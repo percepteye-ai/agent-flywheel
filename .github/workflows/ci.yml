@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+      - run: ruff check src tests
+
+  clean-install:
+    # The package runs inside other people's production processes. This job
+    # proves a fresh environment needs nothing but httpx -- if a module ever
+    # reaches for an undeclared import, it fails here rather than in a
+    # customer's deployment.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install .
+      - name: installed dependency tree is httpx and its own deps only
+        run: |
+          python - <<'PY'
+          import importlib.metadata as md
+          direct = md.distribution("percepteye-harness").requires or []
+          assert [r for r in direct if "extra" not in r] == ["httpx>=0.27"], direct
+          PY
+      - name: import without the dev extra present
+        run: python -c "import percepteye_harness; print(percepteye_harness.__version__)"
+
+  boundary:
+    # Fails the build if an internal system name reaches the published package
+    # -- including inside an error string, where it would be printed into a
+    # customer's logs and disclose something they cannot act on.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: pytest tests/test_oss_boundary.py -q
