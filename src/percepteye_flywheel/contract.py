@@ -1,6 +1,6 @@
-"""The harness/1 wire types.
+"""The flywheel/1 wire types.
 
-Generated shape is pinned by ``schema/harness-1.json``, which this repository
+Generated shape is pinned by ``schema/flywheel-1.json``, which this repository
 owns. Server implementations pin against the published schema; the schema is
 never derived from a server type.
 
@@ -26,12 +26,12 @@ __all__ = [
     "ToolCallOutcome",
 ]
 
-CONTRACT_VERSION = "harness/1"
+CONTRACT_VERSION = "flywheel/1"
 
 Outcome = Literal["ok", "failed", "unknown"]
 
 ExclusionReason = Literal[
-    "harness_crash",
+    "flywheel_crash",
     "substrate_unavailable",
     "credential_expired",
     "deadline_exceeded",
@@ -143,10 +143,10 @@ class ToolCallOutcome:
 
 @dataclass(frozen=True)
 class RolloutRequest:
-    """One unit of work, handed to the harness by the control plane.
+    """One unit of work, handed to the agent by the control plane.
 
     There is deliberately no ``environment`` field. The only configuration
-    channel into a harness is subprocess environment at spawn -- configuration
+    channel into an agent is subprocess environment at spawn -- configuration
     crosses into a FRESH CHILD, never into a running parent.
     """
 
@@ -193,23 +193,23 @@ class RolloutRequest:
 
 #: Every key ``RolloutOutput.to_wire()`` may emit. Anything derived from the
 #: inference wire or from the rollout record is absent by construction: this is
-#: a closed dataclass, so a harness cannot assert a field it has no way to
+#: a closed dataclass, so an agent cannot assert a field it has no way to
 #: know. The server validates independently, because a client-side check binds
 #: only honest clients.
 WIRE_KEYS = frozenset({
     "final_text", "tool_calls", "tool_calls_omitted_count", "artifacts",
     "events", "timing", "llm_call_count", "reward", "success",
-    "harness_fingerprint", "exclusion",
+    "agent_fingerprint", "exclusion",
 })
 
 
 @dataclass
 class RolloutOutput:
-    """What the harness reports back. Harness-authored fields only.
+    """What the agent reports back. Flywheel-authored fields only.
 
     ``tool_calls`` defaults to ``None``, not ``[]``. The distinction is
     load-bearing: ``None`` means "not reported", ``[]`` means "I observed zero
-    tool calls", which is a positive assertion. A harness that reports nothing
+    tool calls", which is a positive assertion. An agent that reports nothing
     must not accidentally assert zero, so the default is the honest one.
     """
 
@@ -224,7 +224,7 @@ class RolloutOutput:
     exclusion_detail: str | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
     timing: dict[str, Any] = field(default_factory=dict)
-    harness_fingerprint: dict[str, Any] | None = None
+    agent_fingerprint: dict[str, Any] | None = None
 
     def to_wire(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -238,7 +238,7 @@ class RolloutOutput:
             "events": list(self.events),
             "timing": dict(self.timing),
         }
-        for k in ("llm_call_count", "reward", "success", "harness_fingerprint"):
+        for k in ("llm_call_count", "reward", "success", "agent_fingerprint"):
             v = getattr(self, k)
             if v is not None:
                 d[k] = v

@@ -1,6 +1,6 @@
 """Child-process entry point: run exactly one rollout and print the result.
 
-``python -m percepteye_harness.child`` reads one JSON payload on stdin and
+``python -m percepteye_flywheel.child`` reads one JSON payload on stdin and
 writes one JSON line on stdout. Nothing else is written to stdout, so the
 parent can always parse the last line; the agent's own printing goes to
 stderr's side of the pipe and is captured for diagnostics.
@@ -27,7 +27,7 @@ def main(argv: list[str] | None = None) -> int:
     raw = sys.stdin.read()
     if not raw.strip():
         print(json.dumps({"final_text": "", "exclusion": {
-            "reason": "harness_crash", "detail": "child received no payload"}}))
+            "reason": "flywheel_crash", "detail": "child received no payload"}}))
         return 0
 
     payload: dict[str, Any] = json.loads(raw)

@@ -1,14 +1,14 @@
 """The child's environment. This is a security boundary, not a convenience."""
 from __future__ import annotations
 
-from percepteye_harness.isolation import build_child_env
+from percepteye_flywheel.isolation import build_child_env
 
 PARENT = {
     "PATH": "/usr/bin",
     "HOME": "/home/dev",
     # Ours. The long-lived, org-scoped control-plane credential.
     "PERCEPTEYE_API_KEY": "pehk_live_do_not_leak",
-    "PERCEPTEYE_CONTROL_PLANE_URL": "https://api.percepteye.com/api/harness/v1",
+    "PERCEPTEYE_CONTROL_PLANE_URL": "https://api.percepteye.com/api/flywheel/v1",
     # Theirs. Their agent legitimately needs these -- that is the premise of
     # running it in their own process.
     "JIRA_API_TOKEN": "customer-token",

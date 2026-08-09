@@ -4,7 +4,7 @@ Resolution happens ONCE, at registration, and raises there. It never happens
 mid-rollout. That is not tidiness: a rollout is one member of a comparison
 group, and a rollout that fails to emit because a method name was wrong does
 not merely lose itself -- it biases the score of every sibling it was supposed
-to be compared against. A typo must stop the harness at startup, in front of
+to be compared against. A typo must stop the agent at startup, in front of
 the person who made it.
 
 The input shape is DECLARED by the caller, never inferred. An earlier SDK

@@ -1,21 +1,21 @@
-"""percepteye-harness -- run your own agent against Percepteye rollouts.
+"""percepteye-flywheel -- run your own agent against Percepteye rollouts.
 
-    import percepteye_harness as ph
+    import percepteye_flywheel as ph
 
     ph.serve(
         "my_package.agent:build",       # importable, so a child can rebuild it
-        harness_id="my-coding-agent",
+        agent_id="my-coding-agent",
         input_shape="text",
-        control_plane_url="https://api.percepteye.com/api/harness/v1",
+        control_plane_url="https://api.percepteye.com/api/flywheel/v1",
     )
 
-Outbound only. The harness dials out, claims a rollout, runs it, reports back.
+Outbound only. The flywheel dials out, claims a rollout, runs it, reports back.
 No listening socket, no inbound firewall rule, no public DNS.
 
 Two things are worth knowing before you read further.
 
 **There is one mode.** ``rollout`` -- Percepteye supplies the model endpoint,
-your harness supplies the agent loop. Modes that do not change what the SDK
+your flywheel supplies the agent loop. Modes that do not change what the SDK
 actually does are not offered, because an earlier SDK shipped five of them, of
 which four were byte-identical strings in one payload field the server never
 read.
@@ -47,7 +47,7 @@ from .errors import (
     ConfigurationError,
     ContractViolation,
     EntrypointError,
-    HarnessError,
+    FlywheelError,
     LeaseLost,
     ModeNotAvailable,
     RoutingNotInstallable,
@@ -55,7 +55,7 @@ from .errors import (
 )
 from .outcomes import OutcomeLedger, current_rollout_id, record_tool_call
 from .runner import RolloutRunner
-from .transport import AttachTransport, HarnessTransport
+from .transport import AttachTransport, FlywheelTransport
 
 __version__ = "0.1.0"
 
@@ -66,8 +66,8 @@ __all__ = [
     "ContractViolation",
     "EntrypointError",
     "ExclusionReason",
-    "HarnessError",
-    "HarnessTransport",
+    "FlywheelError",
+    "FlywheelTransport",
     "InputShape",
     "LeaseLost",
     "ModeNotAvailable",
@@ -93,15 +93,15 @@ ENV_API_KEY = "PERCEPTEYE_API_KEY"
 ENV_ROLLOUT_ID = "PERCEPTEYE_ROLLOUT_ID"      # set by us, for the child
 ENV_LEDGER_DIR = "PERCEPTEYE_LEDGER_DIR"      # set by us, for the child
 
-HarnessMode = Literal["rollout"]
+FlywheelMode = Literal["rollout"]
 
 
 def serve(
     entrypoint: Any,
     *,
-    harness_id: str,
+    agent_id: str,
     input_shape: InputShape,
-    mode: HarnessMode = "rollout",
+    mode: FlywheelMode = "rollout",
     transport: Literal["attach"] = "attach",
     control_plane_url: str | None = None,
     api_key: str | None = None,
@@ -127,7 +127,7 @@ def serve(
             (``isolation="inprocess"`` only).
         input_shape: how ``turn_input`` reaches your agent -- ``"text"``,
             ``"messages"`` or ``"dict"``. Declared, never guessed.
-        reports_tool_calls: assert that this harness reports a per-call
+        reports_tool_calls: assert that this flywheel reports a per-call
             outcome for every tool call it makes. Without it, the reward
             surface available to your rollouts is materially smaller, because
             the verifiers that grade "did this call land" have nothing to
@@ -136,7 +136,7 @@ def serve(
     if mode != "rollout":
         raise ModeNotAvailable(
             f"mode={mode!r} is not available in contract {CONTRACT_VERSION}. "
-            f"See https://docs.percepteye.com/harness/modes"
+            f"See https://docs.percepteye.com/flywheel/modes"
         )
     if transport != "attach":
         raise ModeNotAvailable(
@@ -156,7 +156,7 @@ def serve(
     os.makedirs(adir, exist_ok=True)
 
     client = ControlPlaneClient(url, key)
-    tr = AttachTransport(client, harness_id)
+    tr = AttachTransport(client, agent_id)
 
     # Fail at startup, loudly. A health check nobody calls is not a health
     # check; an earlier SDK shipped one with zero call sites.
@@ -165,7 +165,7 @@ def serve(
     if CONTRACT_VERSION not in [v for v in served if v]:
         raise ConfigurationError(
             f"control plane speaks {served}, this SDK speaks {CONTRACT_VERSION}. "
-            f"Upgrade percepteye-harness."
+            f"Upgrade percepteye-flywheel."
         )
 
     runner = RolloutRunner(
@@ -181,9 +181,9 @@ def serve(
     )
 
     tr.register({
-        "harness_id": harness_id,
+        "agent_id": agent_id,
         "mode": mode,
-        "sdk": f"percepteye-harness-python/{__version__}",
+        "sdk": f"percepteye-flywheel-python/{__version__}",
         "contract_version": CONTRACT_VERSION,
         "reports_tool_calls": bool(reports_tool_calls),
         "isolation": isolation,

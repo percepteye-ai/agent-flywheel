@@ -16,7 +16,7 @@ __all__ = [
     "ConfigurationError",
     "ContractViolation",
     "EntrypointError",
-    "HarnessError",
+    "FlywheelError",
     "LeaseLost",
     "ModeNotAvailable",
     "RoutingNotInstallable",
@@ -24,11 +24,11 @@ __all__ = [
 ]
 
 
-class HarnessError(Exception):
+class FlywheelError(Exception):
     """Base for everything this package raises."""
 
 
-class ConfigurationError(HarnessError):
+class ConfigurationError(FlywheelError):
     """The SDK cannot start. Raised by configure()/serve() at import or startup.
 
     Misconfiguration must fail at init, loudly. A previous SDK shipped a
@@ -51,7 +51,7 @@ class RoutingNotInstallable(ConfigurationError):
 
     There are two binding outcomes and no third: BOUND, or this. There is no
     degraded-routing state, because the failure is silent and its destination
-    is a live third party -- the rollout completes, the harness returns a
+    is a live third party -- the rollout completes, the agent returns a
     plausible final_text, and nothing distinguishes it from a clean rollout.
 
     Carries machine-readable ``reason`` and ``evidence`` plus a printed remedy.
@@ -67,15 +67,15 @@ class RoutingNotInstallable(ConfigurationError):
         super().__init__(msg)
 
 
-class ContractViolation(HarnessError):
-    """A value that cannot be represented on the harness/1 wire.
+class ContractViolation(FlywheelError):
+    """A value that cannot be represented on the flywheel/1 wire.
 
     Raised by the contract types themselves, at construction, so the dangerous
     shape is unconstructible rather than merely discouraged.
     """
 
 
-class TransportError(HarnessError):
+class TransportError(FlywheelError):
     """The control plane could not be reached, or answered unusably."""
 
 

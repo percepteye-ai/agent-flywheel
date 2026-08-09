@@ -13,7 +13,7 @@ argument AHEAD of the environment. A customer whose code says
 ``ChatOpenAI(base_url=...)`` sends every completion to that URL no matter what
 we put in the child's environment, the rollout completes, and the result is
 indistinguishable from a clean one. Passing ``llm=`` lets us check and correct
-it; not passing it means we cannot, and the harness registers at a grade that
+it; not passing it means we cannot, and the agent registers at a grade that
 says so.
 
 **The outcome trap.** ``on_tool_end`` does NOT mean the tool succeeded. A tool

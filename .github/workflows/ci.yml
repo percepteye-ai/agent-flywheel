@@ -38,11 +38,11 @@ jobs:
         run: |
           python - <<'PY'
           import importlib.metadata as md
-          direct = md.distribution("percepteye-harness").requires or []
+          direct = md.distribution("percepteye-flywheel").requires or []
           assert [r for r in direct if "extra" not in r] == ["httpx>=0.27"], direct
           PY
       - name: import without the dev extra present
-        run: python -c "import percepteye_harness; print(percepteye_harness.__version__)"
+        run: python -c "import percepteye_flywheel; print(percepteye_flywheel.__version__)"
 
   boundary:
     # Fails the build if an internal system name reaches the published package

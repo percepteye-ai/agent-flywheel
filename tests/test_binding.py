@@ -3,22 +3,22 @@ from __future__ import annotations
 
 import pytest
 
-from percepteye_harness.binding import (
+from percepteye_flywheel.binding import (
     Adapter,
     AdapterCapabilities,
     bind_all,
     probe,
 )
-from percepteye_harness.errors import RoutingNotInstallable
+from percepteye_flywheel.errors import RoutingNotInstallable
 
 
 class _Fake:
     """An adapter over this package itself, so the probe has real metadata."""
 
     name = "fake"
-    distribution = "percepteye-harness"
+    distribution = "percepteye-flywheel"
     supported = ""
-    required_symbols = ("percepteye_harness.contract:ToolCallOutcome",)
+    required_symbols = ("percepteye_flywheel.contract:ToolCallOutcome",)
 
     def __init__(self, **over):
         self.__dict__.update(over)
@@ -48,7 +48,7 @@ def test_a_missing_symbol_fails_detection():
     released version, so 'detected' meant nothing and the patch silently did
     nothing. Detection cannot pass while binding is broken because both read
     the same tuple."""
-    r = probe(_Fake(required_symbols=("percepteye_harness.contract:NoSuchThing",)))
+    r = probe(_Fake(required_symbols=("percepteye_flywheel.contract:NoSuchThing",)))
     assert r.status == "symbol_missing"
     assert "NoSuchThing" in r.evidence
 
@@ -83,7 +83,7 @@ def test_an_adapter_that_cannot_bind_is_a_refusal_not_a_downgrade():
     failure destination is a live third party and the rollout still
     completes."""
     with pytest.raises(RoutingNotInstallable) as exc:
-        bind_all([_Fake(required_symbols=("percepteye_harness.contract:Nope",))],
+        bind_all([_Fake(required_symbols=("percepteye_flywheel.contract:Nope",))],
                  llm_url="u", api_key="k")
     assert exc.value.reason == "SymbolMissing"
     assert "Nope" in exc.value.evidence
@@ -92,7 +92,7 @@ def test_an_adapter_that_cannot_bind_is_a_refusal_not_a_downgrade():
 
 def test_the_remedy_never_suggests_pinning_around_a_missing_symbol():
     with pytest.raises(RoutingNotInstallable) as exc:
-        bind_all([_Fake(required_symbols=("percepteye_harness.contract:Nope",))],
+        bind_all([_Fake(required_symbols=("percepteye_flywheel.contract:Nope",))],
                  llm_url="u", api_key="k")
     assert "do not pin around it" in exc.value.remedy
 

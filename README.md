@@ -1,4 +1,4 @@
-# percepteye-harness
+# percepteye-flywheel
 
 **Run your own agent against Percepteye rollouts.** Outbound-only, one dependency, MIT.
 
@@ -7,21 +7,21 @@ client at an endpoint we supply, implement or wrap three small methods, and run 
 process. We supply the tasks and the scoring; you supply the agent.
 
 ```bash
-pip install percepteye-harness
+pip install percepteye-flywheel
 ```
 
 ```python
-import percepteye_harness as ph
+import percepteye_flywheel as ph
 
 ph.serve(
     "my_package.agent:build",          # importable, so each rollout gets a fresh child
-    harness_id="my-coding-agent",
+    agent_id="my-coding-agent",
     input_shape="text",
-    control_plane_url="https://api.percepteye.com/api/harness/v1",
+    control_plane_url="https://api.percepteye.com/api/flywheel/v1",
 )
 ```
 
-That is the whole integration. The harness dials out, claims a rollout, runs your agent
+That is the whole integration. The flywheel dials out, claims a rollout, runs your agent
 against it, and reports the result. There is no listening socket, no inbound firewall rule,
 no public DNS, and no TLS to terminate on your side.
 
@@ -44,7 +44,7 @@ no public DNS, and no TLS to terminate on your side.
 When your tool wrapper cannot tell whether a call succeeded, **say so**:
 
 ```python
-from percepteye_harness import record_tool_call
+from percepteye_flywheel import record_tool_call
 
 record_tool_call(
     "charge_card",
@@ -79,7 +79,7 @@ Return a string and we will use it as the final output. Return a `RolloutOutput`
 more to say:
 
 ```python
-from percepteye_harness import RolloutOutput
+from percepteye_flywheel import RolloutOutput
 
 def build():
     class Agent:
@@ -97,7 +97,7 @@ Two details that are easy to miss:
 
 - **`tool_calls=None` and `tool_calls=[]` mean different things.** `None` is "I did not report
   tool calls". `[]` is "I observed zero tool calls" — a positive claim. The default is `None`,
-  so a harness that reports nothing never accidentally asserts zero.
+  so an agent that reports nothing never accidentally asserts zero.
 - **If you cannot classify every executed call, report none of them.** A partial list is
   indistinguishable from a short one. Either emit the unclassifiable call with
   `outcome="unknown"`, or set `tool_calls=None` for the whole rollout.
@@ -158,7 +158,7 @@ compared against.
 
 ## Framework adapters
 
-**Most harnesses need none.** Routing arrives through the child's environment, and
+**Most flywheeles need none.** Routing arrives through the child's environment, and
 `record_tool_call` reports outcomes from any framework or from none. An adapter is
 acceleration over that, never a substitute for it.
 
@@ -172,11 +172,11 @@ Reach for one when either is true:
   every tool.
 
 ```python
-from percepteye_harness.adapters.langchain import LangChainAdapter
+from percepteye_flywheel.adapters.langchain import LangChainAdapter
 
 ph.serve(
     "my_package.agent:build",
-    harness_id="my-agent",
+    agent_id="my-agent",
     input_shape="text",
     adapters=[LangChainAdapter(llm=my_chat_model)],   # llm= is optional
 )
@@ -195,7 +195,7 @@ normal result, and LangChain returns raw content rather than a `ToolMessage` whe
 there's no tool call id to attach. Both look like success. The adapter reports them as
 `unknown` — which is exactly why it's worth having.
 
-To ship your own, expose a factory in the `percepteye_harness.adapters` entry-point group.
+To ship your own, expose a factory in the `percepteye_flywheel.adapters` entry-point group.
 
 ## Configuration
 
@@ -205,7 +205,7 @@ selects behaviour — these are addresses and credentials.
 | Variable | Meaning |
 |---|---|
 | `PERCEPTEYE_CONTROL_PLANE_URL` | Control-plane base URL. |
-| `PERCEPTEYE_API_KEY` | Your harness key. |
+| `PERCEPTEYE_API_KEY` | Your flywheel key. |
 | `PERCEPTEYE_ROLLOUT_ID` | *Set by us* for the child. Read it if you want to tag your own logs. |
 | `PERCEPTEYE_LEDGER_DIR` | *Set by us* for the child. |
 
@@ -213,12 +213,12 @@ selects behaviour — these are addresses and credentials.
 
 ## The contract
 
-[`schema/harness-1.json`](schema/harness-1.json) is the authority. This repository owns it;
+[`schema/flywheel-1.json`](schema/flywheel-1.json) is the authority. This repository owns it;
 server implementations pin against the published schema, never the other way round. Python
 types are generated from it, and a TypeScript package will be generated from the same file.
 
 Fields derived from the inference wire — token-level data, sampling parameters, grouping keys,
-scoring provenance — are absent from the harness contract by construction. A harness cannot
+scoring provenance — are absent from the agent contract by construction. An agent cannot
 know them, so it is never asked to assert them.
 
 ---

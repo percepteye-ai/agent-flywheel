@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.percepteye.com/harness/1.json",
-  "title": "Percepteye harness contract, version 1",
-  "description": "The wire contract between a customer-run agent harness and the Percepteye control plane. THIS FILE IS THE AUTHORITY. Server implementations pin against the published schema; the schema is never generated from a server type. Python dataclasses and TypeScript types are generated from this file in CI.",
-  "x-contract-version": "harness/1",
+  "$id": "https://schemas.percepteye.com/flywheel/1.json",
+  "title": "Percepteye Flywheel contract, version 1",
+  "description": "The wire contract between a customer-run agent and the Percepteye control plane. THIS FILE IS THE AUTHORITY. Server implementations pin against the published schema; the schema is never generated from a server type. Python dataclasses and TypeScript types are generated from this file in CI.",
+  "x-contract-version": "flywheel/1",
 
   "$defs": {
     "ToolCallRecord": {
       "type": "object",
-      "description": "One tool call the harness executed. HARNESS-AUTHORED.",
+      "description": "One tool call the agent executed. FLYWHEEL-AUTHORED.",
       "additionalProperties": false,
       "required": ["name", "outcome", "status_code"],
       "properties": {
@@ -42,13 +42,13 @@
 
     "Exclusion": {
       "type": "object",
-      "description": "The harness's typed 'do not train on this' signal. Distinct from a low reward: a substrate fault is not a policy failure.",
+      "description": "The flywheel's typed 'do not train on this' signal. Distinct from a low reward: a substrate fault is not a policy failure.",
       "additionalProperties": false,
       "required": ["reason"],
       "properties": {
         "reason": {
           "enum": [
-            "harness_crash",
+            "flywheel_crash",
             "substrate_unavailable",
             "credential_expired",
             "deadline_exceeded",
@@ -63,12 +63,12 @@
 
     "RolloutRequest": {
       "type": "object",
-      "description": "PERCEPTEYE-AUTHORED. Handed to the harness for one rollout. Note there is deliberately NO 'environment' key: the only configuration channel into the harness is subprocess environment at spawn. A previous SDK wrote server-supplied values into the RUNNING process's os.environ, which was both dangerous and useless (the LLM client had already read its base_url at construction).",
+      "description": "PERCEPTEYE-AUTHORED. Handed to the agent for one rollout. Note there is deliberately NO 'environment' key: the only configuration channel into the agent is subprocess environment at spawn. A previous SDK wrote server-supplied values into the RUNNING process's os.environ, which was both dangerous and useless (the LLM client had already read its base_url at construction).",
       "additionalProperties": false,
       "required": ["rollout_id", "turn_input", "llm_url", "api_key", "artifacts_dir", "deadline_ts"],
       "properties": {
         "rollout_id": {
-          "description": "Minted by the control plane BEFORE the harness runs anything. This is the attribution unit; it is never a per-process session id.",
+          "description": "Minted by the control plane BEFORE the agent runs anything. This is the attribution unit; it is never a per-process session id.",
           "type": "string",
           "minLength": 1
         },
@@ -81,7 +81,7 @@
         "api_key": { "type": "string", "minLength": 1 },
         "artifacts_dir": { "type": "string" },
         "deadline_ts": {
-          "description": "Authoritative. The harness computes its timeout from this, never from a local environment variable.",
+          "description": "Authoritative. The flywheel computes its timeout from this, never from a local environment variable.",
           "type": "number"
         },
         "lease_token": { "type": ["string", "null"] },
@@ -91,14 +91,14 @@
 
     "RolloutOutput": {
       "type": "object",
-      "description": "HARNESS-AUTHORED. Every field a customer-run harness may assert. Percepteye-authored fields (logprobs, token ids, tokenizer, sampling params, prompt_group_key, scored_suite_sha, doctrine stamps, advantage, training_excluded_reason) are ABSENT BY CONSTRUCTION and rejected at intake if present -- the SDK is semi-trusted.",
+      "description": "FLYWHEEL-AUTHORED. Every field a customer-run flywheel may assert. Percepteye-authored fields (logprobs, token ids, tokenizer, sampling params, prompt_group_key, scored_suite_sha, doctrine stamps, advantage, training_excluded_reason) are ABSENT BY CONSTRUCTION and rejected at intake if present -- the SDK is semi-trusted.",
       "additionalProperties": false,
       "required": ["final_text"],
       "properties": {
         "final_text": { "type": "string" },
 
         "tool_calls": {
-          "description": "null means NOT REPORTED. [] means OBSERVED ZERO CALLS -- a positive assertion. These are different and the wire keeps them different; the default is null so a harness that reports nothing never accidentally asserts zero. If any executed call cannot be classified, either emit it with outcome='unknown' or set this to null for the WHOLE rollout -- never a partial list, because a truncated list is indistinguishable from a short one and corrupts every set-reasoning verifier.",
+          "description": "null means NOT REPORTED. [] means OBSERVED ZERO CALLS -- a positive assertion. These are different and the wire keeps them different; the default is null so an agent that reports nothing never accidentally asserts zero. If any executed call cannot be classified, either emit it with outcome='unknown' or set this to null for the WHOLE rollout -- never a partial list, because a truncated list is indistinguishable from a short one and corrupts every set-reasoning verifier.",
           "type": ["array", "null"],
           "items": { "$ref": "#/$defs/ToolCallRecord" }
         },
@@ -111,13 +111,13 @@
         },
 
         "llm_call_count": {
-          "description": "Completions the harness believes it issued. Reconciled against the gateway's own count; a mismatch means traffic escaped our wire and the rollout cannot be treated as on-policy.",
+          "description": "Completions the agent believes it issued. Reconciled against the gateway's own count; a mismatch means traffic escaped our wire and the rollout cannot be treated as on-policy.",
           "type": ["integer", "null"],
           "minimum": 0
         },
 
         "artifacts": {
-          "description": "name -> path, relative to artifacts_dir. For coding/REPL harnesses the artifact grader IS the reward, so this matters more than tool_calls.",
+          "description": "name -> path, relative to artifacts_dir. For coding/REPL flywheeles the artifact grader IS the reward, so this matters more than tool_calls.",
           "type": "object",
           "additionalProperties": { "type": "string" }
         },
@@ -132,8 +132,8 @@
         "events": { "type": "array", "items": { "type": "object" } },
         "timing": { "type": "object" },
 
-        "harness_fingerprint": {
-          "description": "ATTESTATION, not an authenticated identity. The customer-declared half of the scaffold identity (SDK version, harness version, declared memory/skills/subagent digests). The server-derived half -- rendered-prompt sha, tool-schema digest, sampling params, tokenizer -- is computed at the gateway from the observed wire and is never accepted from here. The two are recorded separately and never conflated.",
+        "agent_fingerprint": {
+          "description": "ATTESTATION, not an authenticated identity. The customer-declared half of the scaffold identity (SDK version, flywheel version, declared memory/skills/subagent digests). The server-derived half -- rendered-prompt sha, tool-schema digest, sampling params, tokenizer -- is computed at the gateway from the observed wire and is never accepted from here. The two are recorded separately and never conflated.",
           "type": ["object", "null"]
         }
       }

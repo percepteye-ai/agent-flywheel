@@ -17,7 +17,7 @@ import re
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SRC = ROOT / "src" / "percepteye_harness"
+SRC = ROOT / "src" / "percepteye_flywheel"
 
 #: Names of internal systems. None of them may appear anywhere in the package.
 INTERNAL_NAMES = (
@@ -49,7 +49,7 @@ def test_no_internal_system_names_in_the_package():
     for path in _package_files():
         text = path.read_text().lower()
         for name in INTERNAL_NAMES:
-            # `percepteye_harness` is our own name; match the internal ones only
+            # `percepteye_flywheel` is our own name; match the internal ones only
             # as standalone words.
             for m in re.finditer(rf"\b{re.escape(name)}\b", text):
                 line = text[: m.start()].count("\n") + 1
@@ -73,7 +73,7 @@ def test_package_imports_with_only_httpx_available():
 
     for mod in ("contract", "errors", "entrypoint", "isolation", "outcomes",
                 "transport", "runner", "child", "_http"):
-        importlib.import_module(f"percepteye_harness.{mod}")
+        importlib.import_module(f"percepteye_flywheel.{mod}")
 
 
 def test_license_exists_and_is_mit():
@@ -85,8 +85,8 @@ def test_license_exists_and_is_mit():
 def test_schema_is_present_and_parses():
     import json
 
-    schema = json.loads((ROOT / "schema" / "harness-1.json").read_text())
-    assert schema["x-contract-version"] == "harness/1"
+    schema = json.loads((ROOT / "schema" / "flywheel-1.json").read_text())
+    assert schema["x-contract-version"] == "flywheel/1"
     # The contract this repo owns must define the shapes the SDK sends.
     for name in ("ToolCallRecord", "RolloutRequest", "RolloutOutput"):
         assert name in schema["$defs"]
@@ -95,9 +95,9 @@ def test_schema_is_present_and_parses():
 def test_schema_and_code_agree_on_the_outcome_enum():
     import json
 
-    from percepteye_harness.contract import _VALID_OUTCOMES
+    from percepteye_flywheel.contract import _VALID_OUTCOMES
 
-    schema = json.loads((ROOT / "schema" / "harness-1.json").read_text())
+    schema = json.loads((ROOT / "schema" / "flywheel-1.json").read_text())
     enum = schema["$defs"]["ToolCallRecord"]["properties"]["outcome"]["enum"]
     assert tuple(enum) == _VALID_OUTCOMES
 
@@ -105,11 +105,11 @@ def test_schema_and_code_agree_on_the_outcome_enum():
 def test_schema_requires_outcome_and_status_code():
     import json
 
-    schema = json.loads((ROOT / "schema" / "harness-1.json").read_text())
+    schema = json.loads((ROOT / "schema" / "flywheel-1.json").read_text())
     required = schema["$defs"]["ToolCallRecord"]["required"]
     assert "outcome" in required and "status_code" in required
 
 
 @pytest.mark.parametrize("mod", ["contract", "errors", "isolation", "outcomes"])
 def test_modules_are_importable_standalone(mod):
-    __import__(f"percepteye_harness.{mod}")
+    __import__(f"percepteye_flywheel.{mod}")

@@ -54,7 +54,7 @@ def current_rollout_id() -> str | None:
 
     Resolution order is context variable, then environment. The env var is what
     a spawned child inherits; the context variable is what an in-process
-    concurrent harness sets. Both are per-rollout. Neither is per-process --
+    concurrent flywheel sets. Both are per-rollout. Neither is per-process --
     a per-process identity collides the moment two rollouts run at once, which
     is precisely how an earlier SDK lost attribution.
     """
@@ -80,7 +80,7 @@ def _ledger_path(rollout_id: str) -> Path | None:
         warnings.warn(
             f"record_tool_call() was called for rollout {rollout_id!r} with no "
             f"ledger destination configured, so the outcome was DISCARDED. "
-            f"Tool outcomes recorded outside a percepteye-harness runner are "
+            f"Tool outcomes recorded outside a percepteye-flywheel runner are "
             f"not captured. This warning is emitted once.",
             RuntimeWarning,
             stacklevel=3,
@@ -147,7 +147,7 @@ class OutcomeLedger:
         """Every call recorded for this rollout, or None if nothing was recorded.
 
         ``None`` and ``[]`` mean different things and this preserves the
-        difference: no ledger file at all means the harness never reported, and
+        difference: no ledger file at all means the agent never reported, and
         must not be rendered as an assertion that zero tool calls occurred.
         """
         if not self.path.exists():

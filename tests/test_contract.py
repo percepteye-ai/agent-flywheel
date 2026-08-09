@@ -5,8 +5,8 @@ import json
 
 import pytest
 
-from percepteye_harness import RolloutOutput, RolloutRequest, ToolCallOutcome
-from percepteye_harness.errors import ContractViolation
+from percepteye_flywheel import RolloutOutput, RolloutRequest, ToolCallOutcome
+from percepteye_flywheel.errors import ContractViolation
 
 
 def _tc(**kw):
@@ -86,7 +86,7 @@ def test_the_app_level_refusal_is_expressible():
 
 def test_tool_calls_defaults_to_none_not_empty_list():
     """[] asserts 'I observed zero tool calls'. None says 'I did not report'.
-    A harness that reports nothing must not accidentally assert zero."""
+    An agent that reports nothing must not accidentally assert zero."""
     assert RolloutOutput(final_text="hi").tool_calls is None
     assert RolloutOutput(final_text="hi").to_wire()["tool_calls"] is None
 
@@ -98,19 +98,19 @@ def test_observed_zero_is_distinguishable_from_not_reported():
 # ── server-authored fields are unrepresentable ──────────────────────────────
 
 def test_output_emits_only_declared_contract_keys():
-    """A harness cannot assert a field it has no way to know. The dataclass is
+    """An agent cannot assert a field it has no way to know. The dataclass is
     closed, so anything derived from the inference wire or the rollout record is
     absent by construction rather than by filtering."""
     import json
     import pathlib
 
     schema = json.loads(
-        (pathlib.Path(__file__).resolve().parents[1] / "schema" / "harness-1.json").read_text()
+        (pathlib.Path(__file__).resolve().parents[1] / "schema" / "flywheel-1.json").read_text()
     )
     declared = set(schema["$defs"]["RolloutOutput"]["properties"])
     out = RolloutOutput(
         final_text="x", tool_calls=[_tc()], reward=1.0, success=True,
-        exclusion_reason="capacity", harness_fingerprint={"sdk": "0.1.0"},
+        exclusion_reason="capacity", agent_fingerprint={"sdk": "0.1.0"},
         llm_call_count=3,
     )
     assert set(out.to_wire()) <= declared, "code emits a key the schema does not declare"

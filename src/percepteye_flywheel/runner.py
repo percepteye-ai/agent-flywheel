@@ -115,7 +115,7 @@ def _coerce_output(raw: Any) -> RolloutOutput:
 
     Deliberately shallow. Guessing at rich structure is how an earlier SDK
     produced confident nonsense; anything beyond text belongs in an explicit
-    ``RolloutOutput`` the harness returns, or in ``record_tool_call``.
+    ``RolloutOutput`` the agent returns, or in ``record_tool_call``.
     """
     if isinstance(raw, RolloutOutput):
         return raw
@@ -238,7 +238,7 @@ class RolloutRunner:
         started = time.time()
         try:
             proc = subprocess.run(
-                [sys.executable, "-m", "percepteye_harness.child"],
+                [sys.executable, "-m", "percepteye_flywheel.child"],
                 input=json.dumps(payload),
                 env=env,
                 capture_output=True,
@@ -255,7 +255,7 @@ class RolloutRunner:
         if proc.returncode != 0:
             return RolloutOutput(
                 final_text="",
-                exclusion_reason="harness_crash",
+                exclusion_reason="flywheel_crash",
                 exclusion_detail=(proc.stderr or "")[-2000:],
                 timing={"elapsed_s": time.time() - started},
             )
@@ -264,7 +264,7 @@ class RolloutRunner:
         except Exception as exc:
             return RolloutOutput(
                 final_text="",
-                exclusion_reason="harness_crash",
+                exclusion_reason="flywheel_crash",
                 exclusion_detail=f"unparseable child result: {exc}",
                 timing={"elapsed_s": time.time() - started},
             )
@@ -300,7 +300,7 @@ class RolloutRunner:
         except Exception as exc:
             try:
                 self.transport.abandon(
-                    rollout, reason="harness_crash", detail=f"{type(exc).__name__}: {exc}"
+                    rollout, reason="flywheel_crash", detail=f"{type(exc).__name__}: {exc}"
                 )
             except TransportError:
                 pass
@@ -369,7 +369,7 @@ def _output_from_wire(d: dict[str, Any]) -> RolloutOutput:
         exclusion_detail=exc.get("detail"),
         events=list(d.get("events") or []),
         timing=dict(d.get("timing") or {}),
-        harness_fingerprint=d.get("harness_fingerprint"),
+        agent_fingerprint=d.get("agent_fingerprint"),
     )
 
 

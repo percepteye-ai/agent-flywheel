@@ -1,13 +1,13 @@
 """Transports.
 
-``attach`` (pull) is the one that ships. The harness dials out, claims work,
+``attach`` (pull) is the one that ships. The flywheel dials out, claims work,
 runs it, reports back. No inbound connection, no listening socket, no public
 DNS, no TLS termination on the customer's side, no firewall change. For a
-harness inside a corporate network that is the difference between "install a
+flywheel inside a corporate network that is the difference between "install a
 package" and "file a change request with the network team".
 
 ``serve`` (push) is deliberately absent rather than half-present. The
-``HarnessTransport`` protocol exists so it can be added without the runner
+``FlywheelTransport`` protocol exists so it can be added without the runner
 learning which one is in use.
 """
 from __future__ import annotations
@@ -20,11 +20,11 @@ from ._http import ControlPlaneClient
 from .contract import RolloutOutput, RolloutRequest
 from .errors import TransportError
 
-__all__ = ["AttachTransport", "HarnessTransport"]
+__all__ = ["AttachTransport", "FlywheelTransport"]
 
 
 @runtime_checkable
-class HarnessTransport(Protocol):
+class FlywheelTransport(Protocol):
     """How work arrives and results leave. The runner never learns which."""
 
     def claim(self, max_rollouts: int) -> tuple[list[RolloutRequest], int]:
@@ -52,13 +52,13 @@ class AttachTransport:
     def __init__(
         self,
         client: ControlPlaneClient,
-        harness_id: str,
+        agent_id: str,
         *,
         wait_ms: int = 25_000,
         lease_ms: int = 1_800_000,
     ) -> None:
         self._c = client
-        self.harness_id = harness_id
+        self.agent_id = agent_id
         self.wait_ms = max(0, min(wait_ms, 25_000))
         self.lease_ms = max(1_000, min(lease_ms, 1_800_000))
 
@@ -68,8 +68,8 @@ class AttachTransport:
 
     def register(self, spec: dict[str, Any]) -> dict[str, Any]:
         return self._c.request(
-            "POST", "/harnesses", json_body=spec,
-            idempotency_key=f"reg-{self.harness_id}",
+            "POST", "/flywheeles", json_body=spec,
+            idempotency_key=f"reg-{self.agent_id}",
         )
 
     def claim(self, max_rollouts: int) -> tuple[list[RolloutRequest], int]:
@@ -77,7 +77,7 @@ class AttachTransport:
             "POST",
             "/rollouts/claim",
             json_body={
-                "harness_id": self.harness_id,
+                "agent_id": self.agent_id,
                 "max": max(1, min(max_rollouts, 16)),
                 "wait_ms": self.wait_ms,
                 "lease_ms": self.lease_ms,

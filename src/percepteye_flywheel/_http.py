@@ -23,11 +23,11 @@ __all__ = ["ControlPlaneClient"]
 #: Transient. Retry these, honouring Retry-After when present.
 _RETRY_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 
-_SDK_UA = "percepteye-harness-python/0.1.0"
+_SDK_UA = "percepteye-flywheel-python/0.1.0"
 
 
 class ControlPlaneClient:
-    """Thin, synchronous, outbound-only client for the harness control plane."""
+    """Thin, synchronous, outbound-only client for the agent control plane."""
 
     def __init__(
         self,
@@ -140,7 +140,7 @@ def _retry_after(resp: httpx.Response) -> float | None:
 
 def _backoff(attempt: int) -> float:
     """Exponential with full jitter, capped. Jitter matters: a fleet of
-    harnesses that all retry on the same schedule reconverges into the spike
+    flywheeles that all retry on the same schedule reconverges into the spike
     that caused the backoff."""
     return random.uniform(0.0, min(8.0, 0.5 * (2 ** (attempt - 1))))
 

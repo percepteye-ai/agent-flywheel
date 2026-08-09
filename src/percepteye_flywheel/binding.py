@@ -16,7 +16,7 @@ and it fails in the worst possible way -- silently, to a live third party:
 * some route through a default gateway whose URL is a hardcoded literal with
   no environment override at all.
 
-In each case the rollout COMPLETES. The harness returns a plausible final
+In each case the rollout COMPLETES. The flywheel returns a plausible final
 text. We own none of the completion wire, capture no token data, and cannot
 tell the difference from the outside. That is the same class of defect as a
 tool call whose outcome nobody observed being scored as a success, one layer
@@ -48,7 +48,7 @@ __all__ = [
 
 ProbeStatus = Literal["detected", "absent", "unsupported_version", "symbol_missing"]
 
-ENTRY_POINT_GROUP = "percepteye_harness.adapters"
+ENTRY_POINT_GROUP = "percepteye_flywheel.adapters"
 
 
 @dataclass(frozen=True)
@@ -57,7 +57,7 @@ class AdapterCapabilities:
 
     ``reports_outcomes`` is the one that matters. An adapter that cannot
     distinguish a failed tool call from a successful one must say so here, so
-    the harness is routed to a lower grade rather than emitting outcomes it
+    the agent is routed to a lower grade rather than emitting outcomes it
     guessed.
     """
 

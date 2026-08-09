@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 
-from percepteye_harness import record_tool_call
+from percepteye_flywheel import record_tool_call
 
 
 class EchoAgent:
