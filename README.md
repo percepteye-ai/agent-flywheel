@@ -156,6 +156,47 @@ compared against.
 
 ---
 
+## Framework adapters
+
+**Most harnesses need none.** Routing arrives through the child's environment, and
+`record_tool_call` reports outcomes from any framework or from none. An adapter is
+acceleration over that, never a substitute for it.
+
+Reach for one when either is true:
+
+- **Your framework's own configuration beats the environment.** A client constructed as
+  `ChatOpenAI(base_url=...)` in your code sends every completion to that URL regardless of
+  what we set at spawn. The rollout completes, at your provider, and looks identical to a
+  clean one from our side. An adapter can check and correct it — without one, we can't.
+- **Its outcome interface saves you real instrumentation**, so you don't hand-annotate
+  every tool.
+
+```python
+from percepteye_harness.adapters.langchain import LangChainAdapter
+
+ph.serve(
+    "my_package.agent:build",
+    harness_id="my-agent",
+    input_shape="text",
+    adapters=[LangChainAdapter(llm=my_chat_model)],   # llm= is optional
+)
+```
+
+Adapters ship inside this package and add **no dependencies** — none imports its framework
+until you bind it, so an absent framework simply fails that adapter's probe. Binding has
+two outcomes and no third: it installs, or it raises `RoutingNotInstallable` at startup
+with the reason and a remedy. There is no degraded-routing state, because the failure
+destination is a live third party and the rollout still completes.
+
+The `langchain` adapter covers LangChain and LangGraph. Worth knowing what it does with
+`on_tool_end`: that callback does **not** mean the tool succeeded. A tool with
+`handle_tool_error=True` catches its own exception and returns a string that reads like a
+normal result, and LangChain returns raw content rather than a `ToolMessage` whenever
+there's no tool call id to attach. Both look like success. The adapter reports them as
+`unknown` — which is exactly why it's worth having.
+
+To ship your own, expose a factory in the `percepteye_harness.adapters` entry-point group.
+
 ## Configuration
 
 Every environment variable this package reads. There are no feature flags, and no variable

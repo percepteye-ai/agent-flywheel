@@ -37,17 +37,19 @@ Issues = "https://github.com/percepteye/percepteye-harness/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4", "pytest-asyncio>=0.23", "ruff>=0.6", "mypy>=1.8"]
+# Frameworks the built-in adapters bind to. NOT runtime dependencies -- no
+# adapter imports its framework at module scope, so an absent framework just
+# fails that adapter's probe. These exist so CI actually exercises the
+# adapters against the real API rather than a mock of it.
+adapters-test = ["langchain-core>=0.3"]
 
-[project.scripts]
-percepteye-harness = "percepteye_harness.cli:main"
-
-# Framework adapters are SEPARATE distributions with independent versions and
-# their own compatibility matrices. That is the structural answer to a previous
-# SDK in which three of six framework integrations were broken against the
-# installed library and nothing noticed: when a framework breaks we ship
-# percepteye-harness-langchain 2.1.1, not a new core.
+# Third parties ship adapters through this group. Ours live in
+# percepteye_harness.adapters and need no entry point: an adapter imports its
+# framework only at bind time, so shipping it here costs nothing and adds no
+# dependency. Separate distributions would have bought a release cadence we do
+# not need, in exchange for version skew between core and adapter -- the same
+# class of silent breakage the probe design exists to remove.
 [project.entry-points."percepteye_harness.adapters"]
-# (populated by adapter distributions, never by core)
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/percepteye_harness"]
