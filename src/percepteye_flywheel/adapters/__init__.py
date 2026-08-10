@@ -16,7 +16,7 @@ Third parties can still ship their own through the
 ``percepteye_flywheel.adapters`` entry-point group; that mechanism is
 independent of where ours live.
 
-**An adapter is acceleration, never a requirement.** Most flywheeles need none:
+**An adapter is acceleration, never a requirement.** Most flywheels need none:
 routing arrives through the child's environment at spawn, and
 ``record_tool_call`` reports outcomes from any framework or from none. Writing
 one is worth it only when a framework's own configuration beats the

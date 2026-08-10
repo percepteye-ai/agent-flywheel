@@ -68,7 +68,7 @@ class AttachTransport:
 
     def register(self, spec: dict[str, Any]) -> dict[str, Any]:
         return self._c.request(
-            "POST", "/flywheeles", json_body=spec,
+            "POST", "/agents", json_body=spec,
             idempotency_key=f"reg-{self.agent_id}",
         )
 
@@ -82,10 +82,14 @@ class AttachTransport:
                 "wait_ms": self.wait_ms,
                 "lease_ms": self.lease_ms,
             },
-            # Replay-safe: re-claiming with the same key inside the lease
-            # returns the same set rather than a second, overlapping one.
             idempotency_key=str(uuid.uuid4()),
             timeout=(self.wait_ms / 1000.0) + 10.0,
+            # Claiming is NOT replayable. The control plane does not honour
+            # Idempotency-Key on this route, so resending a claim that may
+            # already have been processed leases a SECOND batch while the first
+            # is held by nobody -- those rollouts then sit until their leases
+            # lapse. Only a failure that never reached the server is retried.
+            retry_if_ambiguous=False,
         )
         raw = body.get("rollouts") or []
         poll_after = int(body.get("poll_after_ms") or 1000)

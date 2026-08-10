@@ -23,6 +23,11 @@ __all__ = ["ControlPlaneClient"]
 #: Transient. Retry these, honouring Retry-After when present.
 _RETRY_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 
+#: Failures where the connection was never established, so the server cannot
+#: have seen the request. Everything else -- a read timeout above all -- may
+#: have been processed, and is only safe to resend if the endpoint is replayable.
+_NEVER_SENT = (httpx.ConnectError, httpx.ConnectTimeout)
+
 _SDK_UA = "percepteye-flywheel-python/0.1.0"
 
 
@@ -76,7 +81,15 @@ class ControlPlaneClient:
         json_body: Mapping[str, Any] | None = None,
         idempotency_key: str | None = None,
         timeout: float | None = None,
+        retry_if_ambiguous: bool = True,
     ) -> dict[str, Any]:
+        """Send one request, retrying transient failures.
+
+        ``retry_if_ambiguous=False`` narrows retries to failures where the
+        request provably never reached the server. Use it for any call whose
+        server side has a side effect and no replay protection: retrying a
+        request that MAY have been processed performs it twice.
+        """
         url = f"{self.base_url}{path}"
         headers: dict[str, str] = {}
         if idempotency_key:
@@ -91,7 +104,9 @@ class ControlPlaneClient:
                 )
             except httpx.HTTPError as exc:
                 last_err = f"{type(exc).__name__}: {exc}"
-                if attempt == self._max_attempts:
+                if attempt == self._max_attempts or not (
+                    retry_if_ambiguous or isinstance(exc, _NEVER_SENT)
+                ):
                     break
                 time.sleep(_backoff(attempt))
                 continue
@@ -99,7 +114,9 @@ class ControlPlaneClient:
             if resp.status_code == 410:
                 raise LeaseLost(_detail(resp) or "lease lost")
 
-            if resp.status_code in _RETRY_STATUS:
+            if resp.status_code == 429 or (
+                resp.status_code in _RETRY_STATUS and retry_if_ambiguous
+            ):
                 last_err = f"HTTP {resp.status_code}: {_detail(resp)}"
                 if attempt == self._max_attempts:
                     break
@@ -140,7 +157,7 @@ def _retry_after(resp: httpx.Response) -> float | None:
 
 def _backoff(attempt: int) -> float:
     """Exponential with full jitter, capped. Jitter matters: a fleet of
-    flywheeles that all retry on the same schedule reconverges into the spike
+    flywheels that all retry on the same schedule reconverges into the spike
     that caused the backoff."""
     return random.uniform(0.0, min(8.0, 0.5 * (2 ** (attempt - 1))))
 

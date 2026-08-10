@@ -117,7 +117,7 @@
         },
 
         "artifacts": {
-          "description": "name -> path, relative to artifacts_dir. For coding/REPL flywheeles the artifact grader IS the reward, so this matters more than tool_calls.",
+          "description": "name -> path, relative to artifacts_dir. For coding/REPL flywheels the artifact grader IS the reward, so this matters more than tool_calls.",
           "type": "object",
           "additionalProperties": { "type": "string" }
         },

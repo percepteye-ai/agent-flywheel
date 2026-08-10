@@ -21,8 +21,10 @@ import contextvars
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -54,6 +56,35 @@ def _load_spec(spec: str) -> Any:
         target = getattr(mod, attr)
     except AttributeError as exc:
         raise ConfigurationError(f"{spec!r}: module {mod_name} has no attribute {attr!r}") from exc
+    return target
+
+
+def build_agent(spec: str) -> Any:
+    """``"module:attr"`` -> the agent object. The ONE place this is decided.
+
+    The parent resolves the entrypoint at startup and the child re-resolves it
+    per rollout. When those two arrived at the agent by different code the
+    child could run something the parent never validated, so both call this.
+
+    A CLASS is instantiated. Probing for agent-shaped methods first would find
+    ``SomeAgent.invoke`` on the class itself -- an unbound function -- and call
+    it with the turn input as ``self``, which either raises deep inside the
+    agent or, for a ``staticmethod``, quietly runs with no instance at all.
+    """
+    import inspect
+
+    target = _load_spec(spec)
+    if inspect.isclass(target):
+        try:
+            return target()
+        except TypeError as exc:
+            raise ConfigurationError(
+                f"{spec!r} names a class that cannot be constructed with no "
+                f"arguments ({exc}). Point the entrypoint at a zero-argument "
+                f"factory that builds a configured instance instead."
+            ) from exc
+    if callable(target) and not _looks_like_agent(target):
+        return target()
     return target
 
 
@@ -139,6 +170,17 @@ def _attach_ledger(out: RolloutOutput, ledger_dir: str, rollout_id: str) -> None
         out.tool_calls = recorded
 
 
+class _InFlight:
+    """One rollout being served right now, as the heartbeat thread sees it."""
+
+    __slots__ = ("lease_lost", "proc", "rollout")
+
+    def __init__(self, rollout: RolloutRequest) -> None:
+        self.rollout = rollout
+        self.proc: subprocess.Popen[str] | None = None
+        self.lease_lost = False
+
+
 class RolloutRunner:
     """Claim work, run it, report it. One rollout at a time per slot."""
 
@@ -170,8 +212,7 @@ class RolloutRunner:
         self._spec: str | None = None
         if _is_import_spec(entrypoint):
             self._spec = entrypoint
-            target = _load_spec(entrypoint)
-            obj = target() if callable(target) and not _looks_like_agent(target) else target
+            obj = build_agent(entrypoint)
         else:
             obj = entrypoint
             if isolation == "subprocess":
@@ -190,13 +231,35 @@ class RolloutRunner:
         self.isolation = isolation
         self.concurrency = max(1, concurrency)
         self.rollout_timeout_s = rollout_timeout_s
+        # Carried so the CHILD resolves the same callable the parent validated.
+        # This was hardcoded to None on the subprocess payload, so a customer
+        # who named an entrypoint with method= had it honoured at startup and
+        # silently ignored on every rollout: the child re-probed and could run
+        # a different method entirely.
+        self._method = method
         self._on_event = on_event
         self._stop = False
+        #: Rollouts currently being served, by id. Read by the heartbeat thread.
+        self._inflight: dict[str, _InFlight] = {}
+        self._inflight_lock = threading.Lock()
+        self._beat_stop = threading.Event()
 
     # ── one rollout ────────────────────────────────────────────────────────
     def run_one(self, rollout: RolloutRequest) -> RolloutOutput:
         budget = rollout.seconds_remaining(time.time())
-        timeout_s = min(self.rollout_timeout_s, budget) if budget > 0 else self.rollout_timeout_s
+        if budget <= 0.0:
+            # Already past its deadline when we got it -- a queue backlog, a
+            # slow claim, a clock that moved. Running it anyway spent the full
+            # local timeout on work the server had already given up on, and
+            # then reported into a lease that no longer existed. Hand it back
+            # immediately instead.
+            return RolloutOutput(
+                final_text="",
+                exclusion_reason="deadline_exceeded",
+                exclusion_detail="deadline had already passed when claimed",
+                timing={"elapsed_s": 0.0},
+            )
+        timeout_s = min(self.rollout_timeout_s, budget)
         ledger_dir = self._ledger_dir()
         Path(ledger_dir, rollout.rollout_id).mkdir(parents=True, exist_ok=True)
 
@@ -215,7 +278,7 @@ class RolloutRunner:
         assert self._spec is not None
         payload = {
             "spec": self._spec,
-            "method": None,
+            "method": self._method,
             "input_shape": self.resolved.input_shape,
             "rollout": {
                 "rollout_id": rollout.rollout_id,
@@ -236,31 +299,55 @@ class RolloutRunner:
             ledger_dir=ledger_dir,
         )
         started = time.time()
+        # Popen rather than subprocess.run: the heartbeat thread must be able
+        # to KILL this child when the lease is lost. Under run() the child kept
+        # working for the rest of its timeout against a credential the server
+        # had already revoked -- burning the customer's compute to produce a
+        # result nothing would accept.
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "percepteye_flywheel.child"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            text=True,
+        )
+        self._attach_proc(rollout.rollout_id, proc)
         try:
-            proc = subprocess.run(
-                [sys.executable, "-m", "percepteye_flywheel.child"],
-                input=json.dumps(payload),
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=timeout_s + 15.0,
+            stdout, stderr = proc.communicate(
+                input=json.dumps(payload), timeout=timeout_s + 15.0
             )
         except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate()
             return RolloutOutput(
                 final_text="",
                 exclusion_reason="deadline_exceeded",
                 exclusion_detail=f"child exceeded {timeout_s:.0f}s and was killed",
                 timing={"elapsed_s": time.time() - started},
             )
+        finally:
+            self._detach_proc(rollout.rollout_id)
+
+        if self._lease_lost(rollout.rollout_id):
+            # Killed by the heartbeat thread. Not the agent's failure, and not
+            # ours to hand back: the lease is already gone, so there is nothing
+            # left to abandon.
+            return RolloutOutput(
+                final_text="",
+                exclusion_reason="credential_expired",
+                exclusion_detail="lease lost while the rollout was running",
+                timing={"elapsed_s": time.time() - started},
+            )
         if proc.returncode != 0:
             return RolloutOutput(
                 final_text="",
                 exclusion_reason="flywheel_crash",
-                exclusion_detail=(proc.stderr or "")[-2000:],
+                exclusion_detail=(stderr or "")[-2000:],
                 timing={"elapsed_s": time.time() - started},
             )
         try:
-            out = _output_from_wire(json.loads(proc.stdout.strip().splitlines()[-1]))
+            out = _output_from_wire(json.loads(stdout.strip().splitlines()[-1]))
         except Exception as exc:
             return RolloutOutput(
                 final_text="",
@@ -272,29 +359,114 @@ class RolloutRunner:
         _attach_ledger(out, ledger_dir, rollout.rollout_id)
         return out
 
+    # ── leases ─────────────────────────────────────────────────────────────
+    def _attach_proc(self, rollout_id: str, proc: subprocess.Popen[str]) -> None:
+        with self._inflight_lock:
+            entry = self._inflight.get(rollout_id)
+            if entry is not None:
+                entry.proc = proc
+
+    def _detach_proc(self, rollout_id: str) -> None:
+        with self._inflight_lock:
+            entry = self._inflight.get(rollout_id)
+            if entry is not None:
+                entry.proc = None
+
+    def _lease_lost(self, rollout_id: str) -> bool:
+        with self._inflight_lock:
+            entry = self._inflight.get(rollout_id)
+            return bool(entry and entry.lease_lost)
+
+    def _heartbeat_interval_s(self) -> float:
+        """A third of the lease, so two beats may be lost before it lapses."""
+        lease_ms = getattr(self.transport, "lease_ms", 1_800_000)
+        return max(1.0, (lease_ms / 1000.0) / 3.0)
+
+    def _heartbeat_loop(self) -> None:
+        """Keep every in-flight lease alive until its rollout finishes.
+
+        Without this the server's reaper requeued any rollout that outlived its
+        lease WHILE THE AGENT WAS STILL RUNNING IT: the per-rollout credential
+        was revoked mid-flight, the work was handed to someone else, and the
+        report arrived against a lease that no longer existed. Long rollouts --
+        the ones this product exists for -- hit it every time.
+        """
+        interval = self._heartbeat_interval_s()
+        while not self._beat_stop.wait(interval):
+            with self._inflight_lock:
+                entries = [e for e in self._inflight.values() if not e.lease_lost]
+            for entry in entries:
+                try:
+                    self.transport.heartbeat(entry.rollout)
+                except LeaseLost:
+                    # The server has already taken it back. Stop the work now
+                    # rather than let it run to completion for nothing.
+                    entry.lease_lost = True
+                    self._emit("lease_lost", {"rollout_id": entry.rollout.rollout_id})
+                    proc = entry.proc
+                    if proc is not None and proc.poll() is None:
+                        proc.kill()
+                except TransportError as exc:
+                    # Transient. The next beat may well succeed, and there are
+                    # two more before the lease lapses.
+                    self._emit("heartbeat_failed", {
+                        "rollout_id": entry.rollout.rollout_id, "error": str(exc),
+                    })
+
     # ── the loop ───────────────────────────────────────────────────────────
     def serve_forever(self, *, max_rollouts: int | None = None) -> int:
         """Claim → run → report, until stopped. Returns rollouts completed."""
         done = 0
-        while not self._stop:
-            if max_rollouts is not None and done >= max_rollouts:
-                break
-            try:
-                rollouts, poll_after_ms = self.transport.claim(self.concurrency)
-            except TransportError as exc:
-                self._emit("claim_failed", {"error": str(exc)})
-                sleep_ms(5_000)
-                continue
-            if not rollouts:
-                sleep_ms(poll_after_ms)
-                continue
-            for rollout in rollouts:
-                self._serve_one(rollout)
-                done += 1
+        beat = threading.Thread(
+            target=self._heartbeat_loop, name="percepteye-heartbeat", daemon=True
+        )
+        beat.start()
+        try:
+            with _cf.ThreadPoolExecutor(max_workers=self.concurrency) as pool:
+                while not self._stop:
+                    if max_rollouts is not None and done >= max_rollouts:
+                        break
+                    # Never claim more than we still intend to run. Claiming a
+                    # full batch when one rollout remained left the rest leased
+                    # to a runner that was about to exit.
+                    want = self.concurrency
+                    if max_rollouts is not None:
+                        want = min(want, max_rollouts - done)
+                    try:
+                        rollouts, poll_after_ms = self.transport.claim(want)
+                    except TransportError as exc:
+                        self._emit("claim_failed", {"error": str(exc)})
+                        sleep_ms(5_000)
+                        continue
+                    if not rollouts:
+                        sleep_ms(poll_after_ms)
+                        continue
+                    # Concurrently, which is what claiming N meant all along.
+                    # Serving them one after another held N-1 leases on work
+                    # nobody was doing, and with no heartbeat those were the
+                    # rollouts most likely to lapse.
+                    with self._inflight_lock:
+                        for r in rollouts:
+                            self._inflight[r.rollout_id] = _InFlight(r)
+                    futures = [pool.submit(self._serve_one, r) for r in rollouts]
+                    for fut in _cf.as_completed(futures):
+                        fut.result()  # _serve_one never raises; surface it if it does
+                        done += 1
+        finally:
+            self._beat_stop.set()
+            beat.join(timeout=5.0)
         return done
 
     def _serve_one(self, rollout: RolloutRequest) -> None:
         self._emit("rollout_start", {"rollout_id": rollout.rollout_id})
+        try:
+            self._serve_one_inner(rollout)
+        finally:
+            with self._inflight_lock:
+                self._inflight.pop(rollout.rollout_id, None)
+            self._purge_ledger(rollout.rollout_id)
+
+    def _serve_one_inner(self, rollout: RolloutRequest) -> None:
         try:
             out = self.run_one(rollout)
         except Exception as exc:
@@ -302,9 +474,13 @@ class RolloutRunner:
                 self.transport.abandon(
                     rollout, reason="flywheel_crash", detail=f"{type(exc).__name__}: {exc}"
                 )
-            except TransportError:
+            except (TransportError, LeaseLost):
                 pass
             self._emit("rollout_crash", {"rollout_id": rollout.rollout_id, "error": str(exc)})
+            return
+        if self._lease_lost(rollout.rollout_id):
+            # Already requeued server-side. Reporting or abandoning would only
+            # earn a 410; the heartbeat thread has emitted the event.
             return
         try:
             if out.exclusion_reason is not None:
@@ -325,7 +501,22 @@ class RolloutRunner:
         except LeaseLost:
             self._emit("lease_lost", {"rollout_id": rollout.rollout_id})
         except TransportError as exc:
+            # The rollout ran; only the report failed. The lease will lapse and
+            # the server will hand the work to someone else, so this costs a
+            # repeat rather than a hole -- but it is the expensive half we are
+            # throwing away, so it is emitted loudly rather than swallowed.
             self._emit("report_failed", {"rollout_id": rollout.rollout_id, "error": str(exc)})
+
+    def _purge_ledger(self, rollout_id: str) -> None:
+        """Drop this rollout's ledger directory once it is no longer needed.
+
+        One directory per rollout accumulated for the life of the process, so a
+        flywheel serving continuously grew its artifacts tree without bound.
+        """
+        try:
+            shutil.rmtree(Path(self._ledger_dir()) / rollout_id, ignore_errors=True)
+        except OSError:  # pragma: no cover - best effort, never fails a rollout
+            pass
 
     def stop(self) -> None:
         self._stop = True

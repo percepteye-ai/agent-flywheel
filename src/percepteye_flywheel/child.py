@@ -42,12 +42,11 @@ def main(argv: list[str] | None = None) -> int:
     # LLM clients at construction, not at call time. Building the agent in the
     # parent and shipping it here is exactly the ordering bug that made an
     # earlier SDK's configuration channel useless.
-    from .runner import _load_spec, _looks_like_agent, run_rollout_in_process
+    from .runner import build_agent, run_rollout_in_process
 
-    target = _load_spec(spec)
-    obj = target() if callable(target) and not _looks_like_agent(target) else target
-    resolved = resolve_entrypoint(obj, input_shape=input_shape,
-                                  method=payload.get("method"))
+    resolved = resolve_entrypoint(
+        build_agent(spec), input_shape=input_shape, method=payload.get("method")
+    )
 
     out = run_rollout_in_process(
         resolved, rollout, ledger_dir=ledger_dir, timeout_s=timeout_s

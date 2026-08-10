@@ -158,7 +158,7 @@ compared against.
 
 ## Framework adapters
 
-**Most flywheeles need none.** Routing arrives through the child's environment, and
+**Most flywheels need none.** Routing arrives through the child's environment, and
 `record_tool_call` reports outcomes from any framework or from none. An adapter is
 acceleration over that, never a substitute for it.
 

@@ -73,3 +73,37 @@ class Slow:
 
 def build_slow() -> Slow:
     return Slow()
+
+
+class Medium:
+    """Sleeps long enough that serving three of them sequentially is plainly
+    distinguishable from serving them at once."""
+
+    def invoke(self, task: str) -> str:
+        import time
+
+        time.sleep(2.0)
+        return f"medium:{task}"
+
+
+def build_medium() -> Medium:
+    return Medium()
+
+
+class NamedMethod:
+    """Has BOTH a custom entrypoint and a decoy the prober would find first.
+
+    If ``method=`` does not reach the child, the child falls back to probing,
+    finds ``invoke``, and returns the decoy -- so the test fails on the value
+    rather than on an exception.
+    """
+
+    def handle_task(self, task: str) -> str:
+        return f"named:{task}"
+
+    def invoke(self, task: str) -> str:
+        return f"decoy:{task}"
+
+
+def build_named_method() -> NamedMethod:
+    return NamedMethod()
