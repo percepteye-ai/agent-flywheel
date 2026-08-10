@@ -349,3 +349,55 @@ def test_a_429_is_still_retried_because_nothing_was_leased():
 
     assert attempts["n"] == 3
     assert body["poll_after_ms"] == 1000
+
+
+# ── the heartbeat paces itself against the lease it was GRANTED ────────────
+
+
+def test_the_beat_follows_the_granted_lease_not_the_requested_one(tmp_path):
+    """The server clamps what we ask for. Pacing against our own request means
+    a deployment with a lower ceiling reaps every long rollout underneath a
+    heartbeat that thought it had plenty of time."""
+    granted = 3.0
+    req = RolloutRequest(
+        rollout_id="rl_1", turn_input="x",
+        llm_url="https://gw.invalid/llm/v1/rollouts/rl_1", api_key="k",
+        artifacts_dir=str(tmp_path), deadline_ts=time.time() + 600,
+        lease_expires_ts=time.time() + granted, lease_token="lt",
+    )
+    # We asked for half an hour; the server granted three seconds.
+    tr = FakeTransport([[req]], lease_ms=1_800_000)
+    runner = _runner(tmp_path, tr, spec="fixture_agent:build_medium")
+
+    runner.serve_forever(max_rollouts=1)
+
+    assert tr.reported == ["rl_1"]
+    assert len(tr.heartbeats) >= 2, (
+        f"a ~2.5s rollout under a GRANTED 3s lease must beat at least twice; "
+        f"got {tr.heartbeats} -- the beat paced itself against the 30min we "
+        f"requested"
+    )
+
+
+def test_the_beat_falls_back_when_the_server_reports_no_lease(tmp_path):
+    """An older control plane says nothing about what it granted. Falling back
+    to the requested lease is the only estimate available, and is better than
+    not beating at all."""
+    tr = FakeTransport([[_req(tmp_path)]], lease_ms=3_000)
+    runner = _runner(tmp_path, tr, spec="fixture_agent:build_medium")
+    runner.serve_forever(max_rollouts=1)
+    assert len(tr.heartbeats) >= 2
+
+
+def test_the_work_deadline_is_not_the_lease(tmp_path):
+    """The budget is what bounds the run. A lease shorter than the work is
+    normal -- the heartbeat renews it -- and must not shorten the rollout."""
+    req = RolloutRequest(
+        rollout_id="rl_1", turn_input="x",
+        llm_url="https://gw.invalid/llm/v1/rollouts/rl_1", api_key="k",
+        artifacts_dir=str(tmp_path), deadline_ts=time.time() + 600,
+        lease_expires_ts=time.time() + 1.0, lease_token="lt",
+    )
+    assert req.seconds_remaining(time.time()) > 500, (
+        "the work budget followed the lease"
+    )

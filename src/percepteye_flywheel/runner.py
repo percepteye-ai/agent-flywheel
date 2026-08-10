@@ -170,15 +170,24 @@ def _attach_ledger(out: RolloutOutput, ledger_dir: str, rollout_id: str) -> None
         out.tool_calls = recorded
 
 
+#: How often the heartbeat thread wakes to see what is due. Deliberately small
+#: and fixed: the cadence that matters is PER ROLLOUT, because concurrent
+#: rollouts can hold leases of different lengths, and a single global interval
+#: computed once is wrong for all but one of them -- computed BEFORE anything
+#: is in flight, it is wrong for all of them.
+_BEAT_TICK_S = 1.0
+
+
 class _InFlight:
     """One rollout being served right now, as the heartbeat thread sees it."""
 
-    __slots__ = ("lease_lost", "proc", "rollout")
+    __slots__ = ("lease_lost", "next_beat_at", "proc", "rollout")
 
-    def __init__(self, rollout: RolloutRequest) -> None:
+    def __init__(self, rollout: RolloutRequest, next_beat_at: float) -> None:
         self.rollout = rollout
         self.proc: subprocess.Popen[str] | None = None
         self.lease_lost = False
+        self.next_beat_at = next_beat_at
 
 
 class RolloutRunner:
@@ -377,8 +386,18 @@ class RolloutRunner:
             entry = self._inflight.get(rollout_id)
             return bool(entry and entry.lease_lost)
 
-    def _heartbeat_interval_s(self) -> float:
-        """A third of the lease, so two beats may be lost before it lapses."""
+    def _beat_interval_for(self, rollout: RolloutRequest) -> float:
+        """A third of THIS rollout's lease, so two beats may be lost first.
+
+        Measured from the lease the server actually GRANTED, not the one we
+        asked for. The server clamps our request, so a deployment with a lower
+        ceiling than our default would reap every long rollout underneath a
+        heartbeat pacing itself against a lease it never got. Falls back to the
+        requested value for a server that does not report what it granted.
+        """
+        granted = rollout.lease_expires_ts
+        if granted is not None:
+            return max(1.0, (granted - time.time()) / 3.0)
         lease_ms = getattr(self.transport, "lease_ms", 1_800_000)
         return max(1.0, (lease_ms / 1000.0) / 3.0)
 
@@ -391,11 +410,15 @@ class RolloutRunner:
         report arrived against a lease that no longer existed. Long rollouts --
         the ones this product exists for -- hit it every time.
         """
-        interval = self._heartbeat_interval_s()
-        while not self._beat_stop.wait(interval):
+        while not self._beat_stop.wait(_BEAT_TICK_S):
+            now = time.time()
             with self._inflight_lock:
-                entries = [e for e in self._inflight.values() if not e.lease_lost]
+                entries = [
+                    e for e in self._inflight.values()
+                    if not e.lease_lost and now >= e.next_beat_at
+                ]
             for entry in entries:
+                entry.next_beat_at = now + self._beat_interval_for(entry.rollout)
                 try:
                     self.transport.heartbeat(entry.rollout)
                 except LeaseLost:
@@ -445,9 +468,12 @@ class RolloutRunner:
                     # Serving them one after another held N-1 leases on work
                     # nobody was doing, and with no heartbeat those were the
                     # rollouts most likely to lapse.
+                    now = time.time()
                     with self._inflight_lock:
                         for r in rollouts:
-                            self._inflight[r.rollout_id] = _InFlight(r)
+                            self._inflight[r.rollout_id] = _InFlight(
+                                r, now + self._beat_interval_for(r)
+                            )
                     futures = [pool.submit(self._serve_one, r) for r in rollouts]
                     for fut in _cf.as_completed(futures):
                         fut.result()  # _serve_one never raises; surface it if it does

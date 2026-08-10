@@ -156,6 +156,13 @@ class RolloutRequest:
     api_key: str
     artifacts_dir: str
     deadline_ts: float
+    #: When the LEASE lapses, as opposed to when the work is due. Separate
+    #: numbers for separate jobs: the deadline bounds the work, the lease is
+    #: liveness and a heartbeat renews it. Optional because the beat falls back
+    #: to the lease we requested when a server does not say what it granted --
+    #: but a server that clamps our request and does not tell us is exactly how
+    #: a heartbeat ends up slower than the lease it is meant to keep alive.
+    lease_expires_ts: float | None = None
     lease_token: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -182,12 +189,24 @@ class RolloutRequest:
             api_key=str(d["api_key"]),
             artifacts_dir=str(d["artifacts_dir"]),
             deadline_ts=float(d["deadline_ts"]),
+            lease_expires_ts=(
+                float(d["lease_expires_ts"])
+                if d.get("lease_expires_ts") is not None else None
+            ),
             lease_token=d.get("lease_token"),
             metadata=dict(d.get("metadata") or {}),
         )
 
     def seconds_remaining(self, now: float) -> float:
-        """Time budget from the SERVER's deadline, never from a local env var."""
+        """Time budget from the SERVER's deadline, never from a local env var.
+
+        This is the rollout's WORK budget, and it is not the lease. The control
+        plane used to send the lease expiry here, so an agent's budget was
+        silently whatever the lease happened to be -- and once heartbeats
+        existed the two disagreed outright, because the lease extended while
+        the rollout ran and this number did not move. It now moves for exactly
+        one reason: time passing.
+        """
         return max(0.0, self.deadline_ts - now)
 
 
