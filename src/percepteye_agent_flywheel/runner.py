@@ -168,7 +168,7 @@ def run_rollout_in_process(
         try:
             if callable(u):
                 u()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
     out = _coerce_output(raw)

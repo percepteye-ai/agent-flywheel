@@ -37,12 +37,12 @@ from .errors import RoutingNotInstallable
 
 __all__ = [
     "Adapter",
-    "bind_selected",
     "AdapterCapabilities",
     "BindingReport",
     "ProbeResult",
     "ProbeStatus",
     "bind_all",
+    "bind_selected",
     "discover_adapters",
     "probe",
 ]
