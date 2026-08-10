@@ -113,3 +113,25 @@ def test_schema_requires_outcome_and_status_code():
 @pytest.mark.parametrize("mod", ["contract", "errors", "isolation", "outcomes"])
 def test_modules_are_importable_standalone(mod):
     __import__(f"percepteye_agent_flywheel.{mod}")
+
+
+def test_every_serve_kwarg_in_the_readme_actually_exists():
+    """The README documented `adapters=` for weeks while serve() had no such
+    parameter, so following the documentation raised TypeError. Prose drifts
+    from a signature silently; this makes it a test failure."""
+    import inspect
+    import pathlib
+    import re
+
+    import percepteye_agent_flywheel as fw
+
+    readme = (pathlib.Path(__file__).resolve().parent.parent / "README.md").read_text()
+    params = set(inspect.signature(fw.serve).parameters)
+
+    used: set[str] = set()
+    for block in re.finditer(r"(?:ph|fw)\.serve\(\s*(.*?)\n\)", readme, re.S):
+        used |= set(re.findall(r"^\s*([a-z_]+)\s*=", block.group(1), re.M))
+
+    assert used, "no serve() example found in the README — did the format change?"
+    unknown = sorted(used - params)
+    assert not unknown, f"README uses serve() kwargs that do not exist: {unknown}"

@@ -154,15 +154,56 @@ compared against.
 | `"messages"` | `[{"role": "user", "content": "..."}]` |
 | `"dict"` | `{"input": "..."}` |
 
+### Your agent can be a process
+
+If it isn't Python — a compiled binary, a Node CLI, anything with a command line — pass an
+argv list instead of an importable path. There is no protocol to implement, so an existing
+CLI needs no changes:
+
+```python
+ph.serve(
+    ["opencode", "run"],
+    agent_id="coding-agent",
+    input_shape="text",
+)
+```
+
+The task arrives two ways, because CLIs differ and guessing wrongly is silent: on **stdin**,
+and as `PERCEPTEYE_TURN_INPUT`. Its **stdout** is the final text. Its exit code is a result —
+non-zero is excluded from training, because a crashed run says nothing about the policy.
+
+Outcomes come from the same ledger, which a shell can append to:
+
+```sh
+D="$PERCEPTEYE_LEDGER_DIR/$PERCEPTEYE_ROLLOUT_ID"; mkdir -p "$D"
+printf '{"name":"deploy","arguments":{},"outcome":"ok","status_code":200}\n' >> "$D/tool_calls.jsonl"
+```
+
+The command runs in its own **process group**, and that group is what gets killed on timeout —
+a real CLI agent spawns freely, and killing only the process we launched leaves its children
+holding the output pipe open.
+
 ---
 
 ## Framework adapters
 
-**Most flywheels need none.** Routing arrives through the child's environment, and
-`record_tool_call` reports outcomes from any framework or from none. An adapter is
-acceleration over that, never a substitute for it.
+**They are on by default, and they are how you get capture with no instrumentation.**
+`adapters="auto"` binds every built-in whose framework is installed, so a LangChain or
+LangGraph agent reports per-call outcomes with no Percepteye code in it at all — not one
+import, not one `record_tool_call`.
 
-Reach for one when either is true:
+```python
+ph.serve("my_package.agent:build", agent_id="my-agent", input_shape="text")
+# adapters="auto" is the default
+```
+
+Adapters are selected by **name**, because an adapter cannot cross a process boundary and
+the default isolation runs your agent in a child. `adapters=[]` binds none. Naming one
+explicitly — `adapters=["langchain"]` — is a stronger statement: you are asserting that is
+how your calls are captured, so an adapter that cannot bind raises rather than degrading.
+
+`record_tool_call` remains available and is still the ground truth. Reach for it when either
+is true:
 
 - **Your framework's own configuration beats the environment.** A client constructed as
   `ChatOpenAI(base_url=...)` in your code sends every completion to that URL regardless of
@@ -172,13 +213,11 @@ Reach for one when either is true:
   every tool.
 
 ```python
-from percepteye_agent_flywheel.adapters.langchain import LangChainAdapter
-
 ph.serve(
     "my_package.agent:build",
     agent_id="my-agent",
     input_shape="text",
-    adapters=[LangChainAdapter(llm=my_chat_model)],   # llm= is optional
+    adapters=["langchain"],
 )
 ```
 
@@ -195,6 +234,16 @@ normal result, and LangChain returns raw content rather than a `ToolMessage` whe
 there's no tool call id to attach. Both look like success. The adapter reports them as
 `unknown` — which is exactly why it's worth having.
 
+**This is the honest cost of zero instrumentation.** A tool that raises is recorded as
+`failed`, a `ToolMessage` with an explicit status is recorded as what it says, and everything
+else is `unknown`. Unknown outcomes lower the grade — they do not exclude the rollout — so
+capture with no code gets you an honest floor, and one `record_tool_call` at the point where
+you actually know the answer gets you the rest.
+
+In a multi-agent graph each call is attributed to the agent that made it, read from the
+framework's own run metadata (LangGraph stamps the node it is executing). A call nothing
+names stays unattributed: filling it in would train a planner on a coder's tool calls.
+
 To ship your own, expose a factory in the `percepteye_agent_flywheel.adapters` entry-point group.
 
 ## Configuration
@@ -207,7 +256,8 @@ selects behaviour — these are addresses and credentials.
 | `PERCEPTEYE_CONTROL_PLANE_URL` | Control-plane base URL. |
 | `PERCEPTEYE_API_KEY` | Your flywheel key. |
 | `PERCEPTEYE_ROLLOUT_ID` | *Set by us* for the child. Read it if you want to tag your own logs. |
-| `PERCEPTEYE_LEDGER_DIR` | *Set by us* for the child. |
+| `PERCEPTEYE_LEDGER_DIR` | *Set by us* for the child. Write artifacts under `$PERCEPTEYE_LEDGER_DIR/$PERCEPTEYE_ROLLOUT_ID` and they are registered for you. |
+| `PERCEPTEYE_TURN_INPUT` | *Set by us* for a command entrypoint. The task, also on stdin. |
 
 ---
 
