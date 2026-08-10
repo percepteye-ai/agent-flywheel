@@ -140,3 +140,23 @@ class UninstrumentedLangChainAgent:
 
 def build_uninstrumented() -> UninstrumentedLangChainAgent:
     return UninstrumentedLangChainAgent()
+
+
+class ArtifactWriter:
+    """Writes files where a real coding agent would: its own artifacts dir."""
+
+    def invoke(self, task: str) -> str:
+        import os
+        import pathlib
+
+        root = pathlib.Path(os.environ["PERCEPTEYE_LEDGER_DIR"]) / os.environ[
+            "PERCEPTEYE_ROLLOUT_ID"]
+        (root / "out").mkdir(parents=True, exist_ok=True)
+        (root / "result.txt").write_text(f"done: {task}\n")
+        (root / "out" / "patch.diff").write_text("--- a\n+++ b\n@@ -1 +1 @@\n-x\n+y\n")
+        record_tool_call("write", {"n": 2}, outcome="ok", status_code=200)
+        return "wrote 2 files"
+
+
+def build_artifact_writer() -> ArtifactWriter:
+    return ArtifactWriter()

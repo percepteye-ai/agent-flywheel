@@ -32,6 +32,17 @@ __all__ = [
 
 PERCEPTEYE_NAMESPACE = "PERCEPTEYE_"
 
+#: The only names in our namespace a caller may set through ``extra``.
+#: Everything else in it is ours and must not be forgeable from outside --
+#: the control-plane credential lives in this namespace.
+_SETTABLE_BY_CALLER = (
+    "PERCEPTEYE_ROLLOUT_ID",
+    "PERCEPTEYE_LEDGER_DIR",
+    # The turn input, for a command entrypoint that reads it from the
+    # environment rather than stdin.
+    "PERCEPTEYE_TURN_INPUT",
+)
+
 #: Names the child is given for this rollout, and nothing else from our side.
 #: These are the clients whose base URL our gateway can actually serve: it
 #: speaks OpenAI ``/chat/completions``, so pointing a client at it only works
@@ -173,8 +184,7 @@ def build_child_env(
 
     if extra:
         for k, v in extra.items():
-            if _is_our_secret(k) and k not in ("PERCEPTEYE_ROLLOUT_ID",
-                                               "PERCEPTEYE_LEDGER_DIR"):
+            if _is_our_secret(k) and k not in _SETTABLE_BY_CALLER:
                 continue
             env[k] = v
 

@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -40,6 +41,11 @@ from .transport import AttachTransport, sleep_ms
 __all__ = ["RolloutRunner", "run_rollout_in_process"]
 
 _SPEC_SEP = ":"
+
+#: Registration is a digest and a size, so the ceiling is about what is
+#: plausibly a deliverable rather than what fits in memory. Above it the
+#: artifact is recorded as skipped, with its size, rather than dropped.
+MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
 
 
 def _is_import_spec(obj: Any) -> bool:
@@ -220,6 +226,89 @@ def _attach_ledger(out: RolloutOutput, ledger_dir: str, rollout_id: str) -> None
 _BEAT_TICK_S = 1.0
 
 
+def _kill_tree(proc: subprocess.Popen[str]) -> None:
+    """Kill the command AND everything it spawned.
+
+    Whatever the agent started is in the same process group, so the group is
+    the unit that has to die. Falls back to killing the one process where
+    process groups do not exist.
+    """
+    if os.name != "nt":
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    proc.kill()
+
+
+def _is_command(entrypoint: Any) -> bool:
+    """A list/tuple argv means the agent is a PROCESS, not a Python object.
+
+    The importable-entrypoint requirement is the single biggest limit on who
+    can be served: an agent that is a compiled binary, a Node CLI, or anything
+    not written in Python simply had no way in. A command has the same
+    contract as everything else -- it is handed the rollout through the
+    environment, it writes artifacts, and its outcomes come from the ledger.
+    """
+    return isinstance(entrypoint, (list, tuple)) and bool(entrypoint)
+
+
+def run_rollout_as_command(
+    argv: list[str],
+    rollout: RolloutRequest,
+    *,
+    ledger_dir: str,
+    timeout_s: float,
+    env: dict[str, str],
+    cwd: str | None = None,
+) -> RolloutOutput:
+    """Run the customer's agent as a process and read what it left behind.
+
+    ``turn_input`` reaches it two ways, because CLIs differ and guessing
+    wrongly is silent: on stdin, and as PERCEPTEYE_TURN_INPUT. The final text
+    is the process's stdout, trimmed -- there is no protocol to implement, so
+    an existing CLI needs no changes to be served.
+    """
+    started = time.time()
+    proc = subprocess.Popen(
+        list(argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, env=env, text=True, cwd=cwd,
+        # Its own process GROUP. A real CLI agent spawns freely -- a shell, a
+        # compiler, a test runner -- and killing only the process we launched
+        # leaves those children alive holding the stdout pipe open, so
+        # communicate() blocks and the timeout never returns. Measured: a
+        # 1.5s budget against `sh -c 'sleep 120'` took the full 120s.
+        start_new_session=(os.name != "nt"),
+    )
+    try:
+        stdout, stderr = proc.communicate(input=rollout.turn_input,
+                                          timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        stdout, stderr = proc.communicate()
+        return RolloutOutput(
+            final_text="", exclusion_reason="deadline_exceeded",
+            exclusion_detail=f"command exceeded {timeout_s:.0f}s and was killed",
+            timing={"elapsed_s": time.time() - started},
+        )
+    if proc.returncode != 0:
+        # The agent's own failure, not ours: an exit code is a result, and a
+        # non-zero one is a rollout that did not succeed rather than a
+        # substrate fault. It is still excluded, because a crashed run says
+        # nothing about the policy.
+        return RolloutOutput(
+            final_text=(stdout or "").strip(),
+            exclusion_reason="entrypoint_error",
+            exclusion_detail=f"exit {proc.returncode}: {(stderr or '')[-1500:]}",
+            timing={"elapsed_s": time.time() - started},
+        )
+    out = RolloutOutput(final_text=(stdout or "").strip())
+    out.timing["elapsed_s"] = time.time() - started
+    _attach_ledger(out, ledger_dir, rollout.rollout_id)
+    return out
+
+
 class _InFlight:
     """One rollout being served right now, as the heartbeat thread sees it."""
 
@@ -262,6 +351,26 @@ class RolloutRunner:
                 "isolation='subprocess' for concurrency > 1."
             )
         self._spec: str | None = None
+        self._command: list[str] | None = None
+        if _is_command(entrypoint):
+            # A process, not an object. Nothing to resolve and nothing to
+            # import; isolation is inherent because it is already its own
+            # process.
+            self._command = [str(a) for a in entrypoint]
+            self.resolved = None  # type: ignore[assignment]
+            self.transport = transport
+            self.artifacts_dir = str(artifacts_dir)
+            self.isolation = "subprocess"
+            self.concurrency = max(1, concurrency)
+            self.rollout_timeout_s = rollout_timeout_s
+            self._method = method
+            self._adapters = adapters
+            self._on_event = on_event
+            self._stop = False
+            self._inflight = {}
+            self._inflight_lock = threading.Lock()
+            self._beat_stop = threading.Event()
+            return
         if _is_import_spec(entrypoint):
             self._spec = entrypoint
             obj = build_agent(entrypoint)
@@ -319,6 +428,16 @@ class RolloutRunner:
         ledger_dir = self._ledger_dir()
         Path(ledger_dir, rollout.rollout_id).mkdir(parents=True, exist_ok=True)
 
+        if self._command is not None:
+            return run_rollout_as_command(
+                self._command, rollout, ledger_dir=ledger_dir,
+                timeout_s=timeout_s,
+                env=build_child_env(
+                    rollout_id=rollout.rollout_id, llm_url=rollout.llm_url,
+                    api_key=rollout.api_key, ledger_dir=ledger_dir,
+                    extra={"PERCEPTEYE_TURN_INPUT": rollout.turn_input},
+                ),
+            )
         if self.isolation == "inprocess":
             return run_rollout_in_process(
                 self.resolved, rollout, ledger_dir=ledger_dir, timeout_s=timeout_s,
@@ -567,6 +686,7 @@ class RolloutRunner:
                 self._emit("rollout_abandoned",
                            {"rollout_id": rollout.rollout_id, "reason": out.exclusion_reason})
                 return
+            self._collect_artifacts(rollout, out)
             ack = self.transport.report(rollout, out)
             self._emit("rollout_reported", {
                 "rollout_id": rollout.rollout_id,
@@ -581,6 +701,56 @@ class RolloutRunner:
             # repeat rather than a hole -- but it is the expensive half we are
             # throwing away, so it is emitted loudly rather than swallowed.
             self._emit("report_failed", {"rollout_id": rollout.rollout_id, "error": str(exc)})
+
+    def _collect_artifacts(
+        self, rollout: RolloutRequest, out: RolloutOutput
+    ) -> None:
+        """Register the files the agent produced, before the report goes out.
+
+        For a coding or REPL agent the ARTIFACT is the reward -- a diff, a
+        built binary, a screenshot -- and a scorer that only sees final text is
+        grading the commentary rather than the work. ``register_artifact`` has
+        existed on the transport since the beginning with no caller, so this
+        capability was fully implemented and entirely unreachable.
+
+        Registration carries a digest and a size, never the bytes: the control
+        plane decides whether it wants a body, and a rollout that produced a
+        200MB core dump should not discover that by trying to send it.
+        """
+        # The LOCAL per-rollout directory, which is the one the child is told
+        # about through PERCEPTEYE_LEDGER_DIR and can therefore actually write
+        # to. ``rollout.artifacts_dir`` is the SERVER's name for this rollout's
+        # storage ("rollouts/rl_x") and is not a path on this machine.
+        root = Path(self._ledger_dir()) / rollout.rollout_id
+        if not root.is_dir():
+            return
+        registrar = getattr(self.transport, "register_artifact", None)
+        if not callable(registrar):
+            return
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or path.name == LEDGER_FILENAME:
+                continue
+            name = str(path.relative_to(root))
+            try:
+                digest, size = sha256_file(path)
+            except OSError:
+                continue
+            if size > MAX_ARTIFACT_BYTES:
+                # Named, not silently dropped: an artifact too large to
+                # register is a fact about the rollout, and a scorer expecting
+                # it deserves to know it existed.
+                out.artifacts[name] = f"skipped:too_large:{size}"
+                continue
+            try:
+                registrar(rollout, name=name, size_bytes=size, sha256=digest)
+                out.artifacts[name] = digest
+            except (TransportError, LeaseLost) as exc:
+                # The rollout itself is fine. Losing an artifact registration
+                # must not lose the result it belongs to.
+                self._emit("artifact_failed", {
+                    "rollout_id": rollout.rollout_id, "name": name,
+                    "error": str(exc),
+                })
 
     def _purge_ledger(self, rollout_id: str) -> None:
         """Drop this rollout's ledger directory once it is no longer needed.

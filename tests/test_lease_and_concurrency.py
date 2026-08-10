@@ -401,3 +401,64 @@ def test_the_work_deadline_is_not_the_lease(tmp_path):
     assert req.seconds_remaining(time.time()) > 500, (
         "the work budget followed the lease"
     )
+
+
+# ── artifacts: for a coding agent, the artifact IS the reward ───────────────
+
+
+class ArtifactTransport(FakeTransport):
+    def __init__(self, *a, fail=False, **kw):
+        super().__init__(*a, **kw)
+        self.artifacts: list[dict] = []
+        self._fail = fail
+
+    def register_artifact(self, rollout, *, name, size_bytes, sha256,
+                          content_type="application/octet-stream", role="output"):
+        if self._fail:
+            raise TransportError("registry down")
+        self.artifacts.append({"name": name, "size": size_bytes, "sha256": sha256})
+        return {}
+
+
+def test_files_the_agent_wrote_are_registered_before_the_report(tmp_path):
+    """`register_artifact` was fully implemented with NO caller, so an agent
+    that produced a diff or a built binary reported only its commentary."""
+    tr = ArtifactTransport([[_req(tmp_path)]])
+    runner = _runner(tmp_path, tr, spec="fixture_agent:build_artifact_writer")
+
+    runner.serve_forever(max_rollouts=1)
+
+    assert tr.reported == ["rl_1"]
+    names = sorted(a["name"] for a in tr.artifacts)
+    assert names == ["out/patch.diff", "result.txt"], names
+    for a in tr.artifacts:
+        assert len(a["sha256"]) == 64 and a["size"] > 0
+
+
+def test_the_ledger_is_not_registered_as_an_artifact(tmp_path):
+    """It is our bookkeeping, sitting in the same directory. Registering it
+    would hand the customer's own capture back to them as a deliverable."""
+    tr = ArtifactTransport([[_req(tmp_path)]])
+    _runner(tmp_path, tr, spec="fixture_agent:build_artifact_writer").serve_forever(
+        max_rollouts=1)
+    assert all("tool_calls.jsonl" not in a["name"] for a in tr.artifacts)
+
+
+def test_a_failed_registration_does_not_lose_the_rollout(tmp_path):
+    """The expensive half already ran. An artifact we could not register is
+    worth strictly less than the result it belongs to."""
+    tr = ArtifactTransport([[_req(tmp_path)]], fail=True)
+    events: list[str] = []
+    runner = _runner(tmp_path, tr, spec="fixture_agent:build_artifact_writer",
+                     on_event=lambda k, p: events.append(k))
+
+    runner.serve_forever(max_rollouts=1)
+
+    assert tr.reported == ["rl_1"], "the result was lost with the artifact"
+    assert "artifact_failed" in events
+
+
+def test_a_rollout_with_no_files_registers_nothing(tmp_path):
+    tr = ArtifactTransport([[_req(tmp_path)]])
+    _runner(tmp_path, tr).serve_forever(max_rollouts=1)
+    assert tr.artifacts == []
