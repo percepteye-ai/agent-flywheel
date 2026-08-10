@@ -108,3 +108,49 @@ def test_an_explicitly_named_missing_adapter_raises():
 
     with pytest.raises(KeyError, match="nosuchframework"):
         bind_selected(["nosuchframework"], llm_url="https://gw/x", api_key="k")
+
+
+# ── multi-agent attribution ────────────────────────────────────────────────
+
+
+def test_a_call_is_attributed_to_the_agent_that_made_it(tmp_path):
+    """Training a planner on a coder's tool calls is the multi-agent version
+    of scoring an unobserved call as a success."""
+    from langchain_core.tools import tool
+
+    from percepteye_agent_flywheel.binding import bind_selected
+    from percepteye_agent_flywheel.outcomes import OutcomeLedger, _RolloutScope
+
+    @tool
+    def deploy(q: str) -> str:
+        """Deploy."""
+        return "ok"
+
+    report, unbinds = bind_selected("auto", llm_url="https://gw/x", api_key="k")
+    assert "langchain" in report.bound
+    try:
+        with _RolloutScope("rl_m", str(tmp_path)):
+            deploy.invoke({"q": "x"}, config={"metadata": {"langgraph_node": "coder"}})
+            deploy.invoke({"q": "y"})          # nothing names this one
+    finally:
+        for u in unbinds:
+            u()
+
+    calls = OutcomeLedger(str(tmp_path), "rl_m").read() or []
+    assert len(calls) == 2, calls
+    assert calls[0].agent_name == "coder"
+    # Unattributed stays unattributed. Filling it in with the last-seen name
+    # would be a fabrication in exactly the shape this contract refuses.
+    assert calls[1].agent_name is None
+
+
+def test_agent_name_survives_the_wire():
+    from percepteye_agent_flywheel import ToolCallOutcome
+
+    wire = ToolCallOutcome(name="t", arguments={}, outcome="ok", status_code=200,
+                           agent_name="planner").to_wire()
+    assert wire["agent_name"] == "planner"
+    # Absent rather than null when there is nothing to say.
+    plain = ToolCallOutcome(name="t", arguments={}, outcome="ok",
+                            status_code=200).to_wire()
+    assert "agent_name" not in plain

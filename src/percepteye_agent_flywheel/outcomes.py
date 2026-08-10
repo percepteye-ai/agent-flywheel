@@ -98,6 +98,7 @@ def record_tool_call(
     error: str | None = None,
     error_class: str | None = None,
     latency_ms: float | None = None,
+    agent_name: str | None = None,
 ) -> None:
     """Record one executed tool call against the current rollout.
 
@@ -124,6 +125,7 @@ def record_tool_call(
         error=error,
         error_class=error_class,
         latency_ms=latency_ms,
+        agent_name=agent_name,
     )
     path = _ledger_path(rid)
     if path is None:
@@ -169,6 +171,7 @@ class OutcomeLedger:
                         error=d.get("error"),
                         error_class=d.get("error_class"),
                         latency_ms=d.get("latency_ms"),
+                        agent_name=d.get("agent_name"),
                     )
                 )
         return out

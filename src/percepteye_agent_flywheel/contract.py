@@ -102,6 +102,12 @@ class ToolCallOutcome:
     error: str | None = None
     error_class: str | None = None
     latency_ms: float | None = None
+    #: Which agent in a multi-agent system made this call. ``None`` means
+    #: unattributed, which is the honest answer for a single agent and for any
+    #: framework that does not name its sub-agents -- it is NOT a claim that
+    #: one agent made everything. Training a planner on a coder's tool calls is
+    #: the multi-agent version of scoring an unobserved call as a success.
+    agent_name: str | None = None
 
     def __post_init__(self) -> None:
         if not self.name or not isinstance(self.name, str):
@@ -134,7 +140,7 @@ class ToolCallOutcome:
             "outcome": self.outcome,
             "status_code": self.status_code,
         }
-        for k in ("output", "error", "error_class", "latency_ms"):
+        for k in ("output", "error", "error_class", "latency_ms", "agent_name"):
             v = getattr(self, k)
             if v is not None:
                 d[k] = v

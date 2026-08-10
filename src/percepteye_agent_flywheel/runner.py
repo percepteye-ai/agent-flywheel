@@ -788,6 +788,7 @@ def _output_from_wire(d: dict[str, Any]) -> RolloutOutput:
                 outcome=t["outcome"], status_code=t.get("status_code"),
                 output=t.get("output"), error=t.get("error"),
                 error_class=t.get("error_class"), latency_ms=t.get("latency_ms"),
+                agent_name=t.get("agent_name"),
             )
             for t in tcs
         ]

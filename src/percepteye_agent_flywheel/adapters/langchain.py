@@ -106,6 +106,11 @@ def _build_handler_cls() -> type:
                 "name": name,
                 "arguments": kw.get("inputs") or {"input": input_str},
                 "t0": time.perf_counter(),
+                # Which agent made this call, when the graph says so. LangGraph
+                # puts the node name in metadata; tags are the older channel.
+                # None when nothing names it -- unattributed is the honest
+                # answer, and is not a claim that one agent made everything.
+                "agent_name": _agent_name(kw),
             }
 
         def on_tool_end(self, output, *, run_id=None, **kw):
@@ -123,6 +128,7 @@ def _build_handler_cls() -> type:
                 output=_safe(output),
                 error=error,
                 latency_ms=(time.perf_counter() - state["t0"]) * 1000.0,
+                agent_name=state.get("agent_name"),
             )
 
         def on_tool_error(self, error, *, run_id=None, **kw):
@@ -132,12 +138,32 @@ def _build_handler_cls() -> type:
             record_tool_call(
                 state["name"], state["arguments"],
                 outcome="failed", status_code=None,
+                agent_name=state.get("agent_name"),
                 error=f"{type(error).__name__}: {error}",
                 latency_ms=(time.perf_counter() - state["t0"]) * 1000.0,
             )
 
     _handler_cls = _PercepteyeHandler
     return _handler_cls
+
+
+def _agent_name(kw: dict) -> str | None:
+    """The enclosing agent's name, or None.
+
+    Read from the framework's own run metadata rather than guessed. LangGraph
+    stamps the node it is executing; older chains carry tags. Returning None
+    when nothing names it is deliberate: attributing every call to one agent
+    would train a planner on a coder's tool calls.
+    """
+    meta = kw.get("metadata") or {}
+    for key in ("langgraph_node", "agent_name", "checkpoint_ns"):
+        v = meta.get(key)
+        if isinstance(v, str) and v:
+            return v.split(":", 1)[0]
+    for tag in kw.get("tags") or []:
+        if isinstance(tag, str) and tag.startswith("agent:"):
+            return tag.split(":", 1)[1]
+    return None
 
 
 def _classify_output(output: Any, tool_message_cls: type) -> tuple[str, str | None]:
