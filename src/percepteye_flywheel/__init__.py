@@ -30,6 +30,7 @@ believe it.
 from __future__ import annotations
 
 import os
+import warnings
 from collections.abc import Callable
 from typing import Any, Literal
 
@@ -53,6 +54,7 @@ from .errors import (
     RoutingNotInstallable,
     TransportError,
 )
+from .isolation import unroutable_providers_present
 from .outcomes import OutcomeLedger, current_rollout_id, record_tool_call
 from .runner import RolloutRunner
 from .transport import AttachTransport, FlywheelTransport
@@ -166,6 +168,26 @@ def serve(
         raise ConfigurationError(
             f"control plane speaks {served}, this SDK speaks {CONTRACT_VERSION}. "
             f"Upgrade percepteye-flywheel."
+        )
+
+    # Provider configuration we cannot point at the gateway. Reported here, in
+    # front of the person who set it, rather than a run later as a
+    # training-grade exclusion nobody can explain. A warning and not a refusal:
+    # a name on this list is evidence, not proof -- the agent may not use that
+    # provider at all -- and the control plane's reported-vs-served call count
+    # is the check that actually decides.
+    stripped = unroutable_providers_present()
+    if stripped:
+        warnings.warn(
+            f"{', '.join(stripped)} set in this environment. The Percepteye "
+            f"gateway speaks the OpenAI completions API, so these cannot be "
+            f"routed through it, and they are REMOVED from each rollout's "
+            f"child process. An agent built on one of those providers will "
+            f"raise rather than sample from the live provider unobserved. "
+            f"Use an OpenAI-compatible client to have your completions "
+            f"captured.",
+            RuntimeWarning,
+            stacklevel=2,
         )
 
     runner = RolloutRunner(
