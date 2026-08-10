@@ -37,6 +37,7 @@ from .errors import RoutingNotInstallable
 
 __all__ = [
     "Adapter",
+    "bind_selected",
     "AdapterCapabilities",
     "BindingReport",
     "ProbeResult",
@@ -287,3 +288,59 @@ _REMEDY: dict[str, str] = {
         "is how your traffic reaches us."
     ),
 }
+
+
+#: What ``adapters="auto"`` means: try every built-in, bind the ones whose
+#: framework is actually installed, and say nothing about the rest. This is the
+#: default because the alternative -- asking every customer to name their
+#: framework -- is instrumentation, and the whole point of an adapter is that
+#: there is none.
+AUTO = "auto"
+
+
+def bind_selected(
+    selection: list[str] | str | None,
+    *,
+    llm_url: str,
+    api_key: str,
+) -> tuple[BindingReport, list[Any]]:
+    """Bind adapters chosen by NAME, inside the process the agent runs in.
+
+    Names rather than objects, because an adapter cannot cross a process
+    boundary and the default isolation puts the agent in a child. A customer
+    who needs to hand an adapter a live object (a constructed chat model, say)
+    is running ``isolation="inprocess"`` and can pass the instance to
+    ``bind_all`` directly.
+
+    ``"auto"`` probes without committing: a framework that is absent is simply
+    not bound. An EXPLICIT name is a different assertion -- the customer is
+    saying that is how their traffic is captured -- so a named adapter that
+    cannot bind raises rather than degrading.
+    """
+    from .adapters import BUILTIN_ADAPTERS, load_builtin
+
+    if selection is None:
+        return BindingReport(), []
+
+    if selection == AUTO:
+        report = BindingReport()
+        unbinds: list[Any] = []
+        routes = outcomes = False
+        for name in sorted(BUILTIN_ADAPTERS):
+            adapter = load_builtin(name)
+            result = probe(adapter)
+            if not result.ok:
+                report.skipped.append(result)
+                continue
+            unbinds.append(adapter.bind(llm_url=llm_url, api_key=api_key))
+            report.bound.append(adapter.name)
+            caps = adapter.capabilities()
+            routes = routes or caps.routes_llm_calls
+            outcomes = outcomes or caps.reports_outcomes
+        report.capabilities = AdapterCapabilities(
+            routes_llm_calls=routes, reports_outcomes=outcomes
+        )
+        return report, unbinds
+
+    named = [load_builtin(n) if isinstance(n, str) else n for n in selection]
+    return bind_all(named, llm_url=llm_url, api_key=api_key, require_routing=False)

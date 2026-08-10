@@ -49,7 +49,10 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     out = run_rollout_in_process(
-        resolved, rollout, ledger_dir=ledger_dir, timeout_s=timeout_s
+        resolved, rollout, ledger_dir=ledger_dir, timeout_s=timeout_s,
+        # Bound HERE, in the child, because this is the process the agent runs
+        # in. A callback registered in the parent sees nothing a child does.
+        adapters=payload.get("adapters", "auto"),
     )
     sys.stdout.write(json.dumps(out.to_wire(), default=str) + "\n")
     sys.stdout.flush()

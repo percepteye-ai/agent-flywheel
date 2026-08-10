@@ -167,7 +167,14 @@ def test_unbind_clears_the_active_binding():
 
     a = LangChainAdapter()
     unbind = a.bind(llm_url="https://gw/x", api_key="perk_1")
-    assert _ACTIVE.get() == "https://gw/x"
+    # The context variable carries the HANDLER, not the URL. langchain's
+    # configure hook uses this value as a callback handler when no handler
+    # class is registered alongside it -- a string here made every tool call
+    # raise "'str' object has no attribute 'ignore_agent'" and captured
+    # nothing at all.
+    handler = _ACTIVE.get()
+    assert handler is not None
+    assert hasattr(handler, "on_tool_end"), f"not a callback handler: {handler!r}"
     unbind()
     assert _ACTIVE.get() is None
 

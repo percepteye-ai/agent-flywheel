@@ -107,3 +107,36 @@ class NamedMethod:
 
 def build_named_method() -> NamedMethod:
     return NamedMethod()
+
+
+class UninstrumentedLangChainAgent:
+    """An agent with NO Percepteye code in it at all.
+
+    Not one import, not one ``record_tool_call``. If outcomes come back from
+    this, they came from the adapter binding the framework's own callbacks --
+    which is the entire claim of zero-instrumentation capture.
+    """
+
+    def invoke(self, task: str) -> str:
+        from langchain_core.tools import tool
+
+        @tool
+        def lookup(q: str) -> str:
+            """Look something up."""
+            return f"found:{q}"
+
+        @tool
+        def explode(q: str) -> str:
+            """Always fails."""
+            raise RuntimeError("upstream refused")
+
+        out = lookup.invoke({"q": task})
+        try:
+            explode.invoke({"q": task})
+        except Exception:
+            pass
+        return str(out)
+
+
+def build_uninstrumented() -> UninstrumentedLangChainAgent:
+    return UninstrumentedLangChainAgent()

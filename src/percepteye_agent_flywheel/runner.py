@@ -94,9 +94,25 @@ def run_rollout_in_process(
     *,
     ledger_dir: str,
     timeout_s: float,
+    adapters: list[str] | str | None = None,
 ) -> RolloutOutput:
-    """Drive the agent once, in this process, under a rollout-scoped context."""
+    """Drive the agent once, in this process, under a rollout-scoped context.
+
+    ``adapters`` binds framework integrations for the duration of the rollout,
+    which is what makes outcome capture require no instrumentation in the
+    customer's code. Bound HERE rather than in the parent because this is the
+    process the agent runs in -- a callback registered in the parent would
+    never see a child's tool calls.
+    """
     started = time.time()
+    unbinds: list[Any] = []
+    if adapters is not None:
+        from .binding import bind_selected
+
+        report, unbinds = bind_selected(
+            adapters, llm_url=rollout.llm_url, api_key=rollout.api_key
+        )
+        _ = report
     with _RolloutScope(rollout.rollout_id, ledger_dir):
         arg = resolved.build_arg(rollout.turn_input)
         try:
@@ -110,8 +126,25 @@ def run_rollout_in_process(
                 # every recorded outcome would be silently discarded. Copy the
                 # context in explicitly and run the agent inside it.
                 ctx = contextvars.copy_context()
-                with _cf.ThreadPoolExecutor(max_workers=1) as pool:
-                    raw = pool.submit(ctx.run, resolved.fn, arg).result(timeout=timeout_s)
+                # Deliberately NOT a `with` block. Executor.__exit__ calls
+                # shutdown(wait=True), which on the timeout path BLOCKS during
+                # unwinding until the hung agent returns -- so the TimeoutError
+                # could not escape and the budget was cosmetic. Measured: a 1s
+                # budget against an 8s agent returned after 8s, carrying the
+                # right reason, which is why tests asserting the reason passed.
+                # The subprocess path below carries the same warning; this
+                # was the one place that had the bug the comment describes.
+                pool = _cf.ThreadPoolExecutor(max_workers=1)
+                fut = pool.submit(ctx.run, resolved.fn, arg)
+                try:
+                    raw = fut.result(timeout=timeout_s)
+                except BaseException:
+                    # wait=False: stop waiting on the wedged worker. Python
+                    # cannot kill a thread, which is exactly why subprocess is
+                    # the default and the only isolation with a real timeout.
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    raise
+                pool.shutdown(wait=True)
         except _cf.TimeoutError:
             return RolloutOutput(
                 final_text="",
@@ -128,6 +161,15 @@ def run_rollout_in_process(
                 exclusion_detail=f"{type(exc).__name__}: {exc}",
                 timing={"elapsed_s": time.time() - started},
             )
+
+    for u in unbinds:
+        # Best effort: a failed unbind must not lose a completed rollout, and
+        # the process is short-lived anyway under the default isolation.
+        try:
+            if callable(u):
+                u()
+        except Exception:  # noqa: BLE001
+            pass
 
     out = _coerce_output(raw)
     out.timing["elapsed_s"] = time.time() - started
@@ -204,6 +246,7 @@ class RolloutRunner:
         concurrency: int = 1,
         rollout_timeout_s: float = 900.0,
         method: str | None = None,
+        adapters: list[str] | str | None = "auto",
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         if isolation not in ("subprocess", "inprocess"):
@@ -246,6 +289,10 @@ class RolloutRunner:
         # silently ignored on every rollout: the child re-probed and could run
         # a different method entirely.
         self._method = method
+        #: Framework adapters, by NAME, bound inside whichever process runs the
+        #: agent. "auto" binds every built-in whose framework is installed,
+        #: which is what makes outcome capture need no instrumentation.
+        self._adapters = adapters
         self._on_event = on_event
         self._stop = False
         #: Rollouts currently being served, by id. Read by the heartbeat thread.
@@ -274,7 +321,8 @@ class RolloutRunner:
 
         if self.isolation == "inprocess":
             return run_rollout_in_process(
-                self.resolved, rollout, ledger_dir=ledger_dir, timeout_s=timeout_s
+                self.resolved, rollout, ledger_dir=ledger_dir, timeout_s=timeout_s,
+                adapters=self._adapters,
             )
         return self._run_in_subprocess(rollout, ledger_dir=ledger_dir, timeout_s=timeout_s)
 
@@ -289,6 +337,7 @@ class RolloutRunner:
             "spec": self._spec,
             "method": self._method,
             "input_shape": self.resolved.input_shape,
+            "adapters": self._adapters,
             "rollout": {
                 "rollout_id": rollout.rollout_id,
                 "turn_input": rollout.turn_input,

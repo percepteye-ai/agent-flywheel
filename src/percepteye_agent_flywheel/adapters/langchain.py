@@ -48,7 +48,12 @@ _REQUIRED = (
 
 #: The active binding. A context variable, not a module global: two rollouts in
 #: one process must not see each other's.
-_ACTIVE: ContextVar[str | None] = ContextVar("percepteye_lc_active", default=None)
+#: Holds the HANDLER INSTANCE for the rollout on this context, not the URL.
+#: langchain's configure hook reads this variable and, when no handler class is
+#: registered alongside it, uses the value ITSELF as a callback handler -- so a
+#: string here made every tool call raise
+#: ``'str' object has no attribute 'ignore_agent'`` and captured nothing.
+_ACTIVE: ContextVar[Any] = ContextVar("percepteye_lc_active", default=None)
 
 _lock = threading.Lock()
 _handler_cls: type | None = None
@@ -193,10 +198,14 @@ class LangChainAdapter:
                 # handler whenever that variable is set, EVEN IF the context
                 # variable is unset -- which would attach an unbound handler
                 # in forked children and worker threads.
-                register_configure_hook(_ACTIVE, True, handler_cls)
+                #
+                # No handler CLASS either: langchain would then construct its
+                # own instance and ignore ours, and our per-rollout state lives
+                # on the instance. The context variable carries the instance.
+                register_configure_hook(_ACTIVE, True)
                 _hook_registered = True
 
-        token = _ACTIVE.set(llm_url)
+        token = _ACTIVE.set(handler_cls())
 
         def _unbind() -> None:
             _ACTIVE.reset(token)

@@ -113,6 +113,7 @@ def serve(
     rollout_timeout_s: float = 900.0,
     reports_tool_calls: bool = False,
     method: str | None = None,
+    adapters: list[str] | str | None = "auto",
     max_rollouts: int | None = None,
     on_event: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> int:
@@ -129,6 +130,13 @@ def serve(
             (``isolation="inprocess"`` only).
         input_shape: how ``turn_input`` reaches your agent -- ``"text"``,
             ``"messages"`` or ``"dict"``. Declared, never guessed.
+        adapters: framework integrations, by NAME, bound inside whichever
+            process runs your agent. ``"auto"`` (the default) binds every
+            built-in whose framework is installed, so a LangChain or LangGraph
+            agent reports per-call outcomes without you writing anything.
+            Pass ``[]`` to bind none, or ``["langchain"]`` to require one --
+            a NAMED adapter that cannot bind raises, because naming it asserts
+            that it is how your calls are captured.
         reports_tool_calls: assert that this flywheel reports a per-call
             outcome for every tool call it makes. Without it, the reward
             surface available to your rollouts is materially smaller, because
@@ -199,6 +207,7 @@ def serve(
         concurrency=concurrency,
         rollout_timeout_s=rollout_timeout_s,
         method=method,
+        adapters=adapters,
         on_event=on_event,
     )
 
