@@ -5,8 +5,8 @@ import json
 
 import pytest
 
-from percepteye_flywheel import RolloutOutput, RolloutRequest, ToolCallOutcome
-from percepteye_flywheel.errors import ContractViolation
+from percepteye_agent_flywheel import RolloutOutput, RolloutRequest, ToolCallOutcome
+from percepteye_agent_flywheel.errors import ContractViolation
 
 
 def _tc(**kw):

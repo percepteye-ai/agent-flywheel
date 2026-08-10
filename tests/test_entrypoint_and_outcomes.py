@@ -5,9 +5,9 @@ import os
 
 import pytest
 
-from percepteye_flywheel import record_tool_call, resolve_entrypoint
-from percepteye_flywheel.errors import EntrypointError
-from percepteye_flywheel.outcomes import LEDGER_DIR_ENV, ROLLOUT_ID_ENV, OutcomeLedger
+from percepteye_agent_flywheel import record_tool_call, resolve_entrypoint
+from percepteye_agent_flywheel.errors import EntrypointError
+from percepteye_agent_flywheel.outcomes import LEDGER_DIR_ENV, ROLLOUT_ID_ENV, OutcomeLedger
 
 
 class Invoking:

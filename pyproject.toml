@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "percepteye-flywheel"
+name = "percepteye-agent-flywheel"
 version = "0.1.0"
 description = "Run your own agent against Percepteye rollouts. Outbound-only, one dependency."
 readme = "README.md"
@@ -31,9 +31,9 @@ classifiers = [
 dependencies = ["httpx>=0.27"]
 
 [project.urls]
-Homepage = "https://github.com/percepteye/percepteye-flywheel"
-Source = "https://github.com/percepteye/percepteye-flywheel"
-Issues = "https://github.com/percepteye/percepteye-flywheel/issues"
+Homepage = "https://github.com/percepteye/percepteye-agent-flywheel"
+Source = "https://github.com/percepteye/percepteye-agent-flywheel"
+Issues = "https://github.com/percepteye/percepteye-agent-flywheel/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4", "pytest-asyncio>=0.23", "ruff>=0.6", "mypy>=1.8"]
@@ -44,15 +44,15 @@ dev = ["pytest>=7.4", "pytest-asyncio>=0.23", "ruff>=0.6", "mypy>=1.8"]
 adapters-test = ["langchain-core>=0.3"]
 
 # Third parties ship adapters through this group. Ours live in
-# percepteye_flywheel.adapters and need no entry point: an adapter imports its
+# percepteye_agent_flywheel.adapters and need no entry point: an adapter imports its
 # framework only at bind time, so shipping it here costs nothing and adds no
 # dependency. Separate distributions would have bought a release cadence we do
 # not need, in exchange for version skew between core and adapter -- the same
 # class of silent breakage the probe design exists to remove.
-[project.entry-points."percepteye_flywheel.adapters"]
+[project.entry-points."percepteye_agent_flywheel.adapters"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/percepteye_flywheel"]
+packages = ["src/percepteye_agent_flywheel"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src/", "schema/", "tests/", "README.md", "LICENSE"]

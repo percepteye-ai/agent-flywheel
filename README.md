@@ -1,4 +1,4 @@
-# percepteye-flywheel
+# PerceptEye-Agent-Flywheel
 
 **Run your own agent against Percepteye rollouts.** Outbound-only, one dependency, MIT.
 
@@ -7,11 +7,11 @@ client at an endpoint we supply, implement or wrap three small methods, and run 
 process. We supply the tasks and the scoring; you supply the agent.
 
 ```bash
-pip install percepteye-flywheel
+pip install percepteye-agent-flywheel
 ```
 
 ```python
-import percepteye_flywheel as ph
+import percepteye_agent_flywheel as ph
 
 ph.serve(
     "my_package.agent:build",          # importable, so each rollout gets a fresh child
@@ -44,7 +44,7 @@ no public DNS, and no TLS to terminate on your side.
 When your tool wrapper cannot tell whether a call succeeded, **say so**:
 
 ```python
-from percepteye_flywheel import record_tool_call
+from percepteye_agent_flywheel import record_tool_call
 
 record_tool_call(
     "charge_card",
@@ -79,7 +79,7 @@ Return a string and we will use it as the final output. Return a `RolloutOutput`
 more to say:
 
 ```python
-from percepteye_flywheel import RolloutOutput
+from percepteye_agent_flywheel import RolloutOutput
 
 def build():
     class Agent:
@@ -172,7 +172,7 @@ Reach for one when either is true:
   every tool.
 
 ```python
-from percepteye_flywheel.adapters.langchain import LangChainAdapter
+from percepteye_agent_flywheel.adapters.langchain import LangChainAdapter
 
 ph.serve(
     "my_package.agent:build",
@@ -195,7 +195,7 @@ normal result, and LangChain returns raw content rather than a `ToolMessage` whe
 there's no tool call id to attach. Both look like success. The adapter reports them as
 `unknown` — which is exactly why it's worth having.
 
-To ship your own, expose a factory in the `percepteye_flywheel.adapters` entry-point group.
+To ship your own, expose a factory in the `percepteye_agent_flywheel.adapters` entry-point group.
 
 ## Configuration
 

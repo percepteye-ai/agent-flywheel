@@ -80,7 +80,7 @@ def _ledger_path(rollout_id: str) -> Path | None:
         warnings.warn(
             f"record_tool_call() was called for rollout {rollout_id!r} with no "
             f"ledger destination configured, so the outcome was DISCARDED. "
-            f"Tool outcomes recorded outside a percepteye-flywheel runner are "
+            f"Tool outcomes recorded outside a percepteye-agent-flywheel runner are "
             f"not captured. This warning is emitted once.",
             RuntimeWarning,
             stacklevel=3,

@@ -1,7 +1,7 @@
 """The child's environment. This is a security boundary, not a convenience."""
 from __future__ import annotations
 
-from percepteye_flywheel.isolation import build_child_env
+from percepteye_agent_flywheel.isolation import build_child_env
 
 PARENT = {
     "PATH": "/usr/bin",
@@ -132,7 +132,7 @@ def test_the_routing_vars_still_win_over_an_inherited_value():
 
 
 def test_unroutable_providers_are_reported_for_the_startup_warning():
-    from percepteye_flywheel.isolation import unroutable_providers_present
+    from percepteye_agent_flywheel.isolation import unroutable_providers_present
 
     found = unroutable_providers_present(
         {"GEMINI_API_KEY": "x", "JIRA_API_TOKEN": "y", "GROQ_API_KEY": ""}

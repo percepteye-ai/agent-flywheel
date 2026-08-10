@@ -14,10 +14,10 @@ import time
 import httpx
 import pytest
 
-from percepteye_flywheel import RolloutRequest
-from percepteye_flywheel._http import ControlPlaneClient
-from percepteye_flywheel.errors import LeaseLost, TransportError
-from percepteye_flywheel.runner import RolloutRunner
+from percepteye_agent_flywheel import RolloutRequest
+from percepteye_agent_flywheel._http import ControlPlaneClient
+from percepteye_agent_flywheel.errors import LeaseLost, TransportError
+from percepteye_agent_flywheel.runner import RolloutRunner
 
 TESTS_DIR = str(pathlib.Path(__file__).resolve().parent)
 
@@ -319,7 +319,7 @@ def test_a_5xx_is_not_replayed_on_a_non_replayable_route():
 def test_the_claim_call_site_actually_asks_for_the_narrow_retry():
     """Guards the CALL SITE, not just the capability. The client can support
     narrow retries and claim can still forget to ask for them."""
-    from percepteye_flywheel.transport import AttachTransport
+    from percepteye_agent_flywheel.transport import AttachTransport
 
     attempts = {"n": 0}
 

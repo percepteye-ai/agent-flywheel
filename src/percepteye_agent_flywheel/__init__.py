@@ -1,6 +1,6 @@
-"""percepteye-flywheel -- run your own agent against Percepteye rollouts.
+"""percepteye-agent-flywheel -- run your own agent against Percepteye rollouts.
 
-    import percepteye_flywheel as ph
+    import percepteye_agent_flywheel as ph
 
     ph.serve(
         "my_package.agent:build",       # importable, so a child can rebuild it
@@ -167,7 +167,7 @@ def serve(
     if CONTRACT_VERSION not in [v for v in served if v]:
         raise ConfigurationError(
             f"control plane speaks {served}, this SDK speaks {CONTRACT_VERSION}. "
-            f"Upgrade percepteye-flywheel."
+            f"Upgrade percepteye-agent-flywheel."
         )
 
     # Provider configuration we cannot point at the gateway. Reported here, in
@@ -205,7 +205,7 @@ def serve(
     tr.register({
         "agent_id": agent_id,
         "mode": mode,
-        "sdk": f"percepteye-flywheel-python/{__version__}",
+        "sdk": f"percepteye-agent-flywheel-python/{__version__}",
         "contract_version": CONTRACT_VERSION,
         "reports_tool_calls": bool(reports_tool_calls),
         "isolation": isolation,

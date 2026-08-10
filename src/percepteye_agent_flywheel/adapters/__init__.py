@@ -13,7 +13,7 @@ No adapter imports its framework at module scope, so none of them is a
 dependency. An adapter whose framework is absent simply fails its probe.
 
 Third parties can still ship their own through the
-``percepteye_flywheel.adapters`` entry-point group; that mechanism is
+``percepteye_agent_flywheel.adapters`` entry-point group; that mechanism is
 independent of where ours live.
 
 **An adapter is acceleration, never a requirement.** Most flywheels need none:
@@ -31,7 +31,7 @@ __all__ = ["BUILTIN_ADAPTERS", "load_builtin"]
 
 #: name -> import path of a zero-argument factory.
 BUILTIN_ADAPTERS: dict[str, str] = {
-    "langchain": "percepteye_flywheel.adapters.langchain:LangChainAdapter",
+    "langchain": "percepteye_agent_flywheel.adapters.langchain:LangChainAdapter",
 }
 
 

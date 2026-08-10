@@ -16,9 +16,9 @@ import time
 
 import pytest
 
-from percepteye_flywheel import RolloutRequest
-from percepteye_flywheel.errors import ConfigurationError
-from percepteye_flywheel.runner import RolloutRunner
+from percepteye_agent_flywheel import RolloutRequest
+from percepteye_agent_flywheel.errors import ConfigurationError
+from percepteye_agent_flywheel.runner import RolloutRunner
 
 TESTS_DIR = str(pathlib.Path(__file__).resolve().parent)
 

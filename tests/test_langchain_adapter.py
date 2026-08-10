@@ -8,14 +8,14 @@ from __future__ import annotations
 
 import pytest
 
-from percepteye_flywheel.adapters import BUILTIN_ADAPTERS, load_builtin
-from percepteye_flywheel.adapters.langchain import (
+from percepteye_agent_flywheel.adapters import BUILTIN_ADAPTERS, load_builtin
+from percepteye_agent_flywheel.adapters.langchain import (
     LangChainAdapter,
     _classify_output,
 )
-from percepteye_flywheel.binding import bind_all, probe
-from percepteye_flywheel.errors import RoutingNotInstallable
-from percepteye_flywheel.outcomes import LEDGER_DIR_ENV, ROLLOUT_ID_ENV, OutcomeLedger
+from percepteye_agent_flywheel.binding import bind_all, probe
+from percepteye_agent_flywheel.errors import RoutingNotInstallable
+from percepteye_agent_flywheel.outcomes import LEDGER_DIR_ENV, ROLLOUT_ID_ENV, OutcomeLedger
 
 lc = pytest.importorskip("langchain_core")
 
@@ -29,7 +29,7 @@ def _no_binding_leaks():
     which is exactly the cross-rollout leak the design is built to prevent. If
     a test leaks here, production can too.
     """
-    from percepteye_flywheel.adapters.langchain import _ACTIVE
+    from percepteye_agent_flywheel.adapters.langchain import _ACTIVE
 
     assert _ACTIVE.get() is None, "a previous test left a binding active"
     yield
@@ -52,7 +52,7 @@ def test_core_does_not_import_langchain_at_module_scope():
     import pathlib
 
     src = pathlib.Path(
-        "src/percepteye_flywheel/adapters/langchain.py"
+        "src/percepteye_agent_flywheel/adapters/langchain.py"
     ).read_text().split("class LangChainAdapter")[0]
     module_level = [
         ln for ln in src.splitlines()
@@ -73,7 +73,7 @@ def test_it_probes_clean_against_the_installed_library():
 
 
 def test_every_required_symbol_actually_resolves():
-    from percepteye_flywheel.binding import _resolve_symbol
+    from percepteye_agent_flywheel.binding import _resolve_symbol
 
     for path in LangChainAdapter.required_symbols:
         assert _resolve_symbol(path) is not None
@@ -143,7 +143,7 @@ def test_binding_without_a_model_reports_no_routing():
 def test_binding_is_idempotent_and_installs_one_handler():
     """Defining the handler inside bind() would mint a new class per call, and
     langchain's dedup is per-class — so every tool event would record twice."""
-    from percepteye_flywheel.adapters.langchain import _build_handler_cls
+    from percepteye_agent_flywheel.adapters.langchain import _build_handler_cls
 
     assert _build_handler_cls() is _build_handler_cls()
 
@@ -154,7 +154,7 @@ def test_the_handler_subclasses_the_real_base():
     single event."""
     from langchain_core.callbacks.base import BaseCallbackHandler
 
-    from percepteye_flywheel.adapters.langchain import _build_handler_cls
+    from percepteye_agent_flywheel.adapters.langchain import _build_handler_cls
 
     cls = _build_handler_cls()
     assert issubclass(cls, BaseCallbackHandler)
@@ -163,7 +163,7 @@ def test_the_handler_subclasses_the_real_base():
 
 
 def test_unbind_clears_the_active_binding():
-    from percepteye_flywheel.adapters.langchain import _ACTIVE
+    from percepteye_agent_flywheel.adapters.langchain import _ACTIVE
 
     a = LangChainAdapter()
     unbind = a.bind(llm_url="https://gw/x", api_key="perk_1")
@@ -218,7 +218,7 @@ def test_bind_all_accepts_the_builtin():
 def test_tool_events_reach_the_ledger_with_honest_outcomes(monkeypatch, tmp_path):
     from langchain_core.messages.tool import ToolMessage
 
-    from percepteye_flywheel.adapters.langchain import _build_handler_cls
+    from percepteye_agent_flywheel.adapters.langchain import _build_handler_cls
 
     monkeypatch.setenv(ROLLOUT_ID_ENV, "rl_lc")
     monkeypatch.setenv(LEDGER_DIR_ENV, str(tmp_path))
@@ -251,7 +251,7 @@ def test_events_outside_a_binding_are_ignored():
     """The handler is registered process-wide once; only a bound context
     records. Otherwise a sub-agent or worker thread would attribute its tools
     to whatever rollout ran last."""
-    from percepteye_flywheel.adapters.langchain import _ACTIVE, _build_handler_cls
+    from percepteye_agent_flywheel.adapters.langchain import _ACTIVE, _build_handler_cls
 
     assert _ACTIVE.get() is None
     h = _build_handler_cls()()
