@@ -44,6 +44,8 @@ from .contract import (
     ToolCallOutcome,
 )
 from .entrypoint import InputShape, resolve_entrypoint
+from .introspection import DiscoveredAgent, ToolDefinition
+from .introspection import introspect as introspect_agent
 from .errors import (
     ConfigurationError,
     ContractViolation,
@@ -66,6 +68,7 @@ __all__ = [
     "AttachTransport",
     "ConfigurationError",
     "ContractViolation",
+    "DiscoveredAgent",
     "EntrypointError",
     "ExclusionReason",
     "FlywheelError",
@@ -80,9 +83,11 @@ __all__ = [
     "RolloutRunner",
     "RoutingNotInstallable",
     "ToolCallOutcome",
+    "ToolDefinition",
     "TransportError",
     "__version__",
     "current_rollout_id",
+    "introspect_agent",
     "record_tool_call",
     "resolve_entrypoint",
     "serve",
@@ -96,6 +101,19 @@ ENV_ROLLOUT_ID = "PERCEPTEYE_ROLLOUT_ID"      # set by us, for the child
 ENV_LEDGER_DIR = "PERCEPTEYE_LEDGER_DIR"      # set by us, for the child
 
 FlywheelMode = Literal["rollout"]
+
+
+def _env_true(name: str, *, default: bool) -> bool:
+    """An env kill switch that only a DELIBERATE value can flip.
+
+    Unset means the default. ``0``/``false``/``no``/``off`` disable; anything
+    else is treated as enabled, so a typo cannot silently switch capture off
+    and leave the operator believing it is on.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off")
 
 
 def serve(
@@ -114,6 +132,7 @@ def serve(
     reports_tool_calls: bool = False,
     method: str | None = None,
     adapters: list[str] | str | None = "auto",
+    introspect: bool = True,
     max_rollouts: int | None = None,
     on_event: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> int:
@@ -211,7 +230,17 @@ def serve(
         on_event=on_event,
     )
 
-    tr.register({
+    # A command entrypoint has no resolved object -- ``resolved`` is None by
+    # construction (it is already its own process). Reading ``.name`` off it
+    # raised AttributeError here, so every non-Python agent failed at
+    # registration, before its first rollout. No test caught it because the
+    # tests build a RolloutRunner directly and never go through serve().
+    entrypoint_label = (
+        runner.resolved.name if runner.resolved is not None
+        else " ".join(getattr(runner, "_command", None) or []) or "command"
+    )
+
+    payload: dict[str, Any] = {
         "agent_id": agent_id,
         "mode": mode,
         "sdk": f"percepteye-agent-flywheel-python/{__version__}",
@@ -220,8 +249,28 @@ def serve(
         "isolation": isolation,
         "concurrency": concurrency,
         "input_shape": input_shape,
-        "entrypoint": runner.resolved.name,
-    })
+        "entrypoint": entrypoint_label,
+    }
+
+    # ── agent discovery (ADP), from inside the process ──────────────────────
+    # ON by default, with two ways to refuse: ``introspect=False`` here, or
+    # ``PERCEPTEYE_INTROSPECT=0`` in the environment, for an operator who
+    # cannot edit the call site. Both are documented prominently in the
+    # README, because this ships your system prompt and tool catalogue to the
+    # control plane and a default that surprises someone is worse than no
+    # default at all.
+    #
+    # ``discovered_agent: None`` is sent DELIBERATELY when we could not look.
+    # Omitting the key would make "not introspected" indistinguishable from
+    # "introspected, found nothing" -- the same absence-as-zero collapse the
+    # tool-outcome contract exists to prevent, one layer up.
+    if introspect and _env_true("PERCEPTEYE_INTROSPECT", default=True):
+        described = introspect_agent(
+            runner.resolved.fn if runner.resolved is not None else None
+        )
+        payload["discovered_agent"] = described.to_wire() if described else None
+
+    tr.register(payload)
 
     try:
         return runner.serve_forever(max_rollouts=max_rollouts)

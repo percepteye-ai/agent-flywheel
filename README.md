@@ -34,8 +34,61 @@ no public DNS, and no TLS to terminate on your side.
 | **Claims work** | Long-polls for rollouts. Leased, with redelivery — a crashed worker's rollout comes back rather than vanishing. |
 | **Isolates each rollout** | One child process per rollout. Its own endpoint, its own single-use credential, its own ledger. |
 | **Routes the completion wire** | Your agent's LLM calls go to a per-rollout endpoint, which is how the work is attributed and scored. |
+| **Describes your agent** | Reads your system prompt, tool catalogue and sub-agent tree at startup and sends them to the control plane. **On by default.** [What this sends, and how to turn it off](#agent-discovery-on-by-default). |
 | **Records tool outcomes** | `record_tool_call(...)` — the one thing worth instrumenting by hand. See below. |
 | **Reports honestly** | Typed exclusions for crashes and expired credentials, so a substrate fault is never scored as a bad decision by your agent. |
+
+---
+
+## Agent discovery, on by default
+
+At startup — once, before any rollout — this SDK inspects the agent object you
+handed `serve()` and sends a description of it to the control plane. **This is
+on by default and you should decide whether you want it.**
+
+**What is sent:**
+
+| | |
+|---|---|
+| `system_prompt` | Your agent's instruction text, truncated at 20,000 characters. A callable instruction is **not invoked** — it is reported as unread. |
+| `tool_definitions` | Each tool's name, description and input JSON Schema — its declaration, not its implementation. |
+| `discovered_model_config` | Provider and model name; temperature when readable. |
+| `sub_agents` | The same, recursively, for a multi-agent graph (to a depth of 4). |
+| `agent_name`, `framework` | What your agent calls itself, and which framework we matched. |
+
+**What is never sent:** your tools' source or return values, your credentials,
+your data, or anything observed during a rollout. This is a description of the
+agent's *shape*, taken once, at startup.
+
+**Why it is on.** It is what lets the platform work out which workflows are
+worth generating for your agent — the universe of tasks its tools actually make
+possible — instead of asking you to enumerate them. An agent that reports
+nothing gets generic tasks.
+
+**Turning it off**, either way:
+
+```python
+ph.serve("my_package.agent:build", agent_id="a", input_shape="text",
+         introspect=False)
+```
+
+```bash
+PERCEPTEYE_INTROSPECT=0        # for operators who cannot edit the call site
+```
+
+Only a deliberate value disables it (`0`, `false`, `no`, `off`); a typo leaves
+it on rather than silently switching capture off while you believe it is
+running.
+
+**If we could not read your agent, we say so rather than guessing.** A
+framework we do not recognise, or a command entrypoint (a separate process has
+no object to read), reports `discovered_agent: null` — never an empty agent.
+`tool_definitions: null` means "we could not look"; `[]` means "we looked, and
+there are none". Those are different claims and this SDK does not collapse
+them. Anything we could only partly read is named in `incomplete`.
+
+Supported today: **Google ADK** and **LangChain / LangGraph**. Any other
+framework reports `null` until an adapter exists for it.
 
 ---
 
