@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import subprocess
 
 import pytest
 
@@ -34,6 +35,40 @@ INTERNAL_DETAILS = ("max-loras", "vllm", "offline_grpo", "bundle_materializer",
 
 def _package_files():
     return sorted(p for p in SRC.rglob("*.py"))
+
+
+def _published_files():
+    """Every file git tracks, which is exactly what the public repo shows.
+
+    ``_package_files`` scans ``src/`` only, and that hole is not theoretical:
+    the e2e demo under ``examples/`` named twelve internal control-plane
+    modules and two local developer paths, and shipped to a public repo with
+    every boundary test green. The README, the examples and the tests are as
+    public as the package, so they are scanned the same way.
+
+    This file is excluded because it has to name the internals in order to
+    forbid them.
+    """
+    out = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=ROOT,
+        capture_output=True, text=True, check=True,
+    ).stdout
+    here = pathlib.Path(__file__).resolve()
+    paths = []
+    for rel in filter(None, out.split("\0")):
+        p = (ROOT / rel).resolve()
+        if p == here or not p.is_file():
+            continue
+        paths.append(p)
+    assert paths, "git ls-files returned nothing — the scan would pass vacuously"
+    return sorted(paths)
+
+
+def _text(path):
+    try:
+        return path.read_text(errors="ignore").lower()
+    except (OSError, UnicodeDecodeError):  # pragma: no cover - binary asset
+        return ""
 
 
 def test_exactly_one_runtime_dependency():
@@ -65,6 +100,42 @@ def test_no_internal_invariants_disclosed():
             if name in text:
                 offenders.append(f"{path.relative_to(ROOT)} -> {name}")
     assert not offenders, "internal detail disclosed in the OSS package:\n" + "\n".join(offenders)
+
+
+def test_no_internal_system_names_anywhere_published():
+    """The same rule, applied to everything the public repo shows.
+
+    The package-only version of this test passed while an example under
+    ``examples/`` imported a dozen internal control-plane modules by their real
+    dotted paths, in a public repo. A reader could reconstruct the layout from
+    the imports alone. The paths are deliberately not repeated here — this file
+    is exempt from the scan, so anything named in it is published unchecked.
+    """
+    offenders = []
+    for path in _published_files():
+        text = _text(path)
+        for name in INTERNAL_NAMES:
+            for m in re.finditer(rf"\b{re.escape(name)}\b", text):
+                line = text[: m.start()].count("\n") + 1
+                offenders.append(f"{path.relative_to(ROOT)}:{line} -> {name}")
+    assert not offenders, (
+        "internal names leaked into PUBLISHED files:\n" + "\n".join(offenders)
+    )
+
+
+def test_no_local_developer_paths_published():
+    """Absolute paths off a developer's machine disclose the username, the
+    internal repo names and the working layout, and they cannot work for anyone
+    else. ``/Users/<name>/Projects/MissionControl/.worktrees/...`` shipped
+    publicly for exactly this reason."""
+    offenders = []
+    pattern = re.compile(r"(/users/[^/\s\"']+/|/home/[^/\s\"']+/|c:\\\\users\\\\)")
+    for path in _published_files():
+        for m in pattern.finditer(_text(path)):
+            offenders.append(f"{path.relative_to(ROOT)} -> {m.group(0)}")
+    assert not offenders, (
+        "a local developer path is published:\n" + "\n".join(offenders)
+    )
 
 
 def test_package_imports_with_only_httpx_available():
