@@ -68,8 +68,12 @@ nothing gets generic tasks.
 **Turning it off**, either way:
 
 ```python
-ph.serve("my_package.agent:build", agent_id="a", input_shape="text",
-         introspect=False)
+ph.serve(
+    "my_package.agent:build",
+    agent_id="a",
+    input_shape="text",
+    introspect=False,
+)
 ```
 
 ```bash
@@ -89,6 +93,46 @@ them. Anything we could only partly read is named in `incomplete`.
 
 Supported today: **Google ADK** and **LangChain / LangGraph**. Any other
 framework reports `null` until an adapter exists for it.
+
+---
+
+## OpenTelemetry (optional)
+
+Every outcome you record is additionally emitted as an OpenTelemetry span, so
+it appears in whatever you already run — Datadog, Phoenix, Grafana — beside the
+rest of your agent's telemetry.
+
+```bash
+pip install "percepteye-agent-flywheel[otel]"
+```
+
+The extra is the **API only**, never the SDK. This package emits into whatever
+`TracerProvider` you have already registered and **never installs one**:
+`set_tracer_provider` is once-only, so a library that called it would either
+lose its own spans or silently replace your entire GenAI telemetry. With no
+provider configured, spans go to the API's no-op and nothing happens.
+
+| attribute | |
+|---|---|
+| `gen_ai.operation.name`, `gen_ai.tool.name`, `gen_ai.tool.call.arguments` | the GenAI semantic conventions, where they name the thing |
+| `gen_ai.agent.name` | which agent made the call, in a multi-agent graph |
+| `percepteye.tool.outcome` | `ok` / `failed` / `unknown` — see below |
+| `percepteye.tool.status_code`, `percepteye.tool.latency_ms`, `percepteye.rollout.id` | |
+
+**The tri-state needs our own namespace, and that is the honest reason it has
+one.** The GenAI conventions have no way to express "the result of this call
+was never observed", so bending it into a standard attribute would mean
+something different to every other consumer of your traces. For the same
+reason, an `unknown` outcome leaves the **span status unset**: marking it OK
+asserts a success nobody observed, and marking it ERROR asserts a failure
+nobody observed. Only a reported `failed` sets an error status.
+
+**This is egress, not a transport.** Nothing is ever read back, so your
+sampler, your queue overflow and your exporter being down cost you nothing here
+— outcomes reach the control plane through the ledger regardless. That split is
+not an accident of design: the GenAI conventions define no attribute for
+per-token logprobs or token ids, so spans structurally cannot carry what
+training needs.
 
 ---
 

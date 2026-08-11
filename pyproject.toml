@@ -42,6 +42,13 @@ dev = ["pytest>=7.4", "pytest-asyncio>=0.23", "ruff>=0.6", "mypy>=1.8"]
 # fails that adapter's probe. These exist so CI actually exercises the
 # adapters against the real API rather than a mock of it.
 adapters-test = ["langchain-core>=0.3", "google-adk>=2.2"]
+# OpenTelemetry EGRESS. The API only -- never the SDK: this package
+# emits into whatever TracerProvider the customer already registered and
+# never installs one. Optional because the package ships with a single
+# runtime dependency and tool outcomes reach the control plane through
+# the ledger regardless; spans are a projection for the customer's own
+# observability, not a transport we depend on.
+otel = ["opentelemetry-api>=1.20"]
 
 # Third parties ship adapters through this group. Ours live in
 # percepteye_agent_flywheel.adapters and need no entry point: an adapter imports its

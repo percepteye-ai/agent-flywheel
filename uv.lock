@@ -1508,6 +1508,9 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "ruff" },
 ]
+otel = [
+    { name = "opentelemetry-api" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -1515,11 +1518,12 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "langchain-core", marker = "extra == 'adapters-test'", specifier = ">=0.3" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8" },
+    { name = "opentelemetry-api", marker = "extra == 'otel'", specifier = ">=1.20" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
 ]
-provides-extras = ["dev", "adapters-test"]
+provides-extras = ["dev", "adapters-test", "otel"]
 
 [[package]]
 name = "pluggy"

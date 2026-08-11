@@ -127,6 +127,12 @@ def record_tool_call(
         latency_ms=latency_ms,
         agent_name=agent_name,
     )
+    # Project into the customer's own traces BEFORE the ledger write, so a
+    # rollout with no ledger destination still shows up in their telemetry.
+    # Egress only: nothing reads these back, and a telemetry failure inside
+    # cannot reach this function's caller.
+    _emit_span(rec, rid)
+
     path = _ledger_path(rid)
     if path is None:
         return
@@ -137,6 +143,29 @@ def record_tool_call(
     with _write_lock, path.open("a", encoding="utf-8") as fh:
         fh.write(line + "\n")
         fh.flush()
+
+
+
+def _emit_span(rec: ToolCallOutcome, rollout_id: str) -> None:
+    """Mirror one outcome into OpenTelemetry, if the API is installed.
+
+    Lazily imported so the package keeps its single runtime dependency: with
+    the ``otel`` extra absent this costs one failed import, cached.
+    """
+    try:
+        from .tracing import record_tool_call_span
+
+        record_tool_call_span(
+            rec.name, rec.arguments,
+            outcome=rec.outcome,
+            status_code=rec.status_code,
+            error=rec.error,
+            latency_ms=rec.latency_ms,
+            agent_name=rec.agent_name,
+            rollout_id=rollout_id,
+        )
+    except Exception:
+        return
 
 
 class OutcomeLedger:
