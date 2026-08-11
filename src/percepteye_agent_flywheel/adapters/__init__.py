@@ -31,6 +31,7 @@ __all__ = ["BUILTIN_ADAPTERS", "load_builtin"]
 
 #: name -> import path of a zero-argument factory.
 BUILTIN_ADAPTERS: dict[str, str] = {
+    "adk": "percepteye_agent_flywheel.adapters.adk:ADKAdapter",
     "langchain": "percepteye_agent_flywheel.adapters.langchain:LangChainAdapter",
 }
 

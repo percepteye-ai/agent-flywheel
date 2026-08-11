@@ -101,6 +101,14 @@ def test_auto_skips_a_framework_that_is_not_installed():
         u()
     assert "langchain" in report.bound
     assert report.capabilities.reports_outcomes is True
+    # Every built-in whose framework is installed must appear. Asserting only
+    # langchain would let a new adapter be added to the registry and never
+    # reached by "auto" -- built, and wired to nothing, which is the defect
+    # this repo keeps rediscovering.
+    import importlib.util as _u
+
+    if _u.find_spec("google.adk") is not None:
+        assert "adk" in report.bound
 
 
 def test_an_explicitly_named_missing_adapter_raises():
@@ -154,3 +162,70 @@ def test_agent_name_survives_the_wire():
     plain = ToolCallOutcome(name="t", arguments={}, outcome="ok",
                             status_code=200).to_wire()
     assert "agent_name" not in plain
+
+
+# ── the same claim, for Google ADK ─────────────────────────────────────────
+
+
+class UninstrumentedADK:
+    """Not one Percepteye import, and no plugin passed to anything.
+
+    Constructing a PluginManager is what every ADK Runner does internally, so
+    this is the real install path rather than a stand-in for it.
+    """
+
+    def invoke(self, task: str) -> str:
+        import asyncio
+
+        from google.adk.plugins.plugin_manager import PluginManager
+
+        class _Tool:
+            def __init__(self, name):
+                self.name = name
+
+        class _Ctx:
+            def __init__(self, cid, agent):
+                self.function_call_id, self.agent_name = cid, agent
+
+        pm = PluginManager()
+
+        async def drive():
+            ok, bad = _Tool("lookup"), _Tool("deploy")
+            a, b = _Ctx("fc_1", "planner"), _Ctx("fc_2", "coder")
+            await pm.run_before_tool_callback(
+                tool=ok, tool_args={"q": task}, tool_context=a)
+            await pm.run_after_tool_callback(
+                tool=ok, tool_args={"q": task}, tool_context=a, result={"rows": 1})
+            await pm.run_before_tool_callback(
+                tool=bad, tool_args={"q": task}, tool_context=b)
+            await pm.run_on_tool_error_callback(
+                tool=bad, tool_args={"q": task}, tool_context=b,
+                error=RuntimeError("upstream refused"))
+
+        asyncio.run(drive())
+        return "done"
+
+
+def test_adk_outcomes_are_captured_with_no_instrumentation(tmp_path):
+    """THE claim, through the public surface, for the second framework.
+
+    Reaching the ledger proves the whole chain: "auto" probed ADK, bound it by
+    wrapping PluginManager.__init__, the customer's own runner picked the
+    plugin up, and the outcomes were written where the parent reads them.
+    """
+    pytest.importorskip("google.adk")
+    out = run_rollout_in_process(
+        resolve_entrypoint(UninstrumentedADK(), input_shape="text"),
+        _req(tmp_path), ledger_dir=str(tmp_path), timeout_s=30.0, adapters="auto",
+    )
+    assert out.tool_calls is not None, "capture produced nothing"
+    by_name = {c.name: c for c in out.tool_calls}
+    assert set(by_name) == {"lookup", "deploy"}
+
+    # A raise is a real verdict. This is the capability LangChain cannot give.
+    assert by_name["deploy"].outcome == "failed"
+    assert by_name["deploy"].agent_name == "coder"
+
+    # A returned result is not evidence of success, in either framework.
+    assert by_name["lookup"].outcome == "unknown"
+    assert by_name["lookup"].agent_name == "planner"

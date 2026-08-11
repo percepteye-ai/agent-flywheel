@@ -188,9 +188,14 @@ holding the output pipe open.
 ## Framework adapters
 
 **They are on by default, and they are how you get capture with no instrumentation.**
-`adapters="auto"` binds every built-in whose framework is installed, so a LangChain or
-LangGraph agent reports per-call outcomes with no Percepteye code in it at all — not one
-import, not one `record_tool_call`.
+`adapters="auto"` binds every built-in whose framework is installed, so a LangChain,
+LangGraph, or Google ADK agent reports per-call outcomes with no Percepteye code in it at
+all — not one import, not one `record_tool_call`.
+
+| Adapter | Covers | Outcomes | Routes LLM calls |
+|---|---|---|---|
+| `adk` | Google ADK | `failed` on raise **and** on `{"error": ...}`; `unknown` otherwise | no — the child environment routes |
+| `langchain` | LangChain, LangGraph | `failed` on raise or an explicit `ToolMessage` status; `unknown` otherwise | only when you pass `llm=` |
 
 ```python
 ph.serve("my_package.agent:build", agent_id="my-agent", input_shape="text")
@@ -227,6 +232,21 @@ two outcomes and no third: it installs, or it raises `RoutingNotInstallable` at 
 with the reason and a remedy. There is no degraded-routing state, because the failure
 destination is a live third party and the rollout still completes.
 
+The `adk` adapter installs by wrapping `PluginManager.__init__` — the chokepoint every ADK
+runner goes through, including both the deprecated `Runner(plugins=[...])` argument and the
+current `app=` route. You construct your `Runner` exactly as you always have. ADK is the
+better-fitting framework of the two, because it separates a tool that **raised** from one
+that **returned**, so this adapter reports real `failed` verdicts rather than the defensive
+`unknown` LangChain mostly limits us to.
+
+Three things it deliberately never does, because ADK's `_run_callbacks` stops at the first
+plugin returning a non-`None` value and uses that as the result: return from
+`before_tool_callback` (your tool would never run), from `after_tool_callback` (your tool's
+real result would be replaced), or from `on_tool_error_callback` (your exception would be
+silently swallowed). It also catches everything internally — ADK re-raises a plugin's
+exception as a `RuntimeError` into your agent, and a bug in our observer must cost us the
+observation and nothing else.
+
 The `langchain` adapter covers LangChain and LangGraph. Worth knowing what it does with
 `on_tool_end`: that callback does **not** mean the tool succeeded. A tool with
 `handle_tool_error=True` catches its own exception and returns a string that reads like a
@@ -241,8 +261,9 @@ capture with no code gets you an honest floor, and one `record_tool_call` at the
 you actually know the answer gets you the rest.
 
 In a multi-agent graph each call is attributed to the agent that made it, read from the
-framework's own run metadata (LangGraph stamps the node it is executing). A call nothing
-names stays unattributed: filling it in would train a planner on a coder's tool calls.
+framework's own run metadata — ADK exposes `ToolContext.agent_name` directly, LangGraph
+stamps the node it is executing. A call nothing names stays unattributed: filling it in
+would train a planner on a coder's tool calls.
 
 To ship your own, expose a factory in the `percepteye_agent_flywheel.adapters` entry-point group.
 
