@@ -67,6 +67,13 @@
             "null"
           ],
           "description": "Which agent in a multi-agent system made this call. null means unattributed, which is NOT a claim that one agent made everything."
+        },
+        "tool_call_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The id the MODEL assigned to this call (LangChain ToolMessage.tool_call_id, ADK function_call_id, OpenAI tool_calls[].id). The join key for attributing a call to the completion that emitted it: the same id reappears on the role='tool' message of the agent's NEXT request, so attribution needs no clocks and survives concurrent tools. null/absent means the framework exposed no id -- the call still counts, it just cannot be placed more precisely than 'somewhere in this rollout'."
         }
       },
       "allOf": [

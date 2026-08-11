@@ -108,6 +108,15 @@ class ToolCallOutcome:
     #: one agent made everything. Training a planner on a coder's tool calls is
     #: the multi-agent version of scoring an unobserved call as a success.
     agent_name: str | None = None
+    #: The id the MODEL assigned to this call -- LangChain's
+    #: ``ToolMessage.tool_call_id``, ADK's ``function_call_id``, the OpenAI
+    #: ``tool_calls[].id``. It is the join key that lets the control plane say
+    #: WHICH completion a call followed: the same id reappears on the
+    #: ``role="tool"`` message of the agent's next request, so attribution
+    #: needs no clocks and survives concurrent tools. ``None`` means the
+    #: framework exposed no id; the call still counts, it just cannot be
+    #: placed more precisely than "somewhere in this rollout".
+    tool_call_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.name or not isinstance(self.name, str):
@@ -140,7 +149,8 @@ class ToolCallOutcome:
             "outcome": self.outcome,
             "status_code": self.status_code,
         }
-        for k in ("output", "error", "error_class", "latency_ms", "agent_name"):
+        for k in ("output", "error", "error_class", "latency_ms", "agent_name",
+                  "tool_call_id"):
             v = getattr(self, k)
             if v is not None:
                 d[k] = v

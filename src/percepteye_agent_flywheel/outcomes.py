@@ -99,6 +99,7 @@ def record_tool_call(
     error_class: str | None = None,
     latency_ms: float | None = None,
     agent_name: str | None = None,
+    tool_call_id: str | None = None,
 ) -> None:
     """Record one executed tool call against the current rollout.
 
@@ -126,6 +127,7 @@ def record_tool_call(
         error_class=error_class,
         latency_ms=latency_ms,
         agent_name=agent_name,
+        tool_call_id=tool_call_id,
     )
     # Project into the customer's own traces BEFORE the ledger write, so a
     # rollout with no ledger destination still shows up in their telemetry.
@@ -163,6 +165,7 @@ def _emit_span(rec: ToolCallOutcome, rollout_id: str) -> None:
             latency_ms=rec.latency_ms,
             agent_name=rec.agent_name,
             rollout_id=rollout_id,
+            tool_call_id=rec.tool_call_id,
         )
     except Exception:
         return
@@ -201,6 +204,7 @@ class OutcomeLedger:
                         error_class=d.get("error_class"),
                         latency_ms=d.get("latency_ms"),
                         agent_name=d.get("agent_name"),
+                        tool_call_id=d.get("tool_call_id"),
                     )
                 )
         return out

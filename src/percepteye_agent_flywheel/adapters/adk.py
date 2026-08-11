@@ -106,6 +106,12 @@ def _build_plugin_cls() -> type:
                         "name": getattr(tool, "name", None) or "tool",
                         "arguments": dict(tool_args or {}),
                         "t0": time.perf_counter(),
+                        # ADK's function_call_id doubles as the model-assigned
+                        # call id: it reappears in the function_response part
+                        # of the next request, which is what lets the control
+                        # plane attribute this call to the completion that
+                        # emitted it.
+                        "tool_call_id": key,
                         # ADK names the calling agent natively. No metadata
                         # archaeology, and no attributing every call to one
                         # agent when a graph actually had several.
@@ -134,6 +140,7 @@ def _build_plugin_cls() -> type:
                     error=error,
                     latency_ms=(time.perf_counter() - state["t0"]) * 1000.0,
                     agent_name=state.get("agent_name"),
+                    tool_call_id=state.get("tool_call_id"),
                 )
             except Exception:
                 pass
@@ -153,6 +160,7 @@ def _build_plugin_cls() -> type:
                     error_class=type(error).__name__,
                     latency_ms=(time.perf_counter() - state["t0"]) * 1000.0,
                     agent_name=state.get("agent_name"),
+                    tool_call_id=state.get("tool_call_id"),
                 )
             except Exception:
                 pass

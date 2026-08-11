@@ -118,6 +118,13 @@ def _build_handler_cls() -> type:
             if state is None or _ACTIVE.get() is None:
                 return
             outcome, error = _classify_output(output, ToolMessage)
+            # The model-assigned call id rides on the ToolMessage itself, and
+            # the SAME id appears on the role="tool" message of the agent's
+            # next request -- the join key that lets the control plane say
+            # which completion this call followed. A tool that returns a plain
+            # value has no id; None is the honest answer, not a reason to
+            # invent one.
+            _tcid = getattr(output, "tool_call_id", None)
             record_tool_call(
                 state["name"], state["arguments"],
                 outcome=outcome,
@@ -129,6 +136,7 @@ def _build_handler_cls() -> type:
                 error=error,
                 latency_ms=(time.perf_counter() - state["t0"]) * 1000.0,
                 agent_name=state.get("agent_name"),
+                tool_call_id=str(_tcid) if _tcid else None,
             )
 
         def on_tool_error(self, error, *, run_id=None, **kw):

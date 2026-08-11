@@ -74,6 +74,7 @@ def record_tool_call_span(
     latency_ms: float | None = None,
     agent_name: str | None = None,
     rollout_id: str | None = None,
+    tool_call_id: str | None = None,
 ) -> None:
     """Project one recorded tool call into the customer's traces.
 
@@ -91,6 +92,12 @@ def record_tool_call_span(
             # gen_ai.* where the convention names it.
             span.set_attribute("gen_ai.operation.name", "execute_tool")
             span.set_attribute("gen_ai.tool.name", str(name))
+            if tool_call_id:
+                # The convention DOES name this one: the model-assigned call
+                # id, the same value that reappears on the role="tool" message
+                # of the next request. It is what lets a trace consumer join a
+                # tool span to the completion that requested it.
+                span.set_attribute("gen_ai.tool.call.id", str(tool_call_id))
             if arguments is not None:
                 span.set_attribute("gen_ai.tool.call.arguments", _short(arguments))
 
