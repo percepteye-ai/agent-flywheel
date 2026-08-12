@@ -225,6 +225,14 @@ def _attach_ledger(out: RolloutOutput, ledger_dir: str, rollout_id: str) -> None
         out.tool_calls = recorded
 
 
+#: Wall-clock held back from the agent so its RESULT can still be delivered.
+#: Collecting artifacts and posting the report are network calls against a
+#: lease, and a rollout run right up to its deadline has no time left for
+#: either — the deliverable is produced and then dropped at the final step.
+#: Small enough not to matter against a real episode budget, large enough to
+#: cover a slow round-trip.
+REPORT_MARGIN_S = 10.0
+
 #: How often the heartbeat thread wakes to see what is due. Deliberately small
 #: and fixed: the cadence that matters is PER ROLLOUT, because concurrent
 #: rollouts can hold leases of different lengths, and a single global interval
@@ -431,7 +439,14 @@ class RolloutRunner:
                 exclusion_detail="deadline had already passed when claimed",
                 timing={"elapsed_s": 0.0},
             )
-        timeout_s = min(self.rollout_timeout_s, budget)
+        # Stop the agent SHORT of the deadline, so there is time left to
+        # collect its artifacts and get the report in while the lease is still
+        # good. Running to the deadline exactly meant the kill and the expiry
+        # landed together and the report chased a rollout the server had
+        # already swept — the work was done and then thrown away at the last
+        # step. The control plane reserves the same kind of margin on its own
+        # waiting loop, for the same reason; this side had none.
+        timeout_s = min(self.rollout_timeout_s, max(1.0, budget - REPORT_MARGIN_S))
         ledger_dir = self._ledger_dir()
         Path(ledger_dir, rollout.rollout_id).mkdir(parents=True, exist_ok=True)
 
@@ -760,9 +775,12 @@ class RolloutRunner:
         root = Path(self._ledger_dir()) / rollout.rollout_id
         if not root.is_dir():
             return
+        # Registration is OPTIONAL. It is a server-side index; the report body
+        # is what the grader actually reads, so a transport without it (or one
+        # whose registration call fails) must still deliver the bytes.
         registrar = getattr(self.transport, "register_artifact", None)
         if not callable(registrar):
-            return
+            registrar = None
         inline_budget = MAX_INLINE_TOTAL_BYTES
         for path in sorted(root.rglob("*")):
             if not path.is_file() or path.name == LEDGER_FILENAME:
@@ -787,15 +805,23 @@ class RolloutRunner:
                     content = path.read_text(encoding="utf-8", errors="strict")
                 except (OSError, UnicodeDecodeError):
                     content = None
+            # Recorded BEFORE registration is attempted. Registration is a
+            # network call to the same server that may have just expired this
+            # rollout, and it used to gate the assignment below — so on a
+            # deadline_exceeded rollout, the one case where the evidence
+            # matters most, registration 4xx'd and the deliverable vanished
+            # from the report. Losing an index entry must not lose the bytes.
+            if content is not None:
+                inline_budget -= size
+                out.artifacts[name] = {
+                    "sha256": digest, "size_bytes": size, "content": content,
+                }
+            else:
+                out.artifacts[name] = digest
+            if registrar is None:
+                continue
             try:
                 registrar(rollout, name=name, size_bytes=size, sha256=digest)
-                if content is not None:
-                    inline_budget -= size
-                    out.artifacts[name] = {
-                        "sha256": digest, "size_bytes": size, "content": content,
-                    }
-                else:
-                    out.artifacts[name] = digest
             except (TransportError, LeaseLost) as exc:
                 # The rollout itself is fine. Losing an artifact registration
                 # must not lose the result it belongs to.

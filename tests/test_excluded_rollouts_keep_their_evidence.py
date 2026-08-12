@@ -130,6 +130,45 @@ def test_a_timeout_with_nothing_produced_is_still_abandoned(tmp_path):
 # ── the untouched happy path ────────────────────────────────────────────────
 
 
+class _RegistrationRefuses(_T):
+    """The server rejects artifact registration — the shape a rollout that has
+    already blown its deadline actually meets."""
+
+    def register_artifact(self, r, *, name, size_bytes, sha256, **kw):
+        from percepteye_agent_flywheel.errors import TransportError
+
+        raise TransportError("410 gone: deadline passed")
+
+
+def _run_with(tr, tmp_path, body: str, *, timeout_s=30.0, deadline=60.0):
+    runner = RolloutRunner(["sh", _script(tmp_path, body)], transport=tr,
+                           input_shape="text", artifacts_dir=str(tmp_path),
+                           rollout_timeout_s=timeout_s)
+    runner._serve_one_inner(_req(deadline))
+    return tr
+
+
+def test_failed_registration_still_delivers_the_bytes(tmp_path):
+    """Registration is a server-side INDEX; the report body is what the grader
+    reads. Gating the record on registration meant the deliverable vanished in
+    exactly the case it mattered — measured on rl_umms7x7s, killed at 49s with
+    count_5xx.sh on disk and artifacts={} on the row."""
+    tr = _run_with(_RegistrationRefuses(), tmp_path, 'echo x > sol.sh\nexit 1')
+    assert not tr.abandoned, "registration failure must not turn into an abandon"
+    out = tr.reported[0]
+    assert "sol.sh" in out.artifacts, f"deliverable lost: {list(out.artifacts)}"
+
+
+def test_a_transport_without_registration_still_delivers(tmp_path):
+    """register_artifact is optional; its absence must not zero the report."""
+    class _NoRegistrar(_T):
+        register_artifact = None
+
+    tr = _run_with(_NoRegistrar(), tmp_path, 'echo x > sol.sh\necho done')
+    out = tr.reported[0]
+    assert "sol.sh" in out.artifacts
+
+
 def test_a_clean_run_reports_with_no_exclusion(tmp_path):
     tr = _run(tmp_path, 'echo hi > f.txt\necho done')
     assert not tr.abandoned
@@ -137,3 +176,38 @@ def test_a_clean_run_reports_with_no_exclusion(tmp_path):
     assert out.exclusion_reason is None
     assert "exclusion" not in out.to_wire()
     assert "f.txt" in out.artifacts
+
+
+# ── there must be time left to deliver the result ───────────────────────────
+
+
+def test_the_agent_is_stopped_short_of_the_deadline(tmp_path):
+    """Running to the deadline exactly leaves no wall-clock to collect
+    artifacts and post the report, so the work is produced and then dropped at
+    the last step. The agent's budget must reserve a delivery margin."""
+    from percepteye_agent_flywheel.runner import REPORT_MARGIN_S
+
+    seen: dict = {}
+
+    tr = _T()
+    runner = RolloutRunner(["sh", _script(tmp_path, 'echo hi')], transport=tr,
+                           input_shape="text", artifacts_dir=str(tmp_path),
+                           rollout_timeout_s=10_000.0)
+
+    import percepteye_agent_flywheel.runner as _rmod
+    _orig = _rmod.run_rollout_as_command
+
+    def _spy(cmd, rollout, *, ledger_dir, timeout_s, env=None, cwd=None, **kw):
+        seen["timeout_s"] = timeout_s
+        return _orig(cmd, rollout, ledger_dir=ledger_dir, timeout_s=timeout_s,
+                     env=env, cwd=cwd, **kw)
+
+    _rmod.run_rollout_as_command = _spy
+    try:
+        runner._serve_one_inner(_req(300.0))
+    finally:
+        _rmod.run_rollout_as_command = _orig
+
+    # 300s of budget must not become a 300s agent timeout.
+    assert seen["timeout_s"] <= 300.0 - REPORT_MARGIN_S + 1.0, seen
+    assert seen["timeout_s"] > 0
