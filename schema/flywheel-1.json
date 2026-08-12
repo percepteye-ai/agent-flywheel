@@ -209,10 +209,37 @@
           "minimum": 0
         },
         "artifacts": {
-          "description": "name -> path, relative to artifacts_dir. For coding/REPL flywheels the artifact grader IS the reward, so this matters more than tool_calls.",
+          "description": "name -> artifact record. A string value is the file's sha256 digest (or a named skip marker such as 'skipped:too_large:N'). An object value additionally INLINES the body of a small UTF-8 file -- for coding/REPL flywheels the files are the deliverable, and a grader that can verify a digest but never read the file proves integrity while grading nothing. Inline bodies are capped per file and per report; binary or over-cap files keep the string form.",
           "type": "object",
           "additionalProperties": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "sha256",
+                  "size_bytes",
+                  "content"
+                ],
+                "properties": {
+                  "sha256": {
+                    "type": "string",
+                    "minLength": 64,
+                    "maxLength": 64
+                  },
+                  "size_bytes": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "content": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
           }
         },
         "reward": {

@@ -252,7 +252,12 @@ class RolloutOutput:
     tool_calls: list[ToolCallOutcome] | None = None
     tool_calls_omitted_count: int = 0
     llm_call_count: int | None = None
-    artifacts: dict[str, str] = field(default_factory=dict)
+    #: name → digest string, OR — for small UTF-8 files — an inline body
+    #: ``{"sha256", "size_bytes", "content"}``. The inline form exists because
+    #: for a coding/REPL agent the FILES are the deliverable: a grader that
+    #: can verify a digest but never read the file proves integrity while
+    #: grading nothing. Values stay strings for binary/over-cap files.
+    artifacts: dict[str, Any] = field(default_factory=dict)
     reward: float | None = None
     success: bool | None = None
     exclusion_reason: ExclusionReason | None = None

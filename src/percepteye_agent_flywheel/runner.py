@@ -46,6 +46,13 @@ _SPEC_SEP = ":"
 #: plausibly a deliverable rather than what fits in memory. Above it the
 #: artifact is recorded as skipped, with its size, rather than dropped.
 MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
+#: Per-file inline cap: a small UTF-8 artifact travels with the report so a
+#: grader can READ it, not just verify a digest of it. 64KB covers scripts,
+#: configs, and test outputs — the deliverables of a coding/REPL agent.
+MAX_INLINE_ARTIFACT_BYTES = 64 * 1024
+#: Total inline budget per report: two hundred small files must not become a
+#: 12MB report. Files past the budget keep their digest-string value.
+MAX_INLINE_TOTAL_BYTES = 256 * 1024
 
 
 def _is_import_spec(obj: Any) -> bool:
@@ -437,6 +444,14 @@ class RolloutRunner:
                     api_key=rollout.api_key, ledger_dir=ledger_dir,
                     extra={"PERCEPTEYE_TURN_INPUT": rollout.turn_input},
                 ),
+                # The per-rollout directory is the child's working directory,
+                # so the files a CLI agent leaves behind ARE its artifacts —
+                # _collect_artifacts scans exactly this directory. Without
+                # this, a coding agent's work landed wherever the serving
+                # process happened to be started from, collection found
+                # nothing, and the artifact grader scored an absence the
+                # agent never caused.
+                cwd=str(Path(ledger_dir) / rollout.rollout_id),
             )
         if self.isolation == "inprocess":
             return run_rollout_in_process(
@@ -713,9 +728,14 @@ class RolloutRunner:
         existed on the transport since the beginning with no caller, so this
         capability was fully implemented and entirely unreachable.
 
-        Registration carries a digest and a size, never the bytes: the control
-        plane decides whether it wants a body, and a rollout that produced a
-        200MB core dump should not discover that by trying to send it.
+        Registration carries a digest and a size, never the bytes. The REPORT
+        additionally inlines the content of SMALL TEXT artifacts — for a
+        coding or REPL agent the files are the deliverable, and a grader that
+        can verify a digest but never read a file can prove integrity while
+        grading nothing. Two caps bound it: per-file (utf-8, ≤64KB) and a
+        total per report, so a rollout that produced a 200MB core dump — or
+        two hundred small ones — cannot bloat the report. Anything over a cap
+        keeps today's digest-string value: registered, named, not inlined.
         """
         # The LOCAL per-rollout directory, which is the one the child is told
         # about through PERCEPTEYE_LEDGER_DIR and can therefore actually write
@@ -727,6 +747,7 @@ class RolloutRunner:
         registrar = getattr(self.transport, "register_artifact", None)
         if not callable(registrar):
             return
+        inline_budget = MAX_INLINE_TOTAL_BYTES
         for path in sorted(root.rglob("*")):
             if not path.is_file() or path.name == LEDGER_FILENAME:
                 continue
@@ -741,9 +762,24 @@ class RolloutRunner:
                 # it deserves to know it existed.
                 out.artifacts[name] = f"skipped:too_large:{size}"
                 continue
+            # Small text files travel WITH the report, because the grader
+            # needs bytes, not proofs about bytes. Binary or over-cap files
+            # keep the digest-string value — same wire shape as before.
+            content: str | None = None
+            if size <= MAX_INLINE_ARTIFACT_BYTES and size <= inline_budget:
+                try:
+                    content = path.read_text(encoding="utf-8", errors="strict")
+                except (OSError, UnicodeDecodeError):
+                    content = None
             try:
                 registrar(rollout, name=name, size_bytes=size, sha256=digest)
-                out.artifacts[name] = digest
+                if content is not None:
+                    inline_budget -= size
+                    out.artifacts[name] = {
+                        "sha256": digest, "size_bytes": size, "content": content,
+                    }
+                else:
+                    out.artifacts[name] = digest
             except (TransportError, LeaseLost) as exc:
                 # The rollout itself is fine. Losing an artifact registration
                 # must not lose the result it belongs to.
