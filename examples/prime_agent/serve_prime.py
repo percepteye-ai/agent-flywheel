@@ -24,6 +24,14 @@ HERE = pathlib.Path(__file__).resolve().parent
 #: The autonomous limits are bounded deliberately. A rollout that runs until it
 #: decides to stop is a rollout whose cost we do not control, and the episode
 #: budget is the only clock the control plane can enforce from outside.
+#:
+#: Continuations raised 2 -> 6 on 2026-08-12. At 2, run 08e40b36's rollout
+#: rl_dz73eyv died `entrypoint_error: exit 1: Autonomous run stopped before
+#: terminal evidence; maxContinuations reached (2/2)` — the cap cut the agent
+#: off BEFORE it produced the evidence the reward reads, so the rollout scored
+#: nothing and told us nothing. A bound that stops the work short of any
+#: observable result is not cost control, it is a wasted rollout. The episode
+#: budget still bounds the real cost from outside.
 ARGV = [
     "prime-agent",
     "-p",
@@ -31,7 +39,7 @@ ARGV = [
     "-e", str(HERE / "route.ts"),  # the routing extension
     "--autonomous",
     "--autonomous-max-turns", os.environ.get("PRIME_MAX_TURNS", "12"),
-    "--autonomous-max-continuations", "2",
+    "--autonomous-max-continuations", "6",
 ]
 
 
@@ -45,7 +53,16 @@ def main() -> int:
         # the assertion this whole contract refuses, so this stays False until
         # the event parser lands.
         reports_tool_calls=False,
-        concurrency=int(os.environ.get("PRIME_CONCURRENCY", "1")),
+        # Raised 1 -> 4 on 2026-08-12. A GRPO group mints its rollouts at once,
+        # each stamped with an ABSOLUTE deadline_at; at concurrency 1 the rest
+        # sat in the queue burning that clock while this process worked one of
+        # them. Run 08e40b36 lost 5 of 6 rollouts that way — two never claimed
+        # at all ("rollout budget elapsed before any agent claimed it") and one
+        # was claimed with 55s of its 300s left and killed mid-flight, because
+        # the SDK takes min(rollout_timeout_s, seconds_remaining) rather than a
+        # fresh clock. Serving concurrency has to match the group width or the
+        # group's own deadline is what kills it.
+        concurrency=int(os.environ.get("PRIME_CONCURRENCY", "4")),
     )
 
 
