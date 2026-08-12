@@ -38,7 +38,16 @@ ARGV = [
     "--mode", "json",              # structured events, not prose
     "-e", str(HERE / "route.ts"),  # the routing extension
     "--autonomous",
-    "--autonomous-max-turns", os.environ.get("PRIME_MAX_TURNS", "12"),
+    # 12 -> 15 on 2026-08-12. NOT because the agent needs more room to find the
+    # answer: on run 516b7a55 it wrote a CORRECT top_ips.sh and kept going,
+    # because the grading test is hidden by design and it has no way to know it
+    # is finished. Raising this to 30 did not buy completions — it converted
+    # `maxTurns` exclusions into `deadline_exceeded` ones against the 300s
+    # episode budget, and a second attempt at the same task drifted from a
+    # correct solution to a wrong one. 15 is a modest allowance over the point
+    # where the work is typically done; the real fix is that the artifact is now
+    # graded whether or not the agent terminates tidily.
+    "--autonomous-max-turns", os.environ.get("PRIME_MAX_TURNS", "15"),
     "--autonomous-max-continuations", "6",
 ]
 

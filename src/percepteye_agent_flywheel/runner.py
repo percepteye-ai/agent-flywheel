@@ -692,7 +692,19 @@ class RolloutRunner:
             # earn a 410; the heartbeat thread has emitted the event.
             return
         try:
-            if out.exclusion_reason is not None:
+            # Evidence FIRST, whatever the outcome. An agent that exhausted its
+            # turn or time budget still wrote files, and for a coding/REPL agent
+            # those files ARE what the reward reads. Collecting only on the
+            # clean-exit path meant a rollout could write a CORRECT solution and
+            # have it discarded because the process did not terminate tidily —
+            # measured on run 516b7a55, where a correct top_ips.sh sat in the
+            # ledger while the row carried artifacts={}.
+            self._collect_artifacts(rollout, out)
+            if out.exclusion_reason is not None and not out.artifacts:
+                # Nothing to grade: a crash before any work product, a dead
+                # credential, a substrate fault. Hand it back typed, so it can
+                # be retried and never trained on. This is the case abandon was
+                # built for — "not a low reward, do not train on this".
                 self.transport.abandon(
                     rollout,
                     reason=out.exclusion_reason,
@@ -701,12 +713,16 @@ class RolloutRunner:
                 self._emit("rollout_abandoned",
                            {"rollout_id": rollout.rollout_id, "reason": out.exclusion_reason})
                 return
-            self._collect_artifacts(rollout, out)
+            # Reported WITH its exclusion when it has one: to_wire carries the
+            # exclusion block, so the server records the work product and still
+            # knows not to train on it. The agent's inability to declare itself
+            # finished must not decide the score — the hidden test does.
             ack = self.transport.report(rollout, out)
             self._emit("rollout_reported", {
                 "rollout_id": rollout.rollout_id,
                 "grade": ack.get("grade"),
                 "duplicate": ack.get("duplicate", False),
+                "exclusion": out.exclusion_reason,
             })
         except LeaseLost:
             self._emit("lease_lost", {"rollout_id": rollout.rollout_id})
