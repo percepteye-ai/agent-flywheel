@@ -37,6 +37,17 @@ ARGV = [
     "-p",
     "--mode", "json",              # structured events, not prose
     "-e", str(HERE / "route.ts"),  # the routing extension
+    # SELECTING the provider the extension registers. Registering one does not
+    # use it: without these two flags prime-agent kept its own built-in
+    # provider and its own credentials, every completion went somewhere we
+    # never saw, and `inference_calls` stayed empty platform-wide — so no
+    # trajectory carried an llm_call and the substrate-liveness canary
+    # correctly reported "no successful real-provider LLM call" on every run
+    # for a week. The rollouts looked fine; we simply owned none of the
+    # completion wire, which is the exact failure route.ts warns about in its
+    # own header and could not itself prevent.
+    "--provider", "percepteye",
+    "--model", os.environ.get("PERCEPTEYE_MODEL_ID", "policy"),
     "--autonomous",
     # 12 -> 15 on 2026-08-12. NOT because the agent needs more room to find the
     # answer: on run 516b7a55 it wrote a CORRECT top_ips.sh and kept going,
