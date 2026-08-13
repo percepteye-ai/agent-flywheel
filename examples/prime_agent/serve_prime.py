@@ -68,11 +68,17 @@ def main() -> int:
         ARGV,
         agent_id=os.environ.get("PERCEPTEYE_AGENT_ID", "prime-agent"),
         input_shape="text",
-        # prime-agent's own tool results live in its JSON event stream, which
-        # nothing here parses yet. Claiming outcomes we do not extract would be
-        # the assertion this whole contract refuses, so this stays False until
-        # the event parser lands.
-        reports_tool_calls=False,
+        # TRUE as of 2026-08-12: the event parser landed. prime-agent's
+        # `--mode json` stream emits tool_execution_start / tool_execution_end
+        # with toolCallId, toolName, args and isError, and the SDK reads them
+        # off stdout (event_stream.parse_tool_calls) with no instrumentation in
+        # the agent at all. So this is now an assertion we can actually back.
+        #
+        # It stays honest at the edges rather than by promise: a call that ends
+        # without an isError is recorded `unknown`, never rounded up to ok, and
+        # a stream carrying no tool events leaves tool_calls None rather than
+        # claiming zero calls were made.
+        reports_tool_calls=True,
         # Raised 1 -> 4 on 2026-08-12. A GRPO group mints its rollouts at once,
         # each stamped with an ABSOLUTE deadline_at; at concurrency 1 the rest
         # sat in the queue burning that clock while this process worked one of

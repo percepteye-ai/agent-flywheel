@@ -321,7 +321,38 @@ def run_rollout_as_command(
     out = RolloutOutput(final_text=(stdout or "").strip())
     out.timing["elapsed_s"] = time.time() - started
     _attach_ledger(out, ledger_dir, rollout.rollout_id)
+    _attach_stream_tool_calls(out, stdout or "")
     return out
+
+
+def _attach_stream_tool_calls(out: RolloutOutput, stdout: str) -> None:
+    """Recover tool outcomes from a command agent's own event stream.
+
+    Only when the ledger recorded NOTHING. An agent that called
+    ``record_tool_call`` made a deliberate assertion about its own behaviour
+    and a stream parse must never overwrite it — the ledger is the record the
+    control plane grades.
+
+    This is what lets a process agent report tool calls at all. A framework
+    adapter binds to a Python object; a Node CLI or a compiled binary has no
+    object to bind to, so its calls were unobservable and the honest setting
+    was ``reports_tool_calls=False``. Without per-call outcomes there is no
+    verdict to grade, no retry to detect, and nothing a customer can debug a
+    rollout from.
+
+    ``None`` stays ``None``: a stream carrying no tool-execution events leaves
+    the field unset rather than asserting the agent made zero calls.
+    """
+    if out.tool_calls is not None:
+        return
+    try:
+        from .event_stream import parse_tool_calls
+
+        parsed = parse_tool_calls(stdout)
+    except Exception:  # noqa: BLE001 - never fail a rollout over telemetry
+        return
+    if parsed:
+        out.tool_calls = parsed
 
 
 class _InFlight:
