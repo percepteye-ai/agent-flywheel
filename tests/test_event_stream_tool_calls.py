@@ -13,6 +13,7 @@ verbatim from prime-agent ``--mode json``.
 from __future__ import annotations
 
 import json
+import os
 
 from percepteye_agent_flywheel.event_stream import parse_tool_calls
 
@@ -208,3 +209,70 @@ def test_a_stream_is_matched_by_its_events_not_by_a_declared_name():
                      "gen_ai.tool.name": "other"})
     names = [c.name for c in parse_tool_calls(mixed)]
     assert names == ["ipython"]
+
+
+# ── every exit path captures, not just the clean one ────────────────────────
+
+
+def _agent_that_emits_then(exit_code: int, tmp_path):
+    """A stub CLI that prints a tool-execution pair and then exits as told."""
+    import stat as _stat
+    p = tmp_path / "agent.sh"
+    p.write_text(
+        "#!/bin/sh\n"
+        f"cat <<'JSON'\n{json.dumps(_START)}\n{json.dumps(_END_OK)}\nJSON\n"
+        f"exit {exit_code}\n"
+    )
+    p.chmod(p.stat().st_mode | _stat.S_IEXEC)
+    return str(p)
+
+
+def _run_command(tmp_path, script, timeout_s=30.0):
+    import time as _t
+
+    from percepteye_agent_flywheel.contract import RolloutRequest
+    from percepteye_agent_flywheel.runner import run_rollout_as_command
+
+    req = RolloutRequest(
+        rollout_id="rl_x", turn_input="go",
+        llm_url="https://gw.invalid/v1", api_key="k",
+        artifacts_dir="rollouts/rl_x", deadline_ts=_t.time() + 300,
+        lease_token="lt",
+    )
+    return run_rollout_as_command(
+        ["sh", script], req, ledger_dir=str(tmp_path), timeout_s=timeout_s,
+        env=dict(os.environ), cwd=str(tmp_path))
+
+
+def test_a_nonzero_exit_still_captures_its_tool_calls(tmp_path):
+    """THE regression. Every rollout on run b60067db exited non-zero, so
+    tool_calls came back null even though the parser worked — capture had been
+    attached to the clean-exit path only, exactly as the artifact collection
+    had been before it."""
+    out = _run_command(tmp_path, _agent_that_emits_then(1, tmp_path))
+    assert out.exclusion_reason == "entrypoint_error"
+    assert out.tool_calls is not None, "capture skipped on the failure path"
+    assert [c.name for c in out.tool_calls] == ["ipython"]
+
+
+def test_a_clean_exit_captures_its_tool_calls(tmp_path):
+    out = _run_command(tmp_path, _agent_that_emits_then(0, tmp_path))
+    assert out.exclusion_reason is None
+    assert [c.name for c in out.tool_calls] == ["ipython"]
+
+
+def test_a_timeout_kill_still_captures_what_ran(tmp_path):
+    """Killed on the clock, but it ran. Whatever it did before the kill is
+    evidence."""
+    import stat as _stat
+    p = tmp_path / "slow.sh"
+    p.write_text(
+        "#!/bin/sh\n"
+        f"cat <<'JSON'\n{json.dumps(_START)}\n{json.dumps(_END_OK)}\nJSON\n"
+        "sleep 30\n"
+    )
+    p.chmod(p.stat().st_mode | _stat.S_IEXEC)
+    out = _run_command(tmp_path, str(p), timeout_s=1.0)
+    assert out.exclusion_reason == "deadline_exceeded"
+    assert out.tool_calls is not None, "capture skipped on the timeout path"
+    assert [c.name for c in out.tool_calls] == ["ipython"]

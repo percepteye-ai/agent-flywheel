@@ -296,33 +296,43 @@ def run_rollout_as_command(
         # 1.5s budget against `sh -c 'sleep 120'` took the full 120s.
         start_new_session=(os.name != "nt"),
     )
+    # EVERY exit path is finalised the same way. Capture attached only to the
+    # clean-exit path is capture that is missing precisely when it matters — a
+    # rollout killed on its budget is the one whose tool calls you most want to
+    # see. This module learned that once with artifacts, and the stream capture
+    # was then added to the success path only and repeated it: on run b60067db
+    # every rollout exited non-zero, so tool_calls came back null even though
+    # the parser worked. One finaliser, and no path that can forget it.
+    def _finalise(out: RolloutOutput, stdout_text: str) -> RolloutOutput:
+        out.timing.setdefault("elapsed_s", time.time() - started)
+        _attach_ledger(out, ledger_dir, rollout.rollout_id)
+        _attach_stream_tool_calls(out, stdout_text or "")
+        return out
+
     try:
         stdout, stderr = proc.communicate(input=rollout.turn_input,
                                           timeout=timeout_s)
     except subprocess.TimeoutExpired:
         _kill_tree(proc)
         stdout, stderr = proc.communicate()
-        return RolloutOutput(
-            final_text="", exclusion_reason="deadline_exceeded",
+        # Killed on the clock, but it ran — whatever it did before the kill is
+        # evidence and is captured like any other outcome.
+        return _finalise(RolloutOutput(
+            final_text=(stdout or "").strip(),
+            exclusion_reason="deadline_exceeded",
             exclusion_detail=f"command exceeded {timeout_s:.0f}s and was killed",
-            timing={"elapsed_s": time.time() - started},
-        )
+        ), stdout or "")
     if proc.returncode != 0:
         # The agent's own failure, not ours: an exit code is a result, and a
         # non-zero one is a rollout that did not succeed rather than a
-        # substrate fault. It is still excluded, because a crashed run says
-        # nothing about the policy.
-        return RolloutOutput(
+        # substrate fault. Still excluded — a crashed run says nothing about
+        # the policy — but what it DID before failing is still evidence.
+        return _finalise(RolloutOutput(
             final_text=(stdout or "").strip(),
             exclusion_reason="entrypoint_error",
             exclusion_detail=f"exit {proc.returncode}: {(stderr or '')[-1500:]}",
-            timing={"elapsed_s": time.time() - started},
-        )
-    out = RolloutOutput(final_text=(stdout or "").strip())
-    out.timing["elapsed_s"] = time.time() - started
-    _attach_ledger(out, ledger_dir, rollout.rollout_id)
-    _attach_stream_tool_calls(out, stdout or "")
-    return out
+        ), stdout or "")
+    return _finalise(RolloutOutput(final_text=(stdout or "").strip()), stdout or "")
 
 
 def _attach_stream_tool_calls(out: RolloutOutput, stdout: str) -> None:
