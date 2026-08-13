@@ -269,6 +269,29 @@ def _is_command(entrypoint: Any) -> bool:
     return isinstance(entrypoint, (list, tuple)) and bool(entrypoint)
 
 
+def _argv_with_gate(
+    argv: list[str], rollout: RolloutRequest, gate_flag: str | None
+) -> list[str]:
+    """``argv`` plus this rollout's completion gate, when both sides declare one.
+
+    Two independent facts, deliberately kept apart. ``gate_flag`` is how THIS
+    binary spells the option and belongs to the serve configuration — it cannot
+    be guessed, and passing an unknown flag to an arbitrary agent would break
+    it outright. The gate COMMAND is a property of the TASK and arrives per
+    rollout, in ``metadata``.
+
+    Either side missing returns the argv untouched, which is exactly the
+    pre-gate behaviour: an agent whose CLI has no gate concept keeps running
+    until it self-terminates or hits a budget.
+    """
+    if not gate_flag:
+        return argv
+    gate = (rollout.metadata or {}).get("completion_gate")
+    if not isinstance(gate, str) or not gate.strip():
+        return argv
+    return [*argv, gate_flag, gate.strip()]
+
+
 def run_rollout_as_command(
     argv: list[str],
     rollout: RolloutRequest,
@@ -277,6 +300,7 @@ def run_rollout_as_command(
     timeout_s: float,
     env: dict[str, str],
     cwd: str | None = None,
+    gate_flag: str | None = None,
 ) -> RolloutOutput:
     """Run the customer's agent as a process and read what it left behind.
 
@@ -287,7 +311,8 @@ def run_rollout_as_command(
     """
     started = time.time()
     proc = subprocess.Popen(
-        list(argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        _argv_with_gate(list(argv), rollout, gate_flag),
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, env=env, text=True, cwd=cwd,
         # Its own process GROUP. A real CLI agent spawns freely -- a shell, a
         # compiler, a test runner -- and killing only the process we launched
@@ -393,6 +418,13 @@ class RolloutRunner:
         method: str | None = None,
         adapters: list[str] | str | None = "auto",
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
+        #: How THIS binary spells its completion-gate option, e.g.
+        #: ``"--autonomous-gate"``. Serve configuration, because it is a fact
+        #: about the agent's CLI and cannot be guessed — passing an unknown
+        #: flag to an arbitrary binary would break it. The gate COMMAND is a
+        #: property of the task and arrives per rollout in metadata; both are
+        #: required before anything is appended.
+        gate_flag: str | None = None,
     ) -> None:
         if isolation not in ("subprocess", "inprocess"):
             raise ConfigurationError(
@@ -419,6 +451,7 @@ class RolloutRunner:
             self.isolation = "subprocess"
             self.concurrency = max(1, concurrency)
             self.rollout_timeout_s = rollout_timeout_s
+            self.gate_flag = gate_flag
             self._method = method
             self._adapters = adapters
             self._on_event = on_event
@@ -448,6 +481,7 @@ class RolloutRunner:
         self.isolation = isolation
         self.concurrency = max(1, concurrency)
         self.rollout_timeout_s = rollout_timeout_s
+        self.gate_flag = gate_flag
         # Carried so the CHILD resolves the same callable the parent validated.
         # This was hardcoded to None on the subprocess payload, so a customer
         # who named an entrypoint with method= had it honoured at startup and
@@ -494,7 +528,7 @@ class RolloutRunner:
         if self._command is not None:
             return run_rollout_as_command(
                 self._command, rollout, ledger_dir=ledger_dir,
-                timeout_s=timeout_s,
+                timeout_s=timeout_s, gate_flag=self.gate_flag,
                 env=build_child_env(
                     rollout_id=rollout.rollout_id, llm_url=rollout.llm_url,
                     api_key=rollout.api_key, ledger_dir=ledger_dir,

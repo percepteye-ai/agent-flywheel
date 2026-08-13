@@ -129,6 +129,13 @@ def serve(
     isolation: Literal["subprocess", "inprocess"] = "subprocess",
     concurrency: int = 1,
     rollout_timeout_s: float = 900.0,
+    #: How this agent's CLI spells its completion-gate option, e.g.
+    #: ``"--autonomous-gate"``. Required before any gate is passed: the flag is
+    #: a fact about the binary and cannot be guessed, and handing an unknown
+    #: option to an arbitrary agent would break it. The gate COMMAND itself is
+    #: a property of the task and arrives per rollout. Leave unset for an agent
+    #: with no gate concept — it then behaves exactly as before.
+    gate_flag: str | None = None,
     reports_tool_calls: bool = False,
     method: str | None = None,
     adapters: list[str] | str | None = "auto",
@@ -225,6 +232,7 @@ def serve(
         isolation=isolation,
         concurrency=concurrency,
         rollout_timeout_s=rollout_timeout_s,
+        gate_flag=gate_flag,
         method=method,
         adapters=adapters,
         on_event=on_event,

@@ -89,6 +89,14 @@ def main() -> int:
         # fresh clock. Serving concurrency has to match the group width or the
         # group's own deadline is what kills it.
         concurrency=int(os.environ.get("PRIME_CONCURRENCY", "4")),
+        # How prime-agent spells its completion gate. `--autonomous` is
+        # documented as "continue until gates pass or a limit is reached", so
+        # with no gate registered a LIMIT is the only exit that exists — which
+        # is why every rollout on runs b6b4388d and b60067db ended on maxTurns
+        # or maxTokens and was excluded from training even when its artifact
+        # was correct. The gate COMMAND is per task and rides in the rollout
+        # metadata; this only says how to spell the option.
+        gate_flag="--autonomous-gate",
     )
 
 
