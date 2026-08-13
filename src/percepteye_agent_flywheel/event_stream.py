@@ -34,14 +34,77 @@ agent's behalf.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any
 
 from .contract import Outcome, ToolCallOutcome
 
-__all__ = ["parse_tool_calls", "TOOL_START", "TOOL_END"]
+__all__ = ["parse_tool_calls", "StreamFormat", "FORMATS", "TOOL_START", "TOOL_END"]
 
-TOOL_START = "tool_execution_start"
-TOOL_END = "tool_execution_end"
+
+@dataclass(frozen=True)
+class StreamFormat:
+    """How one agent's event stream names the things we need.
+
+    Declarative on purpose. The framework adapters are a directory of small
+    modules because every Python framework hooks tools differently; a process
+    agent needs no hook at all, only a vocabulary. So supporting the next CLI
+    agent is an entry here — not a parser — and nothing about the extraction,
+    the tri-state or the absence rules is re-implemented per agent.
+
+    Field names are CANDIDATE tuples, tried in order, because emitters
+    disagree about camelCase vs snake_case far more often than they disagree
+    about meaning.
+    """
+
+    name: str
+    start_type: str
+    end_type: str
+    call_id: tuple[str, ...] = ("toolCallId", "tool_call_id", "id")
+    tool_name: tuple[str, ...] = ("toolName", "tool_name", "name")
+    args: tuple[str, ...] = ("args", "arguments", "input")
+    result: tuple[str, ...] = ("result", "output", "response")
+    error_flag: tuple[str, ...] = ("isError", "is_error", "error")
+
+
+#: prime-agent (`--mode json`), verified against a live run. The default field
+#: candidates already cover it; it is listed explicitly so the vocabulary is
+#: visible rather than implied.
+PRIME_AGENT = StreamFormat(
+    name="prime-agent",
+    start_type="tool_execution_start",
+    end_type="tool_execution_end",
+)
+
+#: The OpenTelemetry GenAI convention, as emitted by an agent that logs its
+#: spans as JSON lines. Included because it is the one vocabulary that is not
+#: any single vendor's — an agent already instrumented for observability gets
+#: outcome capture with no work at all, which is the point.
+OTEL_GENAI = StreamFormat(
+    name="otel-genai",
+    start_type="gen_ai.tool.start",
+    end_type="gen_ai.tool.end",
+    call_id=("gen_ai.tool.call.id", "toolCallId", "id"),
+    tool_name=("gen_ai.tool.name", "toolName", "name"),
+    args=("gen_ai.tool.input", "args", "arguments"),
+    result=("gen_ai.tool.output", "result", "output"),
+    error_flag=("error.type", "isError", "is_error"),
+)
+
+#: Order is irrelevant — a stream is matched by the event types it actually
+#: carries, never by position or by an agent name we were told.
+FORMATS: tuple[StreamFormat, ...] = (PRIME_AGENT, OTEL_GENAI)
+
+# Back-compat aliases for the prime-agent vocabulary.
+TOOL_START = PRIME_AGENT.start_type
+TOOL_END = PRIME_AGENT.end_type
+
+
+def _first(d: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for k in keys:
+        if k in d:
+            return d[k]
+    return None
 
 #: Bodies can be large (a REPL that printed a file). Bounded so a report stays
 #: a report; the ledger, not the stream, is where full fidelity lives.
@@ -49,16 +112,27 @@ _MAX_OUTPUT_CHARS = 4000
 _MAX_ERROR_CHARS = 1000
 
 
-def _outcome_of(end_event: dict[str, Any]) -> Outcome:
-    """``isError`` as a tri-state.
+def _outcome_of(end_event: dict[str, Any], fmt: StreamFormat) -> Outcome:
+    """The error flag as a TRI-STATE.
 
-    Checked on the event and then on its ``result`` — some emitters put the
-    flag in one place, some in both. Absent from both is ``unknown``: the call
-    ended without a verdict, which is not the same as it having succeeded.
+    Checked on the event and then on its result — emitters disagree about
+    which carries it, and some set both. Absent from both is ``unknown``: the
+    call ended without a verdict, which is not the same as it having
+    succeeded, and this is the one place that distinction can still be made.
+
+    A boolean is read as a boolean. A non-empty STRING is read as a failure
+    because that is how the OTel convention says it (``error.type`` carries the
+    exception class and is simply absent on success) — but an empty string is
+    absence, not a claim.
     """
-    for holder in (end_event, end_event.get("result")):
-        if isinstance(holder, dict) and isinstance(holder.get("isError"), bool):
-            return "failed" if holder["isError"] else "ok"
+    for holder in (end_event, _first(end_event, fmt.result)):
+        if not isinstance(holder, dict):
+            continue
+        flag = _first(holder, fmt.error_flag)
+        if isinstance(flag, bool):
+            return "failed" if flag else "ok"
+        if isinstance(flag, str) and flag.strip():
+            return "failed"
     return "unknown"
 
 
@@ -100,6 +174,7 @@ def parse_tool_calls(stdout: str) -> list[ToolCallOutcome] | None:
     if not stdout:
         return None
 
+    matched: StreamFormat | None = None
     started: dict[str, dict[str, Any]] = {}
     calls: list[ToolCallOutcome] = []
     saw_any = False
@@ -115,29 +190,43 @@ def parse_tool_calls(stdout: str) -> list[ToolCallOutcome] | None:
         if not isinstance(ev, dict):
             continue
         kind = ev.get("type")
-        if kind == TOOL_START:
-            cid = str(ev.get("toolCallId") or "")
+
+        # A stream is identified by the event types it CARRIES, never by an
+        # agent name we were told — a name is a claim, an event type is
+        # evidence. The first format whose vocabulary appears wins, and one
+        # stream is never read through two vocabularies at once.
+        fmt = matched
+        if fmt is None:
+            for cand in FORMATS:
+                if kind in (cand.start_type, cand.end_type):
+                    fmt = matched = cand
+                    break
+        if fmt is None or kind not in (fmt.start_type, fmt.end_type):
+            continue
+
+        if kind == fmt.start_type:
+            cid = str(_first(ev, fmt.call_id) or "")
             if cid:
                 started[cid] = ev
             saw_any = True
             continue
-        if kind != TOOL_END:
-            continue
         saw_any = True
 
-        cid = str(ev.get("toolCallId") or "")
+        cid = str(_first(ev, fmt.call_id) or "")
         start = started.pop(cid, {})
-        name = str(ev.get("toolName") or start.get("toolName") or "")
+        name = str(_first(ev, fmt.tool_name) or _first(start, fmt.tool_name) or "")
         if not name:
             # A call we cannot name is a call we cannot attribute. Dropping it
             # loses one outcome; inventing a name would corrupt every join
             # downstream (retry detection keys on name + arguments).
             continue
-        args = ev.get("args") or start.get("args") or {}
+        args = _first(ev, fmt.args)
+        if args is None:
+            args = _first(start, fmt.args)
         if not isinstance(args, dict):
-            args = {"_raw": args}
-        result = ev.get("result")
-        outcome = _outcome_of(ev)
+            args = {} if args is None else {"_raw": args}
+        result = _first(ev, fmt.result)
+        outcome = _outcome_of(ev, fmt)
 
         error: str | None = None
         if outcome == "failed":

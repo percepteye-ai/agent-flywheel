@@ -153,3 +153,58 @@ def test_an_empty_assertion_of_zero_calls_is_preserved():
     out = RolloutOutput(final_text="", tool_calls=[])
     _attach_stream_tool_calls(out, _stream(_START, _END_OK))
     assert out.tool_calls == []
+
+
+# ── the vocabulary is data, not a parser ────────────────────────────────────
+
+
+def test_an_otel_instrumented_agent_is_read_with_no_new_code():
+    """The generality claim, made concrete. A process agent that already emits
+    GenAI spans as JSON lines gets outcome capture for free — supporting the
+    next CLI agent is an entry in FORMATS, not a parser."""
+    stream = _stream(
+        {"type": "gen_ai.tool.start", "gen_ai.tool.call.id": "c1",
+         "gen_ai.tool.name": "search", "gen_ai.tool.input": {"q": "x"}},
+        {"type": "gen_ai.tool.end", "gen_ai.tool.call.id": "c1",
+         "gen_ai.tool.name": "search", "gen_ai.tool.output": "3 hits"},
+    )
+    calls = parse_tool_calls(stream)
+    assert calls is not None and len(calls) == 1
+    assert calls[0].name == "search"
+    assert calls[0].arguments == {"q": "x"}
+    # No error.type on the span, and OTel omits it on success — but omission
+    # is not an assertion of success, so this stays unknown.
+    assert calls[0].outcome == "unknown"
+
+
+def test_the_otel_error_convention_is_read_as_a_failure():
+    """``error.type`` carries the exception class and is absent on success —
+    a non-empty string IS the failure verdict in that convention."""
+    calls = parse_tool_calls(_stream(
+        {"type": "gen_ai.tool.end", "gen_ai.tool.call.id": "c1",
+         "gen_ai.tool.name": "search", "error.type": "TimeoutError"},
+    ))
+    assert calls[0].outcome == "failed"
+
+
+def test_an_empty_error_string_is_absence_not_a_failure():
+    calls = parse_tool_calls(_stream(
+        {"type": "gen_ai.tool.end", "gen_ai.tool.call.id": "c1",
+         "gen_ai.tool.name": "search", "error.type": "  "},
+    ))
+    assert calls[0].outcome == "unknown"
+
+
+def test_a_stream_is_matched_by_its_events_not_by_a_declared_name():
+    """A name is a claim; an event type is evidence. Nothing here trusts an
+    agent's self-description."""
+    from percepteye_agent_flywheel.event_stream import FORMATS
+
+    assert {f.name for f in FORMATS} >= {"prime-agent", "otel-genai"}
+    # Two vocabularies in one stream: the first seen wins and the other's
+    # events are ignored rather than silently merged under one call id.
+    mixed = _stream(_START, _END_OK,
+                    {"type": "gen_ai.tool.end", "gen_ai.tool.call.id": "z",
+                     "gen_ai.tool.name": "other"})
+    names = [c.name for c in parse_tool_calls(mixed)]
+    assert names == ["ipython"]
