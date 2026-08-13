@@ -60,6 +60,13 @@ ARGV = [
     # graded whether or not the agent terminates tidily.
     "--autonomous-max-turns", os.environ.get("PRIME_MAX_TURNS", "15"),
     "--autonomous-max-continuations", "6",
+    # Bounded because the DEFAULT is 300000ms — exactly the 300s episode
+    # budget, so one hanging gate consumes the entire rollout and the agent
+    # never gets to report. A gate is an existence-and-smoke check; the
+    # derived `test -s <file>` form returns instantly, and a model-authored
+    # one that runs the deliverable should too. 30s is generous for both and
+    # leaves the budget to the actual work.
+    "--autonomous-gate-timeout-ms", "30000",
 ]
 
 
