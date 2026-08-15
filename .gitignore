@@ -12,3 +12,29 @@ build/
 htmlcov/
 .percepteye-artifacts/
 .DS_Store
+
+# Files an agent wrote into the repo root.
+#
+# A CLI agent's cwd IS its collected-artifacts directory, so running an example
+# or a test from the repo root leaves the agent's output files here. Twenty of
+# them were committed once by a `git add -A` -- 426KB of `xxxx` padding at the
+# root of the SDK we ship.
+#
+# Enumerated, not globbed: `/*.txt` would silently swallow a future
+# requirements.txt and `/*.sh` a future bootstrap script, and a gitignore that
+# quietly drops a file someone wanted is a worse bug than the one it prevents.
+# The durable fix is to run examples from a scratch directory rather than to
+# extend this list forever.
+/a.txt
+/b.bin
+/big.txt
+/blob.bin
+/hi.txt
+/kept.txt
+/answer.txt
+/triage.sh
+/f[0-9][0-9].txt
+/avg_response_time.sh
+/extract_ips.sh
+/last_trace.sh
+/merge_logs.sh
