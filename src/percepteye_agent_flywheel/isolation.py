@@ -87,6 +87,17 @@ UNROUTABLE_PROVIDER_VARS = (
     "GOOGLE_API_KEY",
     "GEMINI_API_KEY",
     "GOOGLE_GENAI_USE_VERTEXAI",
+    # NVIDIA NIM / build.nvidia.com — the inference path NemoClaw configures
+    # for OpenClaw. NemoClaw sets it up ONCE at onboarding, via
+    # ``openshell provider create --credential NVIDIA_API_KEY=… --config
+    # OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1``, so the routing
+    # lives in the OpenShell provider registry rather than the process
+    # environment. Our per-rollout OPENAI_BASE_URL therefore does not win,
+    # and the agent samples from NVIDIA cloud while the control plane
+    # believes it is sampling the policy under training. Removing the key is
+    # the reliable half, and the startup report names it.
+    "NVIDIA_API_KEY",
+    "NVIDIA_NIM_API_KEY",
     # Bedrock. Deliberately only the Bedrock-specific token: AWS_ACCESS_KEY_ID
     # is the same credential a customer's agent uses for S3, and taking that
     # would break agents that never touch a model through it.
