@@ -72,6 +72,23 @@ class AttachTransport:
             idempotency_key=f"reg-{self.agent_id}",
         )
 
+    def policy_current(self) -> dict[str, Any]:
+        """What policy this agent should be running, per the control plane.
+
+        The last mile of the flywheel: training produces a better model, and
+        this is how an agent learns about it. A READ — the agent is TOLD its
+        arm and never chooses one, which is what keeps results attributable.
+
+        Never raises into the caller's startup. A control plane that cannot
+        answer must not stop an agent from running, so an empty answer means
+        "keep doing what you were doing" — exactly the behaviour before this
+        endpoint existed.
+        """
+        try:
+            return self._c.request("GET", "/policy/current") or {}
+        except Exception:  # noqa: BLE001 — see docstring
+            return {}
+
     def claim(self, max_rollouts: int) -> tuple[list[RolloutRequest], int]:
         body = self._c.request(
             "POST",

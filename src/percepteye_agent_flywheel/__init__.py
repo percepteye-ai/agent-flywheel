@@ -65,6 +65,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     "CONTRACT_VERSION",
+    "current_policy",
     "AttachTransport",
     "ConfigurationError",
     "ContractViolation",
@@ -114,6 +115,51 @@ def _env_true(name: str, *, default: bool) -> bool:
     if raw is None or raw.strip() == "":
         return default
     return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+def current_policy(
+    *,
+    agent_id: str,
+    control_plane_url: str | None = None,
+    api_key: str | None = None,
+) -> dict[str, Any]:
+    """Ask the control plane what model this agent should be running.
+
+    For the customer's OWN agent process — the one serving their users —
+    which is a different process from :func:`serve`. ``serve`` donates
+    capacity for training; this is how the production agent picks up what
+    that training produced.
+
+    Returns ``{}`` when the control plane cannot answer, and callers should
+    read that as "keep your current configuration". An unreachable control
+    plane must never stop a customer's agent from serving its users.
+
+    What comes back is an ENDPOINT, because that is the only form an agent
+    can act on — an artifact URI is not callable. It is shaped for an
+    OpenAI-compatible client::
+
+        pol = fw.current_policy(agent_id="coding-agent")
+        ep = pol.get("endpoint")
+        if ep:
+            client = OpenAI(base_url=ep["base_url"],
+                            api_key=os.environ[ep["api_key_env"]])
+            model = ep["model"]
+
+    ``endpoint`` is absent when the control plane has nothing deployed to
+    hand you — keep your current configuration, do not fall back to
+    something you guessed.
+    """
+    url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL)
+    key = api_key or os.environ.get(ENV_API_KEY)
+    if not url or not key:
+        return {}
+    client = ControlPlaneClient(base_url=url, api_key=key)
+    try:
+        from .transport import AttachTransport
+
+        return AttachTransport(client, agent_id=agent_id).policy_current()
+    finally:
+        client.close()
 
 
 def serve(
@@ -279,6 +325,32 @@ def serve(
         payload["discovered_agent"] = described.to_wire() if described else None
 
     tr.register(payload)
+
+    # ── the last mile ───────────────────────────────────────────────────────
+    # Training produces a better model; this is where the agent finds out.
+    # The registration response used to be discarded and nothing ever asked
+    # what to run, so a trained adapter reached the customer's process only
+    # by a human editing their config.
+    #
+    # Resolved ONCE at startup rather than polled: a policy that changes
+    # under a running agent is the same confound the control plane refuses on
+    # its own training runs. A change lands on the next restart, and the
+    # dashboard says so.
+    # getattr, not a direct call: ``policy_current`` is not on the
+    # FlywheelTransport Protocol, so a third-party or older transport need
+    # not implement it. The last mile must not break an agent whose
+    # transport predates it — the same fail-open the method itself keeps.
+    _ask = getattr(tr, "policy_current", None)
+    policy = _ask() if callable(_ask) else {}
+    if policy:
+        _ep = policy.get("endpoint") if isinstance(policy.get("endpoint"), dict) else {}
+        print(
+            f"[percepteye] policy: {policy.get('arm', 'base')} — "
+            f"{policy.get('reason', '')}"
+            + (f" → {_ep.get('model')} at {_ep.get('base_url')}"
+               if _ep.get("base_url") else ""),
+            flush=True,
+        )
 
     try:
         return runner.serve_forever(max_rollouts=max_rollouts)
