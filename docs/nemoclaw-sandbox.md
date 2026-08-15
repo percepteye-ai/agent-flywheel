@@ -31,6 +31,45 @@ environment and reports them at startup for exactly this reason. **Do not
 add them back through `extra=`.** The sandbox permits the wrong destination;
 removing the credential is what stops it being used.
 
+## ⚠ Routing: the environment does NOT reach OpenClaw
+
+**Verified 2026-08-15 against openclaw@2026.3.11's shipped `dist/`:**
+
+```
+grep -rn "process.env.OPENAI_BASE_URL" node_modules/openclaw/dist/   →  0 hits
+```
+
+The only `OPENAI_BASE_URL` occurrences in the bundle are text-to-speech. The
+CHAT provider's base URL is resolved from `existingProvider?.baseUrl` — a
+**provider entry in OpenClaw's own config file** (`~/.openclaw/openclaw.json`;
+the live config carries `auth.profiles` and `agents.defaults.model`).
+
+So `build_child_env` setting `OPENAI_BASE_URL` **does not route OpenClaw**.
+The SDK's default routing silently loses — the exact condition
+`adapters/__init__.py` names as the only good reason to write an adapter:
+
+> *"Writing one is worth it only when a framework's own configuration beats
+> the environment — so the default silently loses."*
+
+**An adapter is required.** It must write OpenClaw's provider config, not
+rely on the environment. Two shapes, and which one is correct is still open:
+
+1. **Per-rollout config write** — patch the provider entry's `baseUrl` before
+   each rollout. Correct but serialises rollouts through a shared file, so
+   concurrency > 1 needs care.
+2. **Write it once with an env placeholder.** OpenClaw's config supports
+   `${ENV_VAR}` interpolation — documented in the bundle for `apiKey`
+   (`providers: { "vercel-gateway": { apiKey: "${VERCEL_GATEWAY_API_KEY}" } }`).
+   If that expansion also applies to `baseUrl`, one config written at setup
+   (`baseUrl: "${PERCEPTEYE_LLM_URL}"`) lets the existing per-rollout env flow
+   straight through, with no per-rollout file write at all. **NOT YET
+   CONFIRMED for `baseUrl`** — confirming it is the next step, because it
+   decides which adapter gets built.
+
+Until an adapter exists, a NemoClaw agent will sample whatever its config
+says. The `NVIDIA_API_KEY` strip stops that being NVIDIA cloud, but it does
+not make the agent sample OUR gateway — it makes it fail instead of lying.
+
 ## Policy fragment
 
 Add to `nemoclaw-blueprint/policies/openclaw-sandbox.yaml`, substituting your
@@ -75,5 +114,4 @@ nothing.
 
 OpenClaw is a command, not an importable Python object, so this is the
 command path — the same one prime-agent uses. No adapter is required to
-*execute* it; the adapters that exist are for frameworks whose own
-configuration beats the environment.
+*execute* it. One IS required to *route* it; see the routing section above.
