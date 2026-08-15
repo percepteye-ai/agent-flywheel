@@ -93,13 +93,25 @@ def test_no_internal_system_names_in_the_package():
 
 
 def test_no_internal_invariants_disclosed():
+    """The same scope as the names check, for the same reason.
+
+    This scanned ``src/`` alone while its sibling scanned everything git
+    tracks, so ``INTERNAL_NAMES`` was enforced across the whole published repo
+    and ``INTERNAL_DETAILS`` only inside the package. The earlier widening
+    fixed one list and left the other, and the gap was not theoretical:
+    ``schema/flywheel-1.json`` named three internal fields in a description
+    and no test could see it. A guard with two scopes is a guard you have to
+    remember the shape of; both now scan what the public repo shows.
+    """
     offenders = []
-    for path in _package_files():
-        text = path.read_text().lower()
+    for path in _published_files():
+        text = _text(path)
         for name in INTERNAL_DETAILS:
             if name in text:
                 offenders.append(f"{path.relative_to(ROOT)} -> {name}")
-    assert not offenders, "internal detail disclosed in the OSS package:\n" + "\n".join(offenders)
+    assert not offenders, (
+        "internal detail disclosed in PUBLISHED files:\n" + "\n".join(offenders)
+    )
 
 
 def test_no_internal_system_names_anywhere_published():

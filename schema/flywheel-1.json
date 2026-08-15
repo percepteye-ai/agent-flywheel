@@ -175,7 +175,7 @@
     },
     "RolloutOutput": {
       "type": "object",
-      "description": "FLYWHEEL-AUTHORED. Every field a customer-run flywheel may assert. Percepteye-authored fields (logprobs, token ids, tokenizer, sampling params, prompt_group_key, scored_suite_sha, doctrine stamps, advantage, training_excluded_reason) are ABSENT BY CONSTRUCTION and rejected at intake if present -- the SDK is semi-trusted.",
+      "description": "FLYWHEEL-AUTHORED. Every field a customer-run flywheel may assert, and the complete set: the SDK is semi-trusted, so anything Percepteye authors during scoring or training is absent by construction here and rejected at intake if present. The properties below are the whole allowed vocabulary -- additionalProperties is false, so what is permitted is stated positively rather than by listing what is not.",
       "additionalProperties": false,
       "required": [
         "final_text"
