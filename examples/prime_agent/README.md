@@ -1,6 +1,8 @@
 # prime-agent through the Flywheel
 
-Status: **routing verified, blocked on gateway streaming.**
+Status: **routing verified; the streaming blocker below is RESOLVED in
+MissionControl (SSE passthrough + capture) — runnable once that gateway is
+deployed.**
 
 prime-agent is a TypeScript binary, so it is served through the **command
 entrypoint** — no Python integration, no Percepteye code inside it.
@@ -22,21 +24,28 @@ it and hands it to `registerProvider`. Setting the variable alone does nothing
 and the agent would quietly use its own provider, which is the silent-capture
 failure this whole design exists to prevent.
 
-## What blocks it
+## What blocked it (RESOLVED)
 
-**prime-agent requests `stream: true` and our gateway refuses to stream.**
-Measured request keys: `['max_completion_tokens', 'messages', 'model', 'store',
-'stream', 'stream_options', 'tools']`. `inference.py:178` sets
-`out["stream"] = False`, so the agent gets a shape it cannot parse — the
-assistant message comes back with `content: []` and zero usage.
+**prime-agent requests `stream: true`, and the gateway used to refuse to
+stream.** Measured request keys: `['max_completion_tokens', 'messages',
+'model', 'store', 'stream', 'stream_options', 'tools']`. The old gateway
+forced `out["stream"] = False`, so the agent got a shape it could not parse —
+the assistant message came back with `content: []` and zero usage. prime-agent
+has no compat flag to disable streaming on its side.
 
-There is no compat flag to disable streaming; the documented list covers
-`supportsStore`, `supportsUsageInStreaming`, `maxTokensField` and similar, and
-none of them turn it off.
+The gateway now honours `stream: true` (MissionControl
+`mission_control/api/inference.py`, `_stream_and_capture`): the client sees
+the upstream's SSE bytes verbatim, the gateway reassembles the same bytes into
+the capture the non-streaming path would have produced, and persists once the
+stream ends. Two consequences worth knowing when reading captures:
 
-So the gateway needs SSE support: pass the stream through to the client while
-reassembling it server-side for capture. Until then prime-agent runs and
-produces nothing.
+* Persisting happens at stream END (logprobs / finish reason / usage are not
+  known earlier), so a process death mid-stream loses that call's record.
+* A stream that ends early is recorded as **truncated**, not dropped — a
+  partial completion must never score as a whole one.
+
+Upstream 4xx/5xx after the 200 SSE headers arrives as an SSE error frame, so
+the access log alone will not show upstream rejections — read the capture.
 
 ## Two traps for whoever writes the event parser
 
