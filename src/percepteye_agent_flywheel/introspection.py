@@ -266,9 +266,14 @@ def _adk_model(obj: Any) -> ModelConfig | None:
 
 
 def _probe_langchain(obj: Any, depth: int) -> DiscoveredAgent | None:
-    """LangChain / LangGraph. Far less uniform than ADK: there is no single
-    agent base class, so we match on the tool surface instead and read what is
-    reachable."""
+    """LangChain. Far less uniform than ADK: there is no single agent base
+    class, so we match on the tool surface instead and read what is reachable.
+
+    NOT LangGraph -- this docstring used to claim it and the claim was false:
+    a compiled graph has neither ``tools`` nor ``get_tools``, so this probe
+    returned None for every one of them. ``_probe_langgraph`` handles those
+    and runs first.
+    """
     try:
         from langchain_core.tools import BaseTool
     except Exception:
@@ -337,7 +342,219 @@ def _langchain_model(obj: Any) -> ModelConfig | None:
     )
 
 
-_PROBES = (_probe_adk, _probe_langchain)
+# ── LangGraph ───────────────────────────────────────────────────────────────
+#
+# A compiled graph is NOT a LangChain agent, and probing it as one discovered
+# nothing at all: `_probe_langchain` opens with ``obj.tools`` then
+# ``obj.get_tools()``, and a ``CompiledStateGraph`` has neither, so the probe
+# returned None and a LangGraph customer was onboarded with no description.
+# The graph is the more specific shape, so it is tried FIRST.
+#
+# The unit of description here is the graph NODE: one record per user node,
+# carried as ``sub_agents`` of a record describing the graph. A node's name is
+# the operator-facing id, so it is taken from the graph rather than from the
+# implementing class -- the id the operator picks must be the id the graph
+# uses.
+
+#: Attributes the unwrap hops through to reach a node's implementation.
+#: LangGraph wraps every node (``PregelNode`` -> ``RunnableCallable`` -> the
+#: callable it was given), and a class-based node is often registered as a
+#: bound method, whose ``__self__`` is the object actually holding the prompt
+#: and tools -- the same "the agent is the instance, not the method" unwrap
+#: ``introspect`` already does for the entrypoint.
+_NODE_UNWRAP_KEYS = (
+    "func", "bound", "node", "steps", "runnable", "_func", "__self__",
+)
+
+#: What marks an object as a node's agent surface rather than one more
+#: wrapper. Measured against langgraph 1.2: none of PregelNode,
+#: RunnableCallable, RunnableSeq or ChannelWrite carries any of these, so the
+#: walk cannot mistake plumbing for the customer's node.
+_NODE_SURFACE_ATTRS = (
+    "system_prompt", "system_message", "tools", "tools_by_name", "llm", "model",
+)
+
+#: Hops the unwrap takes before giving up. ``seen`` already stops cycles; this
+#: stops a pathological chain from recursing into Python's own limit.
+_MAX_UNWRAP_HOPS = 8
+
+
+def _is_pregel(obj: Any) -> bool:
+    """True for a compiled LangGraph graph.
+
+    ``Pregel`` rather than ``CompiledStateGraph`` because it is the base every
+    compiled form shares, so a graph built through the functional API matches
+    too. An absent langgraph is simply not a match.
+    """
+    try:
+        from langgraph.pregel import Pregel
+    except Exception:
+        return False
+    return isinstance(obj, Pregel)
+
+
+def _unwrap_node(node: Any, hops: int = 0, seen: set[int] | None = None) -> Any | None:
+    """The object behind a graph node, or None when nothing readable is there.
+
+    None is the correct answer for a plain function or a closure: a closure
+    holds its prompt in a cell, not an attribute, and there is nothing to
+    read. Reporting that as an agent with no tools would be a claim we never
+    observed.
+    """
+    if seen is None:
+        seen = set()
+    if node is None or hops > _MAX_UNWRAP_HOPS or id(node) in seen:
+        return None
+    seen.add(id(node))
+    if _is_pregel(node) or any(hasattr(node, a) for a in _NODE_SURFACE_ATTRS):
+        return node
+    for key in _NODE_UNWRAP_KEYS:
+        child = getattr(node, key, None)
+        if child is None:
+            continue
+        for candidate in (child if isinstance(child, (list, tuple)) else (child,)):
+            got = _unwrap_node(candidate, hops + 1, seen)
+            if got is not None:
+                return got
+    return None
+
+
+def _unreadable_node(name: str) -> DiscoveredAgent:
+    """A node whose implementation we could not reach.
+
+    Every surface is None and named in ``incomplete``. Emitting ``[]`` for the
+    tools here is the specific bug the absence contract exists to prevent: it
+    would report "this node has no tools" when what happened is that we never
+    got to look.
+    """
+    return DiscoveredAgent(
+        agent_name=name,
+        framework="langgraph",
+        system_prompt=None,
+        tool_definitions=None,
+        discovered_model_config=None,
+        role="sub_agent",
+        incomplete=["system_prompt", "tool_definitions", "discovered_model_config"],
+    )
+
+
+def _langgraph_nodes(graph: Any, depth: int) -> list[DiscoveredAgent]:
+    """One record per USER node of a compiled graph, at ``depth``.
+
+    ``__start__`` and ``__end__`` are LangGraph's own channel plumbing, not
+    customer agents; leaking them would put nodes in the operator's picker
+    that cannot be optimised because they do not exist.
+    """
+    out: list[DiscoveredAgent] = []
+    for raw_name, node in (_safe(lambda: dict(graph.nodes)) or {}).items():
+        name = str(raw_name)
+        if name.startswith("__"):
+            continue
+        # Per NODE, so one node with a property that raises costs that node's
+        # description rather than the whole graph's.
+        got = _safe(_langgraph_node, name, node, depth)
+        out.append(got if got is not None else _unreadable_node(name))
+    return out
+
+
+def _langgraph_node(name: str, node: Any, depth: int) -> DiscoveredAgent:
+    target = _unwrap_node(node)
+    if target is None:
+        return _unreadable_node(name)
+
+    # A node can be an entire compiled graph -- the supervisor pattern. Its
+    # own nodes hang below it, so the operator's id stays the path through
+    # graph node names ("researcher/summarizer").
+    if _is_pregel(target):
+        if depth < _MAX_DEPTH:
+            return DiscoveredAgent(
+                agent_name=name,
+                framework="langgraph",
+                role="sub_agent",
+                sub_agents=_langgraph_nodes(target, depth + 1),
+            )
+        # Say the tree was cut rather than reporting a graph with no nodes.
+        return DiscoveredAgent(
+            agent_name=name,
+            framework="langgraph",
+            role="sub_agent",
+            incomplete=["sub_agents"],
+        )
+
+    incomplete: list[str] = []
+
+    prompt = _text(getattr(target, "system_prompt", None)) or _text(
+        getattr(target, "system_message", None)
+    )
+    if prompt is None:
+        incomplete.append("system_prompt")
+
+    raw_tools = getattr(target, "tools", None)
+    if raw_tools is None:
+        # A ToolNode -- the tool surface of every prebuilt agent -- keys its
+        # tools by name rather than listing them.
+        by_name = getattr(target, "tools_by_name", None)
+        if isinstance(by_name, dict):
+            raw_tools = list(by_name.values())
+
+    tools: list[ToolDefinition] | None = None
+    listed = None if raw_tools is None else _safe(list, raw_tools)
+    if listed is None:
+        # No tool surface, or one we could not read. Either way: not observed.
+        incomplete.append("tool_definitions")
+    else:
+        tools = []
+        for t in listed:
+            d = _safe(_langchain_tool, t)
+            if d is not None:
+                tools.append(d)
+            else:
+                incomplete.append("tool")
+
+    model = _safe(_langchain_model, target)
+    if model is None:
+        incomplete.append("discovered_model_config")
+
+    return DiscoveredAgent(
+        agent_name=name,
+        framework="langgraph",
+        system_prompt=prompt,
+        tool_definitions=tools,
+        discovered_model_config=model,
+        role="sub_agent",
+        incomplete=incomplete,
+    )
+
+
+def _probe_langgraph(obj: Any, depth: int) -> DiscoveredAgent | None:
+    """A compiled LangGraph graph, described one user node at a time."""
+    if not _is_pregel(obj):
+        return None
+
+    name = _safe(lambda: str(getattr(obj, "name", "") or "")) or "graph"
+    if depth < _MAX_DEPTH:
+        subs, incomplete = _langgraph_nodes(obj, depth + 1), []
+    else:
+        subs, incomplete = [], ["sub_agents"]
+
+    return DiscoveredAgent(
+        agent_name=name,
+        framework="langgraph",
+        # The graph owns no prompt, tools or model of its own -- its nodes do,
+        # and they are the sub_agents below. None rather than ``[]`` because
+        # "this agent has no tools" is not something we observed about it.
+        system_prompt=None,
+        tool_definitions=None,
+        discovered_model_config=None,
+        sub_agents=subs,
+        role="orchestrator" if subs else "standalone",
+        incomplete=incomplete,
+    )
+
+
+# Order matters: a compiled graph is the more specific shape, and probing it
+# as a plain LangChain agent finds nothing.
+_PROBES = (_probe_adk, _probe_langgraph, _probe_langchain)
 
 
 def _introspect_obj(obj: Any, depth: int = 0) -> DiscoveredAgent | None:

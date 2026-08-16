@@ -41,7 +41,7 @@ dev = ["pytest>=7.4", "pytest-asyncio>=0.23", "ruff>=0.6", "mypy>=1.8"]
 # adapter imports its framework at module scope, so an absent framework just
 # fails that adapter's probe. These exist so CI actually exercises the
 # adapters against the real API rather than a mock of it.
-adapters-test = ["langchain-core>=0.3", "google-adk>=2.2"]
+adapters-test = ["langchain-core>=0.3", "google-adk>=2.2", "langgraph>=1.0"]
 # OpenTelemetry EGRESS. The API only -- never the SDK: this package
 # emits into whatever TracerProvider the customer already registered and
 # never installs one. Optional because the package ships with a single
