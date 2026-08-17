@@ -1,7 +1,7 @@
 # prime-agent through the Flywheel
 
-Status: **routing verified; the streaming blocker below is RESOLVED in
-MissionControl (SSE passthrough + capture) — runnable once that gateway is
+Status: **routing verified; the streaming blocker below is RESOLVED in the
+gateway (SSE passthrough + capture) — runnable once that gateway is
 deployed.**
 
 prime-agent is a TypeScript binary, so it is served through the **command
@@ -33,11 +33,10 @@ forced `out["stream"] = False`, so the agent got a shape it could not parse —
 the assistant message came back with `content: []` and zero usage. prime-agent
 has no compat flag to disable streaming on its side.
 
-The gateway now honours `stream: true` (MissionControl
-`mission_control/api/inference.py`, `_stream_and_capture`): the client sees
-the upstream's SSE bytes verbatim, the gateway reassembles the same bytes into
-the capture the non-streaming path would have produced, and persists once the
-stream ends. Two consequences worth knowing when reading captures:
+The gateway now honours `stream: true`: the client sees the upstream's SSE
+bytes verbatim, the gateway reassembles the same bytes into the capture the
+non-streaming path would have produced, and persists once the stream ends.
+Two consequences worth knowing when reading captures:
 
 * Persisting happens at stream END (logprobs / finish reason / usage are not
   known earlier), so a process death mid-stream loses that call's record.

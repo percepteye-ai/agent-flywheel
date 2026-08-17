@@ -17,6 +17,25 @@ import percepteye_agent_flywheel as fw
 
 HERE = pathlib.Path(__file__).resolve().parent
 
+#: WHERE ROLLOUTS RUN. Each rollout's child process is started with its cwd
+#: inside this directory, and the agent has a real shell — so this must never
+#: be a source tree. Left to the default (``$PWD/.percepteye-artifacts``) and
+#: launched from a checkout, rollouts write their task artifacts into the
+#: repository and can reach the rest of it with ordinary relative paths: on
+#: 2026-08-16 a sweep launched that way left shell scripts beside the package
+#: and removed tracked files from the working tree, including the licence and
+#: the build config.
+#:
+#: A dedicated directory outside any checkout is the cheap part of the fix.
+#: The complete one is an OS-level sandbox — this SDK's ``isolation`` is a
+#: process boundary and an environment scrub, and says nothing about the
+#: filesystem. Run untrusted agents accordingly.
+WORKSPACE = pathlib.Path(
+    os.environ.get("PRIME_WORKSPACE")
+    or (pathlib.Path.home() / ".percepteye" / "prime-agent-workspace"),
+).expanduser()
+WORKSPACE.mkdir(parents=True, exist_ok=True)
+
 #: `-p` is print mode: one task, non-interactive, answer on stdout. The task
 #: also arrives on stdin, which prime-agent merges into the prompt — the SDK
 #: sends it both ways because CLIs differ and guessing wrongly is silent.
@@ -104,6 +123,10 @@ def main() -> int:
         # was correct. The gate COMMAND is per task and rides in the rollout
         # metadata; this only says how to spell the option.
         gate_flag="--autonomous-gate",
+        # Anchor every rollout's working directory outside any checkout. See
+        # WORKSPACE above — without this the cwd defaults to the directory the
+        # server happened to be started from.
+        artifacts_dir=str(WORKSPACE),
     )
 
 

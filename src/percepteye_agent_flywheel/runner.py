@@ -857,8 +857,35 @@ class RolloutRunner:
         if not callable(registrar):
             registrar = None
         inline_budget = MAX_INLINE_TOTAL_BYTES
+        # Resolve the collection root ONCE so every candidate can be proven to
+        # live under it. ``strict=False`` because the dir is ours and exists.
+        root_real = root.resolve()
         for path in sorted(root.rglob("*")):
+            # SYMLINKS ARE NEVER COLLECTED. ``Path.is_file()`` and
+            # ``read_text()`` both FOLLOW links, so a link the agent drops in
+            # its own directory (``ln -s ~/.aws/credentials creds.txt``) used
+            # to be read at its TARGET and inlined verbatim into the report
+            # posted to the control plane — up to MAX_INLINE_ARTIFACT_BYTES of
+            # a host secret, exfiltrated through the artifact path, defeating
+            # the boundary the isolation module exists to draw. The customer's
+            # agent is untrusted code by construction; it authors the contents
+            # of this directory, so the collector must not follow anything it
+            # can point somewhere else.
+            #
+            # Named, not silently dropped — a link IS a fact about the rollout,
+            # and silence here would hide an exfiltration attempt.
+            if path.is_symlink():
+                out.artifacts[str(path.relative_to(root))] = "skipped:symlink"
+                continue
             if not path.is_file() or path.name == LEDGER_FILENAME:
+                continue
+            # Defence in depth against a link ABOVE this path (a symlinked
+            # parent dir would make every child look ordinary): prove the
+            # resolved path is still inside the resolved root.
+            try:
+                path.resolve().relative_to(root_real)
+            except (ValueError, OSError):
+                out.artifacts[str(path.relative_to(root))] = "skipped:escapes_root"
                 continue
             name = str(path.relative_to(root))
             try:

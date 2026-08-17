@@ -37,7 +37,18 @@ export default function (pi: any) {
         name: "Policy under training",
         reasoning: false,
         input: ["text"],
-        contextWindow: Number(process.env.PERCEPTEYE_CONTEXT_WINDOW || 32768),
+        // 65536, not 32768: at 32k the agent compacted its own context
+        // mid-rollout on ~40% of episodes in a measured run, and a compacted
+        // rollout is UNTRAINABLE — compaction rewrites the history, breaking
+        // the token/logprob chain the update is computed over. A third of
+        // that run was discarded for exactly this reason.
+        //
+        // Size this to the TRAINER's context window, not the server's. A
+        // serving endpoint often advertises far more than the trainer can
+        // consume, and a captured sequence longer than the training window is
+        // truncated at tokenize time — silently masking generated tokens out
+        // of the objective. Raise this only alongside the trainer's window.
+        contextWindow: Number(process.env.PERCEPTEYE_CONTEXT_WINDOW || 65536),
         maxTokens: Number(process.env.PERCEPTEYE_MAX_TOKENS || 4096),
         cost: { input: 0, output: 0 },
       },

@@ -178,3 +178,44 @@ def test_every_artifact_value_shape_is_schema_legal(tmp_path):
             )
         else:
             assert isinstance(v, str)
+
+
+# ── symlinks are never followed (exfiltration boundary) ─────────────────────
+
+
+def test_a_symlink_is_named_and_never_read(tmp_path):
+    """An agent that links a host secret into its own directory must not get
+    its CONTENTS shipped in the report. ``is_file()``/``read_text()`` both
+    follow links, so before the guard this inlined the target verbatim."""
+    secret = tmp_path / "host_secret.txt"
+    secret.write_text("AKIA-TOTALLY-REAL-CREDENTIAL")
+    tr, out = _run(tmp_path, f'ln -s "{secret}" creds.txt\necho done')
+    assert out.artifacts.get("creds.txt") == "skipped:symlink", (
+        f"symlink was collected: {out.artifacts.get('creds.txt')!r}"
+    )
+    body = repr(out.artifacts)
+    assert "AKIA-TOTALLY-REAL-CREDENTIAL" not in body, (
+        "the linked secret's CONTENT reached the report"
+    )
+    assert "creds.txt" not in tr.artifacts, "a symlink must not be registered"
+
+
+def test_a_symlinked_directory_does_not_smuggle_its_files(tmp_path):
+    """Defence in depth: the link is the PARENT, so each child looks like an
+    ordinary file. The resolved path must still prove it is under the root."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.env").write_text("TOKEN=sk-live-not-yours")
+    tr, out = _run(tmp_path, f'ln -s "{outside}" leaked\necho done')
+    inlined = repr(out.artifacts)
+    assert "sk-live-not-yours" not in inlined, (
+        f"a symlinked DIRECTORY smuggled its contents: {inlined}"
+    )
+
+
+def test_ordinary_files_still_collect_alongside_a_symlink(tmp_path):
+    """The guard must not suppress real work sitting next to a link."""
+    tr, out = _run(tmp_path, 'echo hi > real.txt\nln -s /etc/hosts linked.txt\necho done')
+    assert isinstance(out.artifacts.get("real.txt"), dict), out.artifacts
+    assert out.artifacts["real.txt"]["content"].strip() == "hi"
+    assert out.artifacts.get("linked.txt") == "skipped:symlink"
