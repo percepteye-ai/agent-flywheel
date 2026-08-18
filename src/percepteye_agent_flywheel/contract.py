@@ -35,7 +35,18 @@ ExclusionReason = Literal[
     "substrate_unavailable",
     "credential_expired",
     "deadline_exceeded",
+    #: The agent could not be STARTED — the binary is missing, the runtime
+    #: refused it, the import failed. Nothing ran, so there is nothing to
+    #: learn from and the work is worth retrying elsewhere.
     "entrypoint_error",
+    #: The agent RAN and exited non-zero. Its own failure, not the
+    #: substrate's: a crash after doing work, or a completion gate it could
+    #: not satisfy. Distinct from ``entrypoint_error`` because the two want
+    #: opposite handling — one is retryable and untrainable, the other is a
+    #: real attempt whose failure is exactly what training must see. Sharing
+    #: one label sent a whole afternoon's triage at the process launcher
+    #: while the detail string read "quality gate still failing".
+    "agent_exit_nonzero",
     "cancelled",
     "capacity",
 ]

@@ -348,13 +348,15 @@ def run_rollout_as_command(
             exclusion_detail=f"command exceeded {timeout_s:.0f}s and was killed",
         ), stdout or "")
     if proc.returncode != 0:
-        # The agent's own failure, not ours: an exit code is a result, and a
-        # non-zero one is a rollout that did not succeed rather than a
-        # substrate fault. Still excluded — a crashed run says nothing about
-        # the policy — but what it DID before failing is still evidence.
+        # The agent's own failure, not ours — and the process RAN, which is
+        # what separates this from ``entrypoint_error``. Popen raises when a
+        # binary cannot be started at all, so reaching here means the agent
+        # executed and chose to exit non-zero: a crash after doing work, or a
+        # completion gate it could not satisfy. Both are the policy's own
+        # behaviour and both are evidence.
         return _finalise(RolloutOutput(
             final_text=(stdout or "").strip(),
-            exclusion_reason="entrypoint_error",
+            exclusion_reason="agent_exit_nonzero",
             exclusion_detail=f"exit {proc.returncode}: {(stderr or '')[-1500:]}",
         ), stdout or "")
     return _finalise(RolloutOutput(final_text=(stdout or "").strip()), stdout or "")
@@ -831,19 +833,20 @@ class RolloutRunner:
             # ledger while the row carried artifacts={}.
             self._collect_artifacts(rollout, out)
             _mark_substrate_unavailable(out)
-            if out.exclusion_reason is not None and not out.artifacts:
-                # Nothing to grade: a crash before any work product, a dead
-                # credential, a substrate fault. Hand it back typed, so it can
-                # be retried and never trained on. This is the case abandon was
-                # built for — "not a low reward, do not train on this".
-                self.transport.abandon(
-                    rollout,
-                    reason=out.exclusion_reason,
-                    detail=out.exclusion_detail or "",
-                )
-                self._emit("rollout_abandoned",
-                           {"rollout_id": rollout.rollout_id, "reason": out.exclusion_reason})
-                return
+            # EVERY rollout is reported, whatever happened to it.
+            #
+            # This used to abandon when an exclusion carried no work product —
+            # "nothing to grade, do not train on this". That is a decision
+            # about TRAINABILITY, and it is not the SDK's to make: abandon
+            # suppresses the record entirely, so the control plane could not
+            # see rollouts it might have wanted to count, and the reason it
+            # would have judged them by never arrived. An operator asking "what
+            # did my agent do" got silence for exactly the rollouts that went
+            # worst.
+            #
+            # The SDK's job is to observe faithfully and say so. Whether a
+            # typed reason means retry, exclude, or train is the control
+            # plane's call, and it has the reason to make it with.
             # Reported WITH its exclusion when it has one: to_wire carries the
             # exclusion block, so the server records the work product and still
             # knows not to train on it. The agent's inability to declare itself

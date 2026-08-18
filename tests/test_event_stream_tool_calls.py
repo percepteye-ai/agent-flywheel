@@ -250,7 +250,9 @@ def test_a_nonzero_exit_still_captures_its_tool_calls(tmp_path):
     attached to the clean-exit path only, exactly as the artifact collection
     had been before it."""
     out = _run_command(tmp_path, _agent_that_emits_then(1, tmp_path))
-    assert out.exclusion_reason == "entrypoint_error"
+    # The agent RAN and exited non-zero — its own failure, not a
+    # failure to start it. Popen raises for the latter.
+    assert out.exclusion_reason == "agent_exit_nonzero"
     assert out.tool_calls is not None, "capture skipped on the failure path"
     assert [c.name for c in out.tool_calls] == ["ipython"]
 

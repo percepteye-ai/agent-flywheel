@@ -95,9 +95,9 @@ def test_the_report_still_carries_the_exclusion(tmp_path):
     the exclusion travels so the server still declines to train on it."""
     tr = _run(tmp_path, 'echo x > out.txt\nexit 1')
     out = tr.reported[0]
-    assert out.exclusion_reason == "entrypoint_error"
+    assert out.exclusion_reason == "agent_exit_nonzero"
     assert "exclusion" in out.to_wire()
-    assert out.to_wire()["exclusion"]["reason"] == "entrypoint_error"
+    assert out.to_wire()["exclusion"]["reason"] == "agent_exit_nonzero"
 
 
 def test_a_timeout_that_produced_files_is_also_reported(tmp_path):
@@ -113,18 +113,31 @@ def test_a_timeout_that_produced_files_is_also_reported(tmp_path):
 # ── the case abandon exists for ─────────────────────────────────────────────
 
 
-def test_nonzero_exit_with_nothing_produced_is_still_abandoned(tmp_path):
-    """No work product means nothing to grade. Hand it back typed so it can be
-    retried and never trained on."""
+def test_nonzero_exit_with_nothing_produced_is_still_REPORTED(tmp_path):
+    """Reported, not abandoned — and typed as the AGENT's exit, not ours.
+
+    Abandon suppresses the record, so the control plane could not see the
+    rollouts that went worst and never received the reason it would judge them
+    by. Whether a typed reason means retry, exclude or train is the control
+    plane's decision; the SDK's job is to observe faithfully and say so.
+
+    ``agent_exit_nonzero``, not ``entrypoint_error``: Popen raises when a
+    binary cannot start, so a non-zero exit means the agent RAN and chose it —
+    a crash after doing work, or a completion gate it could not satisfy. One
+    label for both sent an afternoon's triage at the process launcher while
+    the detail string read "quality gate still failing".
+    """
     tr = _run(tmp_path, 'exit 1')
-    assert tr.abandoned == ["entrypoint_error"]
-    assert not tr.reported
+    assert not tr.abandoned
+    assert tr.reported
+    assert tr.reported[0].exclusion_reason == "agent_exit_nonzero"
 
 
-def test_a_timeout_with_nothing_produced_is_still_abandoned(tmp_path):
+def test_a_timeout_with_nothing_produced_is_also_reported(tmp_path):
     tr = _run(tmp_path, 'sleep 30\n', timeout_s=1.0)
-    assert tr.abandoned == ["deadline_exceeded"]
-    assert not tr.reported
+    assert not tr.abandoned
+    assert tr.reported
+    assert tr.reported[0].exclusion_reason == "deadline_exceeded"
 
 
 # ── the untouched happy path ────────────────────────────────────────────────
@@ -211,3 +224,17 @@ def test_the_agent_is_stopped_short_of_the_deadline(tmp_path):
     # 300s of budget must not become a 300s agent timeout.
     assert seen["timeout_s"] <= 300.0 - REPORT_MARGIN_S + 1.0, seen
     assert seen["timeout_s"] > 0
+
+
+def test_a_completed_nonzero_exit_is_not_an_entrypoint_error(tmp_path):
+    """The two want opposite handling.
+
+    ``entrypoint_error`` means the agent could not be STARTED — nothing ran,
+    so there is nothing to learn from. A non-zero exit from a process that ran
+    is the agent's OWN failure and is exactly the behaviour training must see.
+    Sharing one label made a quality-gate failure read as a launcher fault.
+    """
+    tr = _run(tmp_path, 'exit 3')
+    assert tr.reported[0].exclusion_reason == "agent_exit_nonzero"
+    assert tr.reported[0].exclusion_reason != "entrypoint_error"
+    assert "exit 3" in (tr.reported[0].exclusion_detail or "")

@@ -120,7 +120,9 @@ def test_a_nonzero_exit_is_excluded_not_scored(tmp_path):
     out = _runner(tmp_path, tr,
                   ["sh", _script(tmp_path, 'echo "partial"; echo boom >&2; exit 3\n')]
                   ).run_one(_req(tmp_path))
-    assert out.exclusion_reason == "entrypoint_error"
+    # The agent RAN and exited non-zero — its own failure, not a
+    # failure to start it. Popen raises for the latter.
+    assert out.exclusion_reason == "agent_exit_nonzero"
     assert "exit 3" in (out.exclusion_detail or "")
     assert "boom" in (out.exclusion_detail or "")
 
