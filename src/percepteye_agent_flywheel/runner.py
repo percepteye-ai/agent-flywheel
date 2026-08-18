@@ -402,6 +402,46 @@ class _InFlight:
         self.next_beat_at = next_beat_at
 
 
+def _mark_substrate_unavailable(out: RolloutOutput) -> None:
+    """Every tool call FAILED → the substrate is broken, not the agent.
+
+    A rollout whose every tool call errored is not a low-scoring attempt; it is
+    an attempt that never got to happen. Reporting it as a legitimate zero
+    teaches the policy from an environment fault and hides the fault behind
+    what looks like poor performance — on 2026-08-18 an agent overwrote
+    IPython's own ``interactiveshell.py``, every ``ipython`` call died at
+    import, and a full day of runs reported 0% grounded while reading as "the
+    model cannot use tools".
+
+    STRICT, and deliberately so:
+
+    * every call must be an OBSERVED failure. ``unknown`` is not failure — it
+      is the honest answer when the framework exposed no verdict, and an agent
+      that reports none must behave exactly as it did before.
+    * at least one call must have been made. A rollout that never called a
+      tool has told us nothing about the substrate.
+    * partial failure is left alone. Some calls failing is ordinary agent
+      behaviour and is exactly what we want to train on.
+
+    Never overwrites an exclusion already set: an earlier, more specific
+    reason (a crash, a dead credential) knows more than this does.
+    """
+    if out.exclusion_reason is not None:
+        return
+    calls = out.tool_calls
+    if not calls:                      # None (unreported) or [] (none made)
+        return
+    if any(getattr(c, "outcome", None) != "failed" for c in calls):
+        return
+    out.exclusion_reason = "substrate_unavailable"
+    out.exclusion_detail = (
+        f"all {len(calls)} tool call(s) failed — "
+        f"{', '.join(sorted({str(getattr(c, 'name', '?')) for c in calls}))}. "
+        f"The agent could not act on its environment, so this is a substrate "
+        f"fault rather than a low score: do not train on it."
+    )
+
+
 class RolloutRunner:
     """Claim work, run it, report it. One rollout at a time per slot."""
 
@@ -790,6 +830,7 @@ class RolloutRunner:
             # measured on run 516b7a55, where a correct top_ips.sh sat in the
             # ledger while the row carried artifacts={}.
             self._collect_artifacts(rollout, out)
+            _mark_substrate_unavailable(out)
             if out.exclusion_reason is not None and not out.artifacts:
                 # Nothing to grade: a crash before any work product, a dead
                 # credential, a substrate fault. Hand it back typed, so it can
