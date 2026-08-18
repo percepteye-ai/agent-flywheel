@@ -11,6 +11,16 @@ build/
 .coverage
 htmlcov/
 .percepteye-artifacts/
+# ...and the misspellings the harness has actually written. All three appeared
+# in one working tree: the artifacts root comes from a runtime path that is
+# spelled differently in different places, so ignoring only the correct one
+# left two directories of rollout output untracked-but-visible, which is how
+# they end up in a `git add -A`. Directories, not file globs — a whole tree of
+# `rl_<id>/` solve scripts is unambiguously agent output, so the reasoning
+# below about not swallowing a future requirements.txt does not apply to them.
+.perceptye-artifacts/
+.percept-eye-artifacts/
+_percepteye-artifacts/
 .DS_Store
 
 # Files an agent wrote into the repo root.
