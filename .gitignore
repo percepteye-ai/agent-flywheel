@@ -48,3 +48,4 @@ _percepteye-artifacts/
 /extract_ips.sh
 /last_trace.sh
 /merge_logs.sh
+.worktrees/
