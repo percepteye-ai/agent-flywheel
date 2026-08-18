@@ -11,6 +11,7 @@ one extension that points its completions at the per-rollout endpoint.
 from __future__ import annotations
 
 import os
+import tempfile
 import pathlib
 
 import percepteye_agent_flywheel as fw
@@ -51,8 +52,33 @@ WORKSPACE.mkdir(parents=True, exist_ok=True)
 #: nothing and told us nothing. A bound that stops the work short of any
 #: observable result is not cost control, it is a wasted rollout. The episode
 #: budget still bounds the real cost from outside.
+#: ONE daemon socket per harness process, at a path nothing else uses.
+#:
+#: prime-agent runs a daemon supervisor that owns a registry entry. When a
+#: second generation takes that entry over, every agent still bound to the old
+#: one dies instantly with "Daemon supervisor generation ... no longer owns its
+#: registry entry" — which the SDK reports as ``entrypoint_error`` and the
+#: liveness canary reports as "no successful real-provider LLM call". Run
+#: 32403f96 lost 16 of 40 rollouts that way, mid-run, after a manual daemon
+#: kill had "fixed" it an hour earlier.
+#:
+#: The default socket is shared by every prime-agent on the box: a previous
+#: harness's orphaned daemons, and the operator's own interactive sessions.
+#: A path keyed to THIS process shares with none of them, so a stale
+#: generation cannot evict us and we cannot evict anyone. Per-ROLLOUT sockets
+#: would isolate too, but daemons outlive the agent that started them, so that
+#: leaks a daemon per rollout; one per harness run is the same isolation
+#: without the accumulation.
+#:
+#: ``prime-agent --version`` works regardless — it never touches the daemon —
+#: so it is not a liveness check for this.
+_DAEMON_SOCKET = str(
+    pathlib.Path(tempfile.gettempdir()) / f"percepteye-prime-{os.getpid()}.sock"
+)
+
 ARGV = [
     "prime-agent",
+    "--daemon-socket", _DAEMON_SOCKET,
     "-p",
     "--mode", "json",              # structured events, not prose
     "-e", str(HERE / "route.ts"),  # the routing extension
