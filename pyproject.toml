@@ -61,6 +61,17 @@ adapters-test = ["langchain-core>=0.3", "google-adk>=2.2", "langgraph>=1.0"]
 # the ledger regardless; spans are a projection for the customer's own
 # observability, not a transport we depend on.
 otel = ["opentelemetry-api>=1.20"]
+# The OpenTelemetry SDK, FOR TESTS ONLY, and deliberately not in `otel` above.
+# That extra is the API only on purpose: this package must never install a
+# TracerProvider into a customer's process. The tracing tests need a real
+# provider to assert spans against, so they need the SDK.
+#
+# Until this line existed they got one BY ACCIDENT -- `google-adk` happens to
+# depend on opentelemetry-sdk, so `tests/test_otel_egress.py` ran only as a
+# side effect of an unrelated package's dependency tree. A suite that passes
+# because something else pulled in its dependency is a suite that disappears
+# silently the day that changes, and a green build says nothing went wrong.
+otel-test = ["opentelemetry-sdk>=1.20"]
 
 # Third parties ship adapters through this group. Ours live in
 # percepteye_agent_flywheel.adapters and need no entry point: an adapter imports its
