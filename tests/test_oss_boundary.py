@@ -211,9 +211,31 @@ def test_every_serve_kwarg_in_the_readme_actually_exists():
     readme = (pathlib.Path(__file__).resolve().parent.parent / "README.md").read_text()
     params = set(inspect.signature(fw.serve).parameters)
 
+    # Balance the parentheses rather than looking for a closing "\n)". The
+    # regex form could not see a serve() call written on ONE line: with no
+    # newline-paren to stop at, it ran on to the next multi-line call and
+    # collected the kwargs of everything in between -- so `record_tool_call`'s
+    # `outcome=` and `RolloutOutput`'s `reward=` were reported as non-existent
+    # serve() parameters. A false failure trains you to ignore the check.
+    def _arg_blocks(text: str) -> list[str]:
+        blocks = []
+        for m in re.finditer(r"(?:ph|fw)\.serve\(", text):
+            depth, i = 1, m.end()
+            while i < len(text) and depth:
+                depth += (text[i] == "(") - (text[i] == ")")
+                i += 1
+            blocks.append(text[m.end(): i - 1])
+        return blocks
+
     used: set[str] = set()
-    for block in re.finditer(r"(?:ph|fw)\.serve\(\s*(.*?)\n\)", readme, re.S):
-        used |= set(re.findall(r"^\s*([a-z_]+)\s*=", block.group(1), re.M))
+    for block in _arg_blocks(readme):
+        # Only at the call's own nesting level: a kwarg inside a nested call
+        # (a lambda, a dict, another constructor) is not a serve() parameter.
+        depth, top = 0, []
+        for ch in block:
+            depth += (ch in "([{") - (ch in ")]}")
+            top.append(ch if depth == 0 else " ")
+        used |= set(re.findall(r"([a-z_]+)\s*=(?!=)", "".join(top)))
 
     assert used, "no serve() example found in the README — did the format change?"
     unknown = sorted(used - params)
