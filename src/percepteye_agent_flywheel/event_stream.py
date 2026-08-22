@@ -39,7 +39,7 @@ from typing import Any
 
 from .contract import Outcome, ToolCallOutcome
 
-__all__ = ["parse_tool_calls", "StreamFormat", "FORMATS", "TOOL_START", "TOOL_END"]
+__all__ = ["FORMATS", "TOOL_END", "TOOL_START", "StreamFormat", "parse_tool_calls"]
 
 
 @dataclass(frozen=True)

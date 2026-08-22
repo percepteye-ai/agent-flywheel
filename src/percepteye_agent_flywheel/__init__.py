@@ -44,8 +44,6 @@ from .contract import (
     ToolCallOutcome,
 )
 from .entrypoint import InputShape, resolve_entrypoint
-from .introspection import DiscoveredAgent, ToolDefinition
-from .introspection import introspect as introspect_agent
 from .errors import (
     ConfigurationError,
     ContractViolation,
@@ -56,6 +54,8 @@ from .errors import (
     RoutingNotInstallable,
     TransportError,
 )
+from .introspection import DiscoveredAgent, ToolDefinition
+from .introspection import introspect as introspect_agent
 from .isolation import unroutable_providers_present
 from .outcomes import OutcomeLedger, current_rollout_id, record_tool_call
 from .runner import RolloutRunner
@@ -65,8 +65,6 @@ __version__ = "0.1.0"
 
 __all__ = [
     "CONTRACT_VERSION",
-    "apply_current_policy",
-    "current_policy",
     "AttachTransport",
     "ConfigurationError",
     "ContractViolation",
@@ -88,6 +86,8 @@ __all__ = [
     "ToolDefinition",
     "TransportError",
     "__version__",
+    "apply_current_policy",
+    "current_policy",
     "current_rollout_id",
     "introspect_agent",
     "record_tool_call",

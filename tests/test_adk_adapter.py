@@ -14,10 +14,10 @@ import pytest
 
 pytest.importorskip("google.adk")
 
-from google.adk.plugins.plugin_manager import PluginManager  # noqa: E402
+from google.adk.plugins.plugin_manager import PluginManager
 
-from percepteye_agent_flywheel.adapters.adk import ADKAdapter  # noqa: E402
-from percepteye_agent_flywheel.outcomes import (  # noqa: E402
+from percepteye_agent_flywheel.adapters.adk import ADKAdapter
+from percepteye_agent_flywheel.outcomes import (
     OutcomeLedger,
     _RolloutScope,
 )
@@ -42,7 +42,7 @@ class _ExplodingCtx:
     agent_name = "planner"
 
     @property
-    def function_call_id(self):  # noqa: ANN201
+    def function_call_id(self):
         raise ValueError("boom")
 
 

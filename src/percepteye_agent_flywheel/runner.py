@@ -386,7 +386,7 @@ def _attach_stream_tool_calls(out: RolloutOutput, stdout: str) -> None:
         from .event_stream import parse_tool_calls
 
         parsed = parse_tool_calls(stdout)
-    except Exception:  # noqa: BLE001 - never fail a rollout over telemetry
+    except Exception:  # never fail a rollout over telemetry
         return
     if parsed:
         out.tool_calls = parsed

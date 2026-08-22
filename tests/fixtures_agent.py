@@ -1,6 +1,8 @@
 """Importable agent fixtures for serve() registration tests."""
 from __future__ import annotations
 
+from typing import ClassVar
+
 
 class _Plain:
     def invoke(self, task: str) -> str:
@@ -20,7 +22,7 @@ def build_langchain():
         return q
 
     class _Agent:
-        tools = [lookup]
+        tools: ClassVar[list] = [lookup]
 
         def invoke(self, task: str) -> str:
             return task
