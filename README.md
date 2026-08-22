@@ -14,7 +14,7 @@
 [![runtime dependencies: 1](https://img.shields.io/badge/runtime%20dependencies-1-blue?style=flat-square)](#what-does-it-cost-to-integrate)
 [![license: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 
-[Quickstart](#quickstart-one-import-one-call) · [How it works](#how-the-flywheel-works) · [Zero instrumentation](#zero-instrumentation-langchain-langgraph-google-adk) · [Why `unknown` matters](#why-unknown-is-a-first-class-tool-outcome) · [Comparison](#how-is-this-different-from-langsmith-braintrust-hud-art-or-nemo-data-flywheel) · [FAQ](#faq) · [Docs](https://docs.percepteye.com/flywheel)
+[Quickstart](#quickstart-one-import-one-call) · [How it works](#how-the-flywheel-works) · [Zero instrumentation](#zero-instrumentation-langchain-langgraph-google-adk-and-cli-agents) · [Why `unknown` matters](#why-unknown-is-a-first-class-tool-outcome) · [Comparison](#how-is-this-different-from-langsmith-braintrust-hud-art-or-nemo-data-flywheel) · [FAQ](#faq) · [Docs](https://docs.percepteye.com/flywheel)
 
 ---
 
@@ -112,7 +112,7 @@ The claims in this table are structural properties of the package, not estimates
 | Public DNS records required | **0** | — |
 | Containers to build | **0** | your agent runs as your process, not our image |
 | GPUs you provision | **0** | the control plane holds them |
-| Frameworks with no instrumentation at all | **3** — LangChain, LangGraph, Google ADK | [`src/.../adapters/`](src/percepteye_agent_flywheel/adapters/) |
+| Zero-instrumentation capture | **3 Python frameworks** — LangChain, LangGraph, Google ADK — **plus any CLI agent** that already prints a structured event stream | [`adapters/`](src/percepteye_agent_flywheel/adapters/), [`event_stream.py`](src/percepteye_agent_flywheel/event_stream.py) |
 | Environment variables required | **2** (URL and key), both overridable in code | [Configuration](#configuration-reference) |
 | Tests | **278 across 23 files**, all of them run in CI with zero skips permitted; the bare-install matrix adds 2 operating systems × 4 Python versions | `pytest` and [`.github/workflows/ci.yml`](.github/workflows/ci.yml) |
 | License | MIT | [LICENSE](LICENSE) |
@@ -135,7 +135,7 @@ The dependency count is the number that decides whether an SDK can go into a liv
 
 Counts are not a quality judgement — Phoenix is a server and is *supposed* to be heavy. But three of those SDKs ship exact pins (`hud` pins `fastmcp==3.2.0`, `prompt-toolkit==3.0.51` and `questionary==2.1.0`) and several ship model-vendor SDKs of their own. Inside a production process, an exact pin is not a dependency, it is a veto.
 
-## Zero instrumentation: LangChain, LangGraph, Google ADK
+## Zero instrumentation: LangChain, LangGraph, Google ADK, and CLI agents
 
 Adapters are **on by default**. `adapters="auto"` binds every built-in whose framework is installed, so a LangChain, LangGraph or Google ADK agent reports per-call outcomes with no Percepteye code in it at all — not one import, not one `record_tool_call`.
 
@@ -178,6 +178,28 @@ Served with the three-line script above, the rollout reports:
 
 **`unknown`, not `ok`** — because LangChain returned raw content with no `ToolMessage` status, so nothing observed whether that call succeeded. That is the honest floor zero instrumentation buys you. One `record_tool_call` where you actually know the answer gets you the rest.
 
+### …and CLI agents, from the stream they already print
+
+An adapter binds to a Python object. A Node CLI or a compiled binary has no object to bind to, so its tool calls used to be unobservable and `reports_tool_calls=False` was the only honest setting.
+
+But a modern CLI agent already emits a structured event stream, because it needs one for its own UI. So [`event_stream.py`](src/percepteye_agent_flywheel/event_stream.py) reads the stream you are already printing. Two vocabularies are recognised today:
+
+| vocabulary | events | emitted by |
+|---|---|---|
+| `prime-agent` | `tool_execution_start` / `tool_execution_end` | prime-agent under `--mode json`, verified against a live run |
+| `otel-genai` | `gen_ai.tool.start` / `gen_ai.tool.end` | any agent that logs OpenTelemetry GenAI spans as JSON lines |
+
+The second matters more than the first. It is the one vocabulary that belongs to no single vendor, so **an agent already instrumented for observability gets outcome capture with no work at all** — which is the point.
+
+Four rules govern it, and they are the same rules as everywhere else in this package:
+
+- **A stream is matched by the events it carries**, never by position and never by an agent name you declared. Telling us what you are does not make it so.
+- **Tri-state by omission.** `isError: true` → `failed`, `false` → `ok`, **absent → `unknown`**. An agent that ends a call without saying whether it worked has not asserted success, and we do not assert it on the agent's behalf.
+- **The ledger wins.** A `record_tool_call` is a deliberate assertion about your own behaviour, so a stream parse never overwrites it. The stream is consulted only where the ledger recorded nothing — and a stream carrying no tool events leaves `tool_calls` as `None`, never `[]`.
+- **Capture survives failure.** Outcomes are recovered on a clean exit, on a non-zero exit, and on a timeout kill — because a rollout that died is exactly the one you need the tool calls from.
+
+Supporting the next CLI agent is a `StreamFormat` entry — a vocabulary, not a parser. Nothing about the extraction, the tri-state or the absence rules gets reimplemented per agent.
+
 In a multi-agent graph each call is attributed to the agent that made it, read from the framework's own run metadata — ADK exposes `ToolContext.agent_name` directly, LangGraph stamps the node it is executing. A call nothing names stays unattributed, because filling it in would train a planner on a coder's tool calls.
 
 To ship your own, expose a factory in the `percepteye_agent_flywheel.adapters` entry-point group.
@@ -192,7 +214,9 @@ fw.serve(["opencode", "run"], agent_id="coding-agent", input_shape="text")
 
 The task arrives two ways, because CLIs differ and guessing wrongly is silent: on **stdin**, and as `PERCEPTEYE_TURN_INPUT`. Its **stdout** is the final text. Its exit code is a result — non-zero is excluded from training, because a crashed run says nothing about the policy.
 
-Outcomes come from the same ledger, which a shell can append to:
+**You probably get tool outcomes for free.** If your CLI already prints a structured event stream — prime-agent's `--mode json`, or anything logging OpenTelemetry GenAI events as JSON lines — they are [read straight off stdout](#zero-instrumentation-langchain-langgraph-google-adk-and-cli-agents) with nothing added to the agent.
+
+If it prints nothing useful, the ledger is still there and a shell can append to it:
 
 ```sh
 D="$PERCEPTEYE_LEDGER_DIR/$PERCEPTEYE_ROLLOUT_ID"; mkdir -p "$D"
@@ -201,7 +225,9 @@ printf '{"name":"deploy","arguments":{},"outcome":"ok","status_code":200}\n' >> 
 
 The command runs in its own **process group**, and that group is what gets killed on timeout — a real CLI agent spawns freely, and killing only the process we launched leaves its children holding the output pipe open.
 
-A worked example against a TypeScript coding agent is in [`examples/prime_agent/`](examples/prime_agent/).
+`gate_flag=` names how your CLI spells its completion-gate option (prime-agent: `--autonomous-gate`). The flag is a fact about your binary and cannot be guessed; the gate *command* is a property of the task and arrives per rollout. Leave it unset for an agent with no gate concept.
+
+A worked example against a real TypeScript coding agent — routing, event parsing, gates and all — is in [`examples/prime_agent/`](examples/prime_agent/).
 
 ## Why `unknown` is a first-class tool outcome
 
@@ -415,7 +441,10 @@ No. The control plane holds them. This is the difference between this and runnin
 No. You pass an importable path or an argv list. For LangChain, LangGraph and Google ADK, per-call outcomes are captured with zero code in your agent.
 
 **What if my agent isn't written in Python?**
-[Pass an argv list.](#your-agent-doesnt-have-to-be-python) The task arrives on stdin and in `PERCEPTEYE_TURN_INPUT`; stdout is the final text.
+[Pass an argv list.](#your-agent-doesnt-have-to-be-python) The task arrives on stdin and in `PERCEPTEYE_TURN_INPUT`; stdout is the final text. There is no protocol to implement, so an existing CLI needs no changes.
+
+**Can a CLI or REPL agent report per-tool outcomes, or only Python frameworks?**
+It can, with no instrumentation. If your agent prints a structured event stream — prime-agent's `--mode json`, or OpenTelemetry GenAI events as JSON lines — outcomes are parsed off stdout, including when the run exits non-zero or is killed on the deadline. Adding another CLI agent is a `StreamFormat` entry, not a parser. [Details.](#zero-instrumentation-langchain-langgraph-google-adk-and-cli-agents)
 
 **What happens when a rollout crashes, or my credential expires?**
 It is still reported — every rollout is, whatever happened to it — carrying a **typed exclusion** so the platform records the work product and still knows not to train on it. The SDK emits six: `flywheel_crash`, `substrate_unavailable`, `credential_expired`, `deadline_exceeded`, `entrypoint_error` and `agent_exit_nonzero`. (`cancelled` and `capacity` are declared vocabulary the control plane uses; this SDK never emits them.) `entrypoint_error` — the agent could not be *started* — and `agent_exit_nonzero` — it ran and exited non-zero — are deliberately distinct, because one is retryable and untrainable and the other is a real attempt whose failure is exactly what training must see.
