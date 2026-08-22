@@ -65,6 +65,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     "CONTRACT_VERSION",
+    "apply_current_policy",
     "current_policy",
     "AttachTransport",
     "ConfigurationError",
@@ -160,6 +161,67 @@ def current_policy(
         return AttachTransport(client, agent_id=agent_id).policy_current()
     finally:
         client.close()
+
+
+def apply_current_policy(
+    *,
+    agent_id: str,
+    control_plane_url: str | None = None,
+    api_key: str | None = None,
+    set_env: bool = False,
+) -> dict[str, Any]:
+    """Turn :func:`current_policy` into arguments you can hand a client.
+
+    The last mile. ``current_policy`` already returns the right answer, but
+    every caller had to unpack it the same way, and a caller who unpacks it
+    slightly differently is a caller sampling from something other than what
+    was trained. Returns kwargs shaped for an OpenAI-compatible client::
+
+        kw = fw.apply_current_policy(agent_id="coding-agent")
+        if kw:
+            client, model = OpenAI(**{k: v for k, v in kw.items()
+                                      if k != "model"}), kw["model"]
+
+    Returns ``{}`` when nothing is deployed or the control plane cannot
+    answer — keep your current configuration. Same fail-open as
+    ``current_policy``, for the same reason: an unreachable control plane must
+    never stop a customer's agent from serving its users.
+
+    NOT FOR :func:`serve`, and that is a correctness boundary rather than a
+    style preference. A ``serve`` rollout samples through the per-rollout
+    GATEWAY url, which is what attributes the completion to that rollout and
+    captures it — and the gateway already rewrites the model field to the
+    policy under test. Pointing a donor agent at the policy endpoint directly
+    would bypass capture entirely and silently produce a run with nothing to
+    train on. Use this in your PRODUCTION agent, the one serving your users.
+
+    ``set_env=True`` additionally exports ``OPENAI_BASE_URL`` /
+    ``OPENAI_API_KEY`` for libraries that read the environment rather than
+    accept arguments. Off by default: mutating the process environment is a
+    side effect a caller should ask for.
+    """
+    pol = current_policy(
+        agent_id=agent_id, control_plane_url=control_plane_url, api_key=api_key,
+    )
+    ep = pol.get("endpoint") if isinstance(pol.get("endpoint"), dict) else None
+    if not ep or not ep.get("base_url"):
+        return {}
+    key_env = str(ep.get("api_key_env") or ENV_API_KEY)
+    key = api_key or os.environ.get(key_env) or os.environ.get(ENV_API_KEY)
+    if not key:
+        # An endpoint we cannot authenticate to is not usable, and returning
+        # it would produce 401s at the caller's first request rather than a
+        # legible "nothing to apply" here.
+        return {}
+    out: dict[str, Any] = {
+        "base_url": str(ep["base_url"]),
+        "api_key": str(key),
+        "model": str(ep.get("model") or ""),
+    }
+    if set_env:
+        os.environ["OPENAI_BASE_URL"] = out["base_url"]
+        os.environ["OPENAI_API_KEY"] = out["api_key"]
+    return out
 
 
 def serve(
@@ -343,6 +405,12 @@ def serve(
     _ask = getattr(tr, "policy_current", None)
     policy = _ask() if callable(_ask) else {}
     if policy:
+        # INFORMATIONAL ONLY, deliberately. A serve rollout samples through the
+        # per-rollout GATEWAY url — that is what attributes and captures the
+        # completion, and the gateway already rewrites the model field to the
+        # policy under test. Applying the endpoint here would bypass capture
+        # and produce a run with nothing to train on. Production agents call
+        # apply_current_policy() instead.
         _ep = policy.get("endpoint") if isinstance(policy.get("endpoint"), dict) else {}
         print(
             f"[percepteye] policy: {policy.get('arm', 'base')} — "
