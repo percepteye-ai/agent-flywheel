@@ -15,9 +15,9 @@ Everything marked **[open]** is not yet established and must not be assumed.
 
 ## 0. The one idea this document is organised around
 
-**The ledger is the ABI.** Every integration, in every language, reduces to a shim
+**The trajectory is the ABI.** Every integration, in every language, reduces to a shim
 that does two things: append JSON lines to
-`$PERCEPTEYE_LEDGER_DIR/$PERCEPTEYE_ROLLOUT_ID/tool_calls.jsonl`, and make the
+`$PERCEPTEYE_TRAJECTORY_DIR/$PERCEPTEYE_ROLLOUT_ID/tool_calls.jsonl`, and make the
 agent's completions go to an endpoint we supply.
 
 This is not aspirational. It is already true, and **[verified]**:
@@ -43,15 +43,15 @@ Consequences worth stating plainly:
   Build it once for dsh and OpenClaw is incremental.
 - The existing Python adapters need no change. They are the Python instance of
   the same contract.
-- Promoting the ledger from an implementation detail to a **documented, versioned
+- Promoting the trajectory from an implementation detail to a **documented, versioned
   wire format** is the reusable deliverable. It is already half-specified as
   `ToolCallRecord` in `schema/flywheel-1.json`.
 
 ---
 
-## 1. BLOCKER — fix before anything writes the ledger from outside Python
+## 1. BLOCKER — fix before anything writes the trajectory from outside Python
 
-`OutcomeLedger.read()` is not crash-tolerant. `outcomes.py:195`:
+`Trajectory.read()` is not crash-tolerant. `outcomes.py:195`:
 
 ```python
 for line in fh:
@@ -61,7 +61,7 @@ for line in fh:
     d = json.loads(line)          # <- no guard
 ```
 
-`_attach_ledger` calls it unguarded, **unlike** `_attach_stream_tool_calls`,
+`_attach_trajectory` calls it unguarded, **unlike** `_attach_stream_tool_calls`,
 which is explicitly wrapped with the comment *"never fail a rollout over
 telemetry"*. That asymmetry is the bug.
 
@@ -72,7 +72,7 @@ completed rollout's work is discarded.
 
 Today this is unlikely: `record_tool_call` holds a lock and writes short lines
 from the same process. **The moment an external Node process appends to the
-ledger under a kill signal it becomes probable.**
+trajectory under a kill signal it becomes probable.**
 
 **Fix.** Skip malformed lines, count them, surface the count. Absence must stay
 distinguishable from zero: a file that existed but yielded no parseable records
@@ -134,7 +134,7 @@ second process is required to *capture* anything.
   exactly the mechanism required, already built, and already documented as
   *"Use this in your PRODUCTION agent, the one serving your users."*
 - The adapters — in-process tool capture, zero instrumentation.
-- The ledger, and introspection.
+- The trajectory, and introspection.
 
 ### What is missing
 
@@ -316,7 +316,7 @@ assumption. Config may widen the verified list; it can never override `isError: 
 
 ### 6.3 Safety rules
 
-- **Inert when `PERCEPTEYE_LEDGER_DIR` / `PERCEPTEYE_ROLLOUT_ID` are absent** —
+- **Inert when `PERCEPTEYE_TRAJECTORY_DIR` / `PERCEPTEYE_ROLLOUT_ID` are absent** —
   register no listener, so the plugin is always safe to leave installed.
 - **No tool events → write nothing**, never an empty file.
 - **One synchronous `write(2)` on a single `O_APPEND` fd per record**, built fully
@@ -514,8 +514,8 @@ squatters. Argument for claiming `percepteye` now.
 
 ## 11. Sequence
 
-1. **Ledger reader crash-tolerance** (§1). Real bug regardless of anything else;
-   blocks everything that writes the ledger from outside Python.
+1. **Trajectory reader crash-tolerance** (§1). Real bug regardless of anything else;
+   blocks everything that writes the trajectory from outside Python.
 2. **`fw.TASK` and `endpoint_env=`** (§4). Two general SDK features with tests.
 3. **`percepteye-dsh` L1** — capture only: `tools/result`, the five-case
    classifier, contract test, inert-without-env.
@@ -541,7 +541,7 @@ piecemeal pickup should start there. **6 is the one that changes the product.**
 - ACP: `agentclientprotocol/agent-client-protocol`, `schema/v1/schema.json`,
   `schema/v1/meta.json`
 - Claw-SWE-Bench: arXiv 2606.12344
-- This repo: `outcomes.py:180-210`, `runner.py` `_attach_ledger` /
+- This repo: `outcomes.py:180-210`, `runner.py` `_attach_trajectory` /
   `_attach_stream_tool_calls`, `adapters/adk.py:132`, `adapters/langchain.py:128`,
   `contract.py`, `schema/flywheel-1.json`, `tests/test_oss_boundary.py:24-28`,
   commits `684392c` and `74feb63`, `docs/nemoclaw-sandbox.md`

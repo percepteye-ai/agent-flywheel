@@ -101,7 +101,7 @@ def test_the_gate_reaches_the_spawned_process_argv(tmp_path):
 
     req = _req({"completion_gate": "test -s top_ips.sh"})
     run_rollout_as_command(
-        ["sh", str(script), "--autonomous"], req, ledger_dir=str(tmp_path),
+        ["sh", str(script), "--autonomous"], req, trajectory_dir=str(tmp_path),
         timeout_s=30.0, env=dict(os.environ), cwd=str(tmp_path),
         gate_flag="--autonomous-gate",
     )
@@ -123,7 +123,7 @@ def test_without_a_flag_the_spawned_process_sees_no_extra_args(tmp_path):
 
     req = _req({"completion_gate": "test -s top_ips.sh"})
     run_rollout_as_command(
-        ["sh", str(script), "--autonomous"], req, ledger_dir=str(tmp_path),
+        ["sh", str(script), "--autonomous"], req, trajectory_dir=str(tmp_path),
         timeout_s=30.0, env=dict(os.environ), cwd=str(tmp_path),
     )
 

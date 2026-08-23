@@ -14,9 +14,9 @@ they already produce. This module is the process equivalent of the framework
 adapters, and it follows the same rule as the OTel projection in ``tracing``:
 absence is preserved, never rounded up.
 
-Precedence: the ledger WINS. An agent that calls ``record_tool_call`` has made
+Precedence: the trajectory WINS. An agent that calls ``record_tool_call`` has made
 a deliberate assertion about its own behaviour, and a stream parse must never
-overwrite it. This is only consulted when the ledger recorded nothing.
+overwrite it. This is only consulted when the trajectory recorded nothing.
 
 The recognised shape (verified against prime-agent ``--mode json``):
 
@@ -107,7 +107,7 @@ def _first(d: dict[str, Any], keys: tuple[str, ...]) -> Any:
     return None
 
 #: Bodies can be large (a REPL that printed a file). Bounded so a report stays
-#: a report; the ledger, not the stream, is where full fidelity lives.
+#: a report; the trajectory, not the stream, is where full fidelity lives.
 _MAX_OUTPUT_CHARS = 4000
 _MAX_ERROR_CHARS = 1000
 

@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://raw.githubusercontent.com/percepteye-ai/agent-flywheel/main/docs/assets/flywheel-loop.gif"
        width="900"
-       alt="The Percepteye agent flywheel loop. On the left, inside a box labelled YOUR INFRASTRUCTURE, three components: a flywheel harness running fw.serve(), the agent it spawns as an isolated child process with a tool-outcome ledger recording ok, failed and unknown, and the customer's own production agent calling apply_current_policy(). On the right, across a dashed trust boundary, a single opaque box labelled Percepteye control plane, which generates the tasks, scores every rollout and trains the policy. Four lanes cross the boundary — claim a rollout, completions, result and outcomes, and current policy — and every one of them is opened from the left, with responses returning along the same connection. No arrow originates on the Percepteye side. Caption: no inbound port, no public DNS, no TLS to terminate.">
+       alt="The Percepteye agent flywheel loop. On the left, inside a box labelled YOUR INFRASTRUCTURE, three components: a flywheel harness running fw.serve(), the agent it spawns as an isolated child process with a tool-outcome trajectory recording ok, failed and unknown, and the customer's own production agent calling apply_current_policy(). On the right, across a dashed trust boundary, a single opaque box labelled Percepteye control plane, which generates the tasks, scores every rollout and trains the policy. Four lanes cross the boundary — claim a rollout, completions, result and outcomes, and current policy — and every one of them is opened from the left, with responses returning along the same connection. No arrow originates on the Percepteye side. Caption: no inbound port, no public DNS, no TLS to terminate.">
 </p>
 
 [![ci](https://img.shields.io/github/actions/workflow/status/percepteye-ai/agent-flywheel/ci.yml?branch=main&label=ci&style=flat-square)](https://github.com/percepteye-ai/agent-flywheel/actions)
@@ -85,9 +85,9 @@ fw.serve(
 The diagram above animates one full lap. In prose, because a picture is not indexable and half of you are reading this through a model:
 
 1. **Claim.** Your harness long-polls the control plane for a rollout. The lease is renewed by heartbeat, and a crashed worker's rollout is redelivered rather than lost. Nothing listens on your side — you opened the connection.
-2. **Isolate.** Each rollout gets its own child process, with its own environment, its own single-use credential and its own ledger directory. A child process can actually be killed, which is why it is the default: Python cannot interrupt a synchronous call in another thread, so in-process a hung agent means you stop *waiting* while it keeps running.
+2. **Isolate.** Each rollout gets its own child process, with its own environment, its own single-use credential and its own trajectory directory. A child process can actually be killed, which is why it is the default: Python cannot interrupt a synchronous call in another thread, so in-process a hung agent means you stop *waiting* while it keeps running.
 3. **Route.** Your agent's LLM completions go to a per-rollout endpoint. That is what attributes the work, captures the completion wire, and lets the platform score what the model actually sampled rather than what a transcript says it did.
-4. **Record.** Every tool call lands in the ledger as `ok`, `failed` or `unknown`. See [why that third value exists](#why-unknown-is-a-first-class-tool-outcome).
+4. **Record.** Every tool call lands in the trajectory as `ok`, `failed` or `unknown`. See [why that third value exists](#why-unknown-is-a-first-class-tool-outcome).
 5. **Report.** Final text, artifacts, timings and outcomes go back. Crashes, expired credentials and blown deadlines are reported as **typed exclusions**, so a substrate fault is never scored as a bad decision by your agent.
 6. **Score.** Percepteye grades the rollout against its own compiled checks. This is the part you do not have to build.
 7. **Improve.** Your *production* agent — a different process from the one donating capacity — calls `apply_current_policy()` and picks up what training produced. That closes the loop.
@@ -195,7 +195,7 @@ Four rules govern it, and they are the same rules as everywhere else in this pac
 
 - **A stream is matched by the events it carries**, never by position and never by an agent name you declared. Telling us what you are does not make it so.
 - **Tri-state by omission.** `isError: true` → `failed`, `false` → `ok`, **absent → `unknown`**. An agent that ends a call without saying whether it worked has not asserted success, and we do not assert it on the agent's behalf.
-- **The ledger wins.** A `record_tool_call` is a deliberate assertion about your own behaviour, so a stream parse never overwrites it. The stream is consulted only where the ledger recorded nothing — and a stream carrying no tool events leaves `tool_calls` as `None`, never `[]`.
+- **The trajectory wins.** A `record_tool_call` is a deliberate assertion about your own behaviour, so a stream parse never overwrites it. The stream is consulted only where the trajectory recorded nothing — and a stream carrying no tool events leaves `tool_calls` as `None`, never `[]`.
 - **Capture survives failure.** Outcomes are recovered on a clean exit, on a non-zero exit, and on a timeout kill — because a rollout that died is exactly the one you need the tool calls from.
 
 Supporting the next CLI agent is a `StreamFormat` entry — a vocabulary, not a parser. Nothing about the extraction, the tri-state or the absence rules gets reimplemented per agent.
@@ -216,11 +216,11 @@ The task arrives two ways, because CLIs differ and guessing wrongly is silent: o
 
 **You probably get tool outcomes for free.** If your CLI already prints a structured event stream — prime-agent's `--mode json`, or anything logging OpenTelemetry GenAI events as JSON lines — they are [read straight off stdout](#zero-instrumentation-langchain-langgraph-google-adk-and-cli-agents) with nothing added to the agent.
 
-If it prints nothing useful, the ledger is still there and a shell can append to it:
+If it prints nothing useful, the trajectory is still there and a shell can append to it:
 
 ```sh
-D="$PERCEPTEYE_LEDGER_DIR/$PERCEPTEYE_ROLLOUT_ID"; mkdir -p "$D"
-printf '{"name":"deploy","arguments":{},"outcome":"ok","status_code":200}\n' >> "$D/tool_calls.jsonl"
+printf '{"name":"deploy","arguments":{},"outcome":"ok","status_code":200}\n' \
+  >> "$PERCEPTEYE_TRAJECTORY_DIR/tool_calls.jsonl"
 ```
 
 The command runs in its own **process group**, and that group is what gets killed on timeout — a real CLI agent spawns freely, and killing only the process we launched leaves its children holding the output pipe open.
@@ -370,7 +370,7 @@ Only a deliberate value disables it (`0`, `false`, `no`, `off`); a typo leaves i
 
 `isolation="subprocess"` is the default, and it is the only mode with a real timeout — a child process can actually be killed. The trade-off is that a child cannot receive a live Python object, so it needs an entrypoint it can import. Passing an already-constructed object is supported with `isolation="inprocess"`, which is capped at `concurrency=1`, because concurrent in-process rollouts share one set of environment variables and would race for the per-rollout endpoint. Both are checked when `serve()` starts.
 
-**What the child inherits.** Your agent needs your credentials — that is the entire point of running it in your own process — so your environment passes through. Ours does not: no variable in the `PERCEPTEYE_` namespace is inherited, so the long-lived control-plane key stays in the parent and never reaches code the model can influence. Exactly two are set for the child, the rollout id and the ledger directory, and the per-rollout endpoint and its single-use key are set last so they win over anything inherited.
+**What the child inherits.** Your agent needs your credentials — that is the entire point of running it in your own process — so your environment passes through. Ours does not: no variable in the `PERCEPTEYE_` namespace is inherited, so the long-lived control-plane key stays in the parent and never reaches code the model can influence. Exactly two are set for the child, the rollout id and the trajectory directory, and the per-rollout endpoint and its single-use key are set last so they win over anything inherited.
 
 > [!WARNING]
 > `isolation` is a process boundary and an environment scrub. It says nothing about the filesystem. Point `artifacts_dir` at a directory outside any source tree before you run an untrusted agent, and use an OS-level sandbox if you need one.
@@ -411,7 +411,7 @@ There are no feature flags, and no variable selects behaviour. These are address
 | `PERCEPTEYE_API_KEY` | Your flywheel key. |
 | `PERCEPTEYE_INTROSPECT` | Set to `0` to disable [agent discovery](#agent-discovery-on-by-default). |
 | `PERCEPTEYE_ROLLOUT_ID` | *Set by us* for the child. Read it to tag your own logs. |
-| `PERCEPTEYE_LEDGER_DIR` | *Set by us* for the child. Write artifacts under `$PERCEPTEYE_LEDGER_DIR/$PERCEPTEYE_ROLLOUT_ID` and they are registered for you. |
+| `PERCEPTEYE_TRAJECTORY_DIR` | *Set by us* for the child, and it already **is** this rollout's directory — nothing to join, nothing to create. Append tool calls to `$PERCEPTEYE_TRAJECTORY_DIR/tool_calls.jsonl`; any other file you leave there is collected as an artifact. |
 | `PERCEPTEYE_TURN_INPUT` | *Set by us* for a command entrypoint. The task, also on stdin. |
 
 ### OpenTelemetry (optional)
@@ -424,7 +424,7 @@ Every outcome you record is additionally emitted as an OpenTelemetry span, so it
 
 Spans carry the GenAI semantic conventions where they name the thing, plus `percepteye.tool.outcome` for the tri-state. That needs its own namespace, and that is the honest reason it has one: the GenAI conventions have no way to express "the result of this call was never observed". For the same reason an `unknown` outcome leaves the **span status unset** — marking it OK asserts a success nobody observed, and marking it ERROR asserts a failure nobody observed.
 
-**This is egress, not a transport.** Nothing is ever read back, so your sampler, your queue overflow and your exporter being down cost you nothing here; outcomes reach the control plane through the ledger regardless.
+**This is egress, not a transport.** Nothing is ever read back, so your sampler, your queue overflow and your exporter being down cost you nothing here; outcomes reach the control plane through the trajectory regardless.
 
 ## FAQ
 

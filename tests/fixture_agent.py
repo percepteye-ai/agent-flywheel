@@ -149,8 +149,7 @@ class ArtifactWriter:
         import os
         import pathlib
 
-        root = pathlib.Path(os.environ["PERCEPTEYE_LEDGER_DIR"]) / os.environ[
-            "PERCEPTEYE_ROLLOUT_ID"]
+        root = pathlib.Path(os.environ["PERCEPTEYE_TRAJECTORY_DIR"])
         (root / "out").mkdir(parents=True, exist_ok=True)
         (root / "result.txt").write_text(f"done: {task}\n")
         (root / "out" / "patch.diff").write_text("--- a\n+++ b\n@@ -1 +1 @@\n-x\n+y\n")

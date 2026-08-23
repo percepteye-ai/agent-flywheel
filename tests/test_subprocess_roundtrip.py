@@ -103,7 +103,7 @@ def test_the_child_cannot_see_the_control_plane_credential(tmp_path, monkeypatch
     assert report["control_key"] == "<absent>"
     assert "pehk_live_must_not_leak" not in out.final_text
     assert set(report["percepteye_vars"].split(",")) == {
-        "PERCEPTEYE_ROLLOUT_ID", "PERCEPTEYE_LEDGER_DIR"
+        "PERCEPTEYE_ROLLOUT_ID", "PERCEPTEYE_TRAJECTORY_DIR"
     }
     # Their own credentials still reach their agent -- that is the premise.
     assert report["customer_key"] == "customer-token"
@@ -166,6 +166,6 @@ def test_inprocess_path_also_captures(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX path assumptions")
-def test_ledger_is_written_under_the_rollouts_own_directory(tmp_path):
+def test_trajectory_is_written_under_the_rollouts_own_directory(tmp_path):
     _runner(tmp_path).run_one(_rollout(tmp_path))
     assert (tmp_path / "_percepteye" / "rl_test_1" / "tool_calls.jsonl").exists()

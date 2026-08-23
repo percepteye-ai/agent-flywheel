@@ -18,7 +18,7 @@ from google.adk.plugins.plugin_manager import PluginManager
 
 from percepteye_agent_flywheel.adapters.adk import ADKAdapter
 from percepteye_agent_flywheel.outcomes import (
-    OutcomeLedger,
+    Trajectory,
     _RolloutScope,
 )
 
@@ -58,7 +58,7 @@ def bound():
 
 
 def _calls(tmp_path, rid="rl_adk"):
-    return OutcomeLedger(str(tmp_path), rid).read()
+    return Trajectory(str(tmp_path)).read()
 
 
 async def _one_call(pm, tool, ctx, *, result=None, error=None):

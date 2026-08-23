@@ -243,7 +243,7 @@ def test_a_class_entrypoint_is_instantiated(tmp_path):
 # ── housekeeping ───────────────────────────────────────────────────────────
 
 
-def test_the_ledger_directory_is_purged_after_serving(tmp_path):
+def test_the_trajectory_directory_is_purged_after_serving(tmp_path):
     """One directory per rollout accumulated for the life of the process."""
     tr = FakeTransport([[_req(tmp_path)]])
     runner = _runner(tmp_path, tr)
@@ -435,7 +435,7 @@ def test_files_the_agent_wrote_are_registered_before_the_report(tmp_path):
         assert len(a["sha256"]) == 64 and a["size"] > 0
 
 
-def test_the_ledger_is_not_registered_as_an_artifact(tmp_path):
+def test_the_trajectory_is_not_registered_as_an_artifact(tmp_path):
     """It is our bookkeeping, sitting in the same directory. Registering it
     would hand the customer's own capture back to them as a deliverable."""
     tr = ArtifactTransport([[_req(tmp_path)]])

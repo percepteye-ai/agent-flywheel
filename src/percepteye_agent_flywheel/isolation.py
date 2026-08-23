@@ -1,7 +1,7 @@
 """Per-rollout isolation, and the environment handed to the child.
 
 Two rollouts running at once must not be able to see each other's endpoint,
-credential or ledger. The default is one child process per rollout, with the
+credential or trajectory directory. The default is one child process per rollout, with the
 rollout's configuration crossing into a FRESH process at spawn.
 
 That direction matters. An earlier SDK wrote server-supplied values into the
@@ -37,7 +37,7 @@ PERCEPTEYE_NAMESPACE = "PERCEPTEYE_"
 #: the control-plane credential lives in this namespace.
 _SETTABLE_BY_CALLER = (
     "PERCEPTEYE_ROLLOUT_ID",
-    "PERCEPTEYE_LEDGER_DIR",
+    "PERCEPTEYE_TRAJECTORY_DIR",
     # The turn input, for a command entrypoint that reads it from the
     # environment rather than stdin.
     "PERCEPTEYE_TURN_INPUT",
@@ -135,7 +135,7 @@ def build_child_env(
     rollout_id: str,
     llm_url: str,
     api_key: str,
-    ledger_dir: str,
+    trajectory_dir: str,
     parent_env: Mapping[str, str] | None = None,
     allowlist: Iterable[str] | None = None,
     extra: Mapping[str, str] | None = None,
@@ -156,7 +156,7 @@ def build_child_env(
     1. No variable in the Percepteye namespace is inherited from the parent.
        The control-plane key lives there and stays in the parent.
     2. Exactly two Percepteye variables are then SET, scoped to this rollout:
-       the rollout id and the ledger directory.
+       the rollout id and the trajectory directory.
     3. The per-rollout LLM endpoint and its single-use key are set last, so
        they win over anything inherited.
     """
@@ -174,7 +174,7 @@ def build_child_env(
 
     # (2) Rollout-scoped, and nothing else from our side.
     env["PERCEPTEYE_ROLLOUT_ID"] = rollout_id
-    env["PERCEPTEYE_LEDGER_DIR"] = ledger_dir
+    env["PERCEPTEYE_TRAJECTORY_DIR"] = trajectory_dir
 
     # (2b) Provider configuration we cannot point at our gateway. Left in
     # place, an agent built on one of these routes straight past us and

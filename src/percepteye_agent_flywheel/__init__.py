@@ -57,7 +57,7 @@ from .errors import (
 from .introspection import DiscoveredAgent, ToolDefinition
 from .introspection import introspect as introspect_agent
 from .isolation import unroutable_providers_present
-from .outcomes import OutcomeLedger, current_rollout_id, record_tool_call
+from .outcomes import Trajectory, current_rollout_id, record_tool_call
 from .runner import RolloutRunner
 from .transport import AttachTransport, FlywheelTransport
 
@@ -77,13 +77,13 @@ __all__ = [
     "LeaseLost",
     "ModeNotAvailable",
     "Outcome",
-    "OutcomeLedger",
     "RolloutOutput",
     "RolloutRequest",
     "RolloutRunner",
     "RoutingNotInstallable",
     "ToolCallOutcome",
     "ToolDefinition",
+    "Trajectory",
     "TransportError",
     "__version__",
     "apply_current_policy",
@@ -100,7 +100,7 @@ __all__ = [
 ENV_CONTROL_PLANE_URL = "PERCEPTEYE_CONTROL_PLANE_URL"
 ENV_API_KEY = "PERCEPTEYE_API_KEY"
 ENV_ROLLOUT_ID = "PERCEPTEYE_ROLLOUT_ID"      # set by us, for the child
-ENV_LEDGER_DIR = "PERCEPTEYE_LEDGER_DIR"      # set by us, for the child
+ENV_TRAJECTORY_DIR = "PERCEPTEYE_TRAJECTORY_DIR"  # set by us, for the child
 
 FlywheelMode = Literal["rollout"]
 

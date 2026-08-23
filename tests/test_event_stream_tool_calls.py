@@ -119,23 +119,23 @@ def test_interleaved_noise_does_not_discard_the_outcomes():
     assert len(calls) == 1 and calls[0].outcome == "ok"
 
 
-# ── the ledger wins ─────────────────────────────────────────────────────────
+# ── the trajectory wins ─────────────────────────────────────────────────────────
 
 
-def test_the_ledger_is_not_overwritten_by_the_stream():
+def test_the_trajectory_is_not_overwritten_by_the_stream():
     """An agent that called record_tool_call asserted something deliberate
     about itself; a parse must never overwrite it."""
     from percepteye_agent_flywheel.contract import RolloutOutput, ToolCallOutcome
     from percepteye_agent_flywheel.runner import _attach_stream_tool_calls
 
     recorded = [ToolCallOutcome(
-        name="from_ledger", arguments={}, outcome="ok", status_code=None)]
+        name="from_trajectory", arguments={}, outcome="ok", status_code=None)]
     out = RolloutOutput(final_text="", tool_calls=list(recorded))
     _attach_stream_tool_calls(out, _stream(_START, _END_OK))
-    assert [c.name for c in out.tool_calls] == ["from_ledger"]
+    assert [c.name for c in out.tool_calls] == ["from_trajectory"]
 
 
-def test_the_stream_fills_in_when_the_ledger_recorded_nothing():
+def test_the_stream_fills_in_when_the_trajectory_recorded_nothing():
     from percepteye_agent_flywheel.contract import RolloutOutput
     from percepteye_agent_flywheel.runner import _attach_stream_tool_calls
 
@@ -147,7 +147,7 @@ def test_the_stream_fills_in_when_the_ledger_recorded_nothing():
 
 
 def test_an_empty_assertion_of_zero_calls_is_preserved():
-    """``[]`` from the ledger is a positive claim and must survive."""
+    """``[]`` from the trajectory is a positive claim and must survive."""
     from percepteye_agent_flywheel.contract import RolloutOutput
     from percepteye_agent_flywheel.runner import _attach_stream_tool_calls
 
@@ -240,7 +240,7 @@ def _run_command(tmp_path, script, timeout_s=30.0):
         lease_token="lt",
     )
     return run_rollout_as_command(
-        ["sh", script], req, ledger_dir=str(tmp_path), timeout_s=timeout_s,
+        ["sh", script], req, trajectory_dir=str(tmp_path), timeout_s=timeout_s,
         env=dict(os.environ), cwd=str(tmp_path))
 
 

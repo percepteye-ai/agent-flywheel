@@ -128,7 +128,7 @@ def test_an_nvidia_key_does_not_reach_the_child():
 
     env = build_child_env(
         rollout_id="r1", llm_url="http://gw/v1", api_key="k",
-        ledger_dir="/tmp/l",
+        trajectory_dir="/tmp/l",
         parent_env={"NVIDIA_API_KEY": "nvapi-xxx", "PATH": "/usr/bin"},
     )
     assert "NVIDIA_API_KEY" not in env

@@ -64,7 +64,7 @@ def test_outcomes_are_captured_with_no_instrumentation(tmp_path):
     come from the adapter binding the framework's own callbacks."""
     out = run_rollout_in_process(
         resolve_entrypoint(Uninstrumented(), input_shape="text"),
-        _req(tmp_path), ledger_dir=str(tmp_path), timeout_s=30.0, adapters="auto",
+        _req(tmp_path), trajectory_dir=str(tmp_path), timeout_s=30.0, adapters="auto",
     )
     assert out.tool_calls is not None, "capture produced nothing"
     by_name = {c.name: c for c in out.tool_calls}
@@ -86,7 +86,7 @@ def test_binding_off_captures_nothing_rather_than_guessing(tmp_path):
     half-instrumented."""
     out = run_rollout_in_process(
         resolve_entrypoint(Uninstrumented(), input_shape="text"),
-        _req(tmp_path), ledger_dir=str(tmp_path), timeout_s=30.0, adapters=[],
+        _req(tmp_path), trajectory_dir=str(tmp_path), timeout_s=30.0, adapters=[],
     )
     assert out.tool_calls is None
 
@@ -127,7 +127,7 @@ def test_a_call_is_attributed_to_the_agent_that_made_it(tmp_path):
     from langchain_core.tools import tool
 
     from percepteye_agent_flywheel.binding import bind_selected
-    from percepteye_agent_flywheel.outcomes import OutcomeLedger, _RolloutScope
+    from percepteye_agent_flywheel.outcomes import Trajectory, _RolloutScope
 
     @tool
     def deploy(q: str) -> str:
@@ -144,7 +144,7 @@ def test_a_call_is_attributed_to_the_agent_that_made_it(tmp_path):
         for u in unbinds:
             u()
 
-    calls = OutcomeLedger(str(tmp_path), "rl_m").read() or []
+    calls = Trajectory(str(tmp_path)).read() or []
     assert len(calls) == 2, calls
     assert calls[0].agent_name == "coder"
     # Unattributed stays unattributed. Filling it in with the last-seen name
@@ -209,14 +209,14 @@ class UninstrumentedADK:
 def test_adk_outcomes_are_captured_with_no_instrumentation(tmp_path):
     """THE claim, through the public surface, for the second framework.
 
-    Reaching the ledger proves the whole chain: "auto" probed ADK, bound it by
+    Reaching the trajectory proves the whole chain: "auto" probed ADK, bound it by
     wrapping PluginManager.__init__, the customer's own runner picked the
     plugin up, and the outcomes were written where the parent reads them.
     """
     pytest.importorskip("google.adk")
     out = run_rollout_in_process(
         resolve_entrypoint(UninstrumentedADK(), input_shape="text"),
-        _req(tmp_path), ledger_dir=str(tmp_path), timeout_s=30.0, adapters="auto",
+        _req(tmp_path), trajectory_dir=str(tmp_path), timeout_s=30.0, adapters="auto",
     )
     assert out.tool_calls is not None, "capture produced nothing"
     by_name = {c.name: c for c in out.tool_calls}

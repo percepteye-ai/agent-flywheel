@@ -1,6 +1,6 @@
 """OpenTelemetry egress: a projection out, never a source in.
 
-The ledger is what the control plane grades. Spans are additionally emitted so
+The trajectory is what the control plane grades. Spans are additionally emitted so
 outcomes appear in whatever the customer already runs. Nothing here is ever
 read back, which is why their sampler, queue overflow and exporter failures
 cost us nothing.
@@ -172,7 +172,7 @@ def test_with_no_provider_configured_nothing_raises(monkeypatch):
 
 
 def test_a_telemetry_failure_never_reaches_the_caller(spans, monkeypatch):
-    """This runs on the customer's own execution path beside the ledger write."""
+    """This runs on the customer's own execution path beside the trajectory write."""
     import percepteye_agent_flywheel.tracing as mod
 
     class _Exploding:
@@ -183,19 +183,19 @@ def test_a_telemetry_failure_never_reaches_the_caller(spans, monkeypatch):
     record_tool_call_span("lookup", {}, outcome="ok")   # no raise
 
 
-# ── the ledger is unaffected ───────────────────────────────────────────────
+# ── the trajectory is unaffected ───────────────────────────────────────────────
 
 
-def test_recording_an_outcome_still_writes_the_ledger_and_also_emits(spans, tmp_path):
-    """Egress is ADDITIVE. The ledger stays the record of what was trained on,
+def test_recording_an_outcome_still_writes_the_trajectory_and_also_emits(spans, tmp_path):
+    """Egress is ADDITIVE. The trajectory stays the record of what was trained on,
     because spans cannot carry logprobs or token ids — the GenAI convention
     defines no attribute for either."""
-    from percepteye_agent_flywheel.outcomes import OutcomeLedger
+    from percepteye_agent_flywheel.outcomes import Trajectory
 
     with _RolloutScope("rl_x", str(tmp_path)):
         record_tool_call("deploy", {"svc": "api"}, outcome="unknown", status_code=None)
 
-    calls = OutcomeLedger(str(tmp_path), "rl_x").read()
+    calls = Trajectory(str(tmp_path)).read()
     assert calls is not None and len(calls) == 1
     assert calls[0].outcome == "unknown"
     assert _only(spans).attributes["percepteye.tool.outcome"] == "unknown"

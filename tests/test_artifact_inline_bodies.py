@@ -94,7 +94,7 @@ def test_a_file_the_agent_writes_to_its_cwd_is_an_artifact(tmp_path):
     assert "triage.sh" in tr.artifacts, "the artifact was never registered"
 
 
-def test_the_ledger_file_is_never_an_artifact(tmp_path):
+def test_the_tool_calls_file_is_never_an_artifact(tmp_path):
     _tr, out = _run(tmp_path, 'echo x > kept.txt\necho done')
     assert "tool_calls.jsonl" not in out.artifacts
     assert "kept.txt" in out.artifacts

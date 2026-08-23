@@ -4,7 +4,7 @@ The importable-entrypoint requirement was the single biggest limit on who could
 be served: a compiled binary, a Node CLI, anything not written in Python had no
 way in at all. A command has the same contract as every other entrypoint — it
 is handed the rollout through the environment, it writes artifacts, and its
-outcomes come from the ledger — so an existing CLI needs no changes.
+outcomes come from the trajectory — so an existing CLI needs no changes.
 """
 from __future__ import annotations
 
@@ -99,12 +99,12 @@ def test_the_control_plane_credential_still_does_not_cross(tmp_path, monkeypatch
     assert out.final_text == "<absent>"
 
 
-def test_outcomes_come_from_the_ledger_a_cli_can_append_to(tmp_path):
+def test_outcomes_come_from_the_trajectory_a_cli_can_append_to(tmp_path):
     """A non-Python agent reports tool calls by appending JSONL — no SDK, no
     import, just a file whose path it is given."""
     tr = _T()
     body = (
-        'D="$PERCEPTEYE_LEDGER_DIR/$PERCEPTEYE_ROLLOUT_ID"; mkdir -p "$D"\n'
+        'D="$PERCEPTEYE_TRAJECTORY_DIR"\n'
         'printf \'{"name":"deploy","arguments":{},"outcome":"ok","status_code":200}\\n\''
         ' >> "$D/tool_calls.jsonl"\n'
         'echo done\n'

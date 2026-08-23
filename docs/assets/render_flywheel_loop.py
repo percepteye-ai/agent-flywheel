@@ -181,7 +181,7 @@ def packet(d, x, y, color, w=17, h=7, alpha=1.0, trail=0):
 
 
 def chip(d, x, y, label, color, on: float):
-    """A tri-state ledger chip. `on` in 0..1 fades it in from the dim rail."""
+    """A tri-state trajectory chip. `on` in 0..1 fades it in from the dim rail."""
     wpx = tw(label, F_CHIP) + 22
     body = mix(CARD, mix(BG, color, 0.22), on)
     edge = mix(LINE, color, on)
@@ -242,7 +242,7 @@ def build_base() -> Image.Image:
          "unchanged", F_TINY, (94, 160, 110), anchor="lm")
     text(d, (AGENT[0] + 18, AGENT[1] + 48), "child process  ·  isolated env  ·  killable",
          F_TINY, MUTED, anchor="lm")
-    text(d, (AGENT[0] + 18, AGENT[1] + 78), "TOOL OUTCOME LEDGER", F_ZONE, (102, 110, 122), anchor="lm")
+    text(d, (AGENT[0] + 18, AGENT[1] + 78), "TRAJECTORY", F_ZONE, (102, 110, 122), anchor="lm")
 
     rrect(d, PROD, 10, fill=CARD, outline=LINE, width=1)
     text(d, (PROD[0] + 18, PROD[1] + 25), "your production agent", F_BOX, TXT, anchor="lm")
@@ -380,12 +380,12 @@ def draw_frame(i: int) -> Image.Image:
     else:
         lane_labels("route", 0.15)
 
-    # ── the ledger: fills during `record`, persists to the seam ──
-    LEDGER = [("ok", GREEN, 0.00), ("ok", GREEN, 0.18),
+    # ── the trajectory: fills during `record`, persists to the seam ──
+    TRAJECTORY = [("ok", GREEN, 0.00), ("ok", GREEN, 0.18),
               ("unknown", AMBER, 0.40), ("failed", RED, 0.62), ("ok", GREEN, 0.82)]
     lx = AGENT[0] + 18
     ly = AGENT[1] + 100
-    for label, col, at in LEDGER:
+    for label, col, at in TRAJECTORY:
         if name == "record":
             on = ease(prog(p, at, at + 0.16))
         elif t > STAGES[3][2]:
@@ -396,7 +396,7 @@ def draw_frame(i: int) -> Image.Image:
 
     if name == "record":
         hi = None
-        for label, col, at in LEDGER:
+        for label, col, at in TRAJECTORY:
             if p >= at:
                 hi = (label, col)
         if hi and hi[0] == "unknown":

@@ -15,7 +15,7 @@ from percepteye_agent_flywheel.adapters.langchain import (
 )
 from percepteye_agent_flywheel.binding import bind_all, probe
 from percepteye_agent_flywheel.errors import RoutingNotInstallable
-from percepteye_agent_flywheel.outcomes import LEDGER_DIR_ENV, ROLLOUT_ID_ENV, OutcomeLedger
+from percepteye_agent_flywheel.outcomes import ROLLOUT_ID_ENV, TRAJECTORY_DIR_ENV, Trajectory
 
 lc = pytest.importorskip("langchain_core")
 
@@ -219,16 +219,16 @@ def test_bind_all_accepts_the_builtin():
         u()
 
 
-# ── end to end through the ledger ───────────────────────────────────────────
+# ── end to end through the trajectory ───────────────────────────────────────────
 
 
-def test_tool_events_reach_the_ledger_with_honest_outcomes(monkeypatch, tmp_path):
+def test_tool_events_reach_the_trajectory_with_honest_outcomes(monkeypatch, tmp_path):
     from langchain_core.messages.tool import ToolMessage
 
     from percepteye_agent_flywheel.adapters.langchain import _build_handler_cls
 
     monkeypatch.setenv(ROLLOUT_ID_ENV, "rl_lc")
-    monkeypatch.setenv(LEDGER_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv(TRAJECTORY_DIR_ENV, str(tmp_path))
 
     a = LangChainAdapter()
     unbind = a.bind(llm_url="https://gw/x", api_key="k")
@@ -245,7 +245,7 @@ def test_tool_events_reach_the_ledger_with_honest_outcomes(monkeypatch, tmp_path
     h.on_tool_error(RuntimeError("nope"), run_id="r3")
     unbind()
 
-    calls = OutcomeLedger(tmp_path, "rl_lc").read() or []
+    calls = Trajectory(tmp_path).read() or []
     by = {c.name: c for c in calls}
     assert by["search"].outcome == "ok"
     assert by["charge"].outcome == "unknown", "a prose result is not a success"

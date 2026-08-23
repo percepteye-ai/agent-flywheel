@@ -1,11 +1,11 @@
 """OpenTelemetry egress: a projection out, never a source in.
 
-Tool outcomes already land in the append-only ledger, which is what the control
+Tool outcomes already land in the append-only trajectory, which is what the control
 plane grades. This module additionally emits them as OpenTelemetry spans so
 they show up in whatever the customer already runs -- Datadog, Phoenix, Grafana
 -- alongside the rest of their agent's telemetry.
 
-**Egress only. Nothing here is ever read back.** The ledger stays the record of
+**Egress only. Nothing here is ever read back.** The trajectory stays the record of
 what was trained on, for a reason that is a fact about the OTel spec rather
 than about maturity: the GenAI semantic conventions define no attribute for
 per-token logprobs or token ids. The string "logprob" appears in the whole
@@ -79,7 +79,7 @@ def record_tool_call_span(
     """Project one recorded tool call into the customer's traces.
 
     A no-op when the API is absent, and it NEVER raises: this runs beside the
-    ledger write on the customer's own execution path, and a telemetry failure
+    trajectory write on the customer's own execution path, and a telemetry failure
     must cost us the span and nothing else.
     """
     tracer = _tracer()

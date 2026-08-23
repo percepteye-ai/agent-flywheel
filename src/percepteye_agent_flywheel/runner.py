@@ -35,7 +35,7 @@ from .contract import RolloutOutput, RolloutRequest, ToolCallOutcome
 from .entrypoint import InputShape, ResolvedEntrypoint, resolve_entrypoint
 from .errors import ConfigurationError, LeaseLost, TransportError
 from .isolation import build_child_env
-from .outcomes import LEDGER_FILENAME, OutcomeLedger, _RolloutScope
+from .outcomes import TOOL_CALLS_FILENAME, Trajectory, _RolloutScope
 from .transport import AttachTransport, sleep_ms
 
 __all__ = ["RolloutRunner", "run_rollout_in_process"]
@@ -105,7 +105,7 @@ def run_rollout_in_process(
     resolved: ResolvedEntrypoint,
     rollout: RolloutRequest,
     *,
-    ledger_dir: str,
+    trajectory_dir: str,
     timeout_s: float,
     adapters: list[str] | str | None = None,
 ) -> RolloutOutput:
@@ -126,7 +126,7 @@ def run_rollout_in_process(
             adapters, llm_url=rollout.llm_url, api_key=rollout.api_key
         )
         _ = report
-    with _RolloutScope(rollout.rollout_id, ledger_dir):
+    with _RolloutScope(rollout.rollout_id, trajectory_dir):
         arg = resolved.build_arg(rollout.turn_input)
         try:
             if resolved.is_async:
@@ -186,7 +186,7 @@ def run_rollout_in_process(
 
     out = _coerce_output(raw)
     out.timing["elapsed_s"] = time.time() - started
-    _attach_ledger(out, ledger_dir, rollout.rollout_id)
+    _attach_trajectory(out, trajectory_dir)
     return out
 
 
@@ -216,11 +216,11 @@ def _coerce_output(raw: Any) -> RolloutOutput:
     return RolloutOutput(final_text="" if raw is None else str(raw))
 
 
-def _attach_ledger(out: RolloutOutput, ledger_dir: str, rollout_id: str) -> None:
+def _attach_trajectory(out: RolloutOutput, trajectory_dir: str) -> None:
     """Merge recorded tool calls, preserving the None/[] distinction."""
     if out.tool_calls is not None:
         return
-    recorded = OutcomeLedger(ledger_dir, rollout_id).read()
+    recorded = Trajectory(trajectory_dir).read()
     if recorded is not None:
         out.tool_calls = recorded
 
@@ -264,7 +264,7 @@ def _is_command(entrypoint: Any) -> bool:
     can be served: an agent that is a compiled binary, a Node CLI, or anything
     not written in Python simply had no way in. A command has the same
     contract as everything else -- it is handed the rollout through the
-    environment, it writes artifacts, and its outcomes come from the ledger.
+    environment, it writes artifacts, and its outcomes come from the trajectory.
     """
     return isinstance(entrypoint, (list, tuple)) and bool(entrypoint)
 
@@ -296,7 +296,7 @@ def run_rollout_as_command(
     argv: list[str],
     rollout: RolloutRequest,
     *,
-    ledger_dir: str,
+    trajectory_dir: str,
     timeout_s: float,
     env: dict[str, str],
     cwd: str | None = None,
@@ -330,7 +330,7 @@ def run_rollout_as_command(
     # the parser worked. One finaliser, and no path that can forget it.
     def _finalise(out: RolloutOutput, stdout_text: str) -> RolloutOutput:
         out.timing.setdefault("elapsed_s", time.time() - started)
-        _attach_ledger(out, ledger_dir, rollout.rollout_id)
+        _attach_trajectory(out, trajectory_dir)
         _attach_stream_tool_calls(out, stdout_text or "")
         return out
 
@@ -365,9 +365,9 @@ def run_rollout_as_command(
 def _attach_stream_tool_calls(out: RolloutOutput, stdout: str) -> None:
     """Recover tool outcomes from a command agent's own event stream.
 
-    Only when the ledger recorded NOTHING. An agent that called
+    Only when the trajectory recorded NOTHING. An agent that called
     ``record_tool_call`` made a deliberate assertion about its own behaviour
-    and a stream parse must never overwrite it — the ledger is the record the
+    and a stream parse must never overwrite it — the trajectory is the record the
     control plane grades.
 
     This is what lets a process agent report tool calls at all. A framework
@@ -564,16 +564,16 @@ class RolloutRunner:
         # step. The control plane reserves the same kind of margin on its own
         # waiting loop, for the same reason; this side had none.
         timeout_s = min(self.rollout_timeout_s, max(1.0, budget - REPORT_MARGIN_S))
-        ledger_dir = self._ledger_dir()
-        Path(ledger_dir, rollout.rollout_id).mkdir(parents=True, exist_ok=True)
+        trajectory_dir = self._trajectory_dir(rollout.rollout_id)
+        Path(trajectory_dir).mkdir(parents=True, exist_ok=True)
 
         if self._command is not None:
             return run_rollout_as_command(
-                self._command, rollout, ledger_dir=ledger_dir,
+                self._command, rollout, trajectory_dir=trajectory_dir,
                 timeout_s=timeout_s, gate_flag=self.gate_flag,
                 env=build_child_env(
                     rollout_id=rollout.rollout_id, llm_url=rollout.llm_url,
-                    api_key=rollout.api_key, ledger_dir=ledger_dir,
+                    api_key=rollout.api_key, trajectory_dir=trajectory_dir,
                     extra={"PERCEPTEYE_TURN_INPUT": rollout.turn_input},
                 ),
                 # The per-rollout directory is the child's working directory,
@@ -583,20 +583,20 @@ class RolloutRunner:
                 # process happened to be started from, collection found
                 # nothing, and the artifact grader scored an absence the
                 # agent never caused.
-                cwd=str(Path(ledger_dir) / rollout.rollout_id),
+                cwd=str(trajectory_dir),
             )
         if self.isolation == "inprocess":
             return run_rollout_in_process(
-                self.resolved, rollout, ledger_dir=ledger_dir, timeout_s=timeout_s,
+                self.resolved, rollout, trajectory_dir=trajectory_dir, timeout_s=timeout_s,
                 adapters=self._adapters,
             )
-        return self._run_in_subprocess(rollout, ledger_dir=ledger_dir, timeout_s=timeout_s)
+        return self._run_in_subprocess(rollout, trajectory_dir=trajectory_dir, timeout_s=timeout_s)
 
-    def _ledger_dir(self) -> str:
-        return str(Path(self.artifacts_dir) / "_percepteye")
+    def _trajectory_dir(self, rollout_id: str) -> str:
+        return str(Path(self.artifacts_dir) / "_percepteye" / rollout_id)
 
     def _run_in_subprocess(
-        self, rollout: RolloutRequest, *, ledger_dir: str, timeout_s: float
+        self, rollout: RolloutRequest, *, trajectory_dir: str, timeout_s: float
     ) -> RolloutOutput:
         assert self._spec is not None
         payload = {
@@ -613,14 +613,14 @@ class RolloutRunner:
                 "deadline_ts": rollout.deadline_ts,
                 "metadata": rollout.metadata,
             },
-            "ledger_dir": ledger_dir,
+            "trajectory_dir": trajectory_dir,
             "timeout_s": timeout_s,
         }
         env = build_child_env(
             rollout_id=rollout.rollout_id,
             llm_url=rollout.llm_url,
             api_key=rollout.api_key,
-            ledger_dir=ledger_dir,
+            trajectory_dir=trajectory_dir,
         )
         started = time.time()
         # Popen rather than subprocess.run: the heartbeat thread must be able
@@ -680,7 +680,7 @@ class RolloutRunner:
                 timing={"elapsed_s": time.time() - started},
             )
         out.timing.setdefault("elapsed_s", time.time() - started)
-        _attach_ledger(out, ledger_dir, rollout.rollout_id)
+        _attach_trajectory(out, trajectory_dir)
         return out
 
     # ── leases ─────────────────────────────────────────────────────────────
@@ -805,7 +805,7 @@ class RolloutRunner:
         finally:
             with self._inflight_lock:
                 self._inflight.pop(rollout.rollout_id, None)
-            self._purge_ledger(rollout.rollout_id)
+            self._purge_trajectory(rollout.rollout_id)
 
     def _serve_one_inner(self, rollout: RolloutRequest) -> None:
         try:
@@ -830,7 +830,7 @@ class RolloutRunner:
             # clean-exit path meant a rollout could write a CORRECT solution and
             # have it discarded because the process did not terminate tidily —
             # measured on run 516b7a55, where a correct top_ips.sh sat in the
-            # ledger while the row carried artifacts={}.
+            # trajectory while the row carried artifacts={}.
             self._collect_artifacts(rollout, out)
             _mark_substrate_unavailable(out)
             # EVERY rollout is reported, whatever happened to it.
@@ -888,10 +888,10 @@ class RolloutRunner:
         keeps today's digest-string value: registered, named, not inlined.
         """
         # The LOCAL per-rollout directory, which is the one the child is told
-        # about through PERCEPTEYE_LEDGER_DIR and can therefore actually write
+        # about through PERCEPTEYE_TRAJECTORY_DIR and can therefore actually write
         # to. ``rollout.artifacts_dir`` is the SERVER's name for this rollout's
         # storage ("rollouts/rl_x") and is not a path on this machine.
-        root = Path(self._ledger_dir()) / rollout.rollout_id
+        root = Path(self._trajectory_dir(rollout.rollout_id))
         if not root.is_dir():
             return
         # Registration is OPTIONAL. It is a server-side index; the report body
@@ -921,7 +921,7 @@ class RolloutRunner:
             if path.is_symlink():
                 out.artifacts[str(path.relative_to(root))] = "skipped:symlink"
                 continue
-            if not path.is_file() or path.name == LEDGER_FILENAME:
+            if not path.is_file() or path.name == TOOL_CALLS_FILENAME:
                 continue
             # Defence in depth against a link ABOVE this path (a symlinked
             # parent dir would make every child look ordinary): prove the
@@ -976,14 +976,14 @@ class RolloutRunner:
                     "error": str(exc),
                 })
 
-    def _purge_ledger(self, rollout_id: str) -> None:
-        """Drop this rollout's ledger directory once it is no longer needed.
+    def _purge_trajectory(self, rollout_id: str) -> None:
+        """Drop this rollout's trajectory directory once it is no longer needed.
 
         One directory per rollout accumulated for the life of the process, so a
         flywheel serving continuously grew its artifacts tree without bound.
         """
         try:
-            shutil.rmtree(Path(self._ledger_dir()) / rollout_id, ignore_errors=True)
+            shutil.rmtree(Path(self._trajectory_dir(rollout_id)), ignore_errors=True)
         except OSError:  # pragma: no cover - best effort, never fails a rollout
             pass
 
@@ -1045,4 +1045,4 @@ def sha256_file(path: str | os.PathLike[str]) -> tuple[str, int]:
     return h.hexdigest(), size
 
 
-_ = LEDGER_FILENAME  # re-exported for adapters that write their own ledger
+_ = TOOL_CALLS_FILENAME  # re-exported for adapters writing their own file
