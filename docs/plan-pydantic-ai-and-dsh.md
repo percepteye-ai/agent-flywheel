@@ -488,6 +488,175 @@ Three questions to answer before writing code:
 
 ---
 
+## 9b. Verifying an agent that acts on someone else's API
+
+The prime-agent case is a **coding** agent: the deliverable is a file, the gate is
+`test -s top_ips.sh`, and a hidden test grades the artifact. A **tool-calling**
+agent — Jira, Confluence, Salesforce — is different in kind: the deliverable is
+**state in a third-party system**, and verifying it means calling that system's
+API.
+
+Most of the machinery survives unchanged. One thing breaks hard.
+
+### 9b.1 What survives
+
+`gate_flag` + `metadata["completion_gate"]` already accepts an arbitrary shell
+command, so a gate becomes a request instead of a file test:
+
+```sh
+curl -sf "$JIRA/rest/api/3/issue/$KEY" | jq -e '.fields.status.name == "Done"'
+```
+
+Still an existence-and-smoke check. The `--autonomous-gate-timeout-ms` bound
+matters more here — the gate is now a network call against a rate-limited system,
+re-run on every continuation.
+
+### 9b.2 What breaks: the task cannot be repeated
+
+Sixteen rollouts of *"resolve PROJ-412"* against production Jira produce sixteen
+transitions, sixteen notification storms, sixteen SLA clocks. **Trajectory-level
+repetition is unavailable on production for any write-acting agent.**
+
+This makes the step-level design (§3) *more* necessary, not less. At step level no
+tool is ever executed: sample k completions at a fixed prefix, score which call
+the model chose and how it built the arguments, discard k−1. Zero side effects by
+construction. For a Jira agent that is most of the signal anyway — the failures
+are wrong endpoint, wrong transition id, malformed body, missing required field.
+
+**Two tiers, answering different questions:**
+
+| tier | question | needs | cadence |
+|---|---|---|---|
+| step, from logged prefixes | right call, valid arguments? | nothing — no API access | daily, on production traffic |
+| trajectory, in a disposable instance | right end state? | a resettable target | per training batch |
+
+### 9b.3 τ-bench, and the blind spot that argues for the tri-state
+
+**[verified]** from source (arXiv 2406.12045). τ-bench's reward is **SHA-256
+equality of the entire canonicalized database** — not a subset check, not
+per-field assertions. `calculate_reward` hashes the DB, replays the ground-truth
+actions from a fresh load, hashes again, and compares.
+
+Three consequences read straight off the code:
+
+- **Extra reads are free.** Read tools never mutate `data`.
+- **List order is load-bearing.** `to_hashable` preserves list order and writes
+  append, so two orderings of the same logical writes hash differently. "Any path
+  to the same state passes" holds for the *state*, not unconditionally.
+- **A failed write leaves no trace and does not fail the task.** `step()` wraps
+  tools in `try/except` returning `f"Error: {e}"`, and tools guard early. The
+  agent attempts a forbidden transition, is rejected, the DB is unchanged — and
+  the hash still matches.
+
+That last one is the argument. **State-hash verification cannot see
+attempted-and-rejected actions; per-call tri-state outcomes can.** It is the same
+blindness as `handle_tool_error`, one layer up, sitting in the field's leading
+benchmark for exactly this agent shape.
+
+**Adopt `pass^k`** — the probability that *all* k trials succeed, the inverse of
+`pass@k`. τ-bench introduced it because customer service needs reliability, not
+discoverability, and the measured collapse is the headline: **gpt-4o exceeds 60%
+at pass^1 and falls below 25% at pass^8.** For an enterprise tool-calling agent
+that is the number that blocks deployment, and it is a better daily claim than
+accuracy.
+
+### 9b.4 The environment: per-run namespacing, not vendor sandboxes
+
+**[verified]** Vendor sandboxes are not a per-rollout reset primitive:
+
+| | reset | API? |
+|---|---|---|
+| Atlassian Cloud Sandbox (Premium/Enterprise only) | *"up to 14 days to copy data"* | **none — UI only** |
+| Salesforce Full sandbox | 29-day refresh interval | — |
+| ServiceNow PDI | "a few hours", UI-triggered | none |
+
+Atlassian sandboxes also **do not copy** Marketplace apps, webhooks, API tokens or
+third-party credentials, and copy automation rules **disabled** — a sim-to-real
+gap inside the vendor's own sandbox.
+
+What published benchmarks actually do is **a real instance with per-run
+namespacing and programmatic teardown**. Salesforce's own CRMArena-Pro
+(arXiv 2505.18878) runs on live org sandboxes seeded with ~54k synthetic records
+rather than a mock — a strong signal from a vendor with total control over that
+tradeoff.
+
+**For Jira: a free developer site, one project per rollout, deleted by API
+afterwards.** Provisioning is manual and once; teardown is seconds and scriptable.
+
+### 9b.5 The credential problem — genuinely open space
+
+**[verified]** No eval or RL platform surveyed — HUD, Veris, LangSmith, Braintrust,
+Galileo/Splunk, AgentCore, Salesforce, Microsoft — calls a customer's live
+third-party API to verify an agent action. They avoid it four ways: simulate the
+system, containerize a replica, *be* the system of record, or grade the trace
+instead of the world.
+
+The closest precedent for the shape below is **Braintrust remote evals**: the
+customer runs the eval server, Braintrust triggers it and displays results —
+*"Your evaluation code runs on your machine or server… Only results are sent to
+Braintrust."* Their own caveat applies to us: it is designed for **data
+residency, not for distrusting the customer**; returned scores are accepted at
+face value.
+
+**The trust inversion is unsolved in this market.** The only prior art is
+decentralized RL (Prime Intellect, Gensyn) and crowdsourcing QC. The cheap proven
+answer is **gold tasks**: seed known-answer probes into every batch, and stop
+trusting a tenant's self-reported grades when its probes come back passing.
+
+### 9b.6 Design: post-conditions, not a training mode
+
+The question was whether to add an explicit **training mode** with an out-of-band
+executor shipped in the SDK. Assessment:
+
+**It would be a real mode, not a fake one** — it changes what runs, what side
+effects occur, and what is reported. So it does not fail the §2 test. But it is
+not needed, because **the harness parent is already an out-of-band executor**:
+`serve()` runs in the parent, the agent runs in a child, and the parent already
+collects artifacts after the child exits. Running a post-condition there is a few
+lines in `_finalise`, and it is out-of-band with respect to the agent by
+construction.
+
+**Recommended shape — the existing two-sided pattern, reused verbatim:**
+
+| | serve configuration (a fact about the deployment) | task metadata (a property of the task) |
+|---|---|---|
+| completion gate | `gate_flag` | `completion_gate` |
+| **post-condition** | **`verify_env=`** — "this deployment points at a disposable instance" | **`post_conditions`** |
+
+Either side missing runs nothing, which is exactly today's pre-gate behaviour.
+The declaration matters on its own: running post-conditions against *production*
+Jira is itself unwanted — audit noise, rate limits — so the customer must state
+that the target is disposable.
+
+The verdict is recorded as an ordinary tool call, so no new concept enters the
+contract:
+
+```json
+{"name":"__verify.jira","arguments":{"issue":"PROJ-412"},
+ "outcome":"failed","status_code":200,
+ "error":"status=In Progress, expected Done"}
+```
+
+`status_code: 200` with `outcome: failed` is the `charge_card` case exactly — the
+request succeeded, the assertion did not, both halves true.
+
+**Options considered and why they lose:**
+
+| option | verdict |
+|---|---|
+| post-conditions via the two-sided pattern | **recommended** — no mode, no new process, no new contract concept |
+| a `verify=` Python callable on `serve()` | more expressive, but Python-only, so it does not serve dsh or OpenClaw |
+| a separate executor process | the donor worker again. **One genuine use** — see below |
+| a real `mode="training"` flag | only if several behaviours must be gated together. They need not be |
+
+**The one argument for a separate executor: eventual consistency.** Jira indexes
+asynchronously, so a post-condition run immediately after the agent exits may read
+stale state. A delayed re-check cannot happen inside the rollout's lease. If that
+proves to matter in practice, it is the reason to build an executor — and not
+before.
+
+---
+
 ## 10. Risks
 
 **Cordis v4 is an unstable rewrite with no documentation.** `cordis@4.0.0-rc.8`.
@@ -525,6 +694,9 @@ squatters. Argument for claiming `percepteye` now.
 6. **`fw.attach()`** (§3) — the production-side surface. Independently the highest
    commercial value item, and it depends on none of 3–5.
 7. **PydanticAI adapter** — after §9's questions are answered.
+8. **Post-conditions** (§9b.6) — `verify_env=` plus `post_conditions` in metadata,
+   executed by the harness parent and recorded as an ordinary tool call. Small,
+   and it is what makes a tool-calling agent gradeable at all.
 
 Items 1, 2 and 6 are independently valuable and carry no third-party risk. A
 piecemeal pickup should start there. **6 is the one that changes the product.**
