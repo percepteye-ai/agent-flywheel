@@ -1,76 +1,57 @@
-# Plan: PydanticAI adapter + DeepSeek Harness plugin
+# Plan: the capture ABI, the mode question, and four integrations
 
-**Status: parked.** Written 2026-08-22. Nothing here is implemented. No code
-has been written against any of it.
+**Status: parked.** Written 2026-08-22, extended 2026-08-23. Nothing here is
+implemented. No code has been written against any of it.
 
-Everything marked **[verified]** was read from primary source — npm tarballs,
-a shallow clone of the upstream repo, the GitHub API, or this repository.
+Everything marked **[verified]** was read from primary source — npm tarballs, a
+shallow clone of the upstream repo, the GitHub API, or this repository.
 Everything marked **[open]** is not yet established and must not be assumed.
 
----
-
-## 1. Why these two need different mechanisms
-
-| | PydanticAI | DeepSeek Harness (dsh) |
-|---|---|---|
-| What it is | Python library, importable `Agent` objects | TypeScript/Node CLI on Cordis |
-| Official Python package | `pydantic-ai` 2.33.0, py≥3.10 **[verified]** | `deepseek-harness-sdk` — a *driver* SDK **[verified]** |
-| Runs as | in-process object | child process |
-| Capture mechanism | **in-process adapter** | **in-agent plugin** |
-| Lands in | `src/percepteye_agent_flywheel/adapters/pydantic_ai.py` | a separate npm package |
-
-This introduces a **third capture mechanism** to the product, and it
-generalizes past dsh:
-
-| mechanism | for | ships as |
-|---|---|---|
-| in-process adapter | Python frameworks — LangChain, LangGraph, ADK, PydanticAI | `adapters/*.py` |
-| stdout event stream | CLI agents that already log — prime-agent, OTel GenAI | a `StreamFormat` entry |
-| **in-agent plugin** | frameworks with a plugin system — dsh | a package we publish |
-
-The first two are **pull**: we monkeypatch, or we scrape text meant for humans.
-The third is **push** — the agent hands us the data through a public extension
-point, and the platform guarantees containment rather than us enforcing it by
-hand.
-
-### The ledger is already the plugin ABI
-
-No new protocol is needed. This repository already ships one, and the README
-documents a **shell one-liner** as a conforming client:
-
-```sh
-D="$PERCEPTEYE_LEDGER_DIR/$PERCEPTEYE_ROLLOUT_ID"; mkdir -p "$D"
-printf '{"name":"deploy","arguments":{},"outcome":"ok","status_code":200}\n' >> "$D/tool_calls.jsonl"
-```
-
-Two environment variables and newline-delimited JSON. No Python, no SDK, no
-network. A dsh plugin is therefore the *second implementation of a proven ABI*,
-not a new integration surface. The reusable deliverable is to promote the
-ledger from an implementation detail to a documented, versioned wire format —
-it is already half-specified as `ToolCallRecord` in `schema/flywheel-1.json`.
+> The filename is narrower than the contents. This began as a PydanticAI + DeepSeek
+> Harness plan and grew to cover OpenClaw, ACP, and the training/production mode
+> question. Rename when convenient.
 
 ---
 
-## 2. Why dsh is worth the effort
+## 0. The one idea this document is organised around
 
-**[verified]** via the GitHub API and a shallow clone of `master` @ `b150a55`:
+**The ledger is the ABI.** Every integration, in every language, reduces to a shim
+that does two things: append JSON lines to
+`$PERCEPTEYE_LEDGER_DIR/$PERCEPTEYE_ROLLOUT_ID/tool_calls.jsonl`, and make the
+agent's completions go to an endpoint we supply.
 
-| | |
-|---|---|
-| `deepseek-ai/deepseek-harness` | **185,522 ★**, MIT, created 2026-08-13 |
-| Repo description | *"DeepSeek Harness: Everything is a Plugin."* |
-| Repos tagged `dsh-plugin` | **10,762** |
-| Topics on the repo | `ai-agents`, `cordis`, `dsh`, `dsh-plugin` |
+This is not aspirational. It is already true, and **[verified]**:
+`adapters/adk.py:132` and `adapters/langchain.py:128` both call
+`record_tool_call()`, which appends to that file. The README already documents a
+**shell one-liner** as a conforming client. A Cordis plugin and an OpenClaw
+plugin would write *the same lines*.
 
-`CONTRIBUTING.md:15` and `README.md:42` both instruct plugin authors to tag
-their repository with the `dsh-plugin` topic "for discoverability". That is a
-distribution channel the adapter mechanism has no equivalent of.
+So there is one mechanism with several hosts, not several integrations:
+
+| framework | capture shim | status | routing | status |
+|---|---|---|---|---|
+| LangChain / LangGraph | in-process adapter | ✅ built | env, or `llm=` | ✅ |
+| Google ADK | in-process adapter | ✅ built | env | ✅ |
+| PydanticAI | in-process adapter | planned | **[open]** — see §8 | |
+| prime-agent | stdout `StreamFormat` | ✅ built | `route.ts` extension | ✅ |
+| **DeepSeek Harness** | **Cordis plugin** | planned §6 | `DEEPSEEK_BASE_URL` | ✅ verified §5 |
+| **OpenClaw** | **OpenClaw plugin** | planned §7 | **✅ already solved** | see §7 |
+
+Consequences worth stating plainly:
+
+- dsh and OpenClaw are **two instances of one mechanism**, not two projects.
+  Build it once for dsh and OpenClaw is incremental.
+- The existing Python adapters need no change. They are the Python instance of
+  the same contract.
+- Promoting the ledger from an implementation detail to a **documented, versioned
+  wire format** is the reusable deliverable. It is already half-specified as
+  `ToolCallRecord` in `schema/flywheel-1.json`.
 
 ---
 
-## 3. BLOCKER — fix before anything else
+## 1. BLOCKER — fix before anything writes the ledger from outside Python
 
-`OutcomeLedger.read()` is not crash-tolerant. `src/percepteye_agent_flywheel/outcomes.py:195`:
+`OutcomeLedger.read()` is not crash-tolerant. `outcomes.py:195`:
 
 ```python
 for line in fh:
@@ -80,69 +61,169 @@ for line in fh:
     d = json.loads(line)          # <- no guard
 ```
 
-`_attach_ledger` (`runner.py`) calls it unguarded, **unlike**
-`_attach_stream_tool_calls`, which is explicitly wrapped with the comment
-*"never fail a rollout over telemetry"*. That asymmetry is the bug.
+`_attach_ledger` calls it unguarded, **unlike** `_attach_stream_tool_calls`,
+which is explicitly wrapped with the comment *"never fail a rollout over
+telemetry"*. That asymmetry is the bug.
 
 **Failure mode.** A `SIGKILL` on deadline truncates the final line mid-write →
-`json.JSONDecodeError` → propagates out of `run_one` → the rollout is reported
-as `flywheel_crash`. **Every** tool call is lost, not just the partial one, and
-a completed rollout's work is discarded.
+`json.JSONDecodeError` → propagates out of `run_one` → the rollout is reported as
+`flywheel_crash`. **Every** tool call is lost, not just the partial one, and a
+completed rollout's work is discarded.
 
 Today this is unlikely: `record_tool_call` holds a lock and writes short lines
 from the same process. **The moment an external Node process appends to the
 ledger under a kill signal it becomes probable.**
 
-**Fix.** Skip malformed lines, count them, and surface the count rather than
-swallowing it silently. Absence must stay distinguishable from zero: a file
-that existed but yielded no parseable records is not the same as no file.
+**Fix.** Skip malformed lines, count them, surface the count. Absence must stay
+distinguishable from zero: a file that existed but yielded no parseable records
+is not the same as no file.
 
 ---
 
-## 4. Two general SDK features these require
+## 2. The mode question, and the lesson from the prior SDK
 
-Both were chosen deliberately over dsh-specific hacks.
+### What is recoverable about the prior SDK
+
+**Nothing, from this repository, by design.** Its codename appears in exactly one
+place: the internal-names tuple in `tests/test_oss_boundary.py`, which the
+boundary test uses to keep those names *out* of anything this repo publishes.
+Naming it here would fail that test — as it did on the first draft of this
+document, which is the check working.
+
+**[open]** — if someone can supply, out of band, what its five modes were and
+which one was real, this section can be sharpened.
+
+What *is* recorded is the lesson, in the module docstring:
+
+> *"Modes that do not change what the SDK actually does are not offered, because
+> an earlier SDK shipped five of them, of which four were byte-identical strings
+> in one payload field the server never read."*
+
+### The lesson applied
+
+**Do not add `mode="training"` / `mode="production"`.** It would be the fifth
+fake mode. `FlywheelMode` is `Literal["rollout"]` and should stay that way.
+
+Ask instead what genuinely differs between the two roles. Two things do, and
+neither is a mode:
+
+1. **Where the task came from** — a user, or the control plane. A per-turn
+   **fact**, not a process setting.
+2. **Whether the completion went through a capturing endpoint.** A per-turn
+   **observation**, which can differ turn to turn inside one process.
+
+Model those two and the mode disappears.
+
+---
+
+## 3. The production design — no donor worker
+
+**Constraint: deploying a standing donor worker is a non-starter in the
+enterprise.** The design must put the SDK *inside* the agent, and let the control
+plane switch the endpoint to a fine-tuned model.
+
+### The reframe
+
+If the SDK sits in the production agent and completions flow through a
+Percepteye-supplied endpoint, **production traffic is the training corpus.** No
+second process is required to *capture* anything.
+
+### What already exists
+
+- `apply_current_policy()` — the control plane chooses the endpoint. This is
+  exactly the mechanism required, already built, and already documented as
+  *"Use this in your PRODUCTION agent, the one serving your users."*
+- The adapters — in-process tool capture, zero instrumentation.
+- The ledger, and introspection.
+
+### What is missing
+
+1. Adapters bind only inside `serve()`'s runner. There is no public "bind these
+   in my production process" entry point.
+2. The contract is rollout-shaped (`RolloutRequest`, `rollout_id`). There is no
+   production-turn shape.
+3. Policy adoption is startup-only, deliberately — a policy that changes under a
+   running agent is the same confound the control plane refuses on its own
+   training runs.
+4. No way to mark a turn that **bypassed** capture.
+
+### The proposed surface
+
+```python
+import percepteye_agent_flywheel as fw
+
+fw.attach(agent_id="my-agent")   # register + resolve policy + bind adapters
+```
+
+One call at startup. It should register the agent (with introspection), resolve
+the current policy into the endpoint configuration, bind the framework adapters
+in-process, and return a handle whose policy can be refreshed explicitly rather
+than polled.
+
+### Two hard problems, stated rather than papered over
+
+**(a) The gateway lands in the users' critical path.** Enterprises will resist
+that as hard as a donor worker — Percepteye's availability becomes their
+availability. The house position already exists and should extend: `current_policy`
+fails open because *"an unreachable control plane must never stop a customer's
+agent from serving its users."*
+
+But a bypassed turn **must be recorded as bypassed, not absent**. That is the
+absence≠zero rule one layer up, and getting it wrong yields a training set that
+silently over-represents the turns that happened to work.
+
+**(b) Production traffic is one sample per task.** Group-relative advantage needs
+N samples of the *same* task. So "keeps training itself" has a real staging
+constraint:
+
+| stage | what improves | what it needs |
+|---|---|---|
+| 1 | prompts and tool descriptions, from production traces | nothing new — this is AWS AgentCore's model and it is genuinely friction-free |
+| 2 | SFT'd weights behind the same endpoint | capture only; the endpoint switch is invisible to the agent |
+| 3 | on-policy RL | sampling capacity — **a burst worker run for a training window, not standing infrastructure** |
+
+Stage 3 reframes the donor worker from "deploy this forever" to "run this for an
+afternoon", which is a materially different enterprise conversation.
+
+---
+
+## 4. Two general SDK features
+
+Both chosen over vendor-specific hacks.
 
 ### 4.1 `fw.TASK` — argv templating
 
-dsh headless takes the task as a **positional argv argument**; the SDK
-currently delivers it on stdin and in `PERCEPTEYE_TURN_INPUT`, neither of which
-reaches it.
+Some CLIs take the task as a **positional argv argument**; the SDK delivers it on
+stdin and in `PERCEPTEYE_TURN_INPUT`, neither of which reaches them.
 
 ```python
 fw.serve(["dsh", "--profile", "percepteye", fw.TASK], agent_id=..., input_shape="text")
 ```
 
-A module-level sentinel rather than a `"{task}"` string, because a sentinel
-cannot collide with a literal argument and can be validated at startup —
-consistent with the house rule that the dangerous shape should be
-unconstructible.
+A module-level sentinel rather than a `"{task}"` string: a sentinel cannot collide
+with a literal argument and can be validated at startup — consistent with the
+house rule that the dangerous shape should be unconstructible.
 
 Semantics, all checked at startup:
 
 - **No `TASK` in argv → behaviour unchanged.** Fully backwards compatible.
 - **`TASK` present → the task is delivered by argv, and stdin gets nothing.**
-  Otherwise an agent reading both processes the task twice. Declared, not
-  guessed — same posture as `input_shape`.
+  Otherwise an agent reading both processes it twice. Declared, not guessed.
 - `PERCEPTEYE_TURN_INPUT` stays set either way; it is inert unless read.
 
 Two implementation notes:
 
-- `serve()` builds its registration label with `" ".join(runner._command)`,
-  which will raise on a non-string sentinel. This is the same class of bug the
-  code comments record having shipped once before. Render it as `<task>`.
-- **Security:** argv is visible to other users via `ps`; stdin is not. This is
-  a real trade-off and belongs in the docs beside the feature, not discovered
-  later.
+- `serve()` builds its registration label with `" ".join(runner._command)`, which
+  raises on a non-string sentinel. Same class of bug the code comments record
+  shipping once before. Render it as `<task>`.
+- **Security:** argv is visible to other users via `ps`; stdin is not. That
+  trade-off belongs in the docs beside the feature.
 
 ### 4.2 `endpoint_env=` — configurable endpoint variable names
 
-**[verified]** dsh reads **no** `OPENAI_BASE_URL` — grepped across the whole
-repo; it does not exist. The SDK currently sets `OPENAI_BASE_URL` /
-`OPENAI_API_KEY` in the child, so **out of the box dsh would ignore us, use its
-own credentials, and send every completion to DeepSeek unobserved.** That is
-precisely the failure `examples/prime_agent/README.md` records living through
-("we simply owned none of the completion wire").
+**[verified]** dsh reads **no** `OPENAI_BASE_URL` — grepped across the whole repo.
+The SDK sets that name today, so an unmodified integration would look correct
+while every completion went to DeepSeek unobserved.
 
 ```python
 fw.serve(..., endpoint_env=("DEEPSEEK_BASE_URL", "DEEPSEEK_API_KEY"))
@@ -152,57 +233,51 @@ Names declared, never guessed. Useful well beyond dsh.
 
 ---
 
-## 5. dsh LLM routing — **[verified] viable**
+## 5. DeepSeek Harness — routing **[verified] viable**
 
-Sources: npm tarballs `@deepseek-ai/dsh@0.1.1-rc.2`, `dsh-llm@0.0.1-rc.1`,
-`dsh-llm-pi-ai`, `dsh-llm-deepseek`, `dsh-headless`, `dsh-base`; repo @ `b150a55`.
-
-Note: `@deepseek-ai/dsh-core` and `@deepseek-ai/dsh-config` **do not exist**
-(404 on the registry).
+Sources: npm `@deepseek-ai/dsh@0.1.1-rc.2`, `dsh-llm`, `dsh-llm-pi-ai`,
+`dsh-llm-deepseek`, `dsh-headless`, `dsh-base`; repo @ `b150a55`.
+`@deepseek-ai/dsh-core` and `dsh-config` **do not exist** (404).
 
 | lever | mechanism |
 |---|---|
 | Base URL | `DEEPSEEK_BASE_URL` — `llm-deepseek/src/index.ts:185,360` |
-| API key | `DEEPSEEK_API_KEY` — `DEFAULT_API_KEY_ENV`, `index.ts:79` |
+| API key | `DEEPSEEK_API_KEY` — `index.ts:79` |
 | Model id | **not settable by env** — needs `--patch` or `settings.yaml` |
 
 `DEEPSEEK_BASE_URL` is on dsh's **bootstrap-only** list
 (`packages/boot/app-boot/src/index.ts:93-116`): only the inherited process
-environment may supply it, and a `.env` file naming it is rejected at load.
-Credential precedence is documented as **inherited process environment always
-wins**. That is exactly our spawn model.
+environment may supply it, and a `.env` naming it is rejected at load. Credential
+precedence is **inherited process environment always wins**. That is exactly our
+spawn model.
 
-**Wire format** (`adapter.ts:607`): `fetch(\`${baseURL}/chat/completions\`)`
-with `authorization: Bearer <key>`. Point `DEEPSEEK_BASE_URL` at
-`https://host/v1`. `WireRequest` hardcodes `stream: true` and
-`stream_options: { include_usage: true }` — **the gateway must serve SSE**
-(already true per the prime-agent notes).
+**Wire** (`adapter.ts:607`): `fetch(\`${baseURL}/chat/completions\`)` with
+`authorization: Bearer`. Point `DEEPSEEK_BASE_URL` at `https://host/v1`.
+`WireRequest` hardcodes `stream: true` and `stream_options: {include_usage: true}`
+— **the gateway must serve SSE**.
 
-**Model id** needs `--patch <path>`, which is repeatable, applied after the
-profile layer, and supports `!!js process.env.X` interpolation:
+**Model id** needs `--patch <path>`, repeatable, applied after the profile layer,
+supporting `!!js process.env.X`. `--dump-config` verifies the composed tree.
+Caveat: an id-targeted patch **replaces the named entry's whole `config`**.
 
-```yaml
-- id: agent-default-model
-  config:
-    provider: deepseek-official
-    model: !!js process.env.PERCEPTEYE_MODEL_ID
-```
+### Ecosystem
 
-`--dump-config` prints the composed tree for verification. Caveat from
-`app-boot/README.md`: an id-targeted patch **replaces the named entry's whole
-`config`** — restate unchanged fields.
+**[verified]** `deepseek-ai/deepseek-harness`, **185,522 ★**, MIT, created
+2026-08-13, description *"DeepSeek Harness: Everything is a Plugin."*
+`dsh-plugin` GitHub topic: **10,762 repos**. `CONTRIBUTING.md:15` and
+`README.md:42` both instruct plugin authors to use that topic.
 
 ---
 
-## 6. The plugin: `percepteye-dsh`
+## 6. `percepteye-dsh` — the plugin
 
 One npm package, **zero runtime dependencies**, mounting as an ordinary Cordis
 plugin.
 
 ### 6.1 Subscribe to exactly one event
 
-**[verified]** from `packages/core/tools/src/index.ts:135-206`. Six `tools/*`
-events exist; five are unusable for observation.
+**[verified]** `packages/core/tools/src/index.ts:135-206`. Six `tools/*` events
+exist; five are unusable for observation.
 
 | event | `@mode` | use it? |
 |---|---|---|
@@ -211,146 +286,262 @@ events exist; five are unusable for observation.
 | `tools/post-execute` | **waterfall** | **never** — can replace or **block** the result |
 | `tools/code-dispatch-log` | **waterfall** | **never** — rewrites the logged copy |
 | **`tools/result`** | **emit** | **yes — the only one** |
-| `tools/change` | emit | n/a (registry churn, deliberately unfiltered) |
+| `tools/change` | emit | n/a — registry churn |
 
-`tools/result` is documented as: *"Observe the frozen, lossless-JSON final
+`tools/result` is documented as *"Observe the frozen, lossless-JSON final
 outcome. Listener failures are contained. Scope-filtered dispatch: keyed by
-`exec.agent`."*
-
-That last clause gives **multi-agent attribution for free** — the same
-`agent_name` field the ADK and LangGraph adapters work to populate.
+`exec.agent`."* That last clause gives **multi-agent attribution for free**.
 
 **Payload [verified]:** `ToolExecution` carries `callId`, `rootCallId`, `name`,
 `arguments`, `agent?`, `parent?`, `token`, `signal`. `ToolExecutionResult` is a
-discriminated union on `isError`, where `ToolExecutionSuccess` has
-`value?: never` on the failure side and vice versa.
+discriminated union on `isError`.
 
 ### 6.2 Outcome mapping — the crux
 
-The naive `isError` reading is wrong, and getting it wrong reintroduces the
-exact defect this SDK exists to prevent. dsh's bash tool documents: *"non-zero
-exits are reported, not errored; only infrastructure failures surface as
-`isError`."* **So `isError: false` means "the dispatch completed", not "the
-operation succeeded."** A flat `isError:false → ok` scores every failed
-`npm test`, every non-zero `grep`, every rejected `git push` as a success.
+dsh's bash tool documents *"non-zero exits are reported, not errored; only
+infrastructure failures surface as `isError`."* **So `isError: false` means "the
+dispatch completed", not "the operation succeeded."** A flat mapping scores every
+failed `npm test` as a success.
 
 | case | → | why |
 |---|---|---|
-| `isError: true` | `failed` | `ToolExecutionFailure` never carries a value; the registry normalizes throws into it. A real framework-issued verdict. |
-| `isError: true`, cancellation/timeout code | **`unknown`** | Cancellation arrives as `isError:true` *even when the body ran and its side effect landed*. `failed` would assert a failure nobody observed — the mirror image of the sin, equally forbidden. |
-| `isError: false`, `bash` / `run_code` / `terminal_run` | parse exit code; **`unknown`** if unreadable | These carry the true verdict in-band. Never fall back to `ok`. An exit code is **not** an HTTP status — leave `status_code` null or `ToolCallOutcome.__post_init__` raises `ContractViolation`. |
-| `isError: false`, verified tools (`read`, `write`, `edit`, `glob`, `grep`, `todo_write`) | `ok` | No in-band status channel exists, so failure has nowhere to go but the failure variant. **This is where the training signal comes from.** |
-| everything else — MCP, third-party, subagents | **`unknown`** | An MCP server returning `{"error": ...}` as ordinary content is the swallowed-error case verbatim, invisible from here. |
+| `isError: true` | `failed` | `ToolExecutionFailure` never carries a value; the registry normalizes throws into it |
+| `isError: true`, cancellation/timeout code | **`unknown`** | cancellation arrives as `isError:true` *even when the body ran and its side effect landed* |
+| `isError: false`, `bash` / `run_code` / `terminal_run` | parse exit code; **`unknown`** if unreadable | in-band verdict. An exit code is **not** an HTTP status — leave `status_code` null or `__post_init__` raises |
+| `isError: false`, verified tools (`read`, `write`, `edit`, `glob`, `grep`) | `ok` | no in-band status channel exists, so failure has nowhere to go but the failure variant. **This is where the signal comes from** |
+| everything else — MCP, third-party, subagents | **`unknown`** | an MCP server returning `{"error": ...}` as content is the swallowed-error case verbatim |
 
-A tool moves from `unknown` to `ok` by a fixture plus a contract test, never by
-assumption. Config may only widen the verified list; it can never override the
-`isError: true` case.
+Tools move from `unknown` to `ok` by a fixture plus a contract test, never by
+assumption. Config may widen the verified list; it can never override `isError: true`.
 
 ### 6.3 Safety rules
 
 - **Inert when `PERCEPTEYE_LEDGER_DIR` / `PERCEPTEYE_ROLLOUT_ID` are absent** —
-  register no listener at all, so the plugin is always safe to leave installed.
-- **No tool events → write nothing**, never an empty file. `None` and `[]` must
-  stay distinguishable end to end.
-- **One synchronous `write(2)` on a single `O_APPEND` fd per record**, built
-  fully in memory first. That is what stops concurrent tools interleaving.
-- **`try/catch` internally anyway.** dsh guarantees containment; we do not rely
+  register no listener, so the plugin is always safe to leave installed.
+- **No tool events → write nothing**, never an empty file.
+- **One synchronous `write(2)` on a single `O_APPEND` fd per record**, built fully
+  in memory first. That is what stops concurrent tools interleaving.
+- **`try/catch` internally anyway** — dsh guarantees containment; we do not rely
   on it, exactly as `adk.py` does not rely on ADK.
 - Never write to stdout/stderr — stdout is the agent's `final_text`.
-- **Structural mirror** of dsh's payload types instead of
-  `import type` from `@deepseek-ai/dsh-tools`, plus a type-level contract test
-  pinning the mirror against the real package. Upstream drift becomes one red
-  test in one file rather than silent data loss.
+- **Structural mirror** of dsh's payload types instead of `import type`, plus a
+  type-level contract test pinning it. Upstream drift becomes one red test.
 
 ### 6.4 Distribution
 
 **[verified]** A package is a dsh plugin **iff `package.json` declares
-`dsh.bundle.patch`**. There is no enforced name convention — not
-`dsh-plugin-*`, not `@scope/dsh-*`. `dsh-*` is de-facto community habit;
-`dsh-plugin` is a **GitHub topic**, not a package prefix.
-
-- Dev loop, no publishing needed: `--patch` overlay with an absolute path.
-- Install: `dsh plugin --profile <name> add <package>` — a thin pnpm forwarder,
-  so local paths, tarballs and `github:` specs all work.
-- Tag the repo `dsh-plugin`.
+`dsh.bundle.patch`**. No enforced name convention; `dsh-*` is habit and
+`dsh-plugin` is a GitHub topic, not a prefix. Dev loop: `--patch` with an absolute
+path, no publishing needed. Install: `dsh plugin --profile <name> add <package>`,
+a thin pnpm forwarder, so local paths, tarballs and `github:` specs all work.
 
 ---
 
-## 7. Risks
+## 7. OpenClaw
 
-**Cordis v4 is an unstable rewrite with no documentation.** `cordis@4.0.0-rc.8`.
-`waterfall` is *new* in v4; `reusable` and `reactive` were **removed**; scopes
-became `Fiber`; `Config` moved to Standard Schema. `cordis.js.org` is a dead
-js.org 302 stub — `/en/` and `/guide/` both 404 — and the repo README is one
-line. **Everything in §6 was read from source, not docs.** Mitigation: pin
-exact versions; let the contract test be the alarm.
+**[verified]** `openclaw/openclaw`, **387,190 ★**, MIT © OpenClaw Foundation,
+TypeScript, CalVer `2026.7.1-2` with `extended-stable` and `beta` channels — a
+**more mature** target than dsh, which is RC-only.
 
-**dsh itself is `0.1.1-rc.2`**, a self-described developer preview. Pin the
-exact version in CI, never a dist-tag.
+### 7.1 Is it rollout-shaped? Narrowly
 
-**First-class means CI must prove it.** We just fixed a gap where
-`test_zero_instrumentation.py` — the proof of the headline claim — never ran.
-Claiming dsh support without a Node CI job running a real rollout recreates
-that exact failure in a launch README. dsh supports Linux x64/arm64 and macOS
-14+ arm64; **no Windows**.
+Not as a product. `VISION.md` disclaims the framework role; the command surface is
+`channels devices message pairing qr matrix cron wiki` — bound to a person's phone
+number, not something you sample 200 trajectories from.
 
-**Naming, confirmed in the wild.** PyPI `deepseek-harness` is **not**
-DeepSeek's — it is an unrelated project by another author. DeepSeek ships as
-`deepseek-harness-sdk`. A 185k-star project lost its obvious PyPI name to a
-squatter. Argument for claiming `percepteye` now.
+But one slice is: **`openclaw agent --local`**, a documented one-shot. And its own
+org already runs scored rollouts against it — `openclaw/shellbench` (Python) has
+`EXECUTABLE_ADAPTERS = {"openclaw"}` and drives it over the Gateway WebSocket.
+
+**Support "OpenClaw headless task runs", never "OpenClaw".**
+
+### 7.2 Routing — **already solved in this repo**
+
+See commit `684392c` and [`nemoclaw-sandbox.md`](nemoclaw-sandbox.md). OpenClaw
+substitutes `${VAR}` into any config string at load time, so:
+
+```json
+"baseUrl": "${OPENAI_BASE_URL}",
+"apiKey":  "${OPENAI_API_KEY}"
+```
+
+written **once** to `~/.openclaw/openclaw.json` resolves per rollout from
+`build_child_env`, with no file write and no concurrency problem.
+
+An earlier revision proposed generating a merged config per rollout; commit
+`684392c` rejects that because it *"would serialise every rollout through one
+shared file."* **Do not revisit it.**
+
+**[open]** Verified against `openclaw@2026.3.11`; latest is `2026.7.1-2`.
+Re-confirm the substitution behaviour before relying on it.
+
+### 7.3 Capture — a plugin, same shape as dsh
+
+**Do not add a `StreamFormat` for OpenClaw.** **[verified]** It emits nothing
+structured on stdout: with `--json`, `protectJsonStdout` routes logs to stderr and
+stdout carries one terminal envelope; without it, logs interleave unparseably.
+Per-tool telemetry goes to a **file**. There is no stream to declare, and a
+`StreamFormat` entry would match nothing forever.
+
+The native plugin system is the path. **[verified]** Every plugin ships
+`openclaw.plugin.json`, which OpenClaw reads *"to validate configuration without
+executing plugin code"*; entry points come from `package.json#openclaw`. The
+capability registry has 70+ registration methods; the relevant ones are
+`registerAgentToolResultMiddleware`, `registerAgentEventSubscription` and
+`registerRuntimeLifecycle`. **[open]** — which to use is not yet settled.
+
+### 7.4 Two traps
+
+**A swallowed-error default, in OpenClaw's own emitter [verified]:**
+
+```js
+function itemStatus(item) {
+  if (status === "failed" || status === "error") return "failed";
+  ...
+  return "completed";   // ← default branch swallows everything else
+}
+```
+
+Unrecognised or absent statuses — including `"cancelled"` and `"unknown"`, which
+OpenClaw's own `auditNativeToolTerminalStatus` preserves as *distinct* — become
+`"completed"`. Feeding that file to `_outcome_of()` would round unknown up to ok.
+
+**`approval-unavailable` is deliberately excluded from the error flag**
+(`dist/selection-JInn13lc.js:1938`). A tool that never ran because approval could
+not be obtained arrives with no `error` field.
+
+### 7.5 A number that should shape the product, not just this integration
+
+Claw-SWE-Bench (arXiv 2606.12344): OpenClaw scores **19.1% Pass@1 with a minimal
+adapter vs 73.4% with a full adapter — same GLM 5.1 backbone.** A 54-point spread
+from harness configuration alone.
+
+**Implication beyond OpenClaw:** if harness config drifts across a comparison
+group, the gradient is noise rather than signal. Pinning harness config per group
+is a general requirement of the grouping design.
 
 ---
 
-## 8. PydanticAI — **[open]**
+## 8. Rejected: Agent Client Protocol (ACP) as a sixth mechanism
 
-The research agent did not return; nothing below is established.
+Investigated because `openclaw/acpx` (3,153 ★) suggested one protocol client could
+reach ~40 agents at once. **Rejected.** Recording it so nobody re-runs the
+analysis.
 
-Planned shape: a real adapter mirroring `adk.py` / `langchain.py` — no
-module-scope framework import, `bind()` returns an unbind, errors contained,
-`RoutingNotInstallable` when named explicitly. Plus a `_probe_pydantic_ai` in
-`introspection.py`, with the constraint that PydanticAI supports **dynamic
-system prompts**, which must be reported as unread rather than invoked.
+ACP is real: created by Zed, now jointly governed by Zed and JetBrains, Apache 2.0,
+stable wire protocol version 1, NDJSON over stdio, ~3.9M crate downloads.
 
-Three questions that must be answered before writing code:
+**The tool-call status enum genuinely maps cleanly**, which was the surprise:
+
+```
+ToolCallStatus (closed oneOf, stable v1): "pending" | "in_progress" | "completed" | "failed"
+```
+
+`pending` / `in_progress` / never-updated → `unknown`, correctly, for free. v1 has
+no `cancelled`, so a cancelled call sits at `in_progress` and lands on `unknown`.
+
+**Four blockers, in descending severity:**
+
+1. **ACP carries no routing lever at all — disqualifying.** No method, field or
+   capability lets a client tell an agent which endpoint to sample from. The only
+   model-adjacent surface, `SessionConfigOptionCategory`, is disclaimed in the
+   schema: *"for UX purposes… MUST NOT be required for correctness."* So "one
+   integration reaches 40 agents" is false. It is *one capture integration reaches
+   40 agents, each still needing its own routing work* — and routing is where all
+   the risk and cost live.
+2. **No machine-readable tool name in stable v1.** `ToolCall` has `title`
+   (human prose) and `kind` (a 10-value bucket for *"choosing appropriate icons"*).
+   `name` is unstable-only. Our contract requires a non-empty name.
+   Worse: OpenClaw's ACP bridge *has* the real name and destroys it —
+   `const title = formatToolTitle(name, args)`. Going through ACP is a **lossy
+   downgrade of data the agent already had**.
+3. **`status` is not required**, defaults to `pending`, absence unrecoverable.
+4. Much of the interesting surface (`session/fork`, `providers/*`) is behind the
+   unstable schema.
+
+**Note for anyone re-reading the schema:** the appealing `Cancelled` and
+`Other(String)` variants are **v2 (`2.0.0-alpha.3`, draft)**, not stable v1. Do
+not quote them as available.
+
+---
+
+## 9. PydanticAI — **[open]**
+
+Research did not complete. Nothing below is established.
+
+Planned shape: an adapter mirroring `adk.py` / `langchain.py` — no module-scope
+framework import, `bind()` returns an unbind, errors contained,
+`RoutingNotInstallable` when named explicitly. Plus `_probe_pydantic_ai` in
+`introspection.py`, with the constraint that PydanticAI supports **dynamic system
+prompts**, which must be reported as unread rather than invoked.
+
+Three questions to answer before writing code:
 
 1. Which interception point fires on **every** tool call and exposes failure —
    `FunctionToolResultEvent`, a `WrapperToolset`, or instrumentation hooks?
-2. What is genuinely **unknowable**? Where do `ModelRetry` and
-   `RetryPromptPart` sit, and is there a `handle_tool_error` equivalent that
-   swallows exceptions?
+2. What is genuinely **unknowable**? Where do `ModelRetry` and `RetryPromptPart`
+   sit, and is there a `handle_tool_error` equivalent that swallows exceptions?
 3. **Does PydanticAI honour `OPENAI_BASE_URL` / `OPENAI_API_KEY` from the
-   environment?** Decisive: if yes, routing needs *zero* adapter code, because
-   the SDK already sets both in the child.
+   environment?** Decisive: if yes, routing needs *zero* adapter code.
+
+`pydantic-ai` is 2.33.0, requires Python ≥3.10 — compatible.
 
 ---
 
-## 9. Sequence
+## 10. Risks
 
-1. **Ledger reader crash-tolerance** (§3). Real bug regardless of dsh; blocks
-   everything that writes the ledger from outside Python.
-2. **`fw.TASK` argv templating** and **`endpoint_env=`** (§4). Two general SDK
-   features with tests.
+**Cordis v4 is an unstable rewrite with no documentation.** `cordis@4.0.0-rc.8`.
+`waterfall` is *new* in v4; `reusable` and `reactive` were **removed**; scopes
+became `Fiber`. `cordis.js.org` is a dead js.org 302 stub — `/en/` and `/guide/`
+both 404 — and the repo README is one line. **§6 was read from source, not docs.**
+
+**dsh is `0.1.1-rc.2`**, a self-described developer preview. Pin exact versions,
+never a dist-tag.
+
+**First-class means CI must prove it.** We fixed a gap where
+`test_zero_instrumentation.py` — the proof of the headline claim — never ran.
+Claiming dsh or OpenClaw support without a Node CI job running a real rollout
+recreates that failure in a launch README. Note OpenClaw supports Linux x64/arm64
+and macOS 14+ arm64; **no Windows**.
+
+**Naming, confirmed in the wild.** PyPI `deepseek-harness` is **not** DeepSeek's —
+it is an unrelated project by another author; DeepSeek ships as
+`deepseek-harness-sdk`. PyPI `openclaw` is likewise an unrelated `cmdop` CLI. Two
+of the largest agent projects on GitHub lost their obvious PyPI names to
+squatters. Argument for claiming `percepteye` now.
+
+---
+
+## 11. Sequence
+
+1. **Ledger reader crash-tolerance** (§1). Real bug regardless of anything else;
+   blocks everything that writes the ledger from outside Python.
+2. **`fw.TASK` and `endpoint_env=`** (§4). Two general SDK features with tests.
 3. **`percepteye-dsh` L1** — capture only: `tools/result`, the five-case
    classifier, contract test, inert-without-env.
-4. **CI** — pinned dsh, Node job, end-to-end rollout against a fake control
-   plane.
-5. **L2 routing** — `--patch` generation for the model id, once L1 is proven.
-6. **PydanticAI adapter** — after §8's questions are answered.
+4. **CI** — pinned dsh, Node job, end-to-end rollout against a fake control plane.
+5. **OpenClaw capture plugin** — routing is already done; this is the remaining
+   half, and it is the second instance of the §6 mechanism.
+6. **`fw.attach()`** (§3) — the production-side surface. Independently the highest
+   commercial value item, and it depends on none of 3–5.
+7. **PydanticAI adapter** — after §9's questions are answered.
 
-Items 1 and 2 are independently valuable and carry no dsh risk. If this is
-picked up piecemeal, do those first.
+Items 1, 2 and 6 are independently valuable and carry no third-party risk. A
+piecemeal pickup should start there. **6 is the one that changes the product.**
 
 ---
 
-## 10. Sources
+## 12. Sources
 
-- Repo: `github.com/deepseek-ai/deepseek-harness`, default branch **`master`**,
-  shallow clone @ `b150a55` (2026-08-21)
-- npm: `@deepseek-ai/dsh@0.1.1-rc.2`, `dsh-tools@0.0.1-rc.1`,
-  `dsh-headless@0.0.1-rc.1`, `dsh-llm@0.0.1-rc.1`, `dsh-llm-pi-ai`,
-  `dsh-llm-deepseek`, `dsh-base`, `cordis@4.0.0-rc.8`, `@cordisjs/core@3.18.1`
+- `github.com/deepseek-ai/deepseek-harness`, branch **`master`**, @ `b150a55`
+- npm: `@deepseek-ai/dsh@0.1.1-rc.2`, `dsh-tools`, `dsh-headless`, `dsh-llm`,
+  `dsh-llm-pi-ai`, `dsh-llm-deepseek`, `dsh-base`, `cordis@4.0.0-rc.8`,
+  `@cordisjs/core@3.18.1`, `openclaw@2026.7.1-2`, `acpx@0.13.1`
 - PyPI: `deepseek-harness-sdk@0.1.1rc1` (official), `pydantic-ai@2.33.0`
-- Event contract: `packages/core/tools/src/index.ts:135-206`, cross-checked
-  against published `lib/types/index.d.ts`
+- ACP: `agentclientprotocol/agent-client-protocol`, `schema/v1/schema.json`,
+  `schema/v1/meta.json`
+- Claw-SWE-Bench: arXiv 2606.12344
 - This repo: `outcomes.py:180-210`, `runner.py` `_attach_ledger` /
-  `_attach_stream_tool_calls`, `contract.py`, `schema/flywheel-1.json`
+  `_attach_stream_tool_calls`, `adapters/adk.py:132`, `adapters/langchain.py:128`,
+  `contract.py`, `schema/flywheel-1.json`, `tests/test_oss_boundary.py:24-28`,
+  commits `684392c` and `74feb63`, `docs/nemoclaw-sandbox.md`
