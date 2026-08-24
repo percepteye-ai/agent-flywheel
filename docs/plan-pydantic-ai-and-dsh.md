@@ -7,6 +7,10 @@ Everything marked **[verified]** was read from primary source — npm tarballs, 
 shallow clone of the upstream repo, the GitHub API, or this repository.
 Everything marked **[open]** is not yet established and must not be assumed.
 
+> **§11b corrects a positioning claim made in this document and in the README.**
+> Outbound-only does not differentiate us from Applied Compute. Read that section
+> before writing any competitive copy.
+>
 > The filename is narrower than the contents. This began as a PydanticAI + DeepSeek
 > Harness plan and grew to cover OpenClaw, ACP, and the training/production mode
 > question. Rename when convenient.
@@ -718,6 +722,125 @@ piecemeal pickup should start there. **6 is the one that changes the product.**
 
 ---
 
+## 11b. Competitive position — and a correction to our own
+
+Researched 2026-08-23. This section exists because it **corrects a positioning
+claim made elsewhere in this document and in the README**, and a wrong claim
+about a competitor is worse than no claim.
+
+### The correction
+
+**Outbound-only does not differentiate us from Applied Compute.** It has been
+treated as the Tier 1 claim nobody else offers. That is false.
+
+Applied Compute ships a **Harness Connector**: *"The connector establishes an
+outbound WebSocket to AC2, so the server does not need a public endpoint."*
+They also match the surrounding pitch almost line for line — *"The harness can
+stay where it already runs"*, *"all proprietary execution can remain in the
+customer's stack"*, SOC 2, ISO 42001, VPC deployment.
+
+Anything we write that implies we are alone in keeping the agent in the
+customer's estate needs to change.
+
+### Applied Compute (AC2) — the reference implementation of this category
+
+**[verified]** from public docs at `docs.appliedcompute.com` and the engineering
+post *"Bring Your Own Harness to AC2"* (2026-08-06). Founded 2025 by three
+ex-OpenAI researchers; **$160M raised, $1.3B post-money** (Kleiner Perkins, Apr
+2026). Product is AC2 — packages `ac2.sdk`, `ac2.runtime`, `ac2.tracing`.
+
+**Their published BYOH protocol is our `RolloutRequest`.** Verbatim:
+
+```
+submit(turn_input, llm_url, api_key, rollout_id=None) -> rollout_id
+get_status(rollout_id) -> status
+collect_output(rollout_id) -> artifacts
+```
+
+Ours: `rollout_id`, `turn_input`, `llm_url`, `api_key`, `artifacts_dir`,
+`deadline_ts`. **Four field names identical.** Recorded as a fact; whether that
+is convergence under the same constraints or something else is not a question
+this document can answer.
+
+The seam is the same too, and stated the same way: *"what if instead of
+requiring users to adopt a new agent framework or re-instrument their harness
+with our tracing primitives, we could just replace the LLM response endpoint?"*
+
+Two structural notes:
+
+- **Two independent paths**, which we collapse into one. Their rollout
+  lifecycle runs over the Connector; model requests go to a per-rollout
+  OpenAI-compatible relay. Per-rollout credentials are how attribution works —
+  same mechanism as ours.
+- **BYOH is preview/beta and gated**: *"contact the Applied Compute team to
+  enable access."* And their own worked example — OpenCode on SWE-bench —
+  launches the harness **inside AC2's sandbox**, not in the customer's stack.
+  The customer-hosted path is documented; the demo is not it.
+
+### What actually differentiates us
+
+**Tool outcomes. That is the list.**
+
+Their design, in their words: the harness *"does not need to emit any
+additional observability data."* Traces are reconstructed from the model wire
+alone, by *"structural prefix matching (conceptually similar to a KV-cache)."*
+
+So AC2 observes what the model was asked and what it said. It does **not**
+observe whether the tool worked. That is the httpx-wrapper blindness of §3
+as a whole product: no `handle_tool_error` case, no permission-denial-as-HTTP-200
+case, and no representation for "the result of this call was never observed".
+Our `unknown` has no counterpart in their design, and their capture mechanism
+structurally cannot produce one.
+
+This is narrower than the claim it replaces, and it is defensible. It is also
+the same argument §9b.3 makes against τ-bench's state-hash verifier, which
+means the tri-state is now our differentiator against both the leading
+benchmark and the best-funded competitor — for the same reason each time.
+
+### Prime Agent is not a competitor
+
+**[verified]** `PrimeIntellect-ai/prime-agent`, MIT, **18,140 stars**, launched
+2026-08-05, described by Prime Intellect as *"our self-improving coding
+harness"*. But:
+
+> *"currently no model has been trained around Prime Agent or its core feature
+> set."*
+
+The path from "I ran this agent" to "a model improved" is an **opt-in trace
+upload**, not a pipeline, and the training-side counterpart is a separate, much
+smaller binary.
+
+So Prime Agent is an **agent we already serve** — `examples/prime_agent/` works
+today and `event_stream.py` ships a `StreamFormat` for its `--mode json`
+events. Prime Intellect competes at the platform layer (`verifiers`,
+Environments Hub, `prime-rl`), not here. The two should not be conflated in any
+comparison we publish.
+
+### On the term itself
+
+**[verified]** Exactly one vendor sells "bring your own harness" as a named
+product concept with a published protocol, and it is Applied Compute. The
+research community converged on a different name for the same architecture —
+**"harnessed agentic RL"** (Agent Lightning v1.0). The concept is hardening
+fast; the term is not yet shared vocabulary, so using it invites comparison to
+them specifically.
+
+Worth recording the cost their own founder names: BYOH buys realism and pays in
+*"non-replayability and offline or off-policy data"* — which is precisely the
+constraint that pushed §3 to step-level sampling.
+
+### What this obliges us to change
+
+- The README comparison table lists LangSmith, Braintrust, HUD, ART and NeMo
+  and **does not mention Applied Compute**, who are the closest competitor by a
+  wide margin.
+- Any copy resting on outbound-only as unique must be rewritten around tool
+  outcomes.
+- **[open]** Whether to keep using "BYOH" at all, given it now names a specific
+  competitor's product.
+
+---
+
 ## 12. Sources
 
 - `github.com/deepseek-ai/deepseek-harness`, branch **`master`**, @ `b150a55`
@@ -728,6 +851,11 @@ piecemeal pickup should start there. **6 is the one that changes the product.**
 - ACP: `agentclientprotocol/agent-client-protocol`, `schema/v1/schema.json`,
   `schema/v1/meta.json`
 - Claw-SWE-Bench: arXiv 2606.12344
+- Applied Compute: `docs.appliedcompute.com/platform/custom-harnesses`,
+  `appliedcompute.com/platform/bring-your-own-harness-to-ac2` (2026-08-06),
+  `appliedcompute.com/company/fundraise` (2026-04-08)
+- `PrimeIntellect-ai/prime-agent` and `primeintellect.ai/blog/prime-agent` (2026-08-05)
+- Agent Lightning v1.0, "harnessed agentic RL": arXiv 2608.17528
 - This repo: `outcomes.py:180-210`, `runner.py` `_attach_trajectory` /
   `_attach_stream_tool_calls`, `adapters/adk.py:132`, `adapters/langchain.py:128`,
   `contract.py`, `schema/flywheel-1.json`, `tests/test_oss_boundary.py:24-28`,
