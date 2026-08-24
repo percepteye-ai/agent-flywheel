@@ -14,7 +14,7 @@
 [![runtime dependencies: 1](https://img.shields.io/badge/runtime%20dependencies-1-blue?style=flat-square)](#what-does-it-cost-to-integrate)
 [![license: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 
-[Quickstart](#quickstart-one-import-one-call) · [How it works](#how-the-flywheel-works) · [Zero instrumentation](#zero-instrumentation-langchain-langgraph-google-adk-and-cli-agents) · [Why `unknown` matters](#why-unknown-is-a-first-class-tool-outcome) · [Comparison](#how-is-this-different-from-langsmith-braintrust-hud-art-or-nemo-data-flywheel) · [FAQ](#faq) · [Docs](https://docs.percepteye.com/flywheel)
+[Quickstart](#quickstart-one-import-one-call) · [How it works](#how-the-flywheel-works) · [Zero instrumentation](#zero-instrumentation-langchain-langgraph-google-adk-and-cli-agents) · [Why `unknown` matters](#why-unknown-is-a-first-class-tool-outcome) · [Comparison](#how-is-this-different-from-applied-compute-langsmith-braintrust-hud-or-nemo-data-flywheel) · [FAQ](#faq) · [Docs](https://docs.percepteye.com/flywheel)
 
 ---
 
@@ -359,21 +359,26 @@ fw.serve(
 
 `on_event` gives you every rollout as it completes, including its typed exclusion if it had one. Score the two batches with your own metric, and note the exclusions separately — a rollout excluded as `substrate_unavailable` or `entrypoint_error` is not a loss, it is a run that never happened.
 
-## How is this different from LangSmith, Braintrust, HUD, ART or NeMo Data Flywheel?
+## How is this different from Applied Compute, LangSmith, Braintrust, HUD or NeMo Data Flywheel?
 
-The short version: **the observability tools watch your agent but never close the loop to weights; the RL platforms close the loop but make your agent move into their container or their cluster.** This one leaves the agent where it is.
+The short version: **the observability tools watch your agent but never close the loop to weights; most RL platforms close the loop but make your agent move into their container or their cluster.** One other company leaves the agent where it is — and the difference from them is what your capture can actually see.
 
-| | agent runs in | supplies the tasks | supplies the scoring | core deps | inbound port |
+| | agent runs in | supplies the tasks | supplies the scoring | what it sees per tool call | core deps |
 |---|---|---|---|---|---|
-| **percepteye-agent-flywheel** | **your own process** | yes | yes | **1** | **none** |
-| HUD | their container image | yes | yes | 18 | none |
-| Prime Intellect `verifiers` | wherever, you build the env | community hub | you write the rubric | 26 | none |
-| OpenPipe ART / Tinker | wherever, you write the loop | no | no | 8 / hosted | none |
-| LangSmith · Braintrust · Langfuse · Phoenix | your own process | no | you write the evals | 14 · 10 · 8 · 51 | none |
-| NVIDIA NeMo Data Flywheel | your Kubernetes cluster | no | yes | k8s + 6× H100 to start | n/a |
-| AWS Bedrock AgentCore | your AWS account | no | yes | AWS-bound | n/a |
+| **percepteye-agent-flywheel** | **your own process** | yes | yes | **`ok` / `failed` / `unknown`** | **1** |
+| Applied Compute (BYOH) | your own process | yes | yes | the model wire only | — |
+| HUD | their container image | yes | yes | their environment grades | 18 |
+| Prime Intellect `verifiers` | wherever, you build the env | community hub | you write the rubric | you write it | 26 |
+| OpenPipe ART / Tinker | wherever, you write the loop | no | no | you write it | 8 / hosted |
+| LangSmith · Braintrust · Langfuse · Phoenix | your own process | no | you write the evals | whatever the framework said | 14 · 10 · 8 · 51 |
+| NVIDIA NeMo Data Flywheel | your Kubernetes cluster | no | yes | — | k8s + 6× H100 to start |
+| AWS Bedrock AgentCore | your AWS account | no | yes | — | AWS-bound |
 
-Three honest caveats on that table. **Line count is table stakes** — HUD's decorator is about eight lines and Weave advertises one, so nobody wins on that alone; the differentiator is one call *with one dependency and no container*, which is why the table has a deps column. Read the row, not the cell. **Task supply is not equivalent** — everyone in the "yes" column supplies tasks for environments they built, whereas [agent discovery](#agent-discovery-on-by-default) derives them from your actual tool surface. And **NeMo and AgentCore are not really competitors** so much as the enterprise-platform version of the same idea; if you already run the cluster, they are a reasonable answer.
+**Applied Compute is the closest thing to this, and worth being precise about.** Their BYOH also keeps the harness where it already runs, also connects over an outbound WebSocket with no public endpoint, and is SOC 2 and ISO 42001 certified. If you are choosing between the two, "runs in my own infrastructure" is not the axis — both do that.
+
+The axis is the last column. Their design is explicit that the harness *"does not need to emit any additional observability data"*: traces are reconstructed from the model wire alone. That sees what the model was asked and what it answered. It does not see whether the tool **worked** — so a LangChain tool with `handle_tool_error=True`, or a permission denial your API returns as HTTP 200, is invisible to it. [That distinction is the whole reason `unknown` exists](#why-unknown-is-a-first-class-tool-outcome).
+
+Three further caveats. **Line count is table stakes** — HUD's decorator is about eight lines and Weave advertises one, so nobody wins on that alone; the differentiator is one call *with one dependency and no container*, which is why the table has a deps column. **Task supply is not equivalent** — everyone in the "yes" column supplies tasks for environments they built, whereas [agent discovery](#agent-discovery-on-by-default) derives them from your actual tool surface. And **NeMo and AgentCore are not really competitors** so much as the enterprise-platform version of the same idea; if you already run the cluster, they are a reasonable answer.
 
 ## Agent discovery, on by default
 
@@ -507,7 +512,7 @@ Yes — `concurrency=N` with the default subprocess isolation. In-process isolat
 Yes, once at startup, unless you turn it off — and that is [documented in full above](#agent-discovery-on-by-default) rather than buried. `introspect=False` or `PERCEPTEYE_INTROSPECT=0`.
 
 **How is this different from an eval platform like LangSmith or Braintrust?**
-They observe your agent and let you write evals; they do not supply tasks or close the loop to weights. [Full comparison.](#how-is-this-different-from-langsmith-braintrust-hud-art-or-nemo-data-flywheel)
+They observe your agent and let you write evals; they do not supply tasks or close the loop to weights. [Full comparison.](#how-is-this-different-from-applied-compute-langsmith-braintrust-hud-or-nemo-data-flywheel)
 
 **Is it really only one dependency?**
 Yes, `httpx`. `tests/test_oss_boundary.py` fails the build if the runtime list grows past one entry, and a separate CI job installs the package into a clean environment and asserts the same thing from `importlib.metadata`.
