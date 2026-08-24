@@ -195,7 +195,7 @@ afternoon", which is a materially different enterprise conversation.
 
 ---
 
-## 4. Two general SDK features
+## 4. ~~Two general SDK features~~ — BUILT 2026-08-23
 
 Both chosen over vendor-specific hacks.
 

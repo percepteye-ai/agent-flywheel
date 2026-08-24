@@ -214,6 +214,27 @@ fw.serve(["opencode", "run"], agent_id="coding-agent", input_shape="text")
 
 The task arrives two ways, because CLIs differ and guessing wrongly is silent: on **stdin**, and as `PERCEPTEYE_TURN_INPUT`. Its **stdout** is the final text. Its exit code is a result — non-zero is excluded from training, because a crashed run says nothing about the policy.
 
+**If your CLI takes the task as an argument**, mark the position with `fw.TASK`:
+
+```python
+fw.serve(["dsh", "--profile", "headless", fw.TASK], agent_id="dsh-agent", input_shape="text")
+```
+
+A sentinel rather than a `"{task}"` string, so a literal argument that happens to contain the placeholder text cannot be mistaken for the marker. When it appears, **stdin is left empty** — an agent told the task twice acts on it twice. Leave it out and nothing changes: stdin and the environment variable, exactly as before.
+
+> [!NOTE]
+> A task delivered through argv is visible to other users on the machine via `ps`. One delivered on stdin is not. That is a real trade-off and it is yours to make — which is why this is declared rather than inferred from your binary.
+
+**If your agent reads its endpoint from other variable names**, say so:
+
+```python
+fw.serve(["dsh", "--profile", "headless", fw.TASK],
+         agent_id="dsh-agent", input_shape="text",
+         endpoint_env=("DEEPSEEK_BASE_URL", "DEEPSEEK_API_KEY"))
+```
+
+By default the child gets `OPENAI_BASE_URL`, `OPENAI_API_BASE`, `OPENAI_API_KEY`, `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY`. An agent that reads none of them looks identical from here to one that is correctly routed — right up until its completions arrive at your live provider instead of the gateway, unobserved. `endpoint_env` is additive, so the defaults stay for an agent that reads a mixture.
+
 **You probably get tool outcomes for free.** If your CLI already prints a structured event stream — prime-agent's `--mode json`, or anything logging OpenTelemetry GenAI events as JSON lines — they are [read straight off stdout](#zero-instrumentation-langchain-langgraph-google-adk-and-cli-agents) with nothing added to the agent.
 
 If it prints nothing useful, the trajectory is still there and a shell can append to it:

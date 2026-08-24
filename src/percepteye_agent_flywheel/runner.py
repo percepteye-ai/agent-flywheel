@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from .contract import RolloutOutput, RolloutRequest, ToolCallOutcome
-from .entrypoint import InputShape, ResolvedEntrypoint, resolve_entrypoint
+from .entrypoint import TASK, InputShape, ResolvedEntrypoint, resolve_entrypoint
 from .errors import ConfigurationError, LeaseLost, TransportError
 from .isolation import build_child_env
 from .outcomes import TOOL_CALLS_FILENAME, Trajectory, _RolloutScope
@@ -277,6 +277,20 @@ def _is_command(entrypoint: Any) -> bool:
     return isinstance(entrypoint, (list, tuple)) and bool(entrypoint)
 
 
+def _argv_with_task(argv: list[Any], turn_input: str) -> tuple[list[str], bool]:
+    """Substitute this rollout's task wherever ``TASK`` appears.
+
+    Returns the argv and whether anything was substituted. The caller uses the
+    flag to decide stdin: an agent told the task through argv must NOT also be
+    told it on stdin, or it acts on the same instruction twice. WHICH of the
+    two channels is used is DECLARED by whether the sentinel appears; it is
+    never inferred from the binary.
+    """
+    if not any(a is TASK for a in argv):
+        return [str(a) for a in argv], False
+    return [turn_input if a is TASK else str(a) for a in argv], True
+
+
 def _argv_with_gate(
     argv: list[str], rollout: RolloutRequest, gate_flag: str | None
 ) -> list[str]:
@@ -312,14 +326,18 @@ def run_rollout_as_command(
 ) -> RolloutOutput:
     """Run the customer's agent as a process and read what it left behind.
 
-    ``turn_input`` reaches it two ways, because CLIs differ and guessing
-    wrongly is silent: on stdin, and as PERCEPTEYE_TURN_INPUT. The final text
+    ``turn_input`` reaches it two ways by default, because CLIs differ and
+    guessing wrongly is silent: on stdin, and as PERCEPTEYE_TURN_INPUT. A CLI
+    that takes the task as a positional argument gets a third: put ``fw.TASK``
+    in the argv and it is substituted there, and stdin is then left empty so
+    the task is not delivered twice. The final text
     is the process's stdout, trimmed -- there is no protocol to implement, so
     an existing CLI needs no changes to be served.
     """
     started = time.time()
+    resolved_argv, task_in_argv = _argv_with_task(list(argv), rollout.turn_input)
     proc = subprocess.Popen(
-        _argv_with_gate(list(argv), rollout, gate_flag),
+        _argv_with_gate(resolved_argv, rollout, gate_flag),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, env=env, text=True, cwd=cwd,
         # Its own process GROUP. A real CLI agent spawns freely -- a shell, a
@@ -343,8 +361,10 @@ def run_rollout_as_command(
         return out
 
     try:
-        stdout, stderr = proc.communicate(input=rollout.turn_input,
-                                          timeout=timeout_s)
+        # Empty stdin when the task went in through argv. Sending it both
+        # ways would have an agent that reads both act on the task twice.
+        stdout, stderr = proc.communicate(
+            input="" if task_in_argv else rollout.turn_input, timeout=timeout_s)
     except subprocess.TimeoutExpired:
         _kill_tree(proc)
         stdout, stderr = proc.communicate()
@@ -475,6 +495,7 @@ class RolloutRunner:
         #: property of the task and arrives per rollout in metadata; both are
         #: required before anything is appended.
         gate_flag: str | None = None,
+        endpoint_env: tuple[str, str] | None = None,
     ) -> None:
         if isolation not in ("subprocess", "inprocess"):
             raise ConfigurationError(
@@ -494,7 +515,10 @@ class RolloutRunner:
             # A process, not an object. Nothing to resolve and nothing to
             # import; isolation is inherent because it is already its own
             # process.
-            self._command = [str(a) for a in entrypoint]
+            # str() everything EXCEPT the sentinel, which must survive to
+            # substitution. Stringifying it here is how it would silently
+            # become the literal '<task>' in someone's argv.
+            self._command = [a if a is TASK else str(a) for a in entrypoint]
             self.resolved = None  # type: ignore[assignment]
             self.transport = transport
             self.artifacts_dir = str(artifacts_dir)
@@ -502,6 +526,7 @@ class RolloutRunner:
             self.concurrency = max(1, concurrency)
             self.rollout_timeout_s = rollout_timeout_s
             self.gate_flag = gate_flag
+            self.endpoint_env = endpoint_env
             self._method = method
             self._adapters = adapters
             self._on_event = on_event
@@ -532,6 +557,7 @@ class RolloutRunner:
         self.concurrency = max(1, concurrency)
         self.rollout_timeout_s = rollout_timeout_s
         self.gate_flag = gate_flag
+        self.endpoint_env = endpoint_env
         # Carried so the CHILD resolves the same callable the parent validated.
         # This was hardcoded to None on the subprocess payload, so a customer
         # who named an entrypoint with method= had it honoured at startup and
@@ -582,6 +608,7 @@ class RolloutRunner:
                 env=build_child_env(
                     rollout_id=rollout.rollout_id, llm_url=rollout.llm_url,
                     api_key=rollout.api_key, trajectory_dir=trajectory_dir,
+                    endpoint_env=self.endpoint_env,
                     extra={"PERCEPTEYE_TURN_INPUT": rollout.turn_input},
                 ),
                 # The per-rollout directory is the child's working directory,
@@ -629,6 +656,7 @@ class RolloutRunner:
             llm_url=rollout.llm_url,
             api_key=rollout.api_key,
             trajectory_dir=trajectory_dir,
+            endpoint_env=self.endpoint_env,
         )
         started = time.time()
         # Popen rather than subprocess.run: the heartbeat thread must be able

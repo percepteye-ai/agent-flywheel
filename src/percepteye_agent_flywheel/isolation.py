@@ -139,6 +139,7 @@ def build_child_env(
     parent_env: Mapping[str, str] | None = None,
     allowlist: Iterable[str] | None = None,
     extra: Mapping[str, str] | None = None,
+    endpoint_env: tuple[str, str] | None = None,
 ) -> dict[str, str]:
     """Build the environment for one rollout's child process.
 
@@ -192,6 +193,20 @@ def build_child_env(
     env["OPENAI_API_KEY"] = api_key
     env["ANTHROPIC_BASE_URL"] = llm_url
     env["ANTHROPIC_API_KEY"] = api_key
+
+    # (3b) Names this agent actually reads, when they are not the ones above.
+    # DeepSeek Harness reads DEEPSEEK_BASE_URL and nothing else -- grep its
+    # source for OPENAI_BASE_URL and there are zero hits -- so an unmodified
+    # integration would look correct while every completion went to the live
+    # provider unobserved. That is the exact silent-capture failure this module
+    # exists to prevent, and it cannot be detected from here, so it is
+    # DECLARED by the caller rather than sniffed. Additive: the defaults above
+    # stay, because an agent may read a mixture and removing them buys
+    # nothing.
+    if endpoint_env:
+        url_var, key_var = endpoint_env
+        env[str(url_var)] = llm_url
+        env[str(key_var)] = api_key
 
     if extra:
         for k, v in extra.items():
