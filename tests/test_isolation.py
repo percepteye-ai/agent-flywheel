@@ -58,8 +58,9 @@ def test_routing_wins_over_the_customers_own_key():
 
 
 def test_the_customers_own_secrets_still_pass_through():
-    """BYOH exists so their agent runs against their real systems. Stripping
-    their credentials would defeat the product; stripping ours is the point."""
+    """The whole point is that their agent runs against their REAL systems --
+    their Jira, their database, their staging cluster. Stripping their
+    credentials would defeat the product; stripping ours is the product."""
     env = _env()
     assert env["JIRA_API_TOKEN"] == "customer-token"
     assert env["DATABASE_URL"] == "postgres://customer"

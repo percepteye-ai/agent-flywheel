@@ -836,8 +836,12 @@ constraint that pushed §3 to step-level sampling.
   wide margin.
 - Any copy resting on outbound-only as unique must be rewritten around tool
   outcomes.
-- **[open]** Whether to keep using "BYOH" at all, given it now names a specific
-  competitor's product.
+- ~~**[open]** Whether to keep using "BYOH" at all.~~ **Dropped 2026-08-23.** It
+  appeared exactly once as our own term, in `tests/test_isolation.py`, and now
+  appears only where it names Applied Compute's product. The category slot it
+  occupied is already filled by the README's H1 — *in-process agent RL* — and
+  the differentiator slot belongs to tool outcomes, not to where the agent
+  runs. The `byoh-fixes` branch name is cosmetic and already merged.
 
 ---
 
