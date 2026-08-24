@@ -220,9 +220,17 @@ def _attach_trajectory(out: RolloutOutput, trajectory_dir: str) -> None:
     """Merge recorded tool calls, preserving the None/[] distinction."""
     if out.tool_calls is not None:
         return
-    recorded = Trajectory(trajectory_dir).read()
+    traj = Trajectory(trajectory_dir)
+    recorded = traj.read()
     if recorded is not None:
         out.tool_calls = recorded
+        # A line we could not parse is a call we KNOW executed and cannot
+        # report, which is exactly what this field means on the wire --
+        # "executed calls deliberately not reported; non-zero forbids training
+        # grade". Reporting the survivors while claiming the list is complete
+        # would be the truncated-list failure the contract already forbids
+        # agents from committing by hand.
+        out.tool_calls_omitted_count += traj.malformed
 
 
 #: Wall-clock held back from the agent so its RESULT can still be delivered.

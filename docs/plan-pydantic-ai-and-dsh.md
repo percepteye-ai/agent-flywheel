@@ -49,7 +49,7 @@ Consequences worth stating plainly:
 
 ---
 
-## 1. BLOCKER — fix before anything writes the trajectory from outside Python
+## 1. ~~BLOCKER~~ — FIXED 2026-08-23
 
 `Trajectory.read()` is not crash-tolerant. `outcomes.py:195`:
 
@@ -74,9 +74,17 @@ Today this is unlikely: `record_tool_call` holds a lock and writes short lines
 from the same process. **The moment an external Node process appends to the
 trajectory under a kill signal it becomes probable.**
 
-**Fix.** Skip malformed lines, count them, surface the count. Absence must stay
-distinguishable from zero: a file that existed but yielded no parseable records
-is not the same as no file.
+**Fixed.** Malformed lines are skipped and counted in `Trajectory.malformed`,
+and `_attach_trajectory` adds that count to `tool_calls_omitted_count` — whose
+wire meaning is already *"executed calls deliberately not reported; non-zero
+forbids training grade"*, which is exactly right: the list really is incomplete
+and must not be graded as complete.
+
+Absence stays distinguishable from zero. No file → `None` (never reported). A
+file whose every line is unreadable → `[]` with a non-zero omission count, which
+says "something was reported and we could not read it" rather than "zero calls
+occurred". Ten tests in `tests/test_trajectory_is_crash_tolerant.py`; four of
+them fail if the guard is removed.
 
 ---
 

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from .contract import Outcome, ToolCallOutcome
+from .errors import ContractViolation
 
 __all__ = ["TOOL_CALLS_FILENAME", "Trajectory", "current_rollout_id", "record_tool_call"]
 
@@ -176,6 +177,13 @@ class Trajectory:
 
     def __init__(self, trajectory_dir: str | os.PathLike[str]) -> None:
         self.path = Path(trajectory_dir) / TOOL_CALLS_FILENAME
+        #: Records the last :meth:`read` could not parse. A truncated final
+        #: line is the EXPECTED case, not an exotic one: the deadline kill
+        #: lands mid-write, and once a plugin in another language appends here
+        #: it stops being rare. Counted rather than raised, and counted rather
+        #: than silently dropped -- a call we know executed and cannot read is
+        #: not a call that did not happen.
+        self.malformed = 0
 
     def read(self) -> list[ToolCallOutcome] | None:
         """Every call recorded for this rollout, or None if nothing was recorded.
@@ -183,18 +191,26 @@ class Trajectory:
         ``None`` and ``[]`` mean different things and this preserves the
         difference: no tool-call file at all means the agent never reported, and
         must not be rendered as an assertion that zero tool calls occurred.
+
+        **One unreadable line costs that line and nothing else.** Before this
+        guard a single truncated write -- which is what a SIGKILL on the
+        deadline produces -- raised out of here, out of ``run_one``, and turned
+        a COMPLETED rollout into ``flywheel_crash`` with every tool call lost.
+        The count survives in :attr:`malformed` so the loss is reported rather
+        than hidden; see ``_attach_trajectory``.
         """
         if not self.path.exists():
             return None
+        self.malformed = 0
         out: list[ToolCallOutcome] = []
         with self.path.open(encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
                     continue
-                d = json.loads(line)
-                out.append(
-                    ToolCallOutcome(
+                try:
+                    d = json.loads(line)
+                    rec = ToolCallOutcome(
                         name=d["name"],
                         arguments=d.get("arguments") or {},
                         outcome=d["outcome"],
@@ -206,7 +222,15 @@ class Trajectory:
                         agent_name=d.get("agent_name"),
                         tool_call_id=d.get("tool_call_id"),
                     )
-                )
+                except (ValueError, TypeError, KeyError, AttributeError,
+                        ContractViolation):
+                    # Truncated JSON, a non-object line, a missing required
+                    # key, or a value the contract refuses. All four mean the
+                    # same thing here -- this record is unreadable -- and none
+                    # of them is a reason to discard the readable ones.
+                    self.malformed += 1
+                    continue
+                out.append(rec)
         return out
 
     def unknown_count(self) -> int:
