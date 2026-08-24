@@ -280,6 +280,28 @@ Unknown outcomes lower the grade — they do not exclude the rollout. So capture
 
 The same refusal to collapse absence into zero runs through the whole contract: `tool_calls=None` means "I did not report tool calls"; `tool_calls=[]` means "I observed zero", which is a positive claim. The default is `None`. `tool_definitions: null` means "we could not look"; `[]` means "we looked, and there are none".
 
+## Capture in the process that serves your users
+
+`serve()` donates capacity. `attach()` donates **evidence**, from the turns your agent is already serving — same adapters, same tri-state, same trajectory file, scoped around a live user turn instead of a claimed rollout:
+
+```python
+import percepteye_agent_flywheel as fw
+
+px = fw.attach(agent_id="support-agent", trajectory_root="/var/lib/percepteye")
+
+with px.turn(conversation_id=conv_id) as turn_id:
+    reply = agent.invoke(user_text)        # your agent, unmodified
+```
+
+**It captures. It never reroutes.** Adapters are bound with no endpoint at all, so nothing your agent sends can be re-pointed by attaching. Changing where production traffic goes is [`apply_current_policy()`](#the-last-mile-your-production-agent-picks-up-what-training-produced)'s job, and it stays your explicit decision.
+
+Everything here fails open. An unreachable control plane yields `policy == {}` — read that as *keep your current configuration* — and a turn whose capture cannot write still runs. A capture bug costs the observation and nothing else.
+
+Turn boundaries are **declared, not inferred**: guessing where one request ends and the next begins would silently merge two users' tool calls into one record. The turn id it yields is the join key for an outcome that arrives later than the turn does — the draft kept an hour afterwards, the pull request merged next morning.
+
+> [!NOTE]
+> `trajectory_root` is required rather than defaulted, and turns accumulate there. Nothing removes them, because the `flywheel/1` contract has no route for a production turn yet — so you own retention until it does. Naming the directory is how that becomes a decision rather than a surprise.
+
 ## The last mile: your production agent picks up what training produced
 
 Training produces a better model. This is where your agent finds out.

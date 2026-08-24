@@ -699,8 +699,15 @@ squatters. Argument for claiming `percepteye` now.
 4. **CI** — pinned dsh, Node job, end-to-end rollout against a fake control plane.
 5. **OpenClaw capture plugin** — routing is already done; this is the remaining
    half, and it is the second instance of the §6 mechanism.
-6. **`fw.attach()`** (§3) — the production-side surface. Independently the highest
-   commercial value item, and it depends on none of 3–5.
+6. ~~**`fw.attach()`** (§3)~~ — **local half done** 2026-08-23. Binds adapters in
+   the production process, scopes a turn, fails open, never reroutes. 14 tests in
+   `tests/test_attach_production_capture.py`.
+   **[open] The shipping half needs a control-plane route.** `flywheel/1` has
+   `/health`, `/agents`, `/policy/current` and `/rollouts/*` and nothing for a
+   production turn, so captured turns accumulate locally under a root the caller
+   names. A prototype posted to `POST /turns`; that route does not exist and was
+   deliberately not shipped — writing a client for a route the server does not
+   serve is precisely the five-fake-modes failure of §2.
 7. **PydanticAI adapter** — after §9's questions are answered.
 8. **Post-conditions** (§9b.6) — `verify_env=` plus `post_conditions` in metadata,
    executed by the harness parent and recorded as an ordinary tool call. Small,

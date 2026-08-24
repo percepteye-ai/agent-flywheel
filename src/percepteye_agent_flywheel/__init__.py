@@ -58,6 +58,7 @@ from .introspection import DiscoveredAgent, ToolDefinition
 from .introspection import introspect as introspect_agent
 from .isolation import unroutable_providers_present
 from .outcomes import Trajectory, current_rollout_id, record_tool_call
+from .production import Attachment, attach
 from .runner import RolloutRunner
 from .transport import AttachTransport, FlywheelTransport
 
@@ -67,6 +68,7 @@ __all__ = [
     "CONTRACT_VERSION",
     "TASK",
     "AttachTransport",
+    "Attachment",
     "ConfigurationError",
     "ContractViolation",
     "DiscoveredAgent",
@@ -88,6 +90,7 @@ __all__ = [
     "TransportError",
     "__version__",
     "apply_current_policy",
+    "attach",
     "current_policy",
     "current_rollout_id",
     "introspect_agent",
