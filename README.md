@@ -1,5 +1,7 @@
 # percepteye-agent-flywheel — in-process agent RL, outbound-only
 
+***Observed, not inferred.*** Every tool call your agent makes is recorded as `ok`, `failed` or **`unknown`** — and `unknown` is never rounded up to `ok`. Nothing else in this category can say that, because [reconstructing a trajectory from the model wire cannot see whether a tool actually worked](#how-is-this-different-from-applied-compute-langsmith-braintrust-hud-or-nemo-data-flywheel).
+
 **percepteye-agent-flywheel is a Python SDK that runs your own agent against evaluation and reinforcement-learning rollouts supplied by the Percepteye control plane — without moving your agent.** It keeps running in your process, behind your firewall, on your credentials. One runtime dependency, one import, one call. No inbound port, no container to build, no GPU to provision.
 
 <p align="center">
