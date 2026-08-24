@@ -1,4 +1,4 @@
-# percepteye-agent-flywheel — in-process agent RL, outbound-only
+# percepteye-agent-flywheel — in-process agent RL with observed tool outcomes
 
 ***Observed, not inferred.*** Every tool call your agent makes is recorded as `ok`, `failed` or **`unknown`** — and `unknown` is never rounded up to `ok`. Nothing else in this category can say that, because [reconstructing a trajectory from the model wire cannot see whether a tool actually worked](#how-is-this-different-from-applied-compute-langsmith-braintrust-hud-or-nemo-data-flywheel).
 
