@@ -48,7 +48,14 @@ Source = "https://github.com/percepteye-ai/agent-flywheel"
 Issues = "https://github.com/percepteye-ai/agent-flywheel/issues"
 
 [project.optional-dependencies]
-dev = ["pytest>=7.4", "pytest-asyncio>=0.23", "ruff>=0.6", "mypy>=1.8"]
+# ruff is PINNED, not floored, because CI treats `ruff check` as a required
+# step. A floor means every job resolves to whatever released that morning, so
+# a new rule -- or an existing rule widening -- turns the build red on a commit
+# that changed no code, and the first person to see it is whoever pushed next.
+# Lint is a moving target by design; a pin makes moving it a deliberate commit
+# that lands the fixes alongside it, rather than an ambient event. Everything
+# else here stays a floor: pytest and mypy are not gating the badge.
+dev = ["pytest>=7.4", "pytest-asyncio>=0.23", "ruff==0.16.2", "mypy>=1.8"]
 # Frameworks the built-in adapters bind to. NOT runtime dependencies -- no
 # adapter imports its framework at module scope, so an absent framework just
 # fails that adapter's probe. These exist so CI actually exercises the
