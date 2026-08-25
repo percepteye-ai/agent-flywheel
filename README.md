@@ -118,7 +118,7 @@ The claims in this table are structural properties of the package, not estimates
 | GPUs you provision | **0** | the control plane holds them |
 | Zero-instrumentation capture | **3 Python frameworks** — LangChain, LangGraph, Google ADK — **plus any CLI agent** that already prints a structured event stream | [`adapters/`](src/percepteye_agent_flywheel/adapters/), [`event_stream.py`](src/percepteye_agent_flywheel/event_stream.py) |
 | Environment variables required | **2** (URL and key), both overridable in code | [Configuration](#configuration-reference) |
-| Tests | **278 across 23 files**, all of them run in CI with zero skips permitted; the bare-install matrix adds 2 operating systems × 4 Python versions | `pytest` and [`.github/workflows/ci.yml`](.github/workflows/ci.yml) |
+| Tests | **313 across 26 files**, all of them run in CI with zero skips permitted; the bare-install matrix adds 2 operating systems × 4 Python versions | `pytest` and [`.github/workflows/ci.yml`](.github/workflows/ci.yml) |
 | License | MIT | [LICENSE](LICENSE) |
 
 ### One dependency, in context
@@ -329,7 +329,7 @@ What comes back is an **endpoint**, because that is the only form an agent can a
 
 An honest answer, in three parts.
 
-**What this repository can prove today.** Everything in [the integration table above](#what-does-it-cost-to-integrate): one dependency, one call, zero agent changes, zero inbound ports, 278 passing tests (195 of them on a bare install — the adapter and OpenTelemetry suites skip unless you install those extras). Those are properties of the code and you can check every one of them yourself.
+**What this repository can prove today.** Everything in [the integration table above](#what-does-it-cost-to-integrate): one dependency, one call, zero agent changes, zero inbound ports, 313 passing tests (230 of them on a bare install — the adapter and OpenTelemetry suites skip unless you install those extras). Those are properties of the code and you can check every one of them yourself.
 
 **What it cannot prove yet.** Task success rate, reward improvement, latency or cost deltas for *your* agent. This repository ships no benchmark numbers, and we would rather have the empty table below than a number you cannot reproduce. When we publish, we publish in the form the category's credible results take — `before → after, on a named task, with a named model`:
 
@@ -534,13 +534,13 @@ Fields derived from the inference wire — token-level data, sampling parameters
 
 ```bash
 python -m venv .venv
-# [dev] alone runs 195 tests; the adapter and tracing suites need the
+# [dev] alone passes 230 tests; the adapter and tracing suites need the
 # frameworks they bind to, and skip themselves when those are absent.
 .venv/bin/pip install -e ".[dev,adapters-test,otel,otel-test]"
 .venv/bin/pytest
 ```
 
-278 tests across 23 files, at a 1:1 test-to-source line ratio (4,819 lines of tests against 4,799 of source). Four CI jobs, and each one is there to protect a specific claim in this README:
+313 tests across 26 files, at a 1:1 test-to-source line ratio (5,322 lines of tests against 5,178 of source). Five CI jobs, and each one is there to protect a specific claim in this README:
 
 | job | what it would catch |
 |---|---|
@@ -548,6 +548,7 @@ python -m venv .venv
 | `test-full` | every suite, with every optional framework present, and **zero skips permitted** — because a skipped test and a passing test look identical in a green check mark |
 | `clean-install` | the runtime dependency list growing past `httpx`, asserted from installed metadata rather than from the source |
 | `boundary` | an internal system name reaching the published package, including inside an error string, where it would print into your logs and disclose something you cannot act on |
+| `openclaw-plugin` | the OpenClaw plugin drifting from the Python reader — its JS suite runs against the *same* `Trajectory.read`, so a line one side writes and the other counts as malformed fails here rather than surfacing as a silently short tool-call list |
 
 ## Contributing
 
