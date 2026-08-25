@@ -118,7 +118,7 @@ The claims in this table are structural properties of the package, not estimates
 | GPUs you provision | **0** | the control plane holds them |
 | Zero-instrumentation capture | **3 Python frameworks** — LangChain, LangGraph, Google ADK — **plus any CLI agent** that already prints a structured event stream | [`adapters/`](src/percepteye_agent_flywheel/adapters/), [`event_stream.py`](src/percepteye_agent_flywheel/event_stream.py) |
 | Environment variables required | **2** (URL and key), both overridable in code | [Configuration](#configuration-reference) |
-| Tests | **313 across 26 files**, all of them run in CI with zero skips permitted; the bare-install matrix adds 2 operating systems × 4 Python versions | `pytest` and [`.github/workflows/ci.yml`](.github/workflows/ci.yml) |
+| Tests | **351 across 27 files**, all of them run in CI with zero skips permitted; the bare-install matrix adds 2 operating systems × 4 Python versions | `pytest` and [`.github/workflows/ci.yml`](.github/workflows/ci.yml) |
 | License | MIT | [LICENSE](LICENSE) |
 
 ### One dependency, in context
@@ -284,6 +284,29 @@ Unknown outcomes lower the grade — they do not exclude the rollout. So capture
 
 The same refusal to collapse absence into zero runs through the whole contract: `tool_calls=None` means "I did not report tool calls"; `tool_calls=[]` means "I observed zero", which is a positive claim. The default is `None`. `tool_definitions: null` means "we could not look"; `[]` means "we looked, and there are none".
 
+## Did it work, or did it *stick*?
+
+An outcome says whether a call **worked**. It cannot say whether the change **survived**. A create that returns `201` and then silently fails to persist is indistinguishable, from inside your process, from one that landed — and a policy trained on the difference between them learns that the failure was fine.
+
+Nothing observed from inside the agent can close that gap. The only thing that settles it is looking at the resource afterwards, in the system that owns it.
+
+So when a tool call produces something, the trajectory records **which entity it produced** — a handful of opaque identifiers, never the response body:
+
+```json
+{"name": "POST /rest/api/2/issue", "outcome": "unknown", "status_code": null,
+ "entity_ids": {"id": "10001", "key": "ENG-7"}}
+```
+
+That is deliberately the *identity*, not the payload. The body is your production data and does not belong in a trajectory; the identity is what makes the record checkable later. Two properties follow:
+
+- **It is recorded even when the outcome is `unknown`.** An identity claims nothing about whether the call worked — it names an entity so that something else can go and observe one. It is the only evidence that can turn an honest `unknown` into an honest `ok`, so withholding it would starve exactly the records that need it most.
+- **Absent means absent.** No identity is an abstention, never a failure. Prose yields nothing rather than a guessed id, and low-entropy fields like `name` are refused outright — a human name that a *different* entity happens to share confirms the wrong resource, which is a false positive wearing a verified badge.
+
+**If you also give Percepteye read-only access to the environment your agent operates on, those outcomes get confirmed against your own system of record** before they are scored, and each episode reports how much of its work was confirmed rather than merely observed. If you don't, nothing changes: the flywheel scores exactly what it scores today. It is additive, it is optional, and it is off unless you configure it.
+
+> [!NOTE]
+> Confirmation is partial by nature. Some operations leave a resource you can read back and some do not, which is why coverage is reported per episode instead of implied. A number you can check beats a claim you cannot.
+
 ## Capture in the process that serves your users
 
 `serve()` donates capacity. `attach()` donates **evidence**, from the turns your agent is already serving — same adapters, same tri-state, same trajectory file, scoped around a live user turn instead of a claimed rollout:
@@ -329,7 +352,7 @@ What comes back is an **endpoint**, because that is the only form an agent can a
 
 An honest answer, in three parts.
 
-**What this repository can prove today.** Everything in [the integration table above](#what-does-it-cost-to-integrate): one dependency, one call, zero agent changes, zero inbound ports, 313 passing tests (230 of them on a bare install — the adapter and OpenTelemetry suites skip unless you install those extras). Those are properties of the code and you can check every one of them yourself.
+**What this repository can prove today.** Everything in [the integration table above](#what-does-it-cost-to-integrate): one dependency, one call, zero agent changes, zero inbound ports, 351 passing tests (268 of them on a bare install — the adapter and OpenTelemetry suites skip unless you install those extras). Those are properties of the code and you can check every one of them yourself.
 
 **What it cannot prove yet.** Task success rate, reward improvement, latency or cost deltas for *your* agent. This repository ships no benchmark numbers, and we would rather have the empty table below than a number you cannot reproduce. When we publish, we publish in the form the category's credible results take — `before → after, on a named task, with a named model`:
 
@@ -369,7 +392,7 @@ The short version: **the observability tools watch your agent but never close th
 
 | | agent runs in | supplies the tasks | supplies the scoring | what it sees per tool call | core deps |
 |---|---|---|---|---|---|
-| **percepteye-agent-flywheel** | **your own process** | yes | yes | **`ok` / `failed` / `unknown`** | **1** |
+| **percepteye-agent-flywheel** | **your own process** | yes | yes | **`ok` / `failed` / `unknown`, optionally confirmed against your own system** | **1** |
 | Applied Compute (BYOH) | your own process | yes | yes | the model wire only | — |
 | HUD | their container image | yes | yes | their environment grades | 18 |
 | Prime Intellect `verifiers` | wherever, you build the env | community hub | you write the rubric | you write it | 26 |
@@ -381,6 +404,8 @@ The short version: **the observability tools watch your agent but never close th
 **Applied Compute is the closest thing to this, and worth being precise about.** Their BYOH also keeps the harness where it already runs, also connects over an outbound WebSocket with no public endpoint, and is SOC 2 and ISO 42001 certified. If you are choosing between the two, "runs in my own infrastructure" is not the axis — both do that.
 
 The axis is the last column. Their design is explicit that the harness *"does not need to emit any additional observability data"*: traces are reconstructed from the model wire alone. That sees what the model was asked and what it answered. It does not see whether the tool **worked** — so a LangChain tool with `handle_tool_error=True`, or a permission denial your API returns as HTTP 200, is invisible to it. [That distinction is the whole reason `unknown` exists](#why-unknown-is-a-first-class-tool-outcome).
+
+And there is a second axis, one row further out than the table goes. Everyone above scores from **evidence produced by the run** — a transcript, a model wire, or an environment the vendor supplies and you port your task into. Percepteye can optionally score against **the system that actually holds the result**, because the agent is already operating on it and the record says which entity it touched. That is not a better rubric; it is a different class of evidence, and it is available to us because we are in your process rather than in place of it. [How that works, and what it costs you](#did-it-work-or-did-it-stick).
 
 Three further caveats. **Line count is table stakes** — HUD's decorator is about eight lines and Weave advertises one, so nobody wins on that alone; the differentiator is one call *with one dependency and no container*, which is why the table has a deps column. **Task supply is not equivalent** — everyone in the "yes" column supplies tasks for environments they built, whereas [agent discovery](#agent-discovery-on-by-default) derives them from your actual tool surface. And **NeMo and AgentCore are not really competitors** so much as the enterprise-platform version of the same idea; if you already run the cluster, they are a reasonable answer.
 
@@ -534,13 +559,13 @@ Fields derived from the inference wire — token-level data, sampling parameters
 
 ```bash
 python -m venv .venv
-# [dev] alone passes 230 tests; the adapter and tracing suites need the
+# [dev] alone passes 268 tests; the adapter and tracing suites need the
 # frameworks they bind to, and skip themselves when those are absent.
 .venv/bin/pip install -e ".[dev,adapters-test,otel,otel-test]"
 .venv/bin/pytest
 ```
 
-313 tests across 26 files, at a 1:1 test-to-source line ratio (5,322 lines of tests against 5,178 of source). Five CI jobs, and each one is there to protect a specific claim in this README:
+351 tests across 27 files, at a 1:1 test-to-source line ratio (5,576 lines of tests against 5,387 of source). Five CI jobs, and each one is there to protect a specific claim in this README:
 
 | job | what it would catch |
 |---|---|

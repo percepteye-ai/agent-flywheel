@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .contract import Outcome, ToolCallOutcome
+from .evidence import extract_entity_ids
 
 __all__ = ["FORMATS", "TOOL_END", "TOOL_START", "StreamFormat", "parse_tool_calls"]
 
@@ -253,6 +254,10 @@ def parse_tool_calls(stdout: str) -> list[ToolCallOutcome] | None:
             error=error,
             latency_ms=latency,
             tool_call_id=cid or None,
+            # Resolved from the STRUCTURED result rather than the rendered
+            # text: `_text_of` may stringify it for the trajectory, and an id
+            # recovered from prose afterwards would be a guess.
+            entity_ids=extract_entity_ids(result),
         ))
 
     if not saw_any:

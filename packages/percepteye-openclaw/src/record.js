@@ -11,6 +11,7 @@
  * exists on this path.
  */
 import { classify } from "./classify.js";
+import { extractEntityIds } from "./evidence.js";
 import { toWire } from "./trajectory.js";
 
 export function createRecorder({ writer }) {
@@ -34,6 +35,9 @@ export function createRecorder({ writer }) {
       if (!name) return false;
 
       const verdict = classify(name, event.error, event.result);
+      // Resolve the identity out of the result and let the result itself go.
+      // The record carries who was written, never what the response said.
+      const entity_ids = extractEntityIds(event.result);
       const ok = writer.write(toWire({
         name,
         // The host passes the arguments the tool ACTUALLY ran with -- it
@@ -60,6 +64,7 @@ export function createRecorder({ writer }) {
         tool_call_id: typeof event.toolCallId === "string"
           ? event.toolCallId
           : undefined,
+        entity_ids,
       }));
       if (ok) written += 1;
       return ok;

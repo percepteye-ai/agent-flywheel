@@ -34,7 +34,8 @@ const OPTIONAL_KEYS = [
  * the tri-state exists to prevent. A null status with a real outcome is the
  * honest shape; the contract requires the key, not a number.
  */
-export function toWire({ name, args, outcome, status_code = null, ...rest }) {
+export function toWire({ name, args, outcome, status_code = null, entity_ids,
+                         ...rest }) {
   const d = {
     name,
     arguments: args && typeof args === "object" ? args : {},
@@ -44,6 +45,13 @@ export function toWire({ name, args, outcome, status_code = null, ...rest }) {
   for (const key of OPTIONAL_KEYS) {
     const v = rest[key];
     if (v !== undefined && v !== null) d[key] = v;
+  }
+  // Emitted only when non-empty, and emitted for EVERY outcome including
+  // `unknown`. An identity claims nothing about whether the call worked -- it
+  // names an entity so something else can go and observe one. Withholding it
+  // on `unknown` would suppress the only evidence able to settle that call.
+  if (entity_ids && Object.keys(entity_ids).length > 0) {
+    d.entity_ids = entity_ids;
   }
   return d;
 }

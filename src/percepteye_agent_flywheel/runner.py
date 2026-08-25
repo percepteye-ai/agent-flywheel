@@ -1050,6 +1050,10 @@ def _output_from_wire(d: dict[str, Any]) -> RolloutOutput:
                 error_class=t.get("error_class"), latency_ms=t.get("latency_ms"),
                 agent_name=t.get("agent_name"),
                 tool_call_id=t.get("tool_call_id"),
+                # Carried across the process boundary. An agent that reports
+                # its own tool calls resolved the identity in the child; the
+                # parent must not be where that evidence is quietly lost.
+                entity_ids=t.get("entity_ids") or {},
             )
             for t in tcs
         ]

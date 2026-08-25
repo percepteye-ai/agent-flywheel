@@ -27,6 +27,7 @@ from typing import Any
 
 from .contract import Outcome, ToolCallOutcome
 from .errors import ContractViolation
+from .evidence import extract_entity_ids
 
 __all__ = ["TOOL_CALLS_FILENAME", "Trajectory", "current_rollout_id", "record_tool_call"]
 
@@ -101,6 +102,7 @@ def record_tool_call(
     latency_ms: float | None = None,
     agent_name: str | None = None,
     tool_call_id: str | None = None,
+    entity_ids: dict[str, str] | None = None,
 ) -> None:
     """Record one executed tool call against the current rollout.
 
@@ -112,12 +114,21 @@ def record_tool_call(
     ``outcome="failed", status_code=200``. Reading the status alone would score
     that refused write as a landed mutation.
 
+    ``entity_ids`` names the entity a WRITE produced -- ``{"id": "10001"}``.
+    Pass it when you know it; otherwise it is read out of ``output`` and the
+    body itself is never required downstream. Only high-entropy fields are
+    accepted, because a human ``name`` a different entity happens to share
+    identifies the wrong resource.
+
     Outside a rollout this is a no-op, so instrumentation can stay in
     production code paths unconditionally.
     """
     rid = current_rollout_id()
     if not rid:
         return
+    # Declared identity always wins. Extraction is best-effort acceleration
+    # over an explicit answer, exactly as the adapters are over this function.
+    ids = dict(entity_ids) if entity_ids else extract_entity_ids(output)
     rec = ToolCallOutcome(
         name=name,
         arguments=dict(arguments or {}),
@@ -129,6 +140,7 @@ def record_tool_call(
         latency_ms=latency_ms,
         agent_name=agent_name,
         tool_call_id=tool_call_id,
+        entity_ids=ids,
     )
     # Project into the customer's own traces BEFORE the write, so a rollout
     # with no trajectory directory still shows up in their telemetry.
@@ -221,6 +233,7 @@ class Trajectory:
                         latency_ms=d.get("latency_ms"),
                         agent_name=d.get("agent_name"),
                         tool_call_id=d.get("tool_call_id"),
+                        entity_ids=d.get("entity_ids") or {},
                     )
                 except (ValueError, TypeError, KeyError, AttributeError,
                         ContractViolation):

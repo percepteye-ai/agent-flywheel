@@ -171,7 +171,7 @@ jobs:
           rec.handle({ toolName:'read', params:{path:'/etc/hosts'}, toolCallId:'c1', result:'ok', durationMs:3 }, {agentId:'coder'});
           rec.handle({ toolName:'exec', params:{command:'exit 3'}, toolCallId:'c2', result:{details:{status:'completed',exitCode:3}}, durationMs:91 });
           rec.handle({ toolName:'exec', params:{command:'echo hi'}, toolCallId:'c3', result:{details:{status:'completed',exitCode:0}}, durationMs:93 });
-          rec.handle({ toolName:'mcp__jira__transition', params:{}, toolCallId:'c4', result:'{}' });
+          rec.handle({ toolName:'mcp__jira__transition', params:{}, toolCallId:'c4', result:{id:'10001',key:'ENG-7'} });
           "
           python - <<'PY'
           from percepteye_agent_flywheel.outcomes import Trajectory
@@ -186,5 +186,12 @@ jobs:
               ("mcp__jira__transition", "unknown"),
           ], got
           assert calls[0].tool_call_id == "c1"   # the join key survives
+          # Identity crosses the language boundary, and survives `unknown` --
+          # an unknown call with an identity is the one a later read-back can
+          # actually settle, so losing it here would cost exactly the records
+          # that need it most.
+          assert calls[3].outcome == "unknown"
+          assert calls[3].entity_ids == {"id": "10001", "key": "ENG-7"}, calls[3].entity_ids
           print("cross-language capture contract holds:", got)
+          print("identity crossed the boundary:", calls[3].entity_ids)
           PY

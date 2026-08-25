@@ -17,6 +17,11 @@ from typing import Any, Literal
 
 from .errors import ContractViolation
 
+#: Imported rather than restated so the contract validates against exactly
+#: the field set the extractor produces -- one definition, never a twin
+#: that can drift out from under the other half.
+from .evidence import IDENTITY_FIELDS as _IDENTITY_FIELDS
+
 __all__ = [
     "CONTRACT_VERSION",
     "ExclusionReason",
@@ -128,6 +133,15 @@ class ToolCallOutcome:
     #: framework exposed no id; the call still counts, it just cannot be
     #: placed more precisely than "somewhere in this rollout".
     tool_call_id: str | None = None
+    #: The identity a WRITE produced, filed under the field it came from --
+    #: ``{"id": "10001", "key": "PROJ-42"}``. This is what lets the entity be
+    #: found again later, and it is deliberately not the response body: the
+    #: body is customer production data, the identity is a few opaque strings.
+    #: Extract, then discard.
+    #:
+    #: Empty means no identity evidence, which is an abstention rather than a
+    #: failure -- exactly the rule ``unknown`` follows.
+    entity_ids: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.name or not isinstance(self.name, str):
@@ -147,6 +161,31 @@ class ToolCallOutcome:
             if not (100 <= sc <= 599):
                 raise ContractViolation(f"status_code out of range: {sc}")
 
+        if self.entity_ids:
+            if not isinstance(self.entity_ids, dict):
+                raise ContractViolation(
+                    f"ToolCallOutcome.entity_ids must be a dict, "
+                    f"got {type(self.entity_ids).__name__}"
+                )
+            for k, v in self.entity_ids.items():
+                # Weak fields are refused BY NAME rather than merely
+                # discouraged. A created resource routinely echoes a human
+                # `name` that a different entity shares by coincidence, and
+                # matching on it confirms the wrong resource -- a false
+                # positive dressed as a verified success, which is worse than
+                # no evidence at all.
+                if str(k).strip().lower() not in _IDENTITY_FIELDS:
+                    raise ContractViolation(
+                        f"ToolCallOutcome.entity_ids key {k!r} is not a "
+                        f"high-entropy identity field {_IDENTITY_FIELDS}. "
+                        f"Low-entropy fields identify the wrong entity."
+                    )
+                if not isinstance(v, str) or not v.strip():
+                    raise ContractViolation(
+                        f"ToolCallOutcome.entity_ids[{k!r}] must be a "
+                        f"non-empty string, got {v!r}"
+                    )
+
         if self.outcome == "unknown":
             # Enforced, not requested. An unknown outcome carrying a 2xx is the
             # single shape that turns an honest capture into fabricated data.
@@ -165,6 +204,14 @@ class ToolCallOutcome:
             v = getattr(self, k)
             if v is not None:
                 d[k] = v
+        # Deliberately NOT scrubbed for an `unknown` outcome, unlike `output`.
+        # `_scrub_status` exists so an unobserved call cannot have a status
+        # recovered from its body and be read as landed. An identity claims
+        # nothing about the outcome -- it names an entity so that something
+        # ELSE can go and observe one. Withholding it would suppress the only
+        # evidence capable of turning an honest `unknown` into an honest `ok`.
+        if self.entity_ids:
+            d["entity_ids"] = dict(self.entity_ids)
         return d
 
 
