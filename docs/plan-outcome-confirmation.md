@@ -112,13 +112,17 @@ that seam and nowhere later.
 ## 4. Phase 2 — the credentialed reader (control plane, NOT built)
 
 > [!IMPORTANT]
-> **Phase 2 is larger than this section assumes, and the reason is worth
-> stating before anyone starts.** This was written as though a credentialed
-> reader could be swapped into a running verification path. There is no such
-> path on the flywheel side: the read-back gate requires a live rollout object,
-> returns early when no base URL is configured, and the tool-mode table has no
-> flywheel entry at all. So Phase 2 is *adding confirmation where none runs
-> today*, not rebinding an existing executor.
+> **A correction, because an earlier draft of this section got it backwards.**
+> That draft claimed the flywheel path never reaches scoring, on the grounds
+> that the tool-mode table has no flywheel entry. The premise is true and the
+> conclusion does not follow: an unrecognised mode is logged and treated as
+> `"live"`, so the missing entry routes a flywheel run *into* the scored path
+> rather than diverting it away. The read-back gate's early return on an
+> unconfigured base URL is likewise real but is a configuration condition, not
+> a structural absence.
+>
+> So Phase 2 is not "adding confirmation where none runs". Confirmation runs;
+> what is missing is a binding that points it at the customer's own system.
 >
 > A second correction to the framing above: the reader is already shaped as
 > "a base URL plus a credential plus a read-only client", so the confirmation
@@ -190,30 +194,48 @@ that seam and nowhere later.
   confirmed keeps the claim honest, and is more persuasive than the claim it
   replaces.
 
-### An open question this document created
+### A question this document created, now answered: the cliff stays
 
-Identity is restricted to high-entropy fields (`id`, `key`, `uuid`, `sid`,
-`gid`), which is right — a low-entropy value a different entity shares by
-coincidence confirms the wrong resource. But a post-condition author may name
-any response field as the identity source. One outside that set stops
-resolving, and the concern is that scoring then lands on the **0.0 anti-hack
-cliff** rather than on `inconclusive` — converting a limitation of *our capture
-format* into a scored *policy failure*. Training on that teaches the model its
-correct action was wrong, which is worse than not scoring the episode at all.
+An earlier draft worried that identity restricted to high-entropy fields would
+send authored identity sources outside that set onto the **0.0 anti-hack
+cliff**, turning a capture-format limitation into a scored policy failure. Two
+parts of that were wrong and one was right.
 
-This is recorded as a question rather than a finding, because it is not yet
-established that it is reachable, and because the cliff is an anti-gaming
-guard. Two conditions have to hold before touching it:
+**Wrong: it is not a whitelist.** Scoring gates identity with a DENYLIST of
+low-entropy names, so `ts`, `self`, `permalink` and dotted paths all resolve
+normally — a shipped post-condition uses `ts` and confirms today. The
+high-entropy set constrains what the *capture* side emits, not what scoring
+accepts.
 
-1. **The agent must have no influence over whether identity resolves.** If a
-   policy can cause its own writes to become unresolvable, the cliff is correct
-   as it stands and must not move.
-2. **The two causes must be distinguishable from the data.** "Unresolvable
-   because our format could not carry it" and "unresolvable because the write
-   never happened" have to be told apart, or there is nothing to route
-   differently and this is not fixable at the scoring layer.
+**Right, by a different route: the harm is real and reachable.** A genuinely
+successful create that returns `201` with an empty body has no identity to
+resolve, is scored `0.0` at full weight, and is locked out of every rescue
+tier. That needs no capture format to happen and is pinned by an existing test.
 
-If either fails, the honest outcome is to leave the cliff alone and record why.
+**And the obvious fix is wrong**, on two independent grounds, both established
+by trying to break it rather than by reasoning about it:
+
+1. **It is gameable.** The natural fix demotes such a row so the weaker
+   "the write was acknowledged" tier can grade it. But that tier's predicate
+   only checks that a matching call returned a success envelope — it never
+   inspects what was actually sent or created. Several trivially cheap shapes
+   satisfy it, so the demotion converts a `0.0` into partial credit for doing
+   nothing. Amnesty here is a promotion, not a neutral.
+2. **It is not a reward-only field.** The flag being flipped also feeds the
+   named per-task predicate, which falls back to a "confirmed" boolean that
+   reads **True** for an acknowledged-but-unlocated write. The audit-readable
+   claim "the agent did the thing" would flip from false to true for a bare
+   `2xx` with no identity — a worse outcome than the mis-scored reward it was
+   meant to repair.
+
+**So the cliff stays**, and this is recorded so nobody re-derives the same fix.
+Scoring a correct-but-unnameable write as `0.0` is a real cost, but every
+available remedy so far pays for it with a false success assertion, which is
+the one thing this whole design refuses to trade for.
+
+If it is worth revisiting, the tractable direction is upstream: make identity
+resolvable at capture, where the write's own response is still in hand, rather
+than trying to recover it at scoring time from evidence that no longer exists.
 
 ## 6. Risks
 
