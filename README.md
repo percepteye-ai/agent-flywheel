@@ -1,8 +1,10 @@
-# percepteye-agent-flywheel — in-process agent RL with observed tool outcomes
+# percepteye-agent-flywheel — self-improving agents through continual learning
 
-***Observed, not inferred.*** Every tool call your agent makes is recorded as `ok`, `failed` or **`unknown`** — and `unknown` is never rounded up to `ok`. Nothing else in this category can say that, because [reconstructing a trajectory from the model wire cannot see whether a tool actually worked](#how-is-this-different-from-applied-compute-langsmith-braintrust-hud-or-nemo-data-flywheel).
+**percepteye-agent-flywheel is a Python SDK that turns the work your agent already does into training data, and delivers what it learns back as an endpoint your agent already calls.** Your agent keeps running in your process, behind your firewall, on your credentials — unchanged. One runtime dependency, one import, one call. No inbound port, no container to build, no GPU to provision.
 
-**percepteye-agent-flywheel is a Python SDK that runs your own agent against evaluation and reinforcement-learning rollouts supplied by the Percepteye control plane — without moving your agent.** It keeps running in your process, behind your firewall, on your credentials. One runtime dependency, one import, one call. No inbound port, no container to build, no GPU to provision.
+***Observed, not inferred.*** Every tool call is recorded as `ok`, `failed` or **`unknown`**, and `unknown` is never rounded up to `ok`. That is the difference between learning from what your agent *did* and learning from what its transcript *claimed* — and [nothing else in this category can make the distinction](#how-is-this-different-from-applied-compute-langsmith-braintrust-hud-or-nemo-data-flywheel), because a trajectory reconstructed from the model wire cannot see whether a tool actually worked.
+
+Under the hood this is **in-process agentic RL** — reinforcement learning on rollouts your own agent runs, outbound-only, with per-call tri-state outcomes and a policy endpoint the control plane chooses. You never have to think about any of that to use it.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/percepteye-ai/agent-flywheel/main/docs/assets/flywheel-loop.gif"

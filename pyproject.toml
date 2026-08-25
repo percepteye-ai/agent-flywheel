@@ -11,7 +11,7 @@ version = "0.1.0"
 # ecosystem that Google can reach without an inbound link (pypi.org publishes a
 # sitemap; github.com does not). It is therefore DEFINITIONAL, not imperative:
 # an LLM asked "what is percepteye-agent-flywheel?" must get a category noun.
-description = "In-process agent RL: run your own LLM agent against externally-supplied evaluation and reinforcement-learning rollouts. Outbound-only, one runtime dependency."
+description = "Self-improving agents through continual learning: in-process agentic RL that turns your own agent's work into training data. Observed tool outcomes, outbound-only, one runtime dependency."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
@@ -65,7 +65,7 @@ adapters-test = ["langchain-core>=0.3", "google-adk>=2.2", "langgraph>=1.0"]
 # emits into whatever TracerProvider the customer already registered and
 # never installs one. Optional because the package ships with a single
 # runtime dependency and tool outcomes reach the control plane through
-# the ledger regardless; spans are a projection for the customer's own
+# the trajectory regardless; spans are a projection for the customer's own
 # observability, not a transport we depend on.
 otel = ["opentelemetry-api>=1.20"]
 # The OpenTelemetry SDK, FOR TESTS ONLY, and deliberately not in `otel` above.
