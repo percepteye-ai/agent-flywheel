@@ -20,7 +20,7 @@ PARENT = {
 def _env(**kw):
     base = dict(
         rollout_id="rl_abc", llm_url="https://gw.percepteye.com/llm/v1/rollouts/rl_abc",
-        api_key="perk_single_use", ledger_dir="/tmp/led", parent_env=PARENT,
+        api_key="perk_single_use", trajectory_dir="/tmp/led", parent_env=PARENT,
     )
     base.update(kw)
     return build_child_env(**base)
@@ -39,13 +39,13 @@ def test_control_plane_key_never_reaches_the_child():
 def test_no_percepteye_variable_is_inherited():
     env = _env()
     inherited = {k for k in env if k.startswith("PERCEPTEYE_")}
-    assert inherited == {"PERCEPTEYE_ROLLOUT_ID", "PERCEPTEYE_LEDGER_DIR"}
+    assert inherited == {"PERCEPTEYE_ROLLOUT_ID", "PERCEPTEYE_TRAJECTORY_DIR"}
 
 
 def test_rollout_scoped_variables_are_set():
     env = _env()
     assert env["PERCEPTEYE_ROLLOUT_ID"] == "rl_abc"
-    assert env["PERCEPTEYE_LEDGER_DIR"] == "/tmp/led"
+    assert env["PERCEPTEYE_TRAJECTORY_DIR"] == "/tmp/led"
 
 
 def test_routing_wins_over_the_customers_own_key():
@@ -58,8 +58,9 @@ def test_routing_wins_over_the_customers_own_key():
 
 
 def test_the_customers_own_secrets_still_pass_through():
-    """BYOH exists so their agent runs against their real systems. Stripping
-    their credentials would defeat the product; stripping ours is the point."""
+    """The whole point is that their agent runs against their REAL systems --
+    their Jira, their database, their staging cluster. Stripping their
+    credentials would defeat the product; stripping ours is the product."""
     env = _env()
     assert env["JIRA_API_TOKEN"] == "customer-token"
     assert env["DATABASE_URL"] == "postgres://customer"
@@ -90,7 +91,7 @@ def test_a_provider_we_cannot_route_is_removed_from_the_child():
     can."""
     env = build_child_env(
         rollout_id="rl_1", llm_url="https://gw/llm/v1/rollouts/rl_1",
-        api_key="perk_x", ledger_dir="/tmp/l",
+        api_key="perk_x", trajectory_dir="/tmp/l",
         parent_env={
             "GOOGLE_API_KEY": "live-gemini",
             "AZURE_OPENAI_ENDPOINT": "https://acme.openai.azure.com",
@@ -111,7 +112,7 @@ def test_the_customers_own_non_model_credentials_still_reach_their_agent():
     reason the agent runs in their process at all."""
     env = build_child_env(
         rollout_id="rl_1", llm_url="https://gw/llm/v1/rollouts/rl_1",
-        api_key="perk_x", ledger_dir="/tmp/l",
+        api_key="perk_x", trajectory_dir="/tmp/l",
         parent_env={"JIRA_API_TOKEN": "theirs", "AWS_ACCESS_KEY_ID": "for-s3"},
     )
     assert env["JIRA_API_TOKEN"] == "theirs"
@@ -123,7 +124,7 @@ def test_the_customers_own_non_model_credentials_still_reach_their_agent():
 def test_the_routing_vars_still_win_over_an_inherited_value():
     env = build_child_env(
         rollout_id="rl_1", llm_url="https://gw/llm/v1/rollouts/rl_1",
-        api_key="perk_x", ledger_dir="/tmp/l",
+        api_key="perk_x", trajectory_dir="/tmp/l",
         parent_env={"OPENAI_BASE_URL": "https://api.openai.com/v1",
                     "OPENAI_API_KEY": "sk-live"},
     )

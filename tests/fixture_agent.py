@@ -77,12 +77,29 @@ def build_slow() -> Slow:
 
 class Medium:
     """Sleeps long enough that serving three of them sequentially is plainly
-    distinguishable from serving them at once."""
+    distinguishable from serving them at once.
+
+    Records when it ran, if told where. Concurrency is then provable by
+    OVERLAP -- did all three exist at the same instant -- rather than by
+    comparing a wall-clock total against a threshold, which only holds on a
+    machine as fast as the one the threshold was written on.
+
+    Not a PERCEPTEYE_ name deliberately: that namespace is stripped from the
+    child environment, which is the point of `build_child_env`."""
 
     def invoke(self, task: str) -> str:
+        import os
+        import pathlib
         import time
+        import uuid
 
+        started = time.time()
         time.sleep(2.0)
+        span_dir = os.environ.get("AGENT_SPAN_DIR")
+        if span_dir:
+            pathlib.Path(span_dir, f"{uuid.uuid4().hex}.span").write_text(
+                f"{started} {time.time()}", encoding="utf-8"
+            )
         return f"medium:{task}"
 
 
@@ -149,8 +166,7 @@ class ArtifactWriter:
         import os
         import pathlib
 
-        root = pathlib.Path(os.environ["PERCEPTEYE_LEDGER_DIR"]) / os.environ[
-            "PERCEPTEYE_ROLLOUT_ID"]
+        root = pathlib.Path(os.environ["PERCEPTEYE_TRAJECTORY_DIR"])
         (root / "out").mkdir(parents=True, exist_ok=True)
         (root / "result.txt").write_text(f"done: {task}\n")
         (root / "out" / "patch.diff").write_text("--- a\n+++ b\n@@ -1 +1 @@\n-x\n+y\n")

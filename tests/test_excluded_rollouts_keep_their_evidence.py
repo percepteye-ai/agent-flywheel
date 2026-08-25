@@ -2,7 +2,7 @@
 
 Measured on run 516b7a55 (2026-08-12): prime-agent wrote a CORRECT
 ``top_ips.sh``, hit ``maxTurns (12/12)``, exited 1 — and the control-plane row
-came back with ``artifacts={}`` while the correct file sat in the local ledger.
+came back with ``artifacts={}`` while the correct file sat in the local trajectory.
 Artifacts were collected only on the clean-exit path, and any exclusion
 short-circuited straight to ``abandon``.
 
@@ -210,9 +210,9 @@ def test_the_agent_is_stopped_short_of_the_deadline(tmp_path):
     import percepteye_agent_flywheel.runner as _rmod
     _orig = _rmod.run_rollout_as_command
 
-    def _spy(cmd, rollout, *, ledger_dir, timeout_s, env=None, cwd=None, **kw):
+    def _spy(cmd, rollout, *, trajectory_dir, timeout_s, env=None, cwd=None, **kw):
         seen["timeout_s"] = timeout_s
-        return _orig(cmd, rollout, ledger_dir=ledger_dir, timeout_s=timeout_s,
+        return _orig(cmd, rollout, trajectory_dir=trajectory_dir, timeout_s=timeout_s,
                      env=env, cwd=cwd, **kw)
 
     _rmod.run_rollout_as_command = _spy

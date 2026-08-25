@@ -86,7 +86,7 @@ class AttachTransport:
         """
         try:
             return self._c.request("GET", "/policy/current") or {}
-        except Exception:  # noqa: BLE001 — see docstring
+        except Exception:  # see docstring
             return {}
 
     def claim(self, max_rollouts: int) -> tuple[list[RolloutRequest], int]:

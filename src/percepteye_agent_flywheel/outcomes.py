@@ -8,7 +8,7 @@ answer, not a failure.
 
 **Why a file and not a list.** The default isolation mode spawns one child
 process per rollout, and the customer's agent runs in the child. In-memory
-state and context variables do not cross that boundary, so a ledger held in
+state and context variables do not cross that boundary, so a trajectory directory held in
 the parent would silently record nothing -- capture would appear to work while
 producing an empty tool-call list, which reads downstream as "this agent made
 no tool calls" rather than "we failed to look". Append-only JSONL under the
@@ -26,24 +26,25 @@ from pathlib import Path
 from typing import Any
 
 from .contract import Outcome, ToolCallOutcome
+from .errors import ContractViolation
 
-__all__ = ["LEDGER_FILENAME", "OutcomeLedger", "current_rollout_id", "record_tool_call"]
+__all__ = ["TOOL_CALLS_FILENAME", "Trajectory", "current_rollout_id", "record_tool_call"]
 
-LEDGER_FILENAME = "tool_calls.jsonl"
+TOOL_CALLS_FILENAME = "tool_calls.jsonl"
 
 ROLLOUT_ID_ENV = "PERCEPTEYE_ROLLOUT_ID"
-LEDGER_DIR_ENV = "PERCEPTEYE_LEDGER_DIR"
+TRAJECTORY_DIR_ENV = "PERCEPTEYE_TRAJECTORY_DIR"
 
 _current_rollout: ContextVar[str | None] = ContextVar(
     "percepteye_current_rollout", default=None
 )
-#: Where this rollout's ledger lives. A context variable rather than an
+#: Where this rollout's trajectory lives. A context variable rather than an
 #: environment variable because in-process rollouts must NOT mutate the host
 #: application's environment -- that is the global side effect this SDK exists
 #: not to repeat. The child process gets the same value through its own
 #: environment at spawn, which is a fresh process and therefore safe.
-_current_ledger_dir: ContextVar[str | None] = ContextVar(
-    "percepteye_current_ledger_dir", default=None
+_current_trajectory_dir: ContextVar[str | None] = ContextVar(
+    "percepteye_current_trajectory_dir", default=None
 )
 _write_lock = threading.Lock()
 _warned_no_destination = False
@@ -64,7 +65,7 @@ def current_rollout_id() -> str | None:
     return os.environ.get(ROLLOUT_ID_ENV) or None
 
 
-def _ledger_path(rollout_id: str) -> Path | None:
+def _trajectory_path(rollout_id: str) -> Path | None:
     """Where to append. Context variable first (in-process), env second (child).
 
     Returning None while a rollout IS active means capture would be silently
@@ -72,14 +73,14 @@ def _ledger_path(rollout_id: str) -> Path | None:
     that case warns rather than passing quietly.
     """
     global _warned_no_destination
-    base = _current_ledger_dir.get() or os.environ.get(LEDGER_DIR_ENV)
+    base = _current_trajectory_dir.get() or os.environ.get(TRAJECTORY_DIR_ENV)
     if base:
-        return Path(base) / rollout_id / LEDGER_FILENAME
+        return Path(base) / TOOL_CALLS_FILENAME
     if not _warned_no_destination:
         _warned_no_destination = True
         warnings.warn(
             f"record_tool_call() was called for rollout {rollout_id!r} with no "
-            f"ledger destination configured, so the outcome was DISCARDED. "
+            f"trajectory directory configured, so the outcome was DISCARDED. "
             f"Tool outcomes recorded outside a percepteye-agent-flywheel runner are "
             f"not captured. This warning is emitted once.",
             RuntimeWarning,
@@ -129,13 +130,13 @@ def record_tool_call(
         agent_name=agent_name,
         tool_call_id=tool_call_id,
     )
-    # Project into the customer's own traces BEFORE the ledger write, so a
-    # rollout with no ledger destination still shows up in their telemetry.
+    # Project into the customer's own traces BEFORE the write, so a rollout
+    # with no trajectory directory still shows up in their telemetry.
     # Egress only: nothing reads these back, and a telemetry failure inside
     # cannot reach this function's caller.
     _emit_span(rec, rid)
 
-    path = _ledger_path(rid)
+    path = _trajectory_path(rid)
     if path is None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -171,30 +172,45 @@ def _emit_span(rec: ToolCallOutcome, rollout_id: str) -> None:
         return
 
 
-class OutcomeLedger:
-    """Parent-side reader for one rollout's append-only ledger."""
+class Trajectory:
+    """Parent-side reader for one rollout's trajectory directory."""
 
-    def __init__(self, ledger_dir: str | os.PathLike[str], rollout_id: str) -> None:
-        self.path = Path(ledger_dir) / rollout_id / LEDGER_FILENAME
+    def __init__(self, trajectory_dir: str | os.PathLike[str]) -> None:
+        self.path = Path(trajectory_dir) / TOOL_CALLS_FILENAME
+        #: Records the last :meth:`read` could not parse. A truncated final
+        #: line is the EXPECTED case, not an exotic one: the deadline kill
+        #: lands mid-write, and once a plugin in another language appends here
+        #: it stops being rare. Counted rather than raised, and counted rather
+        #: than silently dropped -- a call we know executed and cannot read is
+        #: not a call that did not happen.
+        self.malformed = 0
 
     def read(self) -> list[ToolCallOutcome] | None:
         """Every call recorded for this rollout, or None if nothing was recorded.
 
         ``None`` and ``[]`` mean different things and this preserves the
-        difference: no ledger file at all means the agent never reported, and
+        difference: no tool-call file at all means the agent never reported, and
         must not be rendered as an assertion that zero tool calls occurred.
+
+        **One unreadable line costs that line and nothing else.** Before this
+        guard a single truncated write -- which is what a SIGKILL on the
+        deadline produces -- raised out of here, out of ``run_one``, and turned
+        a COMPLETED rollout into ``flywheel_crash`` with every tool call lost.
+        The count survives in :attr:`malformed` so the loss is reported rather
+        than hidden; see ``_attach_trajectory``.
         """
         if not self.path.exists():
             return None
+        self.malformed = 0
         out: list[ToolCallOutcome] = []
         with self.path.open(encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
                     continue
-                d = json.loads(line)
-                out.append(
-                    ToolCallOutcome(
+                try:
+                    d = json.loads(line)
+                    rec = ToolCallOutcome(
                         name=d["name"],
                         arguments=d.get("arguments") or {},
                         outcome=d["outcome"],
@@ -206,7 +222,15 @@ class OutcomeLedger:
                         agent_name=d.get("agent_name"),
                         tool_call_id=d.get("tool_call_id"),
                     )
-                )
+                except (ValueError, TypeError, KeyError, AttributeError,
+                        ContractViolation):
+                    # Truncated JSON, a non-object line, a missing required
+                    # key, or a value the contract refuses. All four mean the
+                    # same thing here -- this record is unreadable -- and none
+                    # of them is a reason to discard the readable ones.
+                    self.malformed += 1
+                    continue
+                out.append(rec)
         return out
 
     def unknown_count(self) -> int:
@@ -215,27 +239,27 @@ class OutcomeLedger:
 
 
 class _RolloutScope:
-    """Binds a rollout and its ledger to the current context for one block.
+    """Binds a rollout and its trajectory directory to the context for one block.
 
     Both are set together. An earlier iteration bound only the id and left the
     destination to the environment, so in-process rollouts resolved a rollout
-    but no ledger and dropped every recorded call while appearing to work.
+    but no destination and dropped every recorded call while appearing to work.
     """
 
-    def __init__(self, rollout_id: str, ledger_dir: str) -> None:
+    def __init__(self, rollout_id: str, trajectory_dir: str) -> None:
         self._rid = rollout_id
-        self._ledger_dir = str(ledger_dir)
+        self._trajectory_dir = str(trajectory_dir)
         self._tokens: list[Any] = []
 
     def __enter__(self) -> str:
         self._tokens = [
             _current_rollout.set(self._rid),
-            _current_ledger_dir.set(self._ledger_dir),
+            _current_trajectory_dir.set(self._trajectory_dir),
         ]
         return self._rid
 
     def __exit__(self, *exc: Any) -> None:
         if self._tokens:
             _current_rollout.reset(self._tokens[0])
-            _current_ledger_dir.reset(self._tokens[1])
+            _current_trajectory_dir.reset(self._tokens[1])
             self._tokens = []

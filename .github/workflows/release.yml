@@ -1,0 +1,104 @@
+name: release
+
+# Publishes to PyPI via TRUSTED PUBLISHING (OIDC). There is no API token in
+# this repository, in an environment variable, or in a secret -- GitHub mints
+# a short-lived identity token for this workflow and PyPI verifies it against
+# the publisher you configured there. Nothing long-lived exists to leak.
+#
+# One-time setup on PyPI, and it must be done by a human with the account:
+#
+#   1. https://pypi.org/manage/account/publishing/  ("pending publisher",
+#      which is the flow for a project that does NOT exist on PyPI yet)
+#   2. PyPI Project Name : percepteye-agent-flywheel
+#      Owner            : percepteye-ai
+#      Repository name  : agent-flywheel
+#      Workflow name    : release.yml
+#      Environment name : pypi
+#   3. Create a GitHub environment named `pypi` (Settings -> Environments) and
+#      add yourself as a required reviewer, so a publish waits for a human.
+#
+# After that, publishing is: push a tag, approve the environment. That is all.
+#
+# NOTE, because it is irreversible: PyPI never allows a filename to be reused,
+# even after deletion. A version published by mistake is spent forever. The
+# testpypi job below exists so the first run of this workflow is not also the
+# first time anyone has seen it work.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Where to publish"
+        required: true
+        default: testpypi
+        type: choice
+        options: [testpypi, pypi]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: the tag must match the version in pyproject
+        # A tag that disagrees with the packaged version produces a release
+        # nobody can find by the name they were given.
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          python - <<'PY'
+          import os, tomllib
+          tag = os.environ["GITHUB_REF"].removeprefix("refs/tags/v")
+          ver = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]
+          assert tag == ver, f"tag v{tag} != pyproject version {ver}"
+          print(f"tag and version agree: {ver}")
+          PY
+
+      - run: pip install build twine
+      - run: python -m build
+
+      - name: metadata is valid and the README renders on PyPI
+        # PyPI rejects a long_description it cannot render, and it rejects it
+        # AFTER accepting the filename -- which is then spent.
+        run: python -m twine check --strict dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  testpypi:
+    # A full dress rehearsal. TestPyPI is a separate index with separate
+    # filename accounting, so a mistake here costs nothing on the real one.
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write        # the OIDC token. No secrets needed, or present.
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  pypi:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    runs-on: ubuntu-latest
+    environment: pypi        # gate this with a required reviewer in Settings
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

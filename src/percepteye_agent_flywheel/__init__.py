@@ -43,9 +43,7 @@ from .contract import (
     RolloutRequest,
     ToolCallOutcome,
 )
-from .entrypoint import InputShape, resolve_entrypoint
-from .introspection import DiscoveredAgent, ToolDefinition
-from .introspection import introspect as introspect_agent
+from .entrypoint import TASK, InputShape, resolve_entrypoint
 from .errors import (
     ConfigurationError,
     ContractViolation,
@@ -56,8 +54,11 @@ from .errors import (
     RoutingNotInstallable,
     TransportError,
 )
+from .introspection import DiscoveredAgent, ToolDefinition
+from .introspection import introspect as introspect_agent
 from .isolation import unroutable_providers_present
-from .outcomes import OutcomeLedger, current_rollout_id, record_tool_call
+from .outcomes import Trajectory, current_rollout_id, record_tool_call
+from .production import Attachment, attach
 from .runner import RolloutRunner
 from .transport import AttachTransport, FlywheelTransport
 
@@ -65,9 +66,9 @@ __version__ = "0.1.0"
 
 __all__ = [
     "CONTRACT_VERSION",
-    "apply_current_policy",
-    "current_policy",
+    "TASK",
     "AttachTransport",
+    "Attachment",
     "ConfigurationError",
     "ContractViolation",
     "DiscoveredAgent",
@@ -79,15 +80,18 @@ __all__ = [
     "LeaseLost",
     "ModeNotAvailable",
     "Outcome",
-    "OutcomeLedger",
     "RolloutOutput",
     "RolloutRequest",
     "RolloutRunner",
     "RoutingNotInstallable",
     "ToolCallOutcome",
     "ToolDefinition",
+    "Trajectory",
     "TransportError",
     "__version__",
+    "apply_current_policy",
+    "attach",
+    "current_policy",
     "current_rollout_id",
     "introspect_agent",
     "record_tool_call",
@@ -100,7 +104,7 @@ __all__ = [
 ENV_CONTROL_PLANE_URL = "PERCEPTEYE_CONTROL_PLANE_URL"
 ENV_API_KEY = "PERCEPTEYE_API_KEY"
 ENV_ROLLOUT_ID = "PERCEPTEYE_ROLLOUT_ID"      # set by us, for the child
-ENV_LEDGER_DIR = "PERCEPTEYE_LEDGER_DIR"      # set by us, for the child
+ENV_TRAJECTORY_DIR = "PERCEPTEYE_TRAJECTORY_DIR"  # set by us, for the child
 
 FlywheelMode = Literal["rollout"]
 
@@ -244,6 +248,12 @@ def serve(
     #: a property of the task and arrives per rollout. Leave unset for an agent
     #: with no gate concept — it then behaves exactly as before.
     gate_flag: str | None = None,
+    #: The environment variables THIS agent reads its endpoint from, when they
+    #: are not the OpenAI/Anthropic names set by default. Declared, never
+    #: sniffed: an agent that reads neither default looks identical from here
+    #: to one that is correctly routed, right up until the completions arrive
+    #: at the live provider instead of the gateway.
+    endpoint_env: tuple[str, str] | None = None,
     reports_tool_calls: bool = False,
     method: str | None = None,
     adapters: list[str] | str | None = "auto",
@@ -341,6 +351,7 @@ def serve(
         concurrency=concurrency,
         rollout_timeout_s=rollout_timeout_s,
         gate_flag=gate_flag,
+        endpoint_env=endpoint_env,
         method=method,
         adapters=adapters,
         on_event=on_event,
@@ -353,7 +364,12 @@ def serve(
     # tests build a RolloutRunner directly and never go through serve().
     entrypoint_label = (
         runner.resolved.name if runner.resolved is not None
-        else " ".join(getattr(runner, "_command", None) or []) or "command"
+        # str() each part: a TASK sentinel is not a string, and joining it
+        # raised TypeError here — the same class of bug the line above records
+        # having shipped once, where reading .name off a command entrypoint
+        # failed every non-Python agent at registration.
+        else " ".join(str(a) for a in (getattr(runner, "_command", None) or []))
+        or "command"
     )
 
     payload: dict[str, Any] = {

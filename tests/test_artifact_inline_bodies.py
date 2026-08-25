@@ -94,8 +94,8 @@ def test_a_file_the_agent_writes_to_its_cwd_is_an_artifact(tmp_path):
     assert "triage.sh" in tr.artifacts, "the artifact was never registered"
 
 
-def test_the_ledger_file_is_never_an_artifact(tmp_path):
-    tr, out = _run(tmp_path, 'echo x > kept.txt\necho done')
+def test_the_tool_calls_file_is_never_an_artifact(tmp_path):
+    _tr, out = _run(tmp_path, 'echo x > kept.txt\necho done')
     assert "tool_calls.jsonl" not in out.artifacts
     assert "kept.txt" in out.artifacts
 
@@ -104,7 +104,7 @@ def test_the_ledger_file_is_never_an_artifact(tmp_path):
 
 
 def test_a_small_text_artifact_inlines_its_content(tmp_path):
-    tr, out = _run(tmp_path, 'printf "hello grader" > answer.txt\necho ok')
+    _tr, out = _run(tmp_path, 'printf "hello grader" > answer.txt\necho ok')
     rec = out.artifacts["answer.txt"]
     assert isinstance(rec, dict), f"expected inline record, got {rec!r}"
     assert rec["content"] == "hello grader"
@@ -117,14 +117,14 @@ def test_a_small_text_artifact_inlines_its_content(tmp_path):
 def test_a_binary_artifact_stays_a_digest_string(tmp_path):
     """UTF-8 or nothing: base64-ing binaries would quietly quadruple report
     sizes for files no text grader can read anyway."""
-    tr, out = _run(tmp_path, 'printf "\\377\\376\\000\\001" > blob.bin\necho ok')
+    _tr, out = _run(tmp_path, 'printf "\\377\\376\\000\\001" > blob.bin\necho ok')
     rec = out.artifacts["blob.bin"]
     assert isinstance(rec, str) and len(rec) == 64, rec
 
 
 def test_a_file_over_the_per_file_cap_stays_a_digest_string(tmp_path):
     n = MAX_INLINE_ARTIFACT_BYTES + 1
-    tr, out = _run(tmp_path, f'head -c {n} /dev/zero | tr "\\0" "a" > big.txt\necho ok')
+    _tr, out = _run(tmp_path, f'head -c {n} /dev/zero | tr "\\0" "a" > big.txt\necho ok')
     rec = out.artifacts["big.txt"]
     assert isinstance(rec, str) and len(rec) == 64
 
@@ -138,7 +138,7 @@ def test_the_total_budget_bounds_a_swarm_of_small_files(tmp_path):
         f'head -c {each} /dev/zero | tr "\\0" "x" > f{i:02d}.txt'
         for i in range(count)
     ) + "\necho ok"
-    tr, out = _run(tmp_path, body)
+    _tr, out = _run(tmp_path, body)
     inlined = [n for n, v in out.artifacts.items() if isinstance(v, dict)]
     strings = [n for n, v in out.artifacts.items() if isinstance(v, str)]
     assert len(inlined) == MAX_INLINE_TOTAL_BYTES // each
@@ -166,7 +166,7 @@ def test_every_artifact_value_shape_is_schema_legal(tmp_path):
         schema["$defs"]["RolloutOutput"]["properties"]["artifacts"]
         ["additionalProperties"]["anyOf"][1]["properties"]
     )
-    tr, out = _run(
+    _tr, out = _run(
         tmp_path,
         'printf "small" > a.txt\nprintf "\\377\\376" > b.bin\necho ok',
     )
@@ -206,7 +206,7 @@ def test_a_symlinked_directory_does_not_smuggle_its_files(tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "secret.env").write_text("TOKEN=sk-live-not-yours")
-    tr, out = _run(tmp_path, f'ln -s "{outside}" leaked\necho done')
+    _tr, out = _run(tmp_path, f'ln -s "{outside}" leaked\necho done')
     inlined = repr(out.artifacts)
     assert "sk-live-not-yours" not in inlined, (
         f"a symlinked DIRECTORY smuggled its contents: {inlined}"
@@ -215,7 +215,7 @@ def test_a_symlinked_directory_does_not_smuggle_its_files(tmp_path):
 
 def test_ordinary_files_still_collect_alongside_a_symlink(tmp_path):
     """The guard must not suppress real work sitting next to a link."""
-    tr, out = _run(tmp_path, 'echo hi > real.txt\nln -s /etc/hosts linked.txt\necho done')
+    _tr, out = _run(tmp_path, 'echo hi > real.txt\nln -s /etc/hosts linked.txt\necho done')
     assert isinstance(out.artifacts.get("real.txt"), dict), out.artifacts
     assert out.artifacts["real.txt"]["content"].strip() == "hi"
     assert out.artifacts.get("linked.txt") == "skipped:symlink"

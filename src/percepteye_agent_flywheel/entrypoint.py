@@ -28,6 +28,33 @@ InputShape = Literal["text", "messages", "dict"]
 ENTRYPOINT_ORDER = ("invoke", "run", "execute", "chat", "__call__")
 
 
+class _TaskSentinel:
+    """The position in an argv where this rollout's task text belongs.
+
+    A SENTINEL rather than a ``"{task}"`` string, and that is a correctness
+    choice rather than a stylistic one: a literal argument that happens to
+    contain the placeholder cannot be mistaken for the marker, and the marker
+    cannot survive into a real argv by accident -- substitution is the only
+    thing that removes it, so an unsubstituted one is a bug that shows up as a
+    type error rather than as an agent receiving the four characters
+    ``{task}`` and doing something confident with them.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:      # what a registration label shows
+        return "<task>"
+
+
+#: Marks where the task goes in a command argv::
+#:
+#:     fw.serve(["dsh", "--profile", "headless", fw.TASK], ...)
+#:
+#: Absent, the argv is untouched and the task arrives on stdin and in
+#: PERCEPTEYE_TURN_INPUT exactly as before.
+TASK = _TaskSentinel()
+
+
 class ResolvedEntrypoint:
     """A callable plus everything we needed to learn about it at registration."""
 

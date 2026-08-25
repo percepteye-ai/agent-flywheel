@@ -8,15 +8,14 @@ customer's agent.
 from __future__ import annotations
 
 import json
+from typing import ClassVar
 
 import pytest
 
 from percepteye_agent_flywheel.introspection import (
     DiscoveredAgent,
-    ToolDefinition,
     introspect,
 )
-
 
 # ── the absence contract ───────────────────────────────────────────────────
 
@@ -191,7 +190,7 @@ def test_langchain_agent_yields_its_tool_catalogue():
         return service
 
     class Agent:
-        tools = [deploy]
+        tools: ClassVar[list] = [deploy]
 
     got = introspect(Agent())
     assert got is not None and got.framework == "langchain"
@@ -209,6 +208,6 @@ def test_an_object_with_a_tools_attribute_that_is_not_langchain_does_not_match()
     pytest.importorskip("langchain_core")
 
     class NotAnAgent:
-        tools = ["a string", 42]
+        tools: ClassVar[list] = ["a string", 42]
 
     assert introspect(NotAnAgent()) is None

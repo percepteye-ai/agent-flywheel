@@ -7,6 +7,10 @@ on:
 
 jobs:
   test:
+    # The BARE install: no frameworks, no OpenTelemetry. This job proves the
+    # package works for someone who installed nothing but httpx, which is the
+    # supported configuration. The adapter, introspection and OTel suites
+    # correctly skip here -- `test-full` below is what actually runs them.
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -21,6 +25,70 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: pytest -q
       - run: ruff check src tests
+
+  test-full:
+    # EVERY test, with every optional framework present.
+    #
+    # This job exists because the matrix above installs only `[dev]`, and five
+    # test modules guard themselves with a module-level `pytest.importorskip`.
+    # They were therefore never collected at all -- 72 tests, silently absent
+    # from a green build. Among them is tests/test_zero_instrumentation.py,
+    # which is the proof of the headline claim in the README: that a LangChain
+    # or ADK agent needs zero lines changed. The claim was documented and
+    # untested at the same time.
+    #
+    # A skipped test and a passing test are indistinguishable in a green check
+    # mark, so this job refuses to skip anything at all.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.13"]   # the ends of the supported range
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[dev,adapters-test,otel,otel-test]"
+      - name: every optional framework is genuinely importable
+        # Checked BEFORE pytest, so a framework that failed to install is a
+        # legible error here rather than 72 tests quietly turning into skips.
+        run: |
+          python - <<'PY'
+          import importlib
+          for mod in ("langchain_core", "langgraph", "langgraph.prebuilt",
+                      "google.adk", "opentelemetry.trace", "opentelemetry.sdk",
+                      "packaging"):
+              importlib.import_module(mod)
+              print("ok", mod)
+          PY
+      - run: pytest -q --junitxml=report.xml
+      - name: nothing was skipped -- a skipped suite is an untested claim
+        # Deliberately not a hardcoded test count: that has to be bumped with
+        # every new test and gets rubber-stamped. "Zero skips" is the invariant
+        # that actually holds, and it catches a suite vanishing whether it went
+        # by importorskip, by a platform guard, or by a dependency drifting out
+        # from under it.
+        if: always()
+        run: |
+          python - <<'PY'
+          import os, sys, xml.etree.ElementTree as ET
+          if not os.path.exists("report.xml"):
+              # pytest died before it could write one; it has already failed
+              # the job and its own output is the useful error. Do not bury
+              # that under a traceback from this check.
+              print("no report.xml — see the pytest step above")
+              raise SystemExit(0)
+          root = ET.parse("report.xml").getroot()
+          s = root if root.tag == "testsuite" else root.find("testsuite")
+          tests, skipped = int(s.get("tests")), int(s.get("skipped"))
+          print(f"{tests} collected, {skipped} skipped")
+          if skipped:
+              names = [f"{c.get('classname')}.{c.get('name')}"
+                       for c in s.iter("testcase") if c.find("skipped") is not None]
+              print("skipped:", *names, sep="\n  ", file=sys.stderr)
+              sys.exit(f"{skipped} test(s) skipped with all extras installed")
+          PY
 
   clean-install:
     # The package runs inside other people's production processes. This job

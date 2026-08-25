@@ -7,7 +7,7 @@ survives concurrent tools. Without it, every reported call can only be placed
 "somewhere in this rollout" -- which is why, downstream, an entire episode's
 tool signal lands on its final step today.
 
-The field crosses four serialisation boundaries (ledger write, ledger read,
+The field crosses four serialisation boundaries (trajectory write, trajectory read,
 report wire, wire reconstruct). Each one is a silent-drop point: a boundary
 that forgets the key loses attribution with no error anywhere. These tests pin
 every boundary individually, because a single end-to-end test would pass while
@@ -23,9 +23,9 @@ import pytest
 
 from percepteye_agent_flywheel.contract import ToolCallOutcome
 from percepteye_agent_flywheel.outcomes import (
-    LEDGER_DIR_ENV,
     ROLLOUT_ID_ENV,
-    OutcomeLedger,
+    TRAJECTORY_DIR_ENV,
+    Trajectory,
     _RolloutScope,
     record_tool_call,
 )
@@ -70,13 +70,13 @@ def test_an_unknown_outcome_keeps_its_id():
 # ── every serialisation boundary, individually ──────────────────────────────
 
 
-def test_ledger_roundtrip_preserves_the_id(tmp_path):
+def test_trajectory_roundtrip_preserves_the_id(tmp_path):
     with _RolloutScope("rl_id", str(tmp_path)):
         record_tool_call("deploy", {"svc": "api"}, outcome="ok",
                          status_code=200, tool_call_id="call_dep_1")
         record_tool_call("lookup", {}, outcome="ok", status_code=200)
 
-    calls = OutcomeLedger(str(tmp_path), "rl_id").read()
+    calls = Trajectory(str(tmp_path)).read()
     by = {c.name: c for c in calls}
     assert by["deploy"].tool_call_id == "call_dep_1"
     assert by["lookup"].tool_call_id is None
@@ -131,7 +131,7 @@ def test_langchain_adapter_reads_the_id_off_the_tool_message(monkeypatch, tmp_pa
     )
 
     monkeypatch.setenv(ROLLOUT_ID_ENV, "rl_lcid")
-    monkeypatch.setenv(LEDGER_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv(TRAJECTORY_DIR_ENV, str(tmp_path))
     adapter = LangChainAdapter()
     unbind = adapter.bind(llm_url="https://gw/x", api_key="k")
     try:
@@ -147,7 +147,7 @@ def test_langchain_adapter_reads_the_id_off_the_tool_message(monkeypatch, tmp_pa
     finally:
         unbind()
 
-    by = {c.name: c for c in OutcomeLedger(str(tmp_path), "rl_lcid").read()}
+    by = {c.name: c for c in Trajectory(str(tmp_path)).read()}
     assert by["search"].tool_call_id == "call_lc_7"
     assert by["plain"].tool_call_id is None
 
@@ -184,7 +184,7 @@ def test_adk_adapter_uses_the_function_call_id(tmp_path):
     finally:
         unbind()
 
-    calls = OutcomeLedger(str(tmp_path), "rl_adkid").read()
+    calls = Trajectory(str(tmp_path)).read()
     assert calls and calls[0].tool_call_id == "fc_42"
 
 
@@ -194,7 +194,7 @@ def test_adk_adapter_uses_the_function_call_id(tmp_path):
 def test_the_span_carries_gen_ai_tool_call_id(monkeypatch):
     """gen_ai.tool.call.id is one attribute the convention DOES define. A trace
     consumer joins the tool span to the completion that requested it by this
-    value -- the same join this SDK's control plane performs on the ledger."""
+    value -- the same join this SDK's control plane performs on the trajectory."""
     pytest.importorskip("opentelemetry.sdk")
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor

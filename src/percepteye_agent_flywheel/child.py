@@ -6,11 +6,11 @@ parent can always parse the last line; the agent's own printing goes to
 stderr's side of the pipe and is captured for diagnostics.
 
 This module is why per-tool-call capture works under the default isolation
-mode at all. Binding, context variables and in-memory ledgers do not cross a
+mode at all. Binding, context variables and in-memory state do not cross a
 process boundary, so a design that binds only in the parent would record
 nothing while appearing to work -- and an empty tool-call list reads
 downstream as "this agent used no tools", not as "we failed to look". The
-child re-establishes the rollout scope on its own side, and the ledger it
+child re-establishes the rollout scope on its own side, and the file it
 writes is a file, which the parent merges.
 """
 from __future__ import annotations
@@ -33,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     payload: dict[str, Any] = json.loads(raw)
     spec: str = payload["spec"]
     rollout = RolloutRequest.from_wire(payload["rollout"])
-    ledger_dir: str = payload["ledger_dir"]
+    trajectory_dir: str = payload["trajectory_dir"]
     timeout_s: float = float(payload.get("timeout_s") or 900.0)
     input_shape = payload.get("input_shape") or "text"
 
@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     out = run_rollout_in_process(
-        resolved, rollout, ledger_dir=ledger_dir, timeout_s=timeout_s,
+        resolved, rollout, trajectory_dir=trajectory_dir, timeout_s=timeout_s,
         # Bound HERE, in the child, because this is the process the agent runs
         # in. A callback registered in the parent sees nothing a child does.
         adapters=payload.get("adapters", "auto"),

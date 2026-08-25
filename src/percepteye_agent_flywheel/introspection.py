@@ -102,7 +102,7 @@ class DiscoveredAgent:
     tool_definitions: list[ToolDefinition] | None = None
     discovered_model_config: ModelConfig | None = None
     capabilities: list[str] = field(default_factory=list)
-    sub_agents: list["DiscoveredAgent"] = field(default_factory=list)
+    sub_agents: list[DiscoveredAgent] = field(default_factory=list)
     role: str = "standalone"
     #: Names of the parts we could not read, e.g. ``["system_prompt"]``.
     incomplete: list[str] = field(default_factory=list)
@@ -234,7 +234,7 @@ def _adk_tool(t: Any) -> ToolDefinition | None:
         return None
 
     schema: dict[str, Any] = {}
-    decl = _safe(lambda: t._get_declaration())  # noqa: SLF001 - ADK's own accessor
+    decl = _safe(lambda: t._get_declaration())  # ADK's own accessor
     if decl is not None:
         dumped = _safe(lambda: decl.model_dump(exclude_none=True))
         if isinstance(dumped, dict):
