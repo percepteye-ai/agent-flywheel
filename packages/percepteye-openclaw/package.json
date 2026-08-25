@@ -1,0 +1,44 @@
+{
+  "name": "percepteye-flywheel",
+  "version": "0.1.0",
+  "description": "Record OpenClaw tool-call outcomes into a PerceptEye flywheel trajectory. Observes only.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./classify": "./src/classify.js",
+    "./trajectory": "./src/trajectory.js"
+  },
+  "files": [
+    "src",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "percepteye",
+    "agent",
+    "reinforcement-learning",
+    "continual-learning",
+    "observability"
+  ],
+  "engines": {
+    "node": ">=22.22.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/percepteye-ai/agent-flywheel.git",
+    "directory": "packages/percepteye-openclaw"
+  },
+  "homepage": "https://github.com/percepteye-ai/agent-flywheel/tree/main/packages/percepteye-openclaw",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "openclaw": {
+    "extensions": [
+      "./src/index.js"
+    ]
+  }
+}

@@ -49,3 +49,6 @@ _percepteye-artifacts/
 /last_trace.sh
 /merge_logs.sh
 .worktrees/
+
+# Cross-language ABI check scratch output (CI writes this, never committed)
+abi/

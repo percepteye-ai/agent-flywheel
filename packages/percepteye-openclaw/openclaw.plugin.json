@@ -1,0 +1,14 @@
+{
+  "id": "percepteye-flywheel",
+  "name": "PerceptEye Flywheel",
+  "description": "Records tool-call outcomes (ok/failed/unknown) into the active rollout's trajectory. Observes only; never alters a tool result.",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
+  "activation": {
+    "onStartup": true
+  }
+}

@@ -124,3 +124,63 @@ jobs:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
       - run: pytest tests/test_oss_boundary.py -q
+
+  openclaw-plugin:
+    # The OpenClaw plugin is the same capture contract in another language, so
+    # it is tested against the SAME reader the Python side uses. A JS suite
+    # that only checks itself would let the two halves drift: the plugin would
+    # stay green while writing a line `Trajectory.read` counts as malformed,
+    # and the loss would surface as a silently short tool-call list.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22", "24"]   # the ends of OpenClaw's supported engine range
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: npm test
+        working-directory: packages/percepteye-openclaw
+      - name: the plugin has no dependencies
+        # It runs inside someone else's agent process. A dependency here is a
+        # version conflict imposed on a customer who did not ask for one.
+        run: |
+          python - <<'PY'
+          import json
+          pkg = json.load(open("packages/percepteye-openclaw/package.json"))
+          for key in ("dependencies", "peerDependencies", "optionalDependencies"):
+              assert not pkg.get(key), f"{key} must stay empty: {pkg[key]}"
+          print("no dependencies, as required")
+          PY
+      - name: what the plugin writes is what the Python SDK reads
+        run: |
+          pip install -e .
+          node --input-type=module -e "
+          import { createRecorder } from './packages/percepteye-openclaw/src/record.js';
+          import { createWriter } from './packages/percepteye-openclaw/src/trajectory.js';
+          const rec = createRecorder({ writer: createWriter({ dir: 'abi' }) });
+          rec.handle({ toolName:'read', params:{path:'/etc/hosts'}, toolCallId:'c1', result:'ok', durationMs:3 }, {agentId:'coder'});
+          rec.handle({ toolName:'exec', params:{command:'exit 3'}, toolCallId:'c2', result:{details:{status:'completed',exitCode:3}}, durationMs:91 });
+          rec.handle({ toolName:'exec', params:{command:'echo hi'}, toolCallId:'c3', result:{details:{status:'completed',exitCode:0}}, durationMs:93 });
+          rec.handle({ toolName:'mcp__jira__transition', params:{}, toolCallId:'c4', result:'{}' });
+          "
+          python - <<'PY'
+          from percepteye_agent_flywheel.outcomes import Trajectory
+          t = Trajectory("abi")
+          calls = t.read()
+          assert t.malformed == 0, f"the reader rejected {t.malformed} line(s)"
+          got = [(c.name, c.outcome) for c in calls]
+          assert got == [
+              ("read", "ok"),
+              ("exec", "failed"),          # exit 3, though status said "completed"
+              ("exec", "ok"),
+              ("mcp__jira__transition", "unknown"),
+          ], got
+          assert calls[0].tool_call_id == "c1"   # the join key survives
+          print("cross-language capture contract holds:", got)
+          PY
