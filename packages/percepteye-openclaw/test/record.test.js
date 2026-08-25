@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -109,13 +109,26 @@ describe("staying out of the way", () => {
   });
 
   it("survives an unwritable destination without throwing", () => {
-    const writer = createWriter({ dir: "/proc/nonexistent-percepteye" });
+    // The destination is made unwritable by putting a regular FILE where the
+    // directory would go, so mkdir fails with ENOTDIR. That is deterministic
+    // and identical on every platform.
+    //
+    // This previously pointed at /proc/nonexistent-percepteye, which is not a
+    // portable way to say "unwritable": on macOS there is no /proc at all, so
+    // the test passed for the wrong reason, and on Linux it hung the whole
+    // suite in CI. A fixture whose meaning depends on the host OS is not a
+    // fixture.
+    const base = mkdtempSync(join(tmpdir(), "pe-oc-"));
+    const blocker = join(base, "blocker");
+    writeFileSync(blocker, "a file, not a directory");
+    const dead = join(blocker, "nested");
+
+    const writer = createWriter({ dir: dead });
     let warned = 0;
-    const w2 = createWriter({
-      dir: "/proc/nonexistent-percepteye",
-      onError: () => { warned += 1; },
-    });
+    const w2 = createWriter({ dir: dead, onError: () => { warned += 1; } });
+
     assert.doesNotThrow(() => writer.write({ name: "x" }));
+    assert.equal(writer.write({ name: "x" }), false);
     w2.write({ name: "x" });
     w2.write({ name: "x" });
     // Reported once, then quiet: a per-call warning would bury the agent's

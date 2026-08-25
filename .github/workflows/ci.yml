@@ -132,6 +132,10 @@ jobs:
     # stay green while writing a line `Trajectory.read` counts as malformed,
     # and the loss would surface as a silently short tool-call list.
     runs-on: ubuntu-latest
+    # A backstop for a hang OUTSIDE a test, which the per-test timeout cannot
+    # catch. The first run of this job sat in `npm test` for six minutes and
+    # reported nothing until it was cancelled by hand.
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:

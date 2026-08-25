@@ -34,7 +34,7 @@
   },
   "homepage": "https://github.com/percepteye-ai/agent-flywheel/tree/main/packages/percepteye-openclaw",
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node --test --test-timeout=30000 test/*.test.js"
   },
   "openclaw": {
     "extensions": [
