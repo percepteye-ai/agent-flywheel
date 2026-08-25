@@ -252,3 +252,102 @@ def test_a_cli_agents_event_stream_yields_identity():
     ]))
     assert calls is not None
     assert calls[0].entity_ids == {"id": "10001", "key": "ENG-7"}
+
+
+# ── every framework path, not just one ───────────────────────────────────────
+#
+# Identity is resolved inside `record_tool_call`, which every adapter already
+# routes through, so the framework paths needed no adapter change. That is a
+# claim worth testing rather than reasoning about: "it should already work
+# because of where I put it" is exactly how the child->parent boundary lost
+# identity while looking correct.
+
+
+def test_langchain_capture_yields_identity_with_no_instrumentation(tmp_path):
+    """Zero Percepteye code in the tool, and the identity still lands.
+
+    Note the outcome: a tool that RETURNS a value states no verdict, so it is
+    honestly `unknown` -- and it carries the identity anyway. That pairing is
+    the whole point of the feature.
+    """
+    pytest.importorskip("langchain_core")
+    from langchain_core.tools import tool
+
+    from percepteye_agent_flywheel.binding import bind_selected
+    from percepteye_agent_flywheel.outcomes import _RolloutScope
+
+    @tool
+    def create_issue(project: str) -> dict:
+        """Create an issue; returns what the API returned."""
+        return {"id": "10001", "key": "ENG-7", "self": "https://jira/x/10001"}
+
+    report, unbinds = bind_selected(["langchain"], llm_url="https://gw/x", api_key="k")
+    assert "langchain" in report.bound
+    try:
+        with _RolloutScope("rl_lc", str(tmp_path)):
+            create_issue.invoke({"project": "ENG"})
+    finally:
+        for u in unbinds:
+            u()
+
+    [call] = Trajectory(tmp_path).read() or []
+    assert call.outcome == "unknown"
+    assert call.entity_ids == {"id": "10001", "key": "ENG-7"}
+
+
+def test_adk_capture_yields_identity_with_no_instrumentation(tmp_path):
+    """The same claim for the second framework, through the real install path:
+    constructing a PluginManager is what every ADK Runner does internally."""
+    pytest.importorskip("google.adk")
+    import asyncio
+
+    from google.adk.plugins.plugin_manager import PluginManager
+
+    from percepteye_agent_flywheel.binding import bind_selected
+    from percepteye_agent_flywheel.outcomes import _RolloutScope
+
+    class _Tool:
+        def __init__(self, name):
+            self.name = name
+
+    class _Ctx:
+        function_call_id, agent_name = "fc_1", "coder"
+
+    report, unbinds = bind_selected(["adk"], llm_url="https://gw/x", api_key="k")
+    assert "adk" in report.bound
+    try:
+        with _RolloutScope("rl_adk", str(tmp_path)):
+            pm = PluginManager()
+            create, ctx = _Tool("create_issue"), _Ctx()
+
+            async def drive():
+                await pm.run_before_tool_callback(
+                    tool=create, tool_args={"p": "OPS"}, tool_context=ctx)
+                await pm.run_after_tool_callback(
+                    tool=create, tool_args={"p": "OPS"}, tool_context=ctx,
+                    result={"id": "20002", "key": "OPS-3"})
+
+            asyncio.run(drive())
+    finally:
+        for u in unbinds:
+            u()
+
+    [call] = Trajectory(tmp_path).read() or []
+    assert call.entity_ids == {"id": "20002", "key": "OPS-3"}
+    assert call.agent_name == "coder"
+
+
+def test_a_cli_agent_writing_the_trajectory_itself_carries_identity(tmp_path):
+    """The path a non-Python agent uses when it writes the file directly --
+    dsh, or anything else that appends to the trajectory. The format is the
+    interface, so identity is available to a writer in any language."""
+    (tmp_path / "tool_calls.jsonl").write_text(
+        json.dumps({
+            "name": "POST /rest/api/2/issue", "arguments": {"p": "ENG"},
+            "outcome": "unknown", "status_code": None,
+            "entity_ids": {"key": "ENG-7"},
+        }) + "\n",
+        encoding="utf-8",
+    )
+    [call] = Trajectory(tmp_path).read()
+    assert call.entity_ids == {"key": "ENG-7"}
