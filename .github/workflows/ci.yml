@@ -125,12 +125,13 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: pytest tests/test_oss_boundary.py -q
 
-  openclaw-plugin:
-    # The OpenClaw plugin is the same capture contract in another language, so
-    # it is tested against the SAME reader the Python side uses. A JS suite
-    # that only checks itself would let the two halves drift: the plugin would
-    # stay green while writing a line `Trajectory.read` counts as malformed,
-    # and the loss would surface as a silently short tool-call list.
+  node-plugins:
+    # The OpenClaw and DeepSeek Harness plugins are the same capture contract
+    # in another language, so they are tested against the SAME reader the
+    # Python side uses. A JS suite that only checks itself would let the halves
+    # drift: a plugin would stay green while writing a line `Trajectory.read`
+    # counts as malformed, and the loss would surface as a silently short
+    # tool-call list.
     runs-on: ubuntu-latest
     # A backstop for a hang OUTSIDE a test, which the per-test timeout cannot
     # catch. The first run of this job sat in `npm test` for six minutes and
@@ -149,14 +150,14 @@ jobs:
         with:
           python-version: "3.12"
       - run: npm test
-        working-directory: packages/percepteye-openclaw
+        working-directory: packages/percepteye-agent-flywheel
       - name: the plugin has no dependencies
         # It runs inside someone else's agent process. A dependency here is a
         # version conflict imposed on a customer who did not ask for one.
         run: |
           python - <<'PY'
           import json
-          pkg = json.load(open("packages/percepteye-openclaw/package.json"))
+          pkg = json.load(open("packages/percepteye-agent-flywheel/package.json"))
           for key in ("dependencies", "peerDependencies", "optionalDependencies"):
               assert not pkg.get(key), f"{key} must stay empty: {pkg[key]}"
           print("no dependencies, as required")
@@ -165,13 +166,20 @@ jobs:
         run: |
           pip install -e .
           node --input-type=module -e "
-          import { createRecorder } from './packages/percepteye-openclaw/src/record.js';
-          import { createWriter } from './packages/percepteye-openclaw/src/trajectory.js';
+          import { createRecorder } from './packages/percepteye-agent-flywheel/src/record.js';
+          import { createWriter } from './packages/percepteye-agent-flywheel/src/trajectory.js';
           const rec = createRecorder({ writer: createWriter({ dir: 'abi' }) });
           rec.handle({ toolName:'read', params:{path:'/etc/hosts'}, toolCallId:'c1', result:'ok', durationMs:3 }, {agentId:'coder'});
           rec.handle({ toolName:'exec', params:{command:'exit 3'}, toolCallId:'c2', result:{details:{status:'completed',exitCode:3}}, durationMs:91 });
           rec.handle({ toolName:'exec', params:{command:'echo hi'}, toolCallId:'c3', result:{details:{status:'completed',exitCode:0}}, durationMs:93 });
           rec.handle({ toolName:'mcp__jira__transition', params:{}, toolCallId:'c4', result:{id:'10001',key:'ENG-7'} });
+          // The dsh entry writes the SAME format through its own classifier.
+          import { recordFor } from './packages/percepteye-agent-flywheel/src/dsh.js';
+          const w = createWriter({ dir: 'abi' });
+          w.write(recordFor({ name:'bash', arguments:{command:'exit 3'}, callId:'c5' },
+                            { isError:false, value:{kind:'foreground', exitCode:3} }));
+          w.write(recordFor({ name:'bash', arguments:{command:'sleep 1 &'}, callId:'c6' },
+                            { isError:false, value:{kind:'background', jobId:'j1'} }));
           "
           python - <<'PY'
           from percepteye_agent_flywheel.outcomes import Trajectory
@@ -192,6 +200,12 @@ jobs:
           # that need it most.
           assert calls[3].outcome == "unknown"
           assert calls[3].entity_ids == {"id": "10001", "key": "ENG-7"}, calls[3].entity_ids
+          # dsh: a non-zero exit is a failure even though the harness settled
+          # it as a non-error, and a BACKGROUNDED command has not finished, so
+          # it is unknown rather than a free success.
+          assert (calls[4].name, calls[4].outcome, calls[4].error_class) == ("bash", "failed", "ExitStatus:3"), calls[4]
+          assert (calls[5].outcome, calls[5].error_class) == ("unknown", "StillRunning"), calls[5]
           print("cross-language capture contract holds:", got)
           print("identity crossed the boundary:", calls[3].entity_ids)
+          print("dsh classifier agrees with the reader")
           PY

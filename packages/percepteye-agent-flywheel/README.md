@@ -1,13 +1,16 @@
-# percepteye-agent-flywheel — OpenClaw plugin
+# percepteye-agent-flywheel — OpenClaw and DeepSeek Harness plugin
 
-Records what your OpenClaw agent's tools actually did, as `ok`, `failed` or
+Records what your agent's tools actually did, as `ok`, `failed` or
 **`unknown`**, into the trajectory the PerceptEye flywheel trains on.
 
 **Observes only.** It cannot alter, block, delay or replace a tool result —
-that is a property of the hook it uses, not a promise about the code.
+that is a property of the hooks it uses, not a promise about the code.
+
+One package, two harnesses:
 
 ```bash
-openclaw plugins install percepteye-agent-flywheel
+openclaw plugins install percepteye-agent-flywheel          # OpenClaw
+dsh plugin --profile <name> add percepteye-agent-flywheel   # DeepSeek Harness
 ```
 
 Then set one environment variable on the process running your agent:
@@ -60,6 +63,8 @@ fixture proves how they report failure — promotion is earned, never assumed.
 
 ## Which hook, and why
 
+### OpenClaw
+
 OpenClaw exposes three places to see a tool result. Only one is both complete
 and structurally incapable of changing the run:
 
@@ -81,6 +86,42 @@ is worse than no collector.
 `openclaw plugins doctor` reports this plugin as *hook-only*, which is correct
 — an observer claims no capability seam, and the manifest declares no
 `contracts` because there is none to declare.
+
+### DeepSeek Harness
+
+dsh's tool pipeline is mostly waterfalls: `tools/execute` wraps dispatch,
+`tools/post` can accept, replace or **block** a result, and
+`tools/code-dispatch-log` rewrites what gets logged. A listener on any of them
+can change what the model sees.
+
+`tools/result` is declared `@mode emit` and typed to return `undefined`, and
+the registry **deep-freezes** both the execution and the result before
+publishing them — with an invariant that fails the harness if it ever publishes
+something unfrozen. So this plugin cannot alter a tool result even by accident:
+there is no return channel, and the object it receives is immutable.
+
+dsh's exec tools also declare a real output schema — `kind`, `exitCode`,
+`signal`, `timedOut`, `aborted` — which lets three cases be told apart that a
+cruder reading merges:
+
+| what dsh reports | outcome |
+|---|---|
+| `isError: true` | `failed` (with its own error class) |
+| foreground, exit 0 | `ok` |
+| foreground, non-zero exit | `failed` |
+| killed by a signal, or timed out | `failed` |
+| **`kind: "background"`** | **`unknown`** — launched, not finished |
+| **`aborted: true`** | **`unknown`** — cancelled, which is not the agent's mistake |
+| exit unreadable | `unknown` |
+
+A backgrounded command has no exit code because nothing has exited; grading it
+`ok` would claim a result for work still running. An aborted one never got to
+say what it would have done.
+
+The two entries are separate modules on purpose. Cordis normalises a plugin
+with `exports.default ?? exports`, so a `default` export would be handed to it
+*instead of* `apply` — the OpenClaw entry needs a default and the dsh entry
+must not have one.
 
 ## Dependencies
 

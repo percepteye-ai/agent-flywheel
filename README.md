@@ -204,6 +204,24 @@ Four rules govern it, and they are the same rules as everywhere else in this pac
 
 Supporting the next CLI agent is a `StreamFormat` entry — a vocabulary, not a parser. Nothing about the extraction, the tri-state or the absence rules gets reimplemented per agent.
 
+### …and Node harnesses, through a plugin they already load
+
+Some harnesses do not print a tool-outcome stream at all. Their tool results exist only inside the process, on a plugin seam. For those, `packages/percepteye-agent-flywheel/` ships a plugin — one npm package, one install, currently covering **OpenClaw** and **DeepSeek Harness**:
+
+```bash
+openclaw plugins install percepteye-agent-flywheel     # OpenClaw
+dsh plugin --profile <name> add percepteye-agent-flywheel   # DeepSeek Harness
+```
+
+Then set `PERCEPTEYE_TRAJECTORY_DIR` on the process running your agent. With it unset the plugin does nothing at all, so the same install is a no-op in production and a recorder during a rollout.
+
+**Both plugins observe and cannot do anything else**, and that is a property of the hooks rather than a promise about the code. Each harness offers seams that *replace* a tool result before the model reads it; the plugins take neither. OpenClaw's `after_tool_call` returns `void`, and DeepSeek Harness publishes `tools/result` as an emit-only listener over a **deep-frozen** execution and result — there is no return channel and the object is immutable. Capturing evidence must never be able to change the behaviour being measured.
+
+> [!NOTE]
+> Zero dependencies, `node:fs` only. This runs inside your agent's process, and every dependency added there is a version conflict imposed on someone who did not ask for one — the same rule as the Python package's single dependency.
+
+Both write the same file in the same format, and CI runs the JavaScript suite against the *same* Python reader, so the two halves cannot drift apart quietly.
+
 In a multi-agent graph each call is attributed to the agent that made it, read from the framework's own run metadata — ADK exposes `ToolContext.agent_name` directly, LangGraph stamps the node it is executing. A call nothing names stays unattributed, because filling it in would train a planner on a coder's tool calls.
 
 To ship your own, expose a factory in the `percepteye_agent_flywheel.adapters` entry-point group.
@@ -573,7 +591,7 @@ python -m venv .venv
 | `test-full` | every suite, with every optional framework present, and **zero skips permitted** — because a skipped test and a passing test look identical in a green check mark |
 | `clean-install` | the runtime dependency list growing past `httpx`, asserted from installed metadata rather than from the source |
 | `boundary` | an internal system name reaching the published package, including inside an error string, where it would print into your logs and disclose something you cannot act on |
-| `openclaw-plugin` | the OpenClaw plugin drifting from the Python reader — its JS suite runs against the *same* `Trajectory.read`, so a line one side writes and the other counts as malformed fails here rather than surfacing as a silently short tool-call list |
+| `node-plugins` | the OpenClaw and DeepSeek Harness plugins drifting from the Python reader — their JS suite runs against the *same* `Trajectory.read`, so a line one side writes and the other counts as malformed fails here rather than surfacing as a silently short tool-call list |
 
 ## Contributing
 

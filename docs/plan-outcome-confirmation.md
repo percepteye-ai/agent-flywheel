@@ -96,20 +96,18 @@ identity while looking correct.
 | child → parent boundary | yes | carried on the wire |
 | an agent writing the trajectory itself | yes | the file format is the interface |
 | OpenClaw plugin | yes | a mirror of the Python extractor |
-| DeepSeek Harness | **no** | see below |
+| DeepSeek Harness plugin | yes | resolved from the canonical value |
 
-**dsh is the one gap, and it is not a gap in this phase.** dsh has no
-tool-outcome capture at all yet. `fw.TASK` and `endpoint_env=` got it running
-and routed; neither gets its tool calls out. Its JSON stream carries
-`toolcall_start` / `toolcall_end`, but those are MODEL-WIRE events — the model
-emitting a call and streaming its arguments — and they end at the assembled
-call, never the result. Parsing them would yield arguments with no verdict,
-which is worse than nothing: it looks like capture while carrying exactly the
-blind spot this SDK exists to close.
-
-Real dsh capture needs its plugin surface, emitting on tool results. That is
-separate work, and when it lands identity comes with it for free, because the
-file format is the interface and the extractor is already specified.
+**dsh was the one gap, and it is now closed.** It had no tool-outcome capture
+at all: `fw.TASK` and `endpoint_env=` got it running and routed, neither got
+its tool calls out. Its JSON stream carries `toolcall_start` / `toolcall_end`,
+but those are MODEL-WIRE events — the model emitting a call and streaming its
+arguments — ending at the assembled call and never the result, so a stream
+dialect would have produced arguments with no verdict. Capture goes through the
+harness's own plugin surface instead, on its emit-only tool-result listener.
+Identity comes from the canonical value, which the harness documents as
+execution-local and deliberately omitted from durable events — so it exists at
+that seam and nowhere later.
 
 ## 4. Phase 2 — the credentialed reader (control plane, NOT built)
 
