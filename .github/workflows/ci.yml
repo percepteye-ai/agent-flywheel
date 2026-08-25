@@ -124,3 +124,48 @@ jobs:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
       - run: pytest tests/test_oss_boundary.py -q
+
+  node-plugins:
+    # The OpenClaw and DeepSeek Harness plugins are the same capture contract
+    # in another language, so they are tested against the SAME reader the
+    # Python side uses. A JS suite that only checks itself would let the halves
+    # drift: a plugin would stay green while writing a line `Trajectory.read`
+    # counts as malformed, and the loss would surface as a silently short
+    # tool-call list.
+    runs-on: ubuntu-latest
+    # A backstop for a hang OUTSIDE a test, which the per-test timeout cannot
+    # catch. The first run of this job sat in `npm test` for six minutes and
+    # reported nothing until it was cancelled by hand.
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22", "24"]   # the ends of OpenClaw's supported engine range
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: npm test
+        working-directory: packages/percepteye-agent-flywheel
+      - name: the plugin has no dependencies
+        # It runs inside someone else's agent process. A dependency here is a
+        # version conflict imposed on a customer who did not ask for one.
+        run: |
+          python - <<'PY'
+          import json
+          pkg = json.load(open("packages/percepteye-agent-flywheel/package.json"))
+          for key in ("dependencies", "peerDependencies", "optionalDependencies"):
+              assert not pkg.get(key), f"{key} must stay empty: {pkg[key]}"
+          print("no dependencies, as required")
+          PY
+      - name: what the plugins write is what the Python SDK reads
+        # One definition, invoked from here and runnable by hand. It used to be
+        # inline, and a local approximation of it passed while the real one
+        # failed -- the JS half had grown two records and the assertion had not.
+        run: |
+          pip install -e .
+          ./scripts/cross_language_abi_check.sh

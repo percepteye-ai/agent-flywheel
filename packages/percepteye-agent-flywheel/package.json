@@ -1,0 +1,53 @@
+{
+  "name": "percepteye-agent-flywheel",
+  "version": "0.1.0",
+  "description": "Record agent tool-call outcomes into a PerceptEye flywheel trajectory. Plugins for OpenClaw and DeepSeek Harness. Observes only.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./classify": "./src/classify.js",
+    "./trajectory": "./src/trajectory.js",
+    "./dsh": "./src/dsh.js"
+  },
+  "files": [
+    "src",
+    "openclaw.plugin.json",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "dsh-plugin",
+    "deepseek-harness",
+    "percepteye",
+    "agent",
+    "reinforcement-learning",
+    "continual-learning",
+    "observability"
+  ],
+  "engines": {
+    "node": ">=22.22.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/percepteye-ai/agent-flywheel.git",
+    "directory": "packages/percepteye-agent-flywheel"
+  },
+  "homepage": "https://github.com/percepteye-ai/agent-flywheel/tree/main/packages/percepteye-agent-flywheel",
+  "scripts": {
+    "test": "node --test --test-timeout=30000 test/*.test.js"
+  },
+  "openclaw": {
+    "extensions": [
+      "./src/index.js"
+    ]
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

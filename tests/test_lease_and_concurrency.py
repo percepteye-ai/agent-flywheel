@@ -10,6 +10,7 @@ import os
 import pathlib
 import threading
 import time
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -391,24 +392,47 @@ def test_the_beat_follows_the_granted_lease_not_the_requested_one(tmp_path):
     tr = FakeTransport([[req]], lease_ms=1_800_000)
     runner = _runner(tmp_path, tr, spec="fixture_agent:build_medium")
 
+    # Asserted where the decision is MADE, not inferred from how many beats a
+    # loaded CI runner managed to fit into a 2.5s window. The count was the
+    # original assertion and it was a proxy: macOS/3.10 fitted exactly one
+    # beat and failed a run whose pacing was entirely correct. A test that
+    # goes red on a slow machine teaches you to re-run it, not to read it.
+    assert runner._beat_interval_for(req) < 600.0, (
+        "the beat paced itself against the 30min we REQUESTED"
+    )
+    # A third of what was granted. Stated with a lease long enough that the
+    # division is visible -- at the 3s above, a third is 1.0s, which is also
+    # the floor, so that case alone cannot tell arithmetic from clamping.
+    longer = replace(req, lease_expires_ts=time.time() + 12.0)
+    assert runner._beat_interval_for(longer) == pytest.approx(4.0, abs=0.2)
+
     runner.serve_forever(max_rollouts=1)
 
     assert tr.reported == ["rl_1"]
-    assert len(tr.heartbeats) >= 2, (
-        f"a ~2.5s rollout under a GRANTED 3s lease must beat at least twice; "
-        f"got {tr.heartbeats} -- the beat paced itself against the 30min we "
-        f"requested"
-    )
+    # Liveness only: that the loop beat at all. How MANY beats fit is a
+    # property of the machine, not of the code under test.
+    assert tr.heartbeats, "the rollout held a 3s lease and never beat"
 
 
 def test_the_beat_falls_back_when_the_server_reports_no_lease(tmp_path):
     """An older control plane says nothing about what it granted. Falling back
     to the requested lease is the only estimate available, and is better than
     not beating at all."""
-    tr = FakeTransport([[_req(tmp_path)]], lease_ms=3_000)
+    req = _req(tmp_path)
+    assert req.lease_expires_ts is None, "the fallback case needs no granted lease"
+    tr = FakeTransport([[req]], lease_ms=3_000)
     runner = _runner(tmp_path, tr, spec="fixture_agent:build_medium")
+
+    # Falls back to the transport's requested lease: a third of 3s, floored.
+    assert runner._beat_interval_for(req) == pytest.approx(1.0, abs=0.05)
+    # And it is genuinely READING that value rather than defaulting: a
+    # transport that asked for half an hour must pace at 600s, not 1s.
+    assert RolloutRunner._beat_interval_for(
+        _runner(tmp_path, FakeTransport([[req]], lease_ms=1_800_000)), req
+    ) == pytest.approx(600.0, abs=1.0)
+
     runner.serve_forever(max_rollouts=1)
-    assert len(tr.heartbeats) >= 2
+    assert tr.heartbeats, "no granted lease is not a reason to stop beating"
 
 
 def test_the_work_deadline_is_not_the_lease(tmp_path):

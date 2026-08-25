@@ -74,6 +74,23 @@
             "null"
           ],
           "description": "The id the MODEL assigned to this call (LangChain ToolMessage.tool_call_id, ADK function_call_id, OpenAI tool_calls[].id). The join key for attributing a call to the completion that emitted it: the same id reappears on the role='tool' message of the agent's NEXT request, so attribution needs no clocks and survives concurrent tools. null/absent means the framework exposed no id -- the call still counts, it just cannot be placed more precisely than 'somewhere in this rollout'."
+        },
+        "entity_ids": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          },
+          "propertyNames": {
+            "enum": [
+              "id",
+              "key",
+              "uuid",
+              "sid",
+              "gid"
+            ]
+          },
+          "description": "Identity the write produced, filed under the field it came from. Present so the entity can be found again later without retaining the response body. High-entropy fields only: a low-entropy value a different entity shares by coincidence identifies the wrong resource. Absent or empty means no identity evidence, which is an abstention and never a failure."
         }
       },
       "allOf": [
