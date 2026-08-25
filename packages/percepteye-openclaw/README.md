@@ -1,4 +1,4 @@
-# percepteye-flywheel — OpenClaw plugin
+# percepteye-agent-flywheel — OpenClaw plugin
 
 Records what your OpenClaw agent's tools actually did, as `ok`, `failed` or
 **`unknown`**, into the trajectory the PerceptEye flywheel trains on.
@@ -7,7 +7,7 @@ Records what your OpenClaw agent's tools actually did, as `ok`, `failed` or
 that is a property of the hook it uses, not a promise about the code.
 
 ```bash
-openclaw plugins install percepteye-flywheel
+openclaw plugins install percepteye-agent-flywheel
 ```
 
 Then set one environment variable on the process running your agent:

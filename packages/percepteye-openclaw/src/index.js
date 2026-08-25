@@ -1,5 +1,5 @@
 /**
- * percepteye-flywheel — an OpenClaw plugin that records tool-call outcomes.
+ * percepteye-agent-flywheel — an OpenClaw plugin that records tool-call outcomes.
  *
  * WHY THIS HOOK. OpenClaw exposes three places to see a tool result, and only
  * one of them is both complete and incapable of changing the run:
@@ -35,7 +35,7 @@
 import { createRecorder } from "./record.js";
 import { createWriter, TRAJECTORY_DIR_ENV } from "./trajectory.js";
 
-export const PLUGIN_ID = "percepteye-flywheel";
+export const PLUGIN_ID = "percepteye-agent-flywheel";
 export const HOOK_NAME = "after_tool_call";
 
 export function register(api) {
@@ -67,7 +67,7 @@ export function register(api) {
 
 export default {
   id: PLUGIN_ID,
-  name: "PerceptEye Flywheel",
+  name: "PerceptEye Agent Flywheel",
   description:
     "Records tool-call outcomes (ok/failed/unknown) into the active " +
     `rollout's trajectory. Inert unless ${TRAJECTORY_DIR_ENV} is set.`,

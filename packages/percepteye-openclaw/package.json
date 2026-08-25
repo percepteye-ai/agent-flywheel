@@ -1,5 +1,5 @@
 {
-  "name": "percepteye-flywheel",
+  "name": "percepteye-agent-flywheel",
   "version": "0.1.0",
   "description": "Record OpenClaw tool-call outcomes into a PerceptEye flywheel trajectory. Observes only.",
   "license": "MIT",
