@@ -111,6 +111,27 @@ that seam and nowhere later.
 
 ## 4. Phase 2 — the credentialed reader (control plane, NOT built)
 
+> [!IMPORTANT]
+> **A correction, because an earlier draft of this section got it backwards.**
+> That draft claimed the flywheel path never reaches scoring, on the grounds
+> that the tool-mode table has no flywheel entry. The premise is true and the
+> conclusion does not follow: an unrecognised mode is logged and treated as
+> `"live"`, so the missing entry routes a flywheel run *into* the scored path
+> rather than diverting it away. The read-back gate's early return on an
+> unconfigured base URL is likewise real but is a configuration condition, not
+> a structural absence.
+>
+> So Phase 2 is not "adding confirmation where none runs". Confirmation runs;
+> what is missing is a binding that points it at the customer's own system.
+>
+> A second correction to the framing above: the reader is already shaped as
+> "a base URL plus a credential plus a read-only client", so the confirmation
+> engine does not need building. What needs building is the plumbing that
+> reaches it, and a genuine second credential — today "read-only" is a
+> client-side method block over the *same* secrets as the rollout that did the
+> writing, which is not a property a customer-facing promise can rest on.
+
+
 - Bind a reader to a customer-supplied base URL and **read-only** credential.
   Absent → every later phase is skipped and scoring is exactly what it is today.
 - **A capability probe at onboarding, and this is not optional.** A read
@@ -123,21 +144,98 @@ that seam and nowhere later.
 - Budget and rate limits. Verification traffic lands on the customer's own API,
   appears in their audit logs, and at training scale is not negligible.
 
-## 5. Phase 3 — the join (control plane, NOT built)
+## 5. Phase 3 — the join (control plane, PARTLY BUILT)
 
-- **An explicit `unknown` mapping rule at the boundary.** The scoring side's
-  envelope check treats an absent status as *not a failure*; the SDK's entire
-  discipline is that absence is not success. Those two defaults compose into a
-  bug if left implicit: an SDK `unknown` must not enter scoring as a definitive
-  write. This needs to be written down as a rule, not inferred.
-- **A freshness bound.** There is currently no gating on the age of an episode
+- **~~An explicit `unknown` mapping rule at the boundary.~~ DONE, and it was
+  not a rule — it was a live bug.** This item was written as "the two defaults
+  compose into a bug if left implicit". They did not compose into a *potential*
+  bug; the bug was already there and already being paid, in reward.
+
+  The scoring side decided whether a write "returned a definitive success
+  envelope" from the response status and body alone. That was correct while
+  every write came from a live HTTP tool whose response was the only evidence
+  there was. It is not correct once a capture layer records a first-class
+  outcome, and two shapes were being credited:
+
+  | what capture recorded | what the envelope concluded |
+  |---|---|
+  | `outcome="unknown"` | definitive success |
+  | `outcome="unknown"`, a 200 in the body | definitive success |
+  | **`outcome="failed"`, `status_code=200`** | **definitive success** |
+
+  The third row is the one that matters most and was not anticipated when this
+  document was written. An application-level denial returned as HTTP 200 is the
+  *canonical* case the tri-state exists to catch — [the flagship example in the
+  README](../README.md#why-unknown-is-a-first-class-tool-outcome). Capture
+  recorded it as `failed`, correctly, and scoring read the 200 and called it a
+  landed write. The SDK was doing its job and the answer was being discarded one
+  layer later.
+
+  The fix consults the observed outcome before the envelope. Two properties
+  worth carrying forward:
+
+  - **The guard keys on the outcome alone**, not on "unknown *and* no status".
+    The obvious formulation misses a tool that swallows its own error and
+    returns a 200-shaped body — precisely the `handle_tool_error=True` case.
+  - **Absent is not `None`.** A record that never carried an outcome field — a
+    stored dataset predating the concept — recorded no outcome at all, and the
+    envelope is still the only evidence it has. Collapsing the two withdraws
+    credit from every legacy record, which is a bug in the opposite direction
+    and harder to notice, because it presents as scores drifting down rather
+    than as anything failing.
+
+  Ten tests pin it; four go red without the guard.
+- **A freshness bound.** NOT built. There is currently no gating on the age of an episode
   at scoring time. A read-back run hours later verifies state that humans and
   scheduled jobs have since changed. Either bound the window or discount by
   elapsed time, and record both timestamps either way.
-- **Coverage, reported per episode.** Confirmation is partial by nature: some
+- **Coverage, reported per episode.** NOT built. Confirmation is partial by nature: some
   operations leave a readable resource and some do not. Reporting the fraction
   confirmed keeps the claim honest, and is more persuasive than the claim it
   replaces.
+
+### A question this document created, now answered: the cliff stays
+
+An earlier draft worried that identity restricted to high-entropy fields would
+send authored identity sources outside that set onto the **0.0 anti-hack
+cliff**, turning a capture-format limitation into a scored policy failure. Two
+parts of that were wrong and one was right.
+
+**Wrong: it is not a whitelist.** Scoring gates identity with a DENYLIST of
+low-entropy names, so `ts`, `self`, `permalink` and dotted paths all resolve
+normally — a shipped post-condition uses `ts` and confirms today. The
+high-entropy set constrains what the *capture* side emits, not what scoring
+accepts.
+
+**Right, by a different route: the harm is real and reachable.** A genuinely
+successful create that returns `201` with an empty body has no identity to
+resolve, is scored `0.0` at full weight, and is locked out of every rescue
+tier. That needs no capture format to happen and is pinned by an existing test.
+
+**And the obvious fix is wrong**, on two independent grounds, both established
+by trying to break it rather than by reasoning about it:
+
+1. **It is gameable.** The natural fix demotes such a row so the weaker
+   "the write was acknowledged" tier can grade it. But that tier's predicate
+   only checks that a matching call returned a success envelope — it never
+   inspects what was actually sent or created. Several trivially cheap shapes
+   satisfy it, so the demotion converts a `0.0` into partial credit for doing
+   nothing. Amnesty here is a promotion, not a neutral.
+2. **It is not a reward-only field.** The flag being flipped also feeds the
+   named per-task predicate, which falls back to a "confirmed" boolean that
+   reads **True** for an acknowledged-but-unlocated write. The audit-readable
+   claim "the agent did the thing" would flip from false to true for a bare
+   `2xx` with no identity — a worse outcome than the mis-scored reward it was
+   meant to repair.
+
+**So the cliff stays**, and this is recorded so nobody re-derives the same fix.
+Scoring a correct-but-unnameable write as `0.0` is a real cost, but every
+available remedy so far pays for it with a false success assertion, which is
+the one thing this whole design refuses to trade for.
+
+If it is worth revisiting, the tractable direction is upstream: make identity
+resolvable at capture, where the write's own response is still in hand, rather
+than trying to recover it at scoring time from evidence that no longer exists.
 
 ## 6. Risks
 
