@@ -575,6 +575,13 @@ Fields derived from the inference wire — token-level data, sampling parameters
 
 ## Development
 
+The Node plugins are checked against the *same* Python reader, and that check
+is a script rather than workflow-only YAML, so you can run exactly what CI runs:
+
+```bash
+./scripts/cross_language_abi_check.sh
+```
+
 ```bash
 python -m venv .venv
 # [dev] alone passes 268 tests; the adapter and tracing suites need the

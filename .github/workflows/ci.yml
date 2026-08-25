@@ -162,50 +162,10 @@ jobs:
               assert not pkg.get(key), f"{key} must stay empty: {pkg[key]}"
           print("no dependencies, as required")
           PY
-      - name: what the plugin writes is what the Python SDK reads
+      - name: what the plugins write is what the Python SDK reads
+        # One definition, invoked from here and runnable by hand. It used to be
+        # inline, and a local approximation of it passed while the real one
+        # failed -- the JS half had grown two records and the assertion had not.
         run: |
           pip install -e .
-          node --input-type=module -e "
-          import { createRecorder } from './packages/percepteye-agent-flywheel/src/record.js';
-          import { createWriter } from './packages/percepteye-agent-flywheel/src/trajectory.js';
-          const rec = createRecorder({ writer: createWriter({ dir: 'abi' }) });
-          rec.handle({ toolName:'read', params:{path:'/etc/hosts'}, toolCallId:'c1', result:'ok', durationMs:3 }, {agentId:'coder'});
-          rec.handle({ toolName:'exec', params:{command:'exit 3'}, toolCallId:'c2', result:{details:{status:'completed',exitCode:3}}, durationMs:91 });
-          rec.handle({ toolName:'exec', params:{command:'echo hi'}, toolCallId:'c3', result:{details:{status:'completed',exitCode:0}}, durationMs:93 });
-          rec.handle({ toolName:'mcp__jira__transition', params:{}, toolCallId:'c4', result:{id:'10001',key:'ENG-7'} });
-          // The dsh entry writes the SAME format through its own classifier.
-          import { recordFor } from './packages/percepteye-agent-flywheel/src/dsh.js';
-          const w = createWriter({ dir: 'abi' });
-          w.write(recordFor({ name:'bash', arguments:{command:'exit 3'}, callId:'c5' },
-                            { isError:false, value:{kind:'foreground', exitCode:3} }));
-          w.write(recordFor({ name:'bash', arguments:{command:'sleep 1 &'}, callId:'c6' },
-                            { isError:false, value:{kind:'background', jobId:'j1'} }));
-          "
-          python - <<'PY'
-          from percepteye_agent_flywheel.outcomes import Trajectory
-          t = Trajectory("abi")
-          calls = t.read()
-          assert t.malformed == 0, f"the reader rejected {t.malformed} line(s)"
-          got = [(c.name, c.outcome) for c in calls]
-          assert got == [
-              ("read", "ok"),
-              ("exec", "failed"),          # exit 3, though status said "completed"
-              ("exec", "ok"),
-              ("mcp__jira__transition", "unknown"),
-          ], got
-          assert calls[0].tool_call_id == "c1"   # the join key survives
-          # Identity crosses the language boundary, and survives `unknown` --
-          # an unknown call with an identity is the one a later read-back can
-          # actually settle, so losing it here would cost exactly the records
-          # that need it most.
-          assert calls[3].outcome == "unknown"
-          assert calls[3].entity_ids == {"id": "10001", "key": "ENG-7"}, calls[3].entity_ids
-          # dsh: a non-zero exit is a failure even though the harness settled
-          # it as a non-error, and a BACKGROUNDED command has not finished, so
-          # it is unknown rather than a free success.
-          assert (calls[4].name, calls[4].outcome, calls[4].error_class) == ("bash", "failed", "ExitStatus:3"), calls[4]
-          assert (calls[5].outcome, calls[5].error_class) == ("unknown", "StillRunning"), calls[5]
-          print("cross-language capture contract holds:", got)
-          print("identity crossed the boundary:", calls[3].entity_ids)
-          print("dsh classifier agrees with the reader")
-          PY
+          ./scripts/cross_language_abi_check.sh
