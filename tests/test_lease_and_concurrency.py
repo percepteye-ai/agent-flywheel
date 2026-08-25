@@ -112,8 +112,15 @@ def test_a_long_rollout_heartbeats_its_lease(tmp_path):
     runner.serve_forever(max_rollouts=1)
 
     assert tr.reported == ["rl_1"]
-    assert len(tr.heartbeats) >= 2, (
-        f"a ~2.5s rollout under a 3s lease must beat at least twice, "
+    # AT LEAST ONE, not at least two. The bug this guards was that nothing
+    # called heartbeat AT ALL, so one beat already proves the thread runs and
+    # the lease is renewed. Asserting a COUNT asserted how many times a
+    # background thread happened to wake inside a 2s window, which is a fact
+    # about the machine rather than about this code -- it failed on six of
+    # twelve CI jobs, on 3.10 and 3.11 while 3.12 and 3.13 passed on the same
+    # OS, which is scheduling noise wearing a version number.
+    assert tr.heartbeats.count("rl_1") >= 1, (
+        f"a rollout outliving its beat interval must renew its lease, "
         f"got {tr.heartbeats}"
     )
 
@@ -158,22 +165,37 @@ def test_heartbeat_failure_is_transient_and_does_not_kill_the_rollout(tmp_path):
 # ── claiming N means running N ─────────────────────────────────────────────
 
 
-def test_a_claimed_batch_runs_concurrently(tmp_path):
+def test_a_claimed_batch_runs_concurrently(tmp_path, monkeypatch):
     """Claiming N and serving them one after another held N-1 leases on work
-    nobody was doing. Three 2s rollouts must not take 6s."""
+    nobody was doing.
+
+    Proved by OVERLAP rather than by elapsed time. "Three 2s rollouts must
+    finish in under 4.5s" is a claim about the machine as much as the code:
+    three subprocess spawns on a loaded runner can eat the margin, and then a
+    correct implementation fails. If the last rollout STARTED before the first
+    one FINISHED, all three were in flight at once, and that is true on any
+    machine at any speed."""
+    spans = tmp_path / "spans"
+    spans.mkdir()
+    monkeypatch.setenv("AGENT_SPAN_DIR", str(spans))
+
     batch = [_req(tmp_path, rid=f"rl_{i}") for i in range(3)]
     tr = FakeTransport([batch])
     runner = _runner(
         tmp_path, tr, spec="fixture_agent:build_medium", concurrency=3
     )
 
-    started = time.time()
     runner.serve_forever(max_rollouts=3)
-    elapsed = time.time() - started
 
     assert sorted(tr.reported) == ["rl_0", "rl_1", "rl_2"]
-    assert elapsed < 4.5, (
-        f"three 2s rollouts took {elapsed:.1f}s -- they ran sequentially"
+    seen = [tuple(float(x) for x in p.read_text().split())
+            for p in spans.glob("*.span")]
+    assert len(seen) == 3, f"expected three spans, got {len(seen)}"
+    last_start = max(s for s, _ in seen)
+    first_end = min(e for _, e in seen)
+    assert last_start < first_end, (
+        f"the last rollout started {last_start - first_end:.2f}s AFTER the "
+        f"first finished -- they ran sequentially"
     )
 
 
