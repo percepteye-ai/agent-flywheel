@@ -79,10 +79,37 @@ Rules, all enforced rather than documented:
   names an entity so something else can observe one.
 - **Absent means absent.** No identity is an abstention, never a failure.
 
-Carried on every capture path — `record_tool_call`, the framework adapters, a
-CLI agent's event stream, the child→parent process boundary, and the OpenClaw
-plugin, whose extractor is a deliberate mirror of the Python one so the same
-write produces the same evidence whichever harness ran it.
+### Coverage
+
+Identity is resolved inside `record_tool_call`, which every adapter already
+routes through, so the framework paths required no adapter change at all. That
+is a claim worth a test rather than an argument — "it should already work
+because of where I put it" is exactly how the child→parent boundary lost
+identity while looking correct.
+
+| capture path | covered | how |
+|---|---|---|
+| `record_tool_call` | yes | resolved centrally; a declared identity wins |
+| LangChain / LangGraph | yes | adapter → `record_tool_call` |
+| Google ADK | yes | adapter → `record_tool_call` |
+| CLI agent event stream | yes | resolved from the structured result |
+| child → parent boundary | yes | carried on the wire |
+| an agent writing the trajectory itself | yes | the file format is the interface |
+| OpenClaw plugin | yes | a mirror of the Python extractor |
+| DeepSeek Harness | **no** | see below |
+
+**dsh is the one gap, and it is not a gap in this phase.** dsh has no
+tool-outcome capture at all yet. `fw.TASK` and `endpoint_env=` got it running
+and routed; neither gets its tool calls out. Its JSON stream carries
+`toolcall_start` / `toolcall_end`, but those are MODEL-WIRE events — the model
+emitting a call and streaming its arguments — and they end at the assembled
+call, never the result. Parsing them would yield arguments with no verdict,
+which is worse than nothing: it looks like capture while carrying exactly the
+blind spot this SDK exists to close.
+
+Real dsh capture needs its plugin surface, emitting on tool results. That is
+separate work, and when it lands identity comes with it for free, because the
+file format is the interface and the extractor is already specified.
 
 ## 4. Phase 2 — the credentialed reader (control plane, NOT built)
 
