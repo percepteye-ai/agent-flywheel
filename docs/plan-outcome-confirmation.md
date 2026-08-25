@@ -111,6 +111,23 @@ that seam and nowhere later.
 
 ## 4. Phase 2 — the credentialed reader (control plane, NOT built)
 
+> [!IMPORTANT]
+> **Phase 2 is larger than this section assumes, and the reason is worth
+> stating before anyone starts.** This was written as though a credentialed
+> reader could be swapped into a running verification path. There is no such
+> path on the flywheel side: the read-back gate requires a live rollout object,
+> returns early when no base URL is configured, and the tool-mode table has no
+> flywheel entry at all. So Phase 2 is *adding confirmation where none runs
+> today*, not rebinding an existing executor.
+>
+> A second correction to the framing above: the reader is already shaped as
+> "a base URL plus a credential plus a read-only client", so the confirmation
+> engine does not need building. What needs building is the plumbing that
+> reaches it, and a genuine second credential — today "read-only" is a
+> client-side method block over the *same* secrets as the rollout that did the
+> writing, which is not a property a customer-facing promise can rest on.
+
+
 - Bind a reader to a customer-supplied base URL and **read-only** credential.
   Absent → every later phase is skipped and scoring is exactly what it is today.
 - **A capability probe at onboarding, and this is not optional.** A read
@@ -123,21 +140,80 @@ that seam and nowhere later.
 - Budget and rate limits. Verification traffic lands on the customer's own API,
   appears in their audit logs, and at training scale is not negligible.
 
-## 5. Phase 3 — the join (control plane, NOT built)
+## 5. Phase 3 — the join (control plane, PARTLY BUILT)
 
-- **An explicit `unknown` mapping rule at the boundary.** The scoring side's
-  envelope check treats an absent status as *not a failure*; the SDK's entire
-  discipline is that absence is not success. Those two defaults compose into a
-  bug if left implicit: an SDK `unknown` must not enter scoring as a definitive
-  write. This needs to be written down as a rule, not inferred.
-- **A freshness bound.** There is currently no gating on the age of an episode
+- **~~An explicit `unknown` mapping rule at the boundary.~~ DONE, and it was
+  not a rule — it was a live bug.** This item was written as "the two defaults
+  compose into a bug if left implicit". They did not compose into a *potential*
+  bug; the bug was already there and already being paid, in reward.
+
+  The scoring side decided whether a write "returned a definitive success
+  envelope" from the response status and body alone. That was correct while
+  every write came from a live HTTP tool whose response was the only evidence
+  there was. It is not correct once a capture layer records a first-class
+  outcome, and two shapes were being credited:
+
+  | what capture recorded | what the envelope concluded |
+  |---|---|
+  | `outcome="unknown"` | definitive success |
+  | `outcome="unknown"`, a 200 in the body | definitive success |
+  | **`outcome="failed"`, `status_code=200`** | **definitive success** |
+
+  The third row is the one that matters most and was not anticipated when this
+  document was written. An application-level denial returned as HTTP 200 is the
+  *canonical* case the tri-state exists to catch — [the flagship example in the
+  README](../README.md#why-unknown-is-a-first-class-tool-outcome). Capture
+  recorded it as `failed`, correctly, and scoring read the 200 and called it a
+  landed write. The SDK was doing its job and the answer was being discarded one
+  layer later.
+
+  The fix consults the observed outcome before the envelope. Two properties
+  worth carrying forward:
+
+  - **The guard keys on the outcome alone**, not on "unknown *and* no status".
+    The obvious formulation misses a tool that swallows its own error and
+    returns a 200-shaped body — precisely the `handle_tool_error=True` case.
+  - **Absent is not `None`.** A record that never carried an outcome field — a
+    stored dataset predating the concept — recorded no outcome at all, and the
+    envelope is still the only evidence it has. Collapsing the two withdraws
+    credit from every legacy record, which is a bug in the opposite direction
+    and harder to notice, because it presents as scores drifting down rather
+    than as anything failing.
+
+  Ten tests pin it; four go red without the guard.
+- **A freshness bound.** NOT built. There is currently no gating on the age of an episode
   at scoring time. A read-back run hours later verifies state that humans and
   scheduled jobs have since changed. Either bound the window or discount by
   elapsed time, and record both timestamps either way.
-- **Coverage, reported per episode.** Confirmation is partial by nature: some
+- **Coverage, reported per episode.** NOT built. Confirmation is partial by nature: some
   operations leave a readable resource and some do not. Reporting the fraction
   confirmed keeps the claim honest, and is more persuasive than the claim it
   replaces.
+
+### An open question this document created
+
+Identity is restricted to high-entropy fields (`id`, `key`, `uuid`, `sid`,
+`gid`), which is right — a low-entropy value a different entity shares by
+coincidence confirms the wrong resource. But a post-condition author may name
+any response field as the identity source. One outside that set stops
+resolving, and the concern is that scoring then lands on the **0.0 anti-hack
+cliff** rather than on `inconclusive` — converting a limitation of *our capture
+format* into a scored *policy failure*. Training on that teaches the model its
+correct action was wrong, which is worse than not scoring the episode at all.
+
+This is recorded as a question rather than a finding, because it is not yet
+established that it is reachable, and because the cliff is an anti-gaming
+guard. Two conditions have to hold before touching it:
+
+1. **The agent must have no influence over whether identity resolves.** If a
+   policy can cause its own writes to become unresolvable, the cliff is correct
+   as it stands and must not move.
+2. **The two causes must be distinguishable from the data.** "Unresolvable
+   because our format could not carry it" and "unresolvable because the write
+   never happened" have to be told apart, or there is nothing to route
+   differently and this is not fixable at the scoring layer.
+
+If either fails, the honest outcome is to leave the cliff alone and record why.
 
 ## 6. Risks
 
