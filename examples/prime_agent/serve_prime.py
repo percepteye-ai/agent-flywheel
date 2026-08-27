@@ -11,8 +11,8 @@ one extension that points its completions at the per-rollout endpoint.
 from __future__ import annotations
 
 import os
-import tempfile
 import pathlib
+import tempfile
 
 import percepteye_agent_flywheel as fw
 
