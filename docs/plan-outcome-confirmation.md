@@ -187,9 +187,10 @@ that seam and nowhere later.
   Ten tests pin it; four go red without the guard.
 - **A freshness bound.** NOT built, and there is no clock to build it against.
   Checked 2026-08-26 on both capture surfaces: `ToolCallOutcome`
-  (`contract.py`) carries `latency_ms` and no wall-clock field, and Compass's
-  `ToolCall` (`compass/core/schemas.py`) carries `latency_ms` plus
-  `started_monotonic`. `time.monotonic()` is per-process and has no defined
+  (`contract.py`) carries `latency_ms` and no wall-clock field, and the control
+  plane's own tool-call record carries `latency_ms` plus a monotonic start.
+  (Deliberately not named here: this file is published, and the boundary scan
+  in `tests/test_oss_boundary.py` is the reason it may not be.) `time.monotonic()` is per-process and has no defined
   epoch, so it cannot answer "how long ago did this write happen?" anywhere
   except inside the process that recorded it — and a scoring pass in a later
   DAG step is a different process. A bundle replayed tomorrow has no way at all
