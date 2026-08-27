@@ -113,6 +113,19 @@ class PolicySnapshot:
     #: False after a failed refresh attempt. The snapshot still stands.
     last_refresh_ok: bool = True
 
+    #: The control plane's own answer to "is what I booted with still
+    #: current?", empty when it did not send one.
+    #:
+    #: DELIBERATELY NOT what ``changed`` is computed from, and the two answer
+    #: different questions. ``changed`` asks "must I rebuild my client?" and
+    #: moves only when the endpoint does. This moves when ANYTHING about what
+    #: to run moves — including the system prompt, which this snapshot does
+    #: not carry and a client rebuild would not apply. A fleet holds this
+    #: value and cycles a replica when it differs; a turn loop reads
+    #: ``changed``. Folding them together would either cycle replicas for
+    #: endpoint-only changes or miss prompt changes entirely.
+    serving_generation: str = ""
+
     def __bool__(self) -> bool:
         """Truthy only when there is something to act on — same meaning as
         ``apply_current_policy()``'s ``{}``: keep your current configuration."""
@@ -295,9 +308,20 @@ class PolicySource:
             # a working client down: "nothing deployed" means keep your current
             # configuration, exactly as the one-shot function documents.
             # Withdrawal is expressed by deploying the base, not by an absence.
-            self._snap = replace(self._snap, last_refresh_ok=True)
+            # The generation still moves: the control plane's answer DID
+            # change, even though the part this snapshot carries did not, and
+            # a fleet watching it should still see that.
+            self._snap = replace(
+                self._snap, last_refresh_ok=True,
+                serving_generation=(
+                    str(body.get("serving_generation") or "")
+                    if isinstance(body, dict) else ""
+                ) or self._snap.serving_generation,
+            )
             return
 
+        generation = body.get("serving_generation") if isinstance(body, dict) else None
+        generation = str(generation) if isinstance(generation, str) else ""
         identity = (kw.get("base_url", ""), kw.get("api_key", ""),
                     kw.get("model", ""))
         # The first ACTIONABLE answer is a change, because nothing was handed
@@ -311,6 +335,7 @@ class PolicySource:
         self._snap = PolicySnapshot(
             base_url=identity[0], api_key=identity[1], model=identity[2],
             changed=changed, last_refresh_ok=True,
+            serving_generation=generation,
         )
         if changed and self._on_change is not None:
             try:

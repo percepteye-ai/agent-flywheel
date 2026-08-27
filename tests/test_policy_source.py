@@ -411,3 +411,48 @@ def test_an_endpoint_with_no_usable_credential_is_NOTHING_TO_APPLY():
         _now=_Clock(), _fetch=lambda: body, _rand=lambda lo, hi: 0.0,
     )
     assert not src.current()
+
+
+# ── two questions, two answers ───────────────────────────────────────
+
+
+def test_the_snapshot_carries_the_control_plane_s_own_generation():
+    src, _ = _source([{**_body(), "serving_generation": "abc123"}])
+    assert src.current().serving_generation == "abc123"
+
+
+def test_a_PROMPT_only_change_moves_the_generation_but_not_changed():
+    """The two answer different questions. `changed` asks "must I rebuild my
+    client?" and a prompt change does not require that — the snapshot does not
+    even carry the prompt. `serving_generation` asks "is what I booted with
+    still current?", which a fleet uses to cycle a replica. Folding them
+    together would either cycle replicas for endpoint-only changes or miss
+    prompt changes entirely."""
+    clock = _Clock()
+    src, _ = _source([
+        {**_body(model="m1"), "serving_generation": "gen-1"},
+        {**_body(model="m1"), "serving_generation": "gen-2"},   # prompt moved
+    ], clock=clock)
+    src.current()
+    clock.advance(301.0)
+    snap = src.current()
+    assert snap.changed is False
+    assert snap.serving_generation == "gen-2"
+
+
+def test_an_endpoint_change_moves_BOTH():
+    clock = _Clock()
+    src, _ = _source([
+        {**_body(model="m1"), "serving_generation": "gen-1"},
+        {**_body(model="m2"), "serving_generation": "gen-2"},
+    ], clock=clock)
+    src.current()
+    clock.advance(301.0)
+    snap = src.current()
+    assert snap.changed is True
+    assert snap.serving_generation == "gen-2"
+
+
+def test_a_missing_generation_is_empty_not_invented():
+    src, _ = _source([_body()])
+    assert src.current().serving_generation == ""
