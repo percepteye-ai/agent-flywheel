@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import os
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
 from ._http import ControlPlaneClient
@@ -58,6 +58,7 @@ from .introspection import DiscoveredAgent, ToolDefinition
 from .introspection import introspect as introspect_agent
 from .isolation import unroutable_providers_present
 from .outcomes import Trajectory, current_rollout_id, record_tool_call
+from .policy import PolicySnapshot, PolicySource, policy_source
 from .production import Attachment, attach
 from .runner import RolloutRunner
 from .transport import AttachTransport, FlywheelTransport
@@ -80,6 +81,8 @@ __all__ = [
     "LeaseLost",
     "ModeNotAvailable",
     "Outcome",
+    "PolicySnapshot",
+    "PolicySource",
     "RolloutOutput",
     "RolloutRequest",
     "RolloutRunner",
@@ -93,7 +96,9 @@ __all__ = [
     "attach",
     "current_policy",
     "current_rollout_id",
+    "endpoint_kwargs",
     "introspect_agent",
+    "policy_source",
     "record_tool_call",
     "resolve_entrypoint",
     "serve",
@@ -167,6 +172,39 @@ def current_policy(
         client.close()
 
 
+def endpoint_kwargs(
+    policy: Mapping[str, Any] | None, *, api_key: str | None = None,
+) -> dict[str, Any]:
+    """The ONE place a ``/policy/current`` body becomes client kwargs.
+
+    Extracted because there are now two callers — :func:`apply_current_policy`
+    and :class:`PolicySource` — and "a caller who unpacks it slightly
+    differently is a caller sampling from something other than what was
+    trained" applies at least as much between two of OUR surfaces as it does
+    between two of the customer's.
+
+    ``{}`` means nothing to apply: no endpoint, no ``base_url``, or no
+    credential we can authenticate with. That last one is deliberate — an
+    endpoint we cannot authenticate to is not usable, and returning it would
+    produce 401s at the caller's first request rather than a legible "nothing
+    to apply" here.
+    """
+    if not isinstance(policy, Mapping):
+        return {}
+    ep = policy.get("endpoint")
+    if not isinstance(ep, Mapping) or not ep.get("base_url"):
+        return {}
+    key_env = str(ep.get("api_key_env") or ENV_API_KEY)
+    key = api_key or os.environ.get(key_env) or os.environ.get(ENV_API_KEY)
+    if not key:
+        return {}
+    return {
+        "base_url": str(ep["base_url"]),
+        "api_key": str(key),
+        "model": str(ep.get("model") or ""),
+    }
+
+
 def apply_current_policy(
     *,
     agent_id: str,
@@ -207,21 +245,9 @@ def apply_current_policy(
     pol = current_policy(
         agent_id=agent_id, control_plane_url=control_plane_url, api_key=api_key,
     )
-    ep = pol.get("endpoint") if isinstance(pol.get("endpoint"), dict) else None
-    if not ep or not ep.get("base_url"):
+    out = endpoint_kwargs(pol, api_key=api_key)
+    if not out:
         return {}
-    key_env = str(ep.get("api_key_env") or ENV_API_KEY)
-    key = api_key or os.environ.get(key_env) or os.environ.get(ENV_API_KEY)
-    if not key:
-        # An endpoint we cannot authenticate to is not usable, and returning
-        # it would produce 401s at the caller's first request rather than a
-        # legible "nothing to apply" here.
-        return {}
-    out: dict[str, Any] = {
-        "base_url": str(ep["base_url"]),
-        "api_key": str(key),
-        "model": str(ep.get("model") or ""),
-    }
     if set_env:
         os.environ["OPENAI_BASE_URL"] = out["base_url"]
         os.environ["OPENAI_API_KEY"] = out["api_key"]
