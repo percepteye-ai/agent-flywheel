@@ -232,10 +232,18 @@ def bind_all(
     It does NOT create a degraded-routing state: a customer who supplies an
     adapter is asserting that the adapter is how their traffic gets routed,
     and an adapter that cannot bind is therefore a refusal.
+
+    ``adapters=None`` means the caller said NOTHING, so installed adapter
+    distributions are discovered. ``adapters=[]`` means the caller said NONE,
+    and nothing is bound. Those are opposite instructions, so they are told
+    apart by ``is None`` and never by truthiness: an empty list is falsy, and
+    reading it as "unspecified" is how ``adapters=[]`` came to bind every
+    third-party adapter on the machine -- in a production process, chosen by
+    a customer who had just asked for no capture at all.
     """
     report = BindingReport()
     unbinds: list[Any] = []
-    supplied = list(adapters or []) or discover_adapters()
+    supplied = discover_adapters() if adapters is None else list(adapters)
 
     if not supplied:
         if require_routing:
@@ -316,6 +324,12 @@ def bind_selected(
     not bound. An EXPLICIT name is a different assertion -- the customer is
     saying that is how their traffic is captured -- so a named adapter that
     cannot bind raises rather than degrading.
+
+    ``None`` and ``[]`` both bind nothing. They are spelled differently by
+    callers and mean the same thing here, because at THIS layer the caller has
+    named the adapters they want and an empty naming is a complete answer --
+    unlike ``bind_all``, where ``None`` is the absence of an answer and means
+    discover.
     """
     from .adapters import BUILTIN_ADAPTERS, load_builtin
 

@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import pytest
 
+from percepteye_agent_flywheel import binding
 from percepteye_agent_flywheel.binding import (
     Adapter,
     AdapterCapabilities,
     bind_all,
+    bind_selected,
     probe,
 )
 from percepteye_agent_flywheel.errors import RoutingNotInstallable
@@ -104,6 +106,78 @@ def test_no_adapters_is_the_default_tier_and_is_recorded():
     assert report.bound == []
     assert unbinds == []
     assert report.skipped and report.skipped[0].reason.startswith("no adapters")
+
+
+# ── "none" and "unspecified" are opposite instructions ──────────────────────
+
+class _Foreign(_Fake):
+    """Stands in for an adapter a THIRD PARTY shipped through the entry-point
+    group -- something the customer never named and may not know is installed."""
+
+    name = "foreign"
+
+
+@pytest.fixture
+def a_registered_entry_point(monkeypatch):
+    """Register one adapter in the entry-point group, for real.
+
+    The suite had no such fixture, so every empty-list case was passing
+    vacuously: on a stock install ``discover_adapters()`` returns ``[]``, which
+    makes "bound nothing because I was told none" and "bound nothing because
+    there was nothing to find" indistinguishable. This makes them distinguish.
+    """
+    adapter = _Foreign()
+
+    class _EP:
+        name = "foreign"
+
+        def load(self):
+            return lambda: adapter
+
+    def _entry_points(**kw):
+        return [_EP()] if kw.get("group") == binding.ENTRY_POINT_GROUP else []
+
+    monkeypatch.setattr(binding.md, "entry_points", _entry_points)
+    return adapter
+
+
+def test_the_fixture_really_registers_an_adapter(a_registered_entry_point):
+    """Guards the two tests below. If discovery could not find this adapter,
+    they would pass whether or not the code under test was correct."""
+    assert [a.name for a in binding.discover_adapters()] == ["foreign"]
+
+
+def test_an_unspecified_adapter_list_discovers_installed_distributions(a_registered_entry_point):
+    """``None`` is the absence of an answer, and absence still means discover."""
+    report, unbinds = bind_all(None, llm_url="u", api_key="k")
+    assert report.bound == ["foreign"]
+    assert a_registered_entry_point.bound_with == {"llm_url": "u", "api_key": "k"}
+    assert len(unbinds) == 1
+
+
+def test_an_empty_adapter_list_binds_nothing_even_when_one_is_installed(
+    a_registered_entry_point,
+):
+    """THE fix. ``adapters=[]`` is a customer asking for no capture, and it used
+    to be read as "unspecified" because an empty list is falsy -- so it bound
+    every third-party adapter registered on the machine, inside the customer's
+    production process. The foreign adapter must not merely be unbound: it must
+    never be constructed at all."""
+    report, unbinds = bind_all([], llm_url="u", api_key="k")
+    assert report.bound == []
+    assert unbinds == []
+    assert a_registered_entry_point.bound_with is None
+
+
+def test_serves_empty_selection_reaches_bind_all_as_empty(a_registered_entry_point):
+    """The path ``serve(adapters=[])`` actually takes. bind_selected has its own
+    early return for ``None``, so ``[]`` is the spelling that gets all the way
+    down to bind_all -- which is why the conflation was reachable from the
+    public API at all."""
+    report, unbinds = bind_selected([], llm_url="u", api_key="k")
+    assert report.bound == []
+    assert unbinds == []
+    assert a_registered_entry_point.bound_with is None
 
 
 def test_capabilities_are_the_union_across_adapters():
