@@ -185,10 +185,25 @@ that seam and nowhere later.
     than as anything failing.
 
   Ten tests pin it; four go red without the guard.
-- **A freshness bound.** NOT built. There is currently no gating on the age of an episode
-  at scoring time. A read-back run hours later verifies state that humans and
-  scheduled jobs have since changed. Either bound the window or discount by
-  elapsed time, and record both timestamps either way.
+- **A freshness bound.** NOT built, and there is no clock to build it against.
+  Checked 2026-08-26 on both capture surfaces: `ToolCallOutcome`
+  (`contract.py`) carries `latency_ms` and no wall-clock field, and Compass's
+  `ToolCall` (`compass/core/schemas.py`) carries `latency_ms` plus
+  `started_monotonic`. `time.monotonic()` is per-process and has no defined
+  epoch, so it cannot answer "how long ago did this write happen?" anywhere
+  except inside the process that recorded it — and a scoring pass in a later
+  DAG step is a different process. A bundle replayed tomorrow has no way at all
+  to know its own age.
+
+  So "record both timestamps either way" is not a note beside the bound; it is
+  the PREREQUISITE, and it lands at capture, in the SDK, where the write
+  happens. Add a wall-clock stamp to `ToolCallOutcome` and carry it through the
+  trajectory; then the elapsed time is computable at scoring, and only then is
+  there evidence to choose a window from. Choosing the window first would be
+  inventing a threshold, which is the thing this codebase keeps ruling against.
+
+  Worth stating plainly because the absence explains the whole item: this was
+  never deferred on cost. There was nothing to gate on.
 - **Coverage, reported per episode.** NOT built. Confirmation is partial by nature: some
   operations leave a readable resource and some do not. Reporting the fraction
   confirmed keeps the claim honest, and is more persuasive than the claim it
