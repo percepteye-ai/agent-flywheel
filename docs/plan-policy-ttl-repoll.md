@@ -1,6 +1,26 @@
 # Scope: TTL and re-poll for `current_policy()`
 
-Status: **proposed, not built.** No code changes yet.
+Status: **phases 1 and 2 BUILT** (`src/percepteye_agent_flywheel/policy.py`,
+`tests/test_policy_source.py`). Phase 3 (`background=True`) is deliberately
+unbuilt — per §6 it ships only if inline refresh proves insufficient for
+low-traffic agents, and nothing has measured that yet.
+
+Two things this document got wrong, corrected in the build and recorded here
+so the next reader does not re-derive them:
+
+* §4.2 ("never blocks on the network after the first call") and §4.3 (inline
+  refresh with a 1s timeout) contradict each other. §4.3 is the mechanism;
+  §4.2 is the intent, which is really "no UNBOUNDED blocking". The bound is a
+  total, not per-attempt, so the refresh client is built with
+  `max_attempts=1`.
+* §4.6 says "the cache needs a lock". It needs TWO. One lock makes every
+  concurrent caller queue behind the in-flight fetch on its way to READ the
+  cache — the exact latency this design exists to avoid, and invisible to a
+  test that only counts requests.
+
+Open question 2 is answered: the handle has no `set_env`. Open question 3 is
+answered: damping a flapping control plane is not the client's job. Open
+question 4 is answered in the module docstring: call it per turn.
 
 ## 1. What is true today
 
