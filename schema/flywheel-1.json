@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.percepteye.com/flywheel/1.json",
   "title": "Percepteye Flywheel contract, version 1",
-  "description": "The wire contract between a customer-run agent and the Percepteye control plane. THIS FILE IS THE AUTHORITY. Server implementations pin against the published schema; the schema is never generated from a server type. Python dataclasses and TypeScript types are generated from this file in CI.",
+  "description": "The wire contract between a customer-run agent and the Percepteye control plane. THIS FILE IS THE AUTHORITY. Server implementations pin against the published schema; the schema is never generated from a server type. The Python types in src/percepteye_agent_flywheel/contract.py are hand-written to match this file, not generated from it, and the test suite asserts the two agree.",
   "x-contract-version": "flywheel/1",
   "$defs": {
     "ToolCallRecord": {
@@ -130,6 +130,7 @@
             "credential_expired",
             "deadline_exceeded",
             "entrypoint_error",
+            "agent_exit_nonzero",
             "cancelled",
             "capacity"
           ]

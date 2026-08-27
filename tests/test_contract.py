@@ -142,3 +142,32 @@ def test_deadline_comes_from_the_server():
     )
     assert r.seconds_remaining(now=900.0) == 100.0
     assert r.seconds_remaining(now=2_000.0) == 0.0
+
+
+def test_every_exclusion_reason_the_code_knows_is_declared_by_the_schema():
+    """The schema is the authority, so a reason the code can emit and the
+    schema does not declare is a report a conforming server must reject.
+
+    This is not hypothetical. ``agent_exit_nonzero`` was added to
+    ``ExclusionReason``, emitted by the runner and asserted by four test
+    modules, while the published enum still listed seven reasons -- and the
+    only thing that compared the two was a person reading both files. The
+    equality is exact, and deliberately so: an extra reason in the schema is
+    vocabulary the control plane owns, but the ORDER carries the same
+    editorial meaning in both files, so a silent divergence in either
+    direction is the drift worth catching.
+    """
+    import json
+    import pathlib
+    import typing
+
+    from percepteye_agent_flywheel.contract import ExclusionReason
+
+    schema = json.loads(
+        (pathlib.Path(__file__).resolve().parents[1] / "schema" / "flywheel-1.json").read_text()
+    )
+    declared = schema["$defs"]["Exclusion"]["properties"]["reason"]["enum"]
+    assert list(typing.get_args(ExclusionReason)) == declared, (
+        "ExclusionReason and schema/flywheel-1.json disagree; the schema is the "
+        "authority, so update it in the same commit as the code"
+    )
