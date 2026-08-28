@@ -95,6 +95,7 @@ __all__ = [
     "apply_current_policy",
     "attach",
     "current_policy",
+    "current_prompt",
     "current_rollout_id",
     "endpoint_kwargs",
     "introspect_agent",
@@ -168,6 +169,65 @@ def current_policy(
         from .transport import AttachTransport
 
         return AttachTransport(client, agent_id=agent_id).policy_current()
+    finally:
+        client.close()
+
+
+def current_prompt(
+    *,
+    agent_id: str,
+    control_plane_url: str | None = None,
+    api_key: str | None = None,
+) -> dict[str, Any]:
+    """The approved system prompt this agent should be running, or ``{}``.
+
+    The other half of :func:`current_policy`. That one answers "which model";
+    training also produces a system PROMPT, co-optimized with that model and
+    gated by the same human approval — and until this existed an agent could
+    learn only that the prompt had moved, never what it moved to. The snapshot
+    in :class:`PolicySource` says as much in its own comment: its generation
+    changes for a prompt change, "which this snapshot does not carry and a
+    client rebuild would not apply".
+
+    Returns the deliverable::
+
+        {"name": ..., "version": 3, "sha256": ..., "text": "...",
+         "candidate_kind": "replacement", "status": "approved",
+         "model_prompt_checksum": ..., "stale_baseline": false}
+
+    ``{}`` means KEEP THE PROMPT YOU HAVE — nothing has passed the approval
+    gate for this agent, or the control plane could not answer. It never means
+    "use no prompt", and an unreachable control plane must never blank a
+    running agent's instructions.
+
+    **Deliberately not applied for you, and that is the difference from**
+    :func:`apply_current_policy`. Swapping a model endpoint is invisible to an
+    agent's behaviour; swapping its system prompt changes what it DOES. That is
+    a decision for the person who owns the agent, so this hands back the text
+    and stops. Read ``sha256`` to tell whether it differs from what you are
+    running.
+
+    Two fields are worth checking before you apply it:
+
+    * ``model_prompt_checksum`` — the prompt identity stamped on the MODEL at
+      certification. The contract is a PAIR: this prompt was approved against
+      that checkpoint, and applying it over a different one is not the thing
+      that was approved.
+    * ``stale_baseline`` — true when the prompt you supplied as the baseline
+      has changed since this was certified. The deliverable still stands; it
+      was just shaped against a version of your prompt you no longer ship.
+    """
+    url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL)
+    key = api_key or os.environ.get(ENV_API_KEY)
+    if not url or not key:
+        return {}
+    client = ControlPlaneClient(base_url=url, api_key=key)
+    try:
+        from .transport import AttachTransport
+
+        tr = AttachTransport(client, agent_id=agent_id)
+        ask = getattr(tr, "prompt_current", None)
+        return (ask() if callable(ask) else {}) or {}
     finally:
         client.close()
 

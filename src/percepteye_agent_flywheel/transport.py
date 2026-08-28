@@ -89,6 +89,29 @@ class AttachTransport:
         except Exception:  # see docstring
             return {}
 
+    def prompt_current(self) -> dict[str, Any]:
+        """The approved optimized system prompt for this agent, or ``{}``.
+
+        The other half of the last mile. ``policy_current`` says which MODEL to
+        run; training also produces a system prompt, co-optimized with that
+        model and gated by the same kind of human approval — and until this
+        existed an agent could learn only THAT the prompt had moved, never what
+        it moved to. ``PolicySnapshot.serving_generation`` changes for a prompt
+        change, and there was nothing to fetch in response.
+
+        A SEPARATE call from ``policy_current`` on purpose. That one is polled
+        and identity-sized; a system prompt is unbounded text, so putting it in
+        the poll would make every tick carry a payload the caller already has.
+
+        Same fail-open contract as everything else here: ``{}`` means keep the
+        prompt you have. A control plane that cannot answer must never blank a
+        running agent's instructions.
+        """
+        try:
+            return self._c.request("GET", "/prompt/current") or {}
+        except Exception:  # see docstring
+            return {}
+
     def claim(self, max_rollouts: int) -> tuple[list[RolloutRequest], int]:
         body = self._c.request(
             "POST",
