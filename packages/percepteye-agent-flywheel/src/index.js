@@ -34,9 +34,11 @@
  */
 import { createRecorder } from "./record.js";
 import { createWriter, TRAJECTORY_DIR_ENV } from "./trajectory.js";
+import { registerDescriber, DESCRIBE_HOOK_NAME } from "./describe.js";
 
 export const PLUGIN_ID = "percepteye-agent-flywheel";
 export const HOOK_NAME = "after_tool_call";
+export { DESCRIBE_HOOK_NAME };
 
 export function register(api) {
   if (typeof api?.on !== "function") return null;
@@ -62,7 +64,31 @@ export function register(api) {
     }
   });
 
-  return { recorder, writer };
+  // The describer answers a different question from the recorder: not "what
+  // did this call do" but "what IS this agent". See describe.js -- it is the
+  // only way a CLI agent can reach `introspection_state = described`, because
+  // Python reflection cannot cross a process and a language boundary.
+  const describer = registerDescriber(api, { logger });
+
+  // `llm_input` is a CONVERSATION hook, and the host REFUSES to register it
+  // for a non-bundled plugin unless the operator sets
+  // `plugins.entries.<id>.hooks.allowConversationAccess=true`. The refusal is
+  // a warn-level diagnostic on the host's side, so without this line a
+  // missing opt-in is indistinguishable from a working install: the plugin
+  // loads, the recorder works, and the agent registers as `unreadable`
+  // forever with nothing anywhere saying why. Said once at startup, and only
+  // when a trajectory dir makes it relevant.
+  if (describer?.active) {
+    logger?.info?.(
+      `[${PLUGIN_ID}] describing this agent via ${DESCRIBE_HOOK_NAME}. That is ` +
+      `a conversation hook: if you do not see ${"discovered_agent.json"} in ` +
+      `${TRAJECTORY_DIR_ENV} after the first model call, set ` +
+      `plugins.entries.${PLUGIN_ID}.hooks.allowConversationAccess=true in ` +
+      `your OpenClaw config -- the host blocks the hook without it.`,
+    );
+  }
+
+  return { recorder, writer, describer };
 }
 
 export default {

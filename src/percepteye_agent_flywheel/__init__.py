@@ -54,6 +54,7 @@ from .errors import (
     RoutingNotInstallable,
     TransportError,
 )
+from .host_description import WARMUP_PROMPT, read_discovered_agent, warm_up_command
 from .introspection import DiscoveredAgent, ToolDefinition
 from .introspection import introspect as introspect_agent
 from .isolation import unroutable_providers_present
@@ -314,6 +315,51 @@ def apply_current_policy(
     return out
 
 
+def _describe_via_host(
+    command: list[Any], *, artifacts_dir: str, agent_id: str
+) -> DiscoveredAgent | None:
+    """Have the host describe a command agent, by running it once.
+
+    Returns None when the host produced nothing, having said why. The failure
+    is silent everywhere else -- the plugin's hook simply never fires -- and an
+    operator who is not told here finds out as an empty workflow list an hour
+    later, with nothing in between naming the cause.
+    """
+    # The TASK sentinel marks where a rollout's task goes in the argv. There is
+    # no rollout here, so it is filled with the warm-up prompt: an argv still
+    # holding the sentinel would be passed to the binary as the literal string.
+    argv = [WARMUP_PROMPT if a is TASK else str(a) for a in command]
+    warm_dir = os.path.join(artifacts_dir, "_describe")
+
+    described = warm_up_command(argv, trajectory_dir=warm_dir)
+    if described is not None:
+        n = described.tool_definitions
+        print(
+            f"[percepteye] described {agent_id} from the host: "
+            f"{len(n) if n is not None else 'no'} tool(s), "
+            f"{len(described.system_prompt or '')} chars of system prompt."
+        )
+        return described
+
+    warnings.warn(
+        f"Could not describe {agent_id!r}: the agent ran but its host wrote no "
+        f"description. This agent will register as "
+        f"introspection_state=unreadable, no workflows will be generated for "
+        f"it, and every phase downstream of that (reward suites, graded "
+        f"rollouts, training) has nothing to work from.\n"
+        f"For OpenClaw, the usual cause is the conversation-hook opt-in: the "
+        f"host silently refuses to register `llm_input` for a non-bundled "
+        f"plugin unless the config sets\n"
+        f"  plugins.entries.percepteye-agent-flywheel.hooks."
+        f"allowConversationAccess = true\n"
+        f"Check that the plugin is installed (`openclaw plugins list`) and "
+        f"that the option is set.",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+    return None
+
+
 def serve(
     entrypoint: Any,
     *,
@@ -486,6 +532,18 @@ def serve(
         described = introspect_agent(
             runner.resolved.fn if runner.resolved is not None else None
         )
+        # A COMMAND agent has no object to reflect on, so the line above always
+        # returns None for one and the agent registers `unreadable` forever --
+        # which blocks workflow generation, and with it every downstream phase.
+        # Ask the HOST instead: run the agent once, let its own plugin observe
+        # the assembled prompt and the tool list it sends to the model, and
+        # read that. See host_description.py for why this cannot wait for a
+        # rollout (the launch gate and the first rollout are mutually
+        # blocking).
+        if described is None and getattr(runner, "_command", None):
+            described = _describe_via_host(
+                runner._command, artifacts_dir=adir, agent_id=agent_id,
+            )
         payload["discovered_agent"] = described.to_wire() if described else None
 
     tr.register(payload)

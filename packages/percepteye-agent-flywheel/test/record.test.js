@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { createRecorder } from "../src/record.js";
 import { createWriter, TRAJECTORY_DIR_ENV } from "../src/trajectory.js";
-import plugin, { HOOK_NAME } from "../src/index.js";
+import plugin, { HOOK_NAME, DESCRIBE_HOOK_NAME } from "../src/index.js";
 
 function scratch() {
   return mkdtempSync(join(tmpdir(), "pe-oc-"));
@@ -137,11 +137,16 @@ describe("staying out of the way", () => {
   });
 });
 
-describe("the plugin registers the observer hook and only that", () => {
-  it("subscribes to after_tool_call", () => {
+describe("the plugin registers observer hooks and only those", () => {
+  it("subscribes to after_tool_call and llm_input, and nothing else", () => {
+    // Both are typed `(event, ctx) => Promise<void> | void`: the host
+    // discards the return value, so neither can alter, block or delay the
+    // run. That structural property -- not the hook COUNT -- is the rule.
+    // `llm_input` was added to describe the agent, which is a READ; the
+    // mutation seams (`before_prompt_build`, `before_tool_call`) stay unused.
     const seen = [];
     plugin.register({ on: (name) => seen.push(name) });
-    assert.deepEqual(seen, [HOOK_NAME]);
+    assert.deepEqual(seen.sort(), [HOOK_NAME, DESCRIBE_HOOK_NAME].sort());
   });
 
   it("registers no tool-result middleware", () => {
