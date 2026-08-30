@@ -51,7 +51,6 @@ import json
 import os
 import subprocess
 import time
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -209,96 +208,7 @@ def read_discovered_agent(trajectory_dir: str | os.PathLike[str]) -> DiscoveredA
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    agent = parse_discovered_agent(payload)
-    return _merge_tool_traits(agent, trajectory_dir)
-
-
-def _merge_tool_traits(
-    agent: "DiscoveredAgent | None", trajectory_dir: str | os.PathLike[str],
-) -> "DiscoveredAgent | None":
-    """Fold per-tool traits captured beside the description into the catalogue.
-
-    The host's conversation hook cannot supply these: by the time tools reach a
-    model they are in the provider's function-call shape, which has no field for
-    a read-only declaration. A transport-level observer (for MCP, the shim on
-    ``tools/list``) writes what each server actually declared into
-    ``tool_traits.<pid>.json``, and they are joined here.
-
-    THE JOIN IS BY SUFFIX, because the two sides name tools differently: a
-    server declares ``server_info`` and the host presents it namespaced, e.g.
-    ``multivendor-cli-mcp__server_info``. So a trait for ``X`` claims a
-    catalogue entry ending in ``<sep>X`` (or equal to ``X``).
-
-    AMBIGUITY RESOLVES TO ABSENCE. If two servers both declare ``list_items``
-    and disagree, or a bare name would claim several catalogue entries, no
-    trait is applied and the tool stays undeclared -- which downstream means
-    "assume it writes". Picking a winner here would be inventing a fact about
-    somebody's tool from a name collision.
-    """
-    if agent is None or not agent.tool_definitions:
-        return agent
-    merged: dict[str, bool] = {}
-    conflicting: set[str] = set()
-    try:
-        for f in sorted(Path(trajectory_dir).glob("tool_traits.*.json")):
-            try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            if not isinstance(data, dict):
-                continue
-            for k, v in data.items():
-                if not isinstance(v, bool):
-                    continue
-                if k in merged and merged[k] != v:
-                    conflicting.add(k)      # two servers, two answers
-                merged[k] = v
-    except OSError:
-        return agent
-    if not merged:
-        return agent
-
-    out = []
-    for tool in agent.tool_definitions:
-        if tool.read_only is not None:
-            out.append(tool)                # the host already said
-            continue
-        claims = [
-            k for k in merged
-            if k not in conflicting
-            and (tool.name == k or tool.name.endswith(k))
-            and _suffix_is_a_segment(tool.name, k)
-        ]
-        if len(claims) != 1:
-            out.append(tool)                # 0 = nobody said; >1 = ambiguous
-            continue
-        out.append(replace(tool, read_only=merged[claims[0]]))
-    return replace(agent, tool_definitions=out)
-
-
-def _suffix_is_a_segment(full: str, bare: str) -> bool:
-    """Is ``bare`` a whole namespaced segment of ``full``, not a word ending?
-
-    Without this, a trait for ``facts`` would claim ``get_facts``. The boundary
-    character is whatever the host namespaces with; any non-identifier
-    character counts, which covers ``__``, ``.``, ``/`` and ``:`` alike without
-    hardcoding one host's convention.
-    """
-    if full == bare:
-        return True
-    if not full.endswith(bare):
-        return False
-    prefix = full[: -len(bare)]
-    if not prefix:
-        return False
-    # A single ``_`` cannot be the test: it is BOTH the namespace separator's
-    # last character (``mcp__server_info``) and an ordinary word separator
-    # (``get_facts``). Distinguish by the pair -- ``__`` namespaces, a lone
-    # ``_`` after an identifier character does not.
-    if prefix.endswith("__"):
-        return True
-    last = prefix[-1]
-    return not (last.isalnum() or last == "_")
+    return parse_discovered_agent(payload)
 
 
 def warm_up_command(

@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 
 from percepteye_agent_flywheel.host_description import (
-    _suffix_is_a_segment,
     _tool_from_wire,
     read_discovered_agent,
 )
@@ -47,52 +46,35 @@ class TestWireContract:
             assert _tool_from_wire({"name": "t", "read_only": raw}).read_only is None
 
 
-class TestSegmentJoin:
-    def test_namespaced_tool_is_claimed_by_its_bare_name(self):
-        assert _suffix_is_a_segment("multivendor-cli-mcp__server_info", "server_info")
+class TestNoMergeMachinery:
+    """The trait arrives already namespaced, so there is nothing to join.
 
-    def test_a_word_ending_is_not_a_segment(self):
-        """The one that bites: a trait for `facts` must not claim `get_facts`.
+    An earlier version of this had the SDK glue bare per-server names onto
+    namespaced catalogue entries by suffix. That was solving a problem the
+    describe path does not have: it asks each server for `tools/list` itself and
+    prefixes the name as the host bridges it, so `read_only` is set on the entry
+    that already carries its final name. The suffix-join had no producer left
+    once that was true, so it is gone rather than kept warm.
+    """
 
-        A single `_` cannot be the test — it is both the namespace separator's
-        last character and an ordinary word separator.
-        """
-        assert not _suffix_is_a_segment("multivendor-cli-mcp__get_facts", "facts")
-
-    def test_other_host_separators_work_without_being_hardcoded(self):
-        assert _suffix_is_a_segment("memory-mcp.list_items", "list_items")
-        assert _suffix_is_a_segment("prefix/list", "list")
+    def test_no_join_helper_survives(self):
+        import percepteye_agent_flywheel.host_description as hd
+        assert not hasattr(hd, "_suffix_is_a_segment")
+        assert not hasattr(hd, "_merge_tool_traits")
 
 
-class TestMerge:
-    def test_declared_traits_reach_the_catalogue(self, tmp_path):
-        _write_agent(tmp_path, ["mcp__server_info", "mcp__run_fleet"])
-        (tmp_path / "tool_traits.1.json").write_text(
-            json.dumps({"server_info": True, "run_fleet": False}), encoding="utf-8")
-        got = {t.name: t.read_only for t in read_discovered_agent(tmp_path).tool_definitions}
-        assert got == {"mcp__server_info": True, "mcp__run_fleet": False}
-
-    def test_two_servers_disagreeing_leaves_BOTH_undeclared(self, tmp_path):
-        """Ambiguity resolves to absence, never to a winner.
-
-        Two servers each declare `list_items` and disagree. Picking one would
-        invent a fact about somebody's tool out of a name collision.
-        """
-        _write_agent(tmp_path, ["a-mcp__list_items", "b-mcp__list_items"])
-        (tmp_path / "tool_traits.1.json").write_text(
-            json.dumps({"list_items": True}), encoding="utf-8")
-        (tmp_path / "tool_traits.2.json").write_text(
-            json.dumps({"list_items": False}), encoding="utf-8")
-        for t in read_discovered_agent(tmp_path).tool_definitions:
-            assert t.read_only is None, t.name
-
-    def test_a_tool_nobody_described_stays_undeclared(self, tmp_path):
-        _write_agent(tmp_path, ["exec"])
-        (tmp_path / "tool_traits.1.json").write_text(
-            json.dumps({"server_info": True}), encoding="utf-8")
-        assert read_discovered_agent(tmp_path).tool_definitions[0].read_only is None
-
-    def test_no_trait_files_is_not_an_error(self, tmp_path):
-        _write_agent(tmp_path, ["exec"])
-        agent = read_discovered_agent(tmp_path)
-        assert agent is not None and agent.tool_definitions[0].read_only is None
+class TestReadThrough:
+    def test_a_declared_trait_survives_the_description_file(self, tmp_path):
+        (tmp_path / "discovered_agent.json").write_text(json.dumps({
+            "agent_name": "a", "framework": "openclaw", "source_type": "sdk_runtime",
+            "role": "r", "system_prompt": "p", "discovered_model_config": {},
+            "tool_definitions": [
+                {"name": "srv__read_one", "read_only": True},
+                {"name": "srv__write_one", "read_only": False},
+                {"name": "srv__undeclared"},
+            ],
+        }), encoding="utf-8")
+        got = {t.name: t.read_only
+               for t in read_discovered_agent(tmp_path).tool_definitions}
+        assert got == {"srv__read_one": True, "srv__write_one": False,
+                       "srv__undeclared": None}
