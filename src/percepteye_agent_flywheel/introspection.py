@@ -56,14 +56,35 @@ class ToolDefinition:
     description: str = ""
     input_schema: dict[str, Any] = field(default_factory=dict)
     original_format: str = "unknown"
+    #: Does calling this tool leave the world unchanged?
+    #:
+    #: THREE-VALUED, and the third value is the point. ``None`` means the host
+    #: did not say -- which is NOT the same as "it writes". A consumer that
+    #: collapses the two either grades a write as a read (if absence means
+    #: read) or refuses every undeclared tool (if absence means write); both
+    #: are decisions the AGENT should be making, not us.
+    #:
+    #: Framework-neutral by construction. MCP spells it
+    #: ``annotations.readOnlyHint``, OpenAPI implies it through the HTTP verb,
+    #: GraphQL through ``op_kind``. Whatever a host calls it, it arrives here
+    #: as this boolean, and nothing downstream needs to know which framework
+    #: the agent runs.
+    read_only: bool | None = None
 
     def to_wire(self) -> dict[str, Any]:
-        return {
+        out = {
             "name": self.name,
             "description": self.description,
             "input_schema": self.input_schema,
             "original_format": self.original_format,
         }
+        # OMITTED when undeclared, never sent as ``null``. The absence contract
+        # is carried by the key being missing; a literal null would read as a
+        # host that answered "no" (see the tools/None distinction the wire
+        # already draws elsewhere in this protocol).
+        if self.read_only is not None:
+            out["read_only"] = bool(self.read_only)
+        return out
 
 
 @dataclass(frozen=True)
