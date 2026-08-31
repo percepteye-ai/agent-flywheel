@@ -11,9 +11,14 @@ Design constraints:
     Responses return along the same lane, dimmer and thinner -- never as an
     independent arrow drawn from the platform. That is the load-bearing visual
     claim of the whole picture and nothing may contradict it.
-  * The platform is ONE opaque box. No internal service names, no backend
+  * The platform is ONE box. No internal service names, no backend
     architecture. `tests/test_oss_boundary.py` scans every tracked file for
     internal system names, this one included.
+    That constraint is about not disclosing OUR internals -- it is not a claim
+    that the platform is opaque to the customer, who can log into the dashboard
+    and watch every lap of this loop. The box is unlabelled inside; the work it
+    does is not hidden. An earlier label read "opaque to you" and said the
+    opposite of what is true.
   * The agent box is on screen from the first frame and never changes shape.
     The picture's claim is that integration adds things AROUND your agent; a
     box that redrew itself would contradict it.
@@ -505,7 +510,7 @@ def draw_frame(i: int) -> Image.Image:
         if ver_on > 0.4:
             glow(d, PROD, PURPLE, (ver_on - 0.4) / 0.6 * 0.9)
 
-    # ── the platform: ONE opaque box ─────────────────────────────────────────
+    # ── the platform: ONE box, no internal names ─────────────────────────────
     if a_pf > 0.01:
         rrect(d, PLATFORM, 12, fill=mix(BG, (26, 24, 40), a_pf),
               outline=mix(BG, (96, 76, 132), a_pf), width=1)
@@ -515,8 +520,8 @@ def draw_frame(i: int) -> Image.Image:
              mix(BG, (186, 156, 240), a_pf), anchor="lm")
         dashed_h(d, PLATFORM[1] + 84, PLATFORM[0] + 24, PLATFORM[2] - 24,
                  mix(BG, (66, 56, 88), a_pf), width=1)
-        text(d, (PLATFORM[2] - 24, PLATFORM[1] + 46), "opaque to you", F_TINY,
-             mix(BG, (108, 92, 140), a_pf), anchor="rm")
+        text(d, (PLATFORM[2] - 24, PLATFORM[1] + 46), "visible in the dashboard",
+             F_TINY, mix(BG, (108, 92, 140), a_pf), anchor="rm")
 
         rows = [
             (PLATFORM[1] + 130, "generates the tasks", 10.05),

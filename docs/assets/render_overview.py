@@ -374,7 +374,7 @@ def draw_frame(i):
                  "unknown is never rounded up to ok", F_TINY,
                  fade(AMBER, .95 * say * seam), anchor="lm")
 
-    # ── the other party: one opaque box ──
+    # ── the other party: one box, no internal names ──
     if a_pl > .01:
         rrect(d, PLAT, 12, fill=fade((26, 24, 40), a_pl),
               outline=fade((96, 76, 132), a_pl), width=1)
@@ -382,7 +382,7 @@ def draw_frame(i):
              anchor="lm")
         text(d, (PLAT[0] + 24, PLAT[1] + 60), "control plane", F_CARD,
              fade((186, 156, 240), a_pl), anchor="lm")
-        text(d, (PLAT[2] - 24, PLAT[1] + 47), "opaque to you", F_TINY,
+        text(d, (PLAT[2] - 24, PLAT[1] + 47), "visible in the dashboard", F_TINY,
              fade((108, 92, 140), a_pl), anchor="rm")
         dashed_h(d, PLAT[1] + 86, PLAT[0] + 24, PLAT[2] - 24, fade((66, 56, 88), a_pl))
         for k, (label, at) in enumerate(PLAT_ROWS):
