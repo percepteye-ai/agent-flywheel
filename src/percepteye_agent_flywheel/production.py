@@ -35,6 +35,7 @@ from __future__ import annotations
 import os
 import threading
 import uuid
+import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -231,24 +232,51 @@ def attach(
 
             client = ControlPlaneClient(url, key)
             tr = AttachTransport(client, agent_id)
-            tr.register({
-                "agent_id": agent_id,
-                # NOT a considered value. `mode` is Literal["rollout"] on the
-                # serve() side too, so this field carries zero bits and cannot
-                # distinguish the two surfaces -- `entrypoint` below is the only
-                # thing that does. Changing it to "production" is a control-plane
-                # intake decision, not ours to make unilaterally: an intake that
-                # enumerates modes would 4xx, and the TransportError is swallowed
-                # below, so attach() would lose the last mile with no error.
-                "mode": "rollout",
-                "sdk": f"percepteye-agent-flywheel-python/{__version__}",
-                "contract_version": CONTRACT_VERSION,
-                "reports_tool_calls": bool(bound),
-                "isolation": "inprocess",
-                "concurrency": 1,
-                "input_shape": "text",
-                "entrypoint": "attach",
-            })
+            try:
+                tr.register({
+                    "agent_id": agent_id,
+                    # This process serves users; it does not donate capacity.
+                    # `serve()` sends "rollout". Sending the same value from
+                    # here made the field carry zero bits -- intake could not
+                    # tell a training donor from a production reader, which is
+                    # the one question a `mode` on a registration exists to
+                    # answer.
+                    "mode": "production",
+                    "sdk": f"percepteye-agent-flywheel-python/{__version__}",
+                    "contract_version": CONTRACT_VERSION,
+                    "reports_tool_calls": bool(bound),
+                    "isolation": "inprocess",
+                    "concurrency": 1,
+                    "input_shape": "text",
+                    "entrypoint": "attach",
+                })
+            except Exception as exc:
+                # A REFUSED registration must not cost the last mile, and must
+                # not be silent.
+                #
+                # Both halves matter. `policy_current` is a bare GET scoped by
+                # API key -- it does not put agent_id on the wire and does not
+                # require a registration to have landed -- so there is no
+                # reason a rejected register should also cost this process its
+                # trained model. It used to: one `except` covered both calls,
+                # so anything intake disliked about the payload silently
+                # demoted production to the untrained policy.
+                #
+                # And silence is the worse half. An empty policy already means
+                # "nothing deployed" and "control plane unreachable", both of
+                # which correctly mean keep your current configuration. A third
+                # cause that looks identical is one the customer cannot act on,
+                # so it is named here rather than inferred from an absence.
+                warnings.warn(
+                    f"[percepteye] registration was refused for agent_id="
+                    f"{agent_id!r}: {type(exc).__name__}: {exc}. Capture and "
+                    f"the policy read are unaffected. If this is an HTTP 4xx, "
+                    f"the likely cause is a control plane that does not yet "
+                    f"accept mode='production' from attach(); it is safe to "
+                    f"ignore until intake is updated.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             policy = tr.policy_current() or {}
         except Exception:
             policy = {}

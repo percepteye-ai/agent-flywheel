@@ -224,3 +224,91 @@ def test_a_production_turn_is_not_reported_as_a_rollout(tmp_path, monkeypatch):
 
 def test_current_capture_is_exported():
     assert "current_capture" in fw.__all__
+
+
+# ── what attach() tells the control plane it is ─────────────────────────────
+# Nothing asserted the shape of this payload before, which is how `mode` came
+# to carry the same value from both surfaces.
+
+
+class _RecordingTransport:
+    """Captures the registration payload; policy_current always answers."""
+
+    def __init__(self, *, register_raises: Exception | None = None):
+        self.registered: dict | None = None
+        self._raises = register_raises
+        self.policy_calls = 0
+
+    def register(self, spec):
+        self.registered = dict(spec)
+        if self._raises is not None:
+            raise self._raises
+        return {}
+
+    def policy_current(self):
+        self.policy_calls += 1
+        return {"arm": "candidate-3", "endpoint": {"base_url": "https://gw"}}
+
+
+def _attach_with(monkeypatch, tmp_path, transport):
+    """Run attach()'s control-plane block against a fake transport."""
+    monkeypatch.setenv("PERCEPTEYE_CONTROL_PLANE_URL", "https://cp.invalid")
+    monkeypatch.setenv("PERCEPTEYE_API_KEY", "pek_x")
+    monkeypatch.setattr(
+        "percepteye_agent_flywheel.transport.AttachTransport",
+        lambda client, agent_id: transport,
+    )
+    monkeypatch.setattr(
+        "percepteye_agent_flywheel._http.ControlPlaneClient.close",
+        lambda self: None,
+    )
+    return fw.attach(agent_id="support", trajectory_root=str(tmp_path))
+
+
+def test_attach_registers_as_production_not_as_a_rollout(monkeypatch, tmp_path):
+    """The field exists to tell a training donor from a production reader.
+
+    Both surfaces used to send "rollout", so it answered neither.
+    """
+    tr = _RecordingTransport()
+    with _attach_with(monkeypatch, tmp_path, tr):
+        pass
+    assert tr.registered is not None, "attach() did not register"
+    assert tr.registered["mode"] == "production"
+    assert tr.registered["entrypoint"] == "attach"
+
+
+def test_a_refused_registration_still_yields_the_policy(monkeypatch, tmp_path):
+    """The failure mode this change had to avoid.
+
+    One `except` used to cover the register AND the policy read, so anything
+    intake disliked about the payload silently demoted production to the
+    untrained model. `policy_current` is a bare GET scoped by API key and does
+    not depend on a registration having landed, so it must still run.
+    """
+    tr = _RecordingTransport(register_raises=RuntimeError("HTTP 422: bad mode"))
+    with pytest.warns(RuntimeWarning, match="registration was refused"):
+        px = _attach_with(monkeypatch, tmp_path, tr)
+    with px:
+        assert tr.policy_calls == 1, "the policy read was skipped"
+        assert px.policy.get("arm") == "candidate-3"
+
+
+def test_a_refused_registration_is_not_silent(monkeypatch, tmp_path):
+    """An empty policy already means two different benign things. A third
+    cause that looks identical is one the customer cannot act on."""
+    tr = _RecordingTransport(register_raises=RuntimeError("HTTP 422"))
+    with pytest.warns(RuntimeWarning, match="mode='production'"):
+        px = _attach_with(monkeypatch, tmp_path, tr)
+    px.close()
+
+
+def test_a_refused_registration_still_does_not_fail_the_attach(
+    monkeypatch, tmp_path
+):
+    """Fail-open is the whole posture of this function and it survives."""
+    tr = _RecordingTransport(register_raises=RuntimeError("boom"))
+    with pytest.warns(RuntimeWarning):
+        px = _attach_with(monkeypatch, tmp_path, tr)
+    with px, px.turn() as tid:
+        assert tid

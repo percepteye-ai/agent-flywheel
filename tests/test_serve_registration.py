@@ -130,3 +130,22 @@ def test_a_real_agent_is_described_in_the_registration(captured):
     assert described["framework"] == "langchain"
     assert described["source_type"] == "sdk_runtime"
     assert [t["name"] for t in described["tool_definitions"]] == ["lookup"]
+
+
+def test_serve_registers_as_a_rollout_and_attach_does_not(captured):
+    """The two surfaces must be distinguishable by the field that names them.
+
+    `attach()` sends mode="production" (see
+    tests/test_attach_production_capture.py). This side keeps "rollout", which
+    is the value intake has always received from a training donor. The point of
+    the pair is that they DIFFER -- while both said "rollout" the field carried
+    zero bits and could not answer the one question it exists for.
+
+    "rollout" rather than "training" deliberately: this is the wire, where the
+    field names the protocol, and renaming a value intake already accepts would
+    be a breaking change for no gain. `PERCEPTEYE_MODE=training` is the
+    customer-facing spelling of the same thing.
+    """
+    spec = captured("tests.fixtures_agent:build", isolation="inprocess")
+    assert spec["mode"] == "rollout"
+    assert spec["entrypoint"]
