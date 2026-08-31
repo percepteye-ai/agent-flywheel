@@ -508,3 +508,28 @@ def test_a_rollout_with_no_files_registers_nothing(tmp_path):
     tr = ArtifactTransport([[_req(tmp_path)]])
     _runner(tmp_path, tr).serve_forever(max_rollouts=1)
     assert tr.artifacts == []
+
+
+def test_an_empty_claim_is_announced_rather_than_silent(tmp_path):
+    """An empty queue and a broken claim route used to look identical.
+
+    Both were a silent sleep; the only event in the loop, `claim_failed`, fires
+    on the failing one alone. So an operator watching a flywheel that had
+    claimed nothing for an hour could not tell "there is no work" from "my
+    claim route is 404ing" without a packet capture. `claim_empty` gives the
+    successful-but-empty case its own signal, carrying the server's own
+    backoff so the operator can also see a control plane stalling them.
+    """
+    events: list[tuple[str, dict]] = []
+    tr = FakeTransport([])
+    runner = _runner(
+        tmp_path, tr, on_event=lambda kind, ev: events.append((kind, ev))
+    )
+    runner.serve_forever()
+
+    empties = [ev for kind, ev in events if kind == "claim_empty"]
+    assert empties, f"no claim_empty emitted; saw {[k for k, _ in events]}"
+    assert empties[0]["poll_after_ms"] == 10
+    assert not [k for k, _ in events if k == "claim_failed"], (
+        "an empty queue is not a failure and must not be reported as one"
+    )

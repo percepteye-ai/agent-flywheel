@@ -14,7 +14,7 @@ One import. One call. One runtime dependency.
 <br/>
 [![runtime dependencies](https://img.shields.io/badge/runtime_deps-1-f59e0b?style=for-the-badge)](#what-it-costs-to-integrate)
 [![lines changed in your agent](https://img.shields.io/badge/lines_changed_in_your_agent-0-ec4899?style=for-the-badge)](#zero-instrumentation-concretely)
-[![tests](https://img.shields.io/badge/tests-428_·_0_skips-22c55e?style=for-the-badge)](#development)
+[![tests](https://img.shields.io/badge/tests-438_·_0_skips-22c55e?style=for-the-badge)](#development)
 [![license](https://img.shields.io/badge/license-MIT-14b8a6?style=for-the-badge)](LICENSE)
 
 <img src="https://raw.githubusercontent.com/percepteye-ai/agent-flywheel/main/docs/assets/flywheel-overview.gif"
@@ -45,7 +45,7 @@ import percepteye_agent_flywheel as fw
 fw.serve("my_package.agent:build", agent_id="my-coding-agent", input_shape="text")
 ```
 
-**That is the whole integration.** You pass an importable `"module:attr"` factory so each rollout can rebuild your agent in a fresh child process. `serve()` claims rollouts, runs them, reports outcomes, and blocks until you stop it.
+**That is the whole integration.** You pass an importable `"module:attr"` factory so each rollout can rebuild your agent in a fresh child process. `serve()` claims rollouts, runs them, reports outcomes, and blocks until you stop it — see [starting and stopping](#configuration) for what "stop it" means.
 
 Everything that can be misconfigured — entrypoint, credential, contract version, isolation mode — is checked **before the first rollout** and raises there, never mid-run.
 
@@ -231,6 +231,17 @@ with px.turn(conversation_id=conv_id) as turn_id:
 
 **It captures. It never reroutes.** Adapters bind with no endpoint at all, so attaching cannot re-point a single byte of production traffic. Everything fails open: an unreachable control plane costs you the observation and nothing else.
 
+**Telling the two apart in your own code** — `current_capture()` answers with three states and never collapses them:
+
+```python
+match fw.current_capture():
+    case ("rollout", rid): ...      # inside a serve() rollout
+    case ("turn", tid):    ...      # inside attach().turn(), in production
+    case None:             ...      # neither
+```
+
+Branch on this, not on `current_rollout_id()` — that one answers the narrower "which trajectory am I appending to", and inside `attach().turn()` it returns that **turn's** id, so `if fw.current_rollout_id():` is true in production.
+
 <br/>
 
 ## Harnesses already supported
@@ -263,7 +274,7 @@ Every row is a structural property of this repository, checkable from it.
 | Environment variables required | **2** — URL and key, both overridable in code | [Configuration](#configuration) |
 | Frameworks captured with no instrumentation | **LangChain · LangGraph · Google ADK · OpenClaw · DeepSeek Harness · any OTel-GenAI CLI** | [`adapters/`](src/percepteye_agent_flywheel/adapters/), [`event_stream.py`](src/percepteye_agent_flywheel/event_stream.py) |
 | Languages | **Python by import path, anything else by argv** | [above](#runs-whatever-you-already-run) |
-| Tests | **428, zero skips permitted in CI** | `pytest` + [`ci.yml`](.github/workflows/ci.yml) |
+| Tests | **438, zero skips permitted in CI** | `pytest` + [`ci.yml`](.github/workflows/ci.yml) |
 | License | **MIT** | [LICENSE](LICENSE) |
 
 <details>
@@ -288,6 +299,61 @@ Counts are not a quality judgement — but inside a live production process, an 
 <br/>
 
 ## Configuration
+
+<details>
+<summary><b>Starting and stopping a flywheel</b> — there is no off switch, and that is the design</summary>
+
+<br/>
+
+**Starting is a call, not a mode.** Which surface you use *is* the boundary:
+
+| you call | you donate | outbound |
+|:--|:--|:--|
+| `fw.serve(...)` | **capacity** — control-plane tasks run on your credentials | `/health`, `POST /agents`, `GET /policy/current`, then claim in a loop |
+| `fw.attach(...)` | **evidence** — outcomes from turns you already serve | `POST /agents` + `GET /policy/current`, once |
+| `fw.apply_current_policy(...)` | **nothing** | one `GET /policy/current` |
+
+**Donate nothing, still get the trained model.** No `serve()`, no `attach()`, no registration:
+
+```python
+kw = fw.apply_current_policy(agent_id="my-agent")
+prompt = fw.current_prompt(agent_id="my-agent")
+```
+
+**Stopping.** There is no feature flag that turns rollouts off — you stop calling `serve()`. Concretely:
+
+- **`max_rollouts=N` is the only clean exit.** It is a completion counter checked at the top of the loop; there is no env equivalent and no way to change it on a running process.
+- **There is no signal handler.** Nothing in the package catches SIGINT or SIGTERM. `SIGTERM` ends the process; in-flight rollouts are **orphaned rather than abandoned**, and the control plane reclaims them by lease expiry (up to 30 minutes) rather than by an `abandon` call.
+- **Ctrl-C is not instant.** In-flight rollouts drain first, for up to `rollout_timeout_s` (default 900s). A subprocess-isolation child takes the same SIGINT and is reported as `flywheel_crash`, so an operator's Ctrl-C is recorded as the SDK crashing. A command-entrypoint child runs in a new session, does not receive the terminal's SIGINT, and outlives the parent.
+- **Revoking the API key does not stop it.** A 401 is terminal per request, but the loop catches it, emits `claim_failed`, sleeps 5s and continues — indefinitely.
+- **The control plane cannot stop it either.** The claim response carries only `rollouts` and `poll_after_ms`; there is no pause or drain field. The strongest server-side levers are an empty queue and a longer backoff, and both leave you polling.
+
+Your production agent is unaffected by any of this — it is a different process calling different functions.
+</details>
+
+<details>
+<summary><b>Watching a flywheel</b> — <code>on_event</code> and the full event vocabulary</summary>
+
+<br/>
+
+`serve(on_event=...)` takes a `Callable[[str, dict], None]`. It is called **synchronously on the serving thread**, so a slow callback slows the loop and a raising one propagates.
+
+```python
+fw.serve(..., on_event=lambda kind, ev: print(kind, ev))
+```
+
+| event | when |
+|:--|:--|
+| `claim_empty` | a successful claim returned no work — carries `poll_after_ms` |
+| `claim_failed` | the claim itself failed — carries `error` |
+| `rollout_start` | a claimed rollout began |
+| `rollout_reported` | the result was accepted; carries the rollout's typed exclusion if it had one |
+| `rollout_crash` | the rollout raised; it was abandoned |
+| `report_failed` · `artifact_failed` | the work happened, delivering it did not |
+| `lease_lost` · `heartbeat_failed` | the lease lapsed or could not be renewed |
+
+Without a callback a flywheel is silent, and **an empty queue and a broken claim route look identical** — `claim_empty` versus `claim_failed` is what tells them apart. This is the answer to "how do I know it's working."
+</details>
 
 <details>
 <summary><b>Isolation, entrypoints, input shapes, environment variables</b></summary>
@@ -371,7 +437,7 @@ python -m venv .venv
 ./scripts/cross_language_abi_check.sh     # the JS suite, against the same Python reader
 ```
 
-428 tests at roughly a 1:1 test-to-source line ratio. Five CI jobs, each protecting a specific claim on this page:
+438 tests at roughly a 1:1 test-to-source line ratio. Five CI jobs, each protecting a specific claim on this page:
 
 | job | what it catches |
 |:--|:--|

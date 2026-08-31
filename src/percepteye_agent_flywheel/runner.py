@@ -813,6 +813,12 @@ class RolloutRunner:
                         sleep_ms(5_000)
                         continue
                     if not rollouts:
+                        # A successful claim that returned no work. Emitted so
+                        # an operator can tell "the queue is empty" from "the
+                        # claim route is broken" -- both were previously a
+                        # silent sleep, and the only other signal, claim_failed,
+                        # fires only on the failing one.
+                        self._emit("claim_empty", {"poll_after_ms": poll_after_ms})
                         sleep_ms(poll_after_ms)
                         continue
                     # Concurrently, which is what claiming N meant all along.
