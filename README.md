@@ -21,7 +21,7 @@ One import. One call. One runtime dependency.
      width="900"
      alt="Your agent — prompt, tools and model — sits inside your infrastructure. fw.serve() wraps it from the outside with zero lines changed inside. Rollouts and observed outcomes go out; a trained policy comes back. The model row flips from your-model to a policy trained on this agent's own work, while the prompt and tools rows stay untouched.">
 
-**[Quickstart](#quickstart-three-lines)** · [How the loop closes](#how-the-loop-closes) · [Python · Node · CLI](#runs-whatever-you-already-run) · [Zero instrumentation](#zero-instrumentation-concretely) · [Production](#close-the-loop-in-production) · [Harnesses](#harnesses-already-supported) · [Docs](https://docs.percepteye.com/flywheel)
+**[Quickstart](#quickstart-three-lines)** · [How the loop closes](#how-the-loop-closes) · [Python · Node · CLI](#runs-whatever-you-already-run) · [Zero instrumentation](#zero-instrumentation-concretely) · [Production](#close-the-loop-in-production) · [Harnesses](#harnesses-already-supported) · [Docs](https://docs.percepteye.ai/flywheel)
 
 </div>
 

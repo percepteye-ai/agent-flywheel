@@ -43,7 +43,7 @@ dependencies = ["httpx>=0.27"]
 
 [project.urls]
 Homepage = "https://github.com/percepteye-ai/agent-flywheel"
-Documentation = "https://docs.percepteye.com/flywheel"
+Documentation = "https://docs.percepteye.ai/flywheel"
 Source = "https://github.com/percepteye-ai/agent-flywheel"
 Issues = "https://github.com/percepteye-ai/agent-flywheel/issues"
 
