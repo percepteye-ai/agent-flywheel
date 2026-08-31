@@ -250,13 +250,26 @@ def warm_up_command(
         pass
 
     child_env = dict(os.environ if env is None else env)
-    # A rollout id in the SERVING process is inherited here unless we drop it,
-    # and then every tool call this child makes records under that rollout --
-    # against the promise above that this "is not a rollout and is never
-    # reported as one". `build_child_env` gets this for free by scrubbing the
-    # whole PERCEPTEYE_ namespace; this path cannot, because the warm-up needs
-    # the ambient credentials in order to construct the agent at all.
-    child_env.pop("PERCEPTEYE_ROLLOUT_ID", None)
+    # The SAME namespace scrub `build_child_env` does, for the same two
+    # reasons, and this path is not exempt from either.
+    #
+    # A rollout id inherited from the serving process would make every tool
+    # call this child records land under a rollout that never ran it, against
+    # the promise above that this "is not a rollout and is never reported as
+    # one". And the long-lived control-plane key has no business in a child
+    # process at all -- that key is what `build_child_env` keeps in the parent
+    # so it never reaches code the model can influence, and a describe child
+    # runs the customer's agent exactly as a rollout child does.
+    #
+    # An earlier version of this dropped only the rollout id, on the grounds
+    # that the warm-up "needs the ambient credentials". It does not: the
+    # docstring above says it needs "no working completion, no gateway, and no
+    # API key", the credentials a CLI actually needs are the PROVIDER
+    # variables, and those are overwritten with a loopback URL and a dummy key
+    # a few lines below. The only PERCEPTEYE_ variable the child has ever read
+    # is the trajectory directory, which is set immediately after this.
+    for _name in [k for k in child_env if k.startswith("PERCEPTEYE_")]:
+        del child_env[_name]
     child_env["PERCEPTEYE_TRAJECTORY_DIR"] = str(target)
 
     # A DELIBERATELY UNROUTABLE endpoint, forced rather than defaulted.

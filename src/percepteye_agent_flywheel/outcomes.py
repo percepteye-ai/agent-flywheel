@@ -235,9 +235,13 @@ def _scope_kind() -> CaptureScope:
     return "turn" if _current_scope_kind.get() == "turn" else "rollout"
 
 
-def _emit_span(rec: ToolCallOutcome, scope_id: str,
-               kind: CaptureScope = "rollout") -> None:
+def _emit_span(rec: ToolCallOutcome, scope_id: str, kind: CaptureScope) -> None:
     """Mirror one outcome into OpenTelemetry, if the API is installed.
+
+    ``kind`` is REQUIRED rather than defaulted. Defaulting it to "rollout"
+    meant a future caller who forgot the argument would silently restore the
+    bug this parameter exists to fix -- production turns stamped as rollouts in
+    the customer's own traces -- and would do it with a green suite.
 
     Lazily imported so the package keeps its single runtime dependency: with
     the ``otel`` extra absent this costs one failed import, cached.

@@ -25,9 +25,15 @@ That is the ONLY axis this word names here. An earlier SDK shipped five modes
 of which four were byte-identical strings in one payload field the server
 never read, and the rule that came out of it stands: a mode has to change what
 the SDK does. These two do -- one claims rollouts and the other opens no
-socket. The registration payload still carries ``"rollout"``, because that
-field describes the protocol rather than the deployment, and it is the only
-value intake has ever seen.
+socket.
+
+On the wire, ``serve()`` registers as ``"rollout"`` -- that field names the
+protocol this process speaks, and it is the value intake has always received
+from a training donor. ``attach()`` registers as ``"production"``, because a
+training donor and a production reader are the one distinction a ``mode`` on a
+registration exists to draw, and while both sent ``"rollout"`` the field
+answered nothing. So the wire carries two values and this parameter carries
+two modes, but they are not the same axis and do not have to agree.
 
 **Reporting "I don't know" is a supported answer.** When your tool wrapper
 cannot tell whether a call succeeded, say ``outcome="unknown"``. It is
@@ -164,25 +170,10 @@ _MODE_ALIASES: dict[str, str] = {
 }
 
 
-def resolve_mode(explicit: str | None = None) -> str:
-    """Which mode this process is in: ``"training"`` or ``"production"``.
-
-    Precedence is explicit argument, then ``PERCEPTEYE_MODE``, then
-    ``"training"``. The argument wins so that a caller who has hard-coded a
-    mode gets what they wrote; the environment provides the default in the
-    ordinary case where nobody passed one, which is what lets an operator flip
-    a deployment WITHOUT editing code.
-
-    Raises:
-        ConfigurationError: for any value that is not a recognised mode. There
-            is no safe guess -- see ``_MODE_ALIASES``.
-    """
-    raw = explicit if explicit is not None else os.environ.get(ENV_MODE)
-    if raw is None or str(raw).strip() == "":
-        return "training"
+def _mode_from(raw: Any, *, source: str) -> str:
+    """One spelling to one mode, or a refusal that names where it came from."""
     key = str(raw).strip().lower()
     if key not in _MODE_ALIASES:
-        source = "mode=" if explicit is not None else f"{ENV_MODE}="
         raise ConfigurationError(
             f"{source}{raw!r} is not a mode. Use 'training' (this process "
             f"donates capacity: it claims rollouts and runs them) or "
@@ -190,6 +181,43 @@ def resolve_mode(explicit: str | None = None) -> str:
             f"{', '.join(sorted(_MODE_ALIASES))}."
         )
     return _MODE_ALIASES[key]
+
+
+def _resolve_mode_source(explicit: str | None = None) -> tuple[str, str]:
+    """The mode, and which of ``argument``/``environment``/``default`` set it.
+
+    An EMPTY explicit argument falls through to the environment rather than
+    being honoured as a value. ``mode=cfg.get("percepteye_mode", "")`` is the
+    ordinary way a config layer says "not set", and treating it as a value
+    silently pinned the process to "training" without ever reading
+    ``PERCEPTEYE_MODE`` -- so an operator who had flipped the switch to stop
+    donating kept donating, on their own credentials, with nothing printed.
+    That is the exact failure ``_MODE_ALIASES`` calls unrecoverable, arrived at
+    through the one input that skipped the closed-set check entirely.
+    """
+    if explicit is not None and str(explicit).strip() != "":
+        return _mode_from(explicit, source="mode="), "argument"
+    env = os.environ.get(ENV_MODE)
+    if env is not None and str(env).strip() != "":
+        return _mode_from(env, source=f"{ENV_MODE}="), "environment"
+    return "training", "default"
+
+
+def resolve_mode(explicit: str | None = None) -> str:
+    """Which mode this process is in: ``"training"`` or ``"production"``.
+
+    Precedence is explicit argument, then ``PERCEPTEYE_MODE``, then
+    ``"training"``. The argument wins so that a caller who has hard-coded a
+    mode gets what they wrote; the environment provides the default in the
+    ordinary case where nobody passed one, which is what lets an operator flip
+    a deployment WITHOUT editing code. An empty or whitespace argument counts
+    as "nobody passed one".
+
+    Raises:
+        ConfigurationError: for any value that is not a recognised mode. There
+            is no safe guess -- see ``_MODE_ALIASES``.
+    """
+    return _resolve_mode_source(explicit)[0]
 
 
 def current_mode() -> str:
@@ -521,9 +549,15 @@ def serve(
             killed and any in-flight rollout is orphaned rather than abandoned,
             to be reclaimed by lease expiry. Note the count is completions, not
             successes -- a crash and a graded pass both increment it.
-        on_event: ``Callable[[str, dict], None]``, called SYNCHRONOUSLY on the
-            serving thread, so a slow callback slows the loop and a raising one
-            propagates. Kinds: ``claim_empty``, ``claim_failed``,
+        on_event: ``Callable[[str, dict], None]``, called SYNCHRONOUSLY on
+            whichever thread produced the event -- the serving thread for
+            ``claim_*``, a pool worker for the per-rollout kinds, and the
+            heartbeat thread for ``lease_lost``/``heartbeat_failed`` -- so a
+            slow callback slows that thread. Exceptions raised by the callback
+            are SWALLOWED: it is an observability hook and must not be able to
+            change what it observes. Keep it cheap and non-blocking; the
+            heartbeat thread renews every in-flight lease. Kinds:
+            ``claim_empty``, ``claim_failed``,
             ``rollout_start``, ``rollout_reported``, ``rollout_crash``,
             ``report_failed``, ``artifact_failed``, ``lease_lost``,
             ``heartbeat_failed``. Without it a flywheel is silent, and an empty
@@ -535,7 +569,33 @@ def serve(
     # that a production deployment needs neither a control-plane URL nor a key
     # to start clean. Turning training off must not require being configured
     # for it.
-    resolved_mode = resolve_mode(mode)
+    resolved_mode, _mode_source = _resolve_mode_source(mode)
+
+    # An override has to be announced in BOTH directions. The production
+    # branch below prints when code says stop; this prints when code says GO
+    # while the environment said stop -- which is the direction an operator
+    # actually cares about, and the one that was silent. Flipping the variable
+    # and seeing the flywheel keep claiming, with nothing on stdout to explain
+    # it, is the same silence this function refuses everywhere else.
+    if _mode_source == "argument":
+        _env_raw = os.environ.get(ENV_MODE)
+        if _env_raw is not None and str(_env_raw).strip() != "":
+            try:
+                _env_mode = _mode_from(_env_raw, source=f"{ENV_MODE}=")
+            except ConfigurationError as exc:
+                # Not fatal: the argument is authoritative and this process has
+                # been told what to do. But an unreadable switch must not pass
+                # unremarked, or the next operator to rely on it is misled.
+                warnings.warn(str(exc), RuntimeWarning, stacklevel=2)
+                _env_mode = None
+            if _env_mode is not None and _env_mode != resolved_mode:
+                print(
+                    f"[percepteye] mode={resolved_mode} — set by mode= in "
+                    f"code, overriding {ENV_MODE}={_env_mode}. Remove mode= "
+                    f"from the call to let this deployment decide.",
+                    flush=True,
+                )
+
     if resolved_mode == "production":
         # Return, never raise: this is a running service, and a switch that
         # crashes the process it was meant to quiet is not a switch. Return 0
@@ -548,7 +608,8 @@ def serve(
         print(
             f"[percepteye] mode=production — not claiming rollouts. "
             f"(set {ENV_MODE}=training to donate capacity"
-            + (", or remove mode= from this call" if mode is not None else "")
+            + (", or remove mode= from this call"
+               if _mode_source == "argument" else "")
             + ")",
             flush=True,
         )
@@ -635,9 +696,10 @@ def serve(
 
     payload: dict[str, Any] = {
         "agent_id": agent_id,
-        # The WIRE value, which is not the deployment mode and never was: intake
-        # has only ever seen "rollout", and changing that is a control-plane
-        # decision rather than ours. Reaching this line at all means
+        # The WIRE value, which is not the deployment mode and never was.
+        # `attach()` sends "production" on this same field; a donor sends
+        # "rollout", which names the protocol it speaks and is what intake has
+        # always received here. Reaching this line at all means
         # resolved_mode == "training".
         "mode": "rollout",
         "sdk": f"percepteye-agent-flywheel-python/{__version__}",

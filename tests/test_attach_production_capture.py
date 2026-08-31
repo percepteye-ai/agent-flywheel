@@ -11,6 +11,8 @@ control plane is gone.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import pytest
 
 import percepteye_agent_flywheel as fw
@@ -250,8 +252,15 @@ class _RecordingTransport:
         return {"arm": "candidate-3", "endpoint": {"base_url": "https://gw"}}
 
 
+@contextmanager
 def _attach_with(monkeypatch, tmp_path, transport):
-    """Run attach()'s control-plane block against a fake transport."""
+    """attach()'s control-plane block against a fake transport, always closed.
+
+    A context manager rather than a plain call because an Attachment that
+    outlives a FAILING assertion leaves its adapters bound, and the next test
+    to bind trips the suite's own "a previous test left a binding active"
+    guard. One wrong regex in here cascaded into 17 errors in another file.
+    """
     monkeypatch.setenv("PERCEPTEYE_CONTROL_PLANE_URL", "https://cp.invalid")
     monkeypatch.setenv("PERCEPTEYE_API_KEY", "pek_x")
     monkeypatch.setattr(
@@ -262,7 +271,11 @@ def _attach_with(monkeypatch, tmp_path, transport):
         "percepteye_agent_flywheel._http.ControlPlaneClient.close",
         lambda self: None,
     )
-    return fw.attach(agent_id="support", trajectory_root=str(tmp_path))
+    px = fw.attach(agent_id="support", trajectory_root=str(tmp_path))
+    try:
+        yield px
+    finally:
+        px.close()
 
 
 def test_attach_registers_as_production_not_as_a_rollout(monkeypatch, tmp_path):
@@ -287,11 +300,10 @@ def test_a_refused_registration_still_yields_the_policy(monkeypatch, tmp_path):
     not depend on a registration having landed, so it must still run.
     """
     tr = _RecordingTransport(register_raises=RuntimeError("HTTP 422: bad mode"))
-    with pytest.warns(RuntimeWarning, match="registration was refused"):
-        px = _attach_with(monkeypatch, tmp_path, tr)
-    with px:
-        assert tr.policy_calls == 1, "the policy read was skipped"
-        assert px.policy.get("arm") == "candidate-3"
+    with pytest.warns(RuntimeWarning, match="refused this registration"):
+        with _attach_with(monkeypatch, tmp_path, tr) as px:
+            assert tr.policy_calls == 1, "the policy read was skipped"
+            assert px.policy.get("arm") == "candidate-3"
 
 
 def test_a_refused_registration_is_not_silent(monkeypatch, tmp_path):
@@ -299,8 +311,8 @@ def test_a_refused_registration_is_not_silent(monkeypatch, tmp_path):
     cause that looks identical is one the customer cannot act on."""
     tr = _RecordingTransport(register_raises=RuntimeError("HTTP 422"))
     with pytest.warns(RuntimeWarning, match="mode='production'"):
-        px = _attach_with(monkeypatch, tmp_path, tr)
-    px.close()
+        with _attach_with(monkeypatch, tmp_path, tr):
+            pass
 
 
 def test_a_refused_registration_still_does_not_fail_the_attach(
@@ -309,6 +321,5 @@ def test_a_refused_registration_still_does_not_fail_the_attach(
     """Fail-open is the whole posture of this function and it survives."""
     tr = _RecordingTransport(register_raises=RuntimeError("boom"))
     with pytest.warns(RuntimeWarning):
-        px = _attach_with(monkeypatch, tmp_path, tr)
-    with px, px.turn() as tid:
-        assert tid
+        with _attach_with(monkeypatch, tmp_path, tr) as px, px.turn() as tid:
+            assert tid

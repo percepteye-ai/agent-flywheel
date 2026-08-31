@@ -423,12 +423,15 @@ def _attach_stream_tool_calls(out: RolloutOutput, stdout: str) -> None:
 class _InFlight:
     """One rollout being served right now, as the heartbeat thread sees it."""
 
-    __slots__ = ("lease_lost", "next_beat_at", "proc", "rollout")
+    __slots__ = ("beat_interval", "lease_lost", "next_beat_at", "proc", "rollout")
 
-    def __init__(self, rollout: RolloutRequest, next_beat_at: float) -> None:
+    def __init__(self, rollout: RolloutRequest, beat_interval: float,
+                 next_beat_at: float) -> None:
         self.rollout = rollout
         self.proc: subprocess.Popen[str] | None = None
         self.lease_lost = False
+        #: Fixed for the life of the rollout. See RolloutRunner._beat_interval_for.
+        self.beat_interval = beat_interval
         self.next_beat_at = next_beat_at
 
 
@@ -748,6 +751,15 @@ class RolloutRunner:
         """
         granted = rollout.lease_expires_ts
         if granted is not None:
+            # A DURATION, measured once. `lease_expires_ts` is an absolute
+            # timestamp frozen at claim time, so recomputing this against
+            # `now` on every beat paced against the shrinking REMAINDER rather
+            # than the lease: the interval halved, then quartered, then pinned
+            # itself to the 1.0 floor, turning a 300s lease on a 900s rollout
+            # into roughly 600 heartbeat POSTs where the design intends nine.
+            # Nothing was reaped -- the server extends on every beat -- so it
+            # was pure load, invisible from here and paid for by the control
+            # plane. Callers must compute this once, at claim, and reuse it.
             return max(1.0, (granted - time.time()) / 3.0)
         lease_ms = getattr(self.transport, "lease_ms", 1_800_000)
         return max(1.0, (lease_ms / 1000.0) / 3.0)
@@ -769,7 +781,7 @@ class RolloutRunner:
                     if not e.lease_lost and now >= e.next_beat_at
                 ]
             for entry in entries:
-                entry.next_beat_at = now + self._beat_interval_for(entry.rollout)
+                entry.next_beat_at = now + entry.beat_interval
                 try:
                     self.transport.heartbeat(entry.rollout)
                 except LeaseLost:
@@ -828,8 +840,9 @@ class RolloutRunner:
                     now = time.time()
                     with self._inflight_lock:
                         for r in rollouts:
+                            _interval = self._beat_interval_for(r)
                             self._inflight[r.rollout_id] = _InFlight(
-                                r, now + self._beat_interval_for(r)
+                                r, _interval, now + _interval
                             )
                     futures = [pool.submit(self._serve_one, r) for r in rollouts]
                     for fut in _cf.as_completed(futures):
@@ -1033,8 +1046,30 @@ class RolloutRunner:
         self._stop = True
 
     def _emit(self, kind: str, payload: dict[str, Any]) -> None:
-        if self._on_event:
+        """Hand one event to the customer's callback, and survive it.
+
+        Guarded, because this is called from three different threads and one of
+        them cannot afford to die. ``lease_lost`` and ``heartbeat_failed`` are
+        emitted from inside the heartbeat thread's own exception handlers, so a
+        callback that raised there exited the for, the while, and the thread --
+        after which NO in-flight lease was renewed again, every subsequent
+        rollout collected a 410 at report time, and the exception surfaced only
+        through the thread excepthook. An observability hook that can silently
+        stop lease renewal for the whole process is not one a docstring can
+        make safe.
+
+        The same rule as the plugins on the Node side: capturing evidence must
+        never be able to change the behaviour being measured.
+        """
+        if not self._on_event:
+            return
+        try:
             self._on_event(kind, payload)
+        except Exception:
+            # Deliberately swallowed and not re-emitted. There is no logger in
+            # this package, and routing a failed callback back through the
+            # callback is a loop.
+            pass
 
 
 def _looks_like_agent(target: Any) -> bool:

@@ -221,6 +221,7 @@ def attach(
 
     # ── the control plane, entirely optional ────────────────────────────────
     policy: dict[str, Any] = {}
+    register_error: Exception | None = None
     url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL)
     key = api_key or os.environ.get(ENV_API_KEY)
     if register and url and key:
@@ -251,32 +252,16 @@ def attach(
                     "entrypoint": "attach",
                 })
             except Exception as exc:
-                # A REFUSED registration must not cost the last mile, and must
-                # not be silent.
+                # A REFUSED registration must not cost the last mile.
                 #
-                # Both halves matter. `policy_current` is a bare GET scoped by
-                # API key -- it does not put agent_id on the wire and does not
-                # require a registration to have landed -- so there is no
-                # reason a rejected register should also cost this process its
-                # trained model. It used to: one `except` covered both calls,
-                # so anything intake disliked about the payload silently
-                # demoted production to the untrained policy.
-                #
-                # And silence is the worse half. An empty policy already means
-                # "nothing deployed" and "control plane unreachable", both of
-                # which correctly mean keep your current configuration. A third
-                # cause that looks identical is one the customer cannot act on,
-                # so it is named here rather than inferred from an absence.
-                warnings.warn(
-                    f"[percepteye] registration was refused for agent_id="
-                    f"{agent_id!r}: {type(exc).__name__}: {exc}. Capture and "
-                    f"the policy read are unaffected. If this is an HTTP 4xx, "
-                    f"the likely cause is a control plane that does not yet "
-                    f"accept mode='production' from attach(); it is safe to "
-                    f"ignore until intake is updated.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
+                # `policy_current` is a bare GET scoped by API key -- it does
+                # not put agent_id on the wire and does not require a
+                # registration to have landed -- so there is no reason a
+                # rejected register should also cost this process its trained
+                # model. It used to: one `except` covered both calls, so
+                # anything intake disliked about the payload silently demoted
+                # production to the untrained policy.
+                register_error = exc
             policy = tr.policy_current() or {}
         except Exception:
             policy = {}
@@ -286,6 +271,32 @@ def attach(
                     client.close()
                 except Exception:
                     pass
+
+    # Warned LAST, outside the try that owns the network calls, so raising
+    # here cannot cost the policy read -- and guarded, because under
+    # `-W error` a warning IS an exception and this function must never fail a
+    # customer's startup. Under that setting the warning is lost; the policy,
+    # which is the part that matters, is not.
+    #
+    # Only when the policy read SUCCEEDED, which is what distinguishes the two
+    # causes without parsing an error string: the network demonstrably works,
+    # so intake refused this payload specifically. A register that failed
+    # because the control plane was unreachable is left silent, exactly as it
+    # was before -- an offline laptop should not print a warning about intake.
+    if register_error is not None and policy:
+        try:
+            warnings.warn(
+                f"[percepteye] the control plane refused this registration for "
+                f"agent_id={agent_id!r}: {type(register_error).__name__}: "
+                f"{register_error}. The policy read succeeded, so capture and "
+                f"the trained policy are both unaffected. The likely cause is "
+                f"a control plane that does not yet accept mode='production' "
+                f"from attach(); it is safe to ignore until intake is updated.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        except Exception:  # -W error turns the line above into a raise
+            pass
 
     return Attachment(
         agent_id,

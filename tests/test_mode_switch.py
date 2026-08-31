@@ -203,3 +203,55 @@ def test_resolve_mode_is_callable_without_touching_the_environment(monkeypatch):
     monkeypatch.setenv("PERCEPTEYE_MODE", "production")
     assert fw.resolve_mode("training") == "training"
     assert fw.resolve_mode() == "production"
+
+
+# ── the empty argument, which used to skip the switch entirely ─────────────
+
+
+@pytest.mark.parametrize("empty", ["", "   ", "\t"])
+def test_an_empty_mode_argument_falls_through_to_the_environment(
+    monkeypatch, empty
+):
+    """``mode=cfg.get("percepteye_mode", "")`` is how a config layer says
+    "not set". Honouring it as a value pinned the process to training without
+    ever reading PERCEPTEYE_MODE -- so an operator who had flipped the switch
+    to stop donating kept donating, on their own credentials, silently. It is
+    the one input that reached the donate direction without passing the
+    closed-set check."""
+    monkeypatch.setenv("PERCEPTEYE_MODE", "production")
+    assert fw.resolve_mode(empty) == "production"
+    assert fw.serve("m:b", mode=empty, **CALL) == 0
+
+
+def test_an_empty_argument_with_no_environment_is_still_training(monkeypatch):
+    assert fw.resolve_mode("") == "training"
+
+
+# ── an override is announced in BOTH directions ────────────────────────────
+
+
+def test_code_overriding_the_environment_to_donate_says_so(monkeypatch, capsys):
+    """The direction that was silent, and the one an operator cares about.
+
+    Env says stop, code says go. serve() proceeds -- the precedence is correct
+    and documented -- but it used to proceed with nothing on stdout, so an
+    operator who flipped the variable saw the flywheel keep claiming and had
+    no way to learn why.
+    """
+    monkeypatch.setenv("PERCEPTEYE_MODE", "production")
+    with pytest.raises(ConfigurationError):        # stopped by the missing URL
+        fw.serve("m:b", mode="training", **CALL)
+    out = capsys.readouterr().out
+    assert "overriding PERCEPTEYE_MODE=production" in out
+    assert "mode=training" in out
+
+
+def test_an_unreadable_environment_switch_is_reported_even_when_overridden(
+    monkeypatch,
+):
+    """The argument is authoritative, so a typo'd variable must not crash a
+    process that was told what to do -- but it must not pass unremarked
+    either, or the next operator to rely on that variable is misled."""
+    monkeypatch.setenv("PERCEPTEYE_MODE", "prodction")
+    with pytest.warns(RuntimeWarning, match="is not a mode"):
+        assert fw.serve("m:b", mode="production", **CALL) == 0

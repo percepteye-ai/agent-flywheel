@@ -321,12 +321,18 @@ def test_the_warm_up_child_does_not_inherit_an_ambient_rollout_id(
     makes records under a rollout that never ran it.
     """
     monkeypatch.setenv("PERCEPTEYE_ROLLOUT_ID", "rl_from_the_parent")
+    monkeypatch.setenv("PERCEPTEYE_API_KEY", "pek_LONG_LIVED_CONTROL_PLANE_KEY")
     argv = _fake_cli(
         tmp_path,
         "import os\n"
-        "open(os.environ['PERCEPTEYE_TRAJECTORY_DIR'] + '/rid', 'w')"
-        ".write(os.environ.get('PERCEPTEYE_ROLLOUT_ID', '<absent>'))\n",
+        "open(os.environ['PERCEPTEYE_TRAJECTORY_DIR'] + '/env', 'w').write(\n"
+        "    repr(sorted(k for k in os.environ if k.startswith('PERCEPTEYE_'))))\n",
     )
     out = tmp_path / "traj"
     warm_up_command(argv, trajectory_dir=out, timeout_s=30)
-    assert (out / "rid").read_text() == "<absent>"
+    seen = (out / "env").read_text()
+    assert "PERCEPTEYE_ROLLOUT_ID" not in seen
+    # and the long-lived control-plane key, which has no business in any child
+    assert "PERCEPTEYE_API_KEY" not in seen
+    # the one variable it does need survives, or the plugin stays inert
+    assert "PERCEPTEYE_TRAJECTORY_DIR" in seen

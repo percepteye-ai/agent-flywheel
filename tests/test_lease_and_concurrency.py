@@ -533,3 +533,92 @@ def test_an_empty_claim_is_announced_rather_than_silent(tmp_path):
     assert not [k for k, _ in events if k == "claim_failed"], (
         "an empty queue is not a failure and must not be reported as one"
     )
+
+
+def test_a_raising_on_event_cannot_stop_lease_renewal(tmp_path):
+    """The sharpest edge an observability hook could have.
+
+    `lease_lost` and `heartbeat_failed` are emitted from inside the heartbeat
+    thread's own exception handlers, and `_emit` had no guard. A callback that
+    raised there exited the for, the while, and the THREAD -- after which no
+    in-flight lease was renewed again, every later rollout collected a 410 at
+    report time, and the exception reached nobody but the thread excepthook.
+
+    The detector is the SECOND rollout: it can only be heartbeated by a thread
+    that survived the first rollout's callback. Asserting on the first proves
+    nothing, because the thread dies after emitting.
+    """
+    tr = FakeTransport(
+        [[_req(tmp_path, "rl_1")], [_req(tmp_path, "rl_2")]],
+        lease_ms=3_000,                       # -> a beat every second
+        heartbeat_raises=TransportError("beat boom"),
+    )
+    raised: list[str] = []
+
+    def explode(kind, ev):
+        if kind == "heartbeat_failed":
+            raised.append(ev["rollout_id"])
+            raise RuntimeError("callback blew up inside the heartbeat thread")
+
+    runner = _runner(tmp_path, tr, spec="fixture_agent:build_medium")
+    runner._on_event = explode
+    runner.serve_forever(max_rollouts=2)
+
+    assert raised, "the callback never fired; this test proved nothing"
+    assert tr.heartbeats.count("rl_2") >= 1, (
+        f"the heartbeat thread did not survive the first raising callback, "
+        f"so rl_2 was never renewed: heartbeats={tr.heartbeats}"
+    )
+
+
+def test_the_beat_interval_is_computed_once_and_does_not_decay(tmp_path):
+    """`lease_expires_ts` is an ABSOLUTE timestamp, frozen at claim time.
+
+    The heartbeat loop used to recompute `(granted - now) / 3` on every beat,
+    which paced against the shrinking REMAINDER rather than the lease: the
+    interval halved, then quartered, then pinned itself to the 1.0s floor. A
+    300s grant on a 900s rollout became roughly 600 heartbeat POSTs where the
+    design intends nine. Nothing was reaped -- the server extends on every beat
+    -- so it was pure load, invisible from the client and paid for by the
+    control plane.
+
+    Before the schema declared `lease_expires_ts`, `additionalProperties:
+    false` meant a conforming server could not send it, `granted` was always
+    None, and the constant `lease_ms / 3` was used. Declaring the field is what
+    made the decaying branch reachable, so the guard belongs with it.
+
+    Asserted structurally rather than by counting beats in a wall-clock window,
+    which this file already learned is a fact about the machine rather than
+    about this code.
+    """
+    tr = FakeTransport([[_req(tmp_path, "rl_1")]], lease_ms=3_000)
+    runner = _runner(tmp_path, tr, spec="fixture_agent:build_medium")
+
+    seen: list[str] = []
+    original = runner._beat_interval_for
+
+    def spy(rollout):
+        seen.append(rollout.rollout_id)
+        return original(rollout)
+
+    runner._beat_interval_for = spy
+    runner.serve_forever(max_rollouts=1)
+
+    assert tr.reported == ["rl_1"]
+    assert seen.count("rl_1") == 1, (
+        f"the interval was recomputed {seen.count('rl_1')} times; recomputing "
+        f"it per beat is what makes it decay toward the 1s floor"
+    )
+
+
+def test_a_granted_lease_sets_the_interval_to_a_third_of_it(tmp_path):
+    """The value itself, since the test above only pins how often it is taken."""
+    tr = FakeTransport([], lease_ms=1_800_000)          # 600s if unused
+    runner = _runner(tmp_path, tr)
+    granted = replace(_req(tmp_path, "rl_1"), lease_expires_ts=time.time() + 90.0)
+
+    interval = runner._beat_interval_for(granted)
+
+    assert 28.0 <= interval <= 31.0, interval          # a third of 90s
+    # and the requested lease is NOT what was used, which is the whole point
+    assert interval < 600.0
