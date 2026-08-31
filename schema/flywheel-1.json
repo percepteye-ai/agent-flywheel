@@ -186,6 +186,13 @@
             "null"
           ]
         },
+        "lease_expires_ts": {
+          "description": "Absolute epoch seconds at which the lease the server GRANTED expires. Not the work deadline: deadline_ts is the rollout's budget and does not move, whereas this advances every time a heartbeat extends the lease. The flywheel paces heartbeats at a third of it, so that two beats may be lost before a reap. Absent means the server does not report what it granted, and the client falls back to the lease it requested -- which is wrong whenever the server clamped that request downward.",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "metadata": {
           "type": "object"
         }

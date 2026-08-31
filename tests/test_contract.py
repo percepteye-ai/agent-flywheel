@@ -171,3 +171,45 @@ def test_every_exclusion_reason_the_code_knows_is_declared_by_the_schema():
         "ExclusionReason and schema/flywheel-1.json disagree; the schema is the "
         "authority, so update it in the same commit as the code"
     )
+
+
+def test_rollout_request_and_the_schema_declare_the_same_keys():
+    """The parity check whose absence let `lease_expires_ts` drift.
+
+    `RolloutOutput` has `test_output_emits_only_declared_contract_keys` and the
+    Exclusion enum has its own agreement test; `RolloutRequest` had neither. So
+    the client parsed a field, PACED HEARTBEATS against it (runner._beat_
+    interval_for), and the published schema declared `additionalProperties:
+    false` without it -- meaning a conforming server could not send the field
+    the client needs, and a server that sent it violated the schema this repo
+    calls authoritative. Both directions are asserted, because only checking
+    one is how the drift survived.
+    """
+    import dataclasses
+    import json
+    import pathlib as _pl
+
+    schema = json.loads(
+        (_pl.Path(__file__).resolve().parents[1] / "schema" / "flywheel-1.json")
+        .read_text()
+    )
+    declared = set(schema["$defs"]["RolloutRequest"]["properties"])
+    fields = {f.name for f in dataclasses.fields(RolloutRequest)}
+
+    assert not (fields - declared), (
+        "the dataclass carries fields the schema does not declare, and the "
+        f"schema forbids additionalProperties: {sorted(fields - declared)}"
+    )
+    assert not (declared - fields), (
+        f"the schema declares fields the dataclass drops: {sorted(declared - fields)}"
+    )
+
+
+def test_a_granted_lease_survives_the_wire():
+    """`lease_expires_ts` is only useful if `from_wire` actually keeps it."""
+    r = RolloutRequest.from_wire({
+        "rollout_id": "rl_1", "turn_input": "t", "llm_url": "u",
+        "api_key": "k", "artifacts_dir": "/tmp/a", "deadline_ts": 1.0,
+        "lease_expires_ts": 1234.5,
+    })
+    assert r.lease_expires_ts == 1234.5
