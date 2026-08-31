@@ -6,7 +6,7 @@
         "my_package.agent:build",       # importable, so a child can rebuild it
         agent_id="my-coding-agent",
         input_shape="text",
-        control_plane_url="https://api.percepteye.com/api/flywheel/v1",
+        control_plane_url="https://api.percepteye.ai/api/flywheel/v1",
     )
 
 Outbound only. The flywheel dials out, claims a rollout, runs it, reports back.

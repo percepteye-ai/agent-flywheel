@@ -8,7 +8,7 @@ PARENT = {
     "HOME": "/home/dev",
     # Ours. The long-lived, org-scoped control-plane credential.
     "PERCEPTEYE_API_KEY": "pehk_live_do_not_leak",
-    "PERCEPTEYE_CONTROL_PLANE_URL": "https://api.percepteye.com/api/flywheel/v1",
+    "PERCEPTEYE_CONTROL_PLANE_URL": "https://api.percepteye.ai/api/flywheel/v1",
     # Theirs. Their agent legitimately needs these -- that is the premise of
     # running it in their own process.
     "JIRA_API_TOKEN": "customer-token",
@@ -19,7 +19,7 @@ PARENT = {
 
 def _env(**kw):
     base = dict(
-        rollout_id="rl_abc", llm_url="https://gw.percepteye.com/llm/v1/rollouts/rl_abc",
+        rollout_id="rl_abc", llm_url="https://gw.percepteye.ai/llm/v1/rollouts/rl_abc",
         api_key="perk_single_use", trajectory_dir="/tmp/led", parent_env=PARENT,
     )
     base.update(kw)

@@ -338,7 +338,7 @@ def draw_frame(i):
     swap = ease(prog(t, 17.55, 18.25)) * seam
     rows = [("system prompt", "yours, unchanged", None),
             ("tools", "yours, unchanged", None),
-            ("model", "your-model", "policy · gw.percepteye.com/r/…")]
+            ("model", "your-model", "policy · gw.percepteye.ai/r/…")]
     for k, (key, val, newval) in enumerate(rows):
         ry = AGENT[1] + 112 + k * 40
         text(d, (AGENT[0] + 22, ry), key, F_ROWK, fade(DIM, a_rw), anchor="lm")
