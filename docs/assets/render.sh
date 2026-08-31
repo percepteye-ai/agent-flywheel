@@ -3,16 +3,19 @@
 #
 #   flywheel-overview.{gif,png}  <- render_overview.py         (the hero)
 #   flywheel-loop.{gif,png}      <- render_flywheel_loop.py    (the architecture)
+#   flywheel-architecture.svg    <- render_architecture.py     (the closed loop)
 #
 # Both are checked in, because a README cannot fetch a build artifact -- and
 # both are generated, so a checked-in asset with no build script drifts from
 # its source the first time someone edits one without the other. Run this after
 # touching either renderer.
 #
-#   ./render.sh            # both
+#   ./render.sh            # all three
 #   ./render.sh overview   # just one
 #
-# Needs: python with Pillow, and ffmpeg.
+# Needs: python with Pillow, and ffmpeg -- EXCEPT for the architecture figure,
+# which is an SVG and needs neither. It is static, so it does not need a frame
+# pipeline, and being text it is the one figure a reviewer can read in a diff.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -45,12 +48,16 @@ render() {   # name renderer colours poster
   ls -l "$name.gif" "$name.png"
 }
 
+architecture() { "$PY" render_architecture.py; }
+
 case "${1:-all}" in
-  overview) render flywheel-overview render_overview.py 128 f0455.png ;;
-  loop)     render flywheel-loop render_flywheel_loop.py 224 f0466.png ;;
+  overview)     render flywheel-overview render_overview.py 128 f0455.png ;;
+  loop)         render flywheel-loop render_flywheel_loop.py 224 f0466.png ;;
+  architecture) architecture ;;
   all)
     render flywheel-overview render_overview.py 128 f0455.png
     render flywheel-loop render_flywheel_loop.py 224 f0466.png
+    architecture
     ;;
-  *) echo "usage: $0 [all|overview|loop]" >&2; exit 2 ;;
+  *) echo "usage: $0 [all|overview|loop|architecture]" >&2; exit 2 ;;
 esac
