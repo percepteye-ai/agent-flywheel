@@ -307,3 +307,26 @@ def test_the_warm_up_does_not_run_for_a_python_agent(registered, tmp_path, monke
     spec = registered("tests.fixtures_agent:build", isolation="inprocess")
     assert calls == [], "warm-up ran for an agent reflection could already read"
     assert "discovered_agent" in spec
+
+
+def test_the_warm_up_child_does_not_inherit_an_ambient_rollout_id(
+    tmp_path, monkeypatch
+):
+    """The describe child is not a rollout, so it must not record as one.
+
+    `build_child_env` scrubs the whole PERCEPTEYE_ namespace by inheritance;
+    this path cannot, because the warm-up needs the ambient credentials to
+    construct the agent at all. So the rollout id is dropped explicitly --
+    otherwise a serving process's id reaches this child and every tool call it
+    makes records under a rollout that never ran it.
+    """
+    monkeypatch.setenv("PERCEPTEYE_ROLLOUT_ID", "rl_from_the_parent")
+    argv = _fake_cli(
+        tmp_path,
+        "import os\n"
+        "open(os.environ['PERCEPTEYE_TRAJECTORY_DIR'] + '/rid', 'w')"
+        ".write(os.environ.get('PERCEPTEYE_ROLLOUT_ID', '<absent>'))\n",
+    )
+    out = tmp_path / "traj"
+    warm_up_command(argv, trajectory_dir=out, timeout_s=30)
+    assert (out / "rid").read_text() == "<absent>"

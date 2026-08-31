@@ -250,6 +250,13 @@ def warm_up_command(
         pass
 
     child_env = dict(os.environ if env is None else env)
+    # A rollout id in the SERVING process is inherited here unless we drop it,
+    # and then every tool call this child makes records under that rollout --
+    # against the promise above that this "is not a rollout and is never
+    # reported as one". `build_child_env` gets this for free by scrubbing the
+    # whole PERCEPTEYE_ namespace; this path cannot, because the warm-up needs
+    # the ambient credentials in order to construct the agent at all.
+    child_env.pop("PERCEPTEYE_ROLLOUT_ID", None)
     child_env["PERCEPTEYE_TRAJECTORY_DIR"] = str(target)
 
     # A DELIBERATELY UNROUTABLE endpoint, forced rather than defaulted.
