@@ -65,9 +65,24 @@ def _published_files():
 
 
 def _text(path):
+    """The text of a published file, or "" for one that has no text.
+
+    Decoded STRICTLY, so a binary asset raises and is skipped. It used to
+    decode with ``errors="ignore"``, which made the ``UnicodeDecodeError``
+    branch below unreachable and scanned the GIFs as if they were text -- and
+    that is worse than useless in both directions. It cannot find a real leak,
+    because a name rendered into a figure is pixels rather than bytes; and it
+    invents fake ones, because dropping the invalid bytes welds whatever
+    survives into new words. Re-rendering ``flywheel-loop.gif`` produced a file
+    whose bytes do not contain any entry of ``INTERNAL_DETAILS`` anywhere, but
+    which decoded to a string carrying one of them -- its four letters were
+    scattered through the compressed stream with dropped bytes between them.
+    Every re-render was a fresh roll of that dice against a thirty-word list,
+    and the figures are regenerated whenever their renderer changes.
+    """
     try:
-        return path.read_text(errors="ignore").lower()
-    except (OSError, UnicodeDecodeError):  # pragma: no cover - binary asset
+        return path.read_text().lower()
+    except (OSError, UnicodeDecodeError):  # a binary asset carries no text
         return ""
 
 
