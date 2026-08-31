@@ -58,7 +58,13 @@ from .host_description import WARMUP_PROMPT, read_discovered_agent, warm_up_comm
 from .introspection import DiscoveredAgent, ToolDefinition
 from .introspection import introspect as introspect_agent
 from .isolation import unroutable_providers_present
-from .outcomes import Trajectory, current_rollout_id, record_tool_call
+from .outcomes import (
+    CaptureScope,
+    Trajectory,
+    current_capture,
+    current_rollout_id,
+    record_tool_call,
+)
 from .policy import PolicySnapshot, PolicySource, policy_source
 from .production import Attachment, attach
 from .runner import RolloutRunner
@@ -71,6 +77,7 @@ __all__ = [
     "TASK",
     "AttachTransport",
     "Attachment",
+    "CaptureScope",
     "ConfigurationError",
     "ContractViolation",
     "DiscoveredAgent",
@@ -95,6 +102,7 @@ __all__ = [
     "__version__",
     "apply_current_policy",
     "attach",
+    "current_capture",
     "current_policy",
     "current_prompt",
     "current_rollout_id",
@@ -418,6 +426,20 @@ def serve(
             surface available to your rollouts is materially smaller, because
             the verifiers that grade "did this call land" have nothing to
             read and correctly abstain.
+        max_rollouts: stop after this many rollouts COMPLETE, and return. The
+            only clean exit this function has: nothing in this package handles
+            SIGINT or SIGTERM, so otherwise it runs until the process is
+            killed and any in-flight rollout is orphaned rather than abandoned,
+            to be reclaimed by lease expiry. Note the count is completions, not
+            successes -- a crash and a graded pass both increment it.
+        on_event: ``Callable[[str, dict], None]``, called SYNCHRONOUSLY on the
+            serving thread, so a slow callback slows the loop and a raising one
+            propagates. Kinds: ``claim_empty``, ``claim_failed``,
+            ``rollout_start``, ``rollout_reported``, ``rollout_crash``,
+            ``report_failed``, ``artifact_failed``, ``lease_lost``,
+            ``heartbeat_failed``. Without it a flywheel is silent, and an empty
+            queue is indistinguishable from a broken claim route --
+            ``claim_empty`` versus ``claim_failed`` is what separates them.
     """
     if mode != "rollout":
         raise ModeNotAvailable(

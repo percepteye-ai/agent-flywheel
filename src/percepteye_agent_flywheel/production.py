@@ -114,7 +114,7 @@ class Attachment:
                     str(conversation_id), encoding="utf-8")
             except OSError:
                 pass
-        with _RolloutScope(tid, str(path)):
+        with _RolloutScope(tid, str(path), kind="turn"):
             yield tid
 
     def read(self, turn_id: str) -> Any:
@@ -233,6 +233,13 @@ def attach(
             tr = AttachTransport(client, agent_id)
             tr.register({
                 "agent_id": agent_id,
+                # NOT a considered value. `mode` is Literal["rollout"] on the
+                # serve() side too, so this field carries zero bits and cannot
+                # distinguish the two surfaces -- `entrypoint` below is the only
+                # thing that does. Changing it to "production" is a control-plane
+                # intake decision, not ours to make unilaterally: an intake that
+                # enumerates modes would 4xx, and the TransportError is swallowed
+                # below, so attach() would lose the last mile with no error.
                 "mode": "rollout",
                 "sdk": f"percepteye-agent-flywheel-python/{__version__}",
                 "contract_version": CONTRACT_VERSION,

@@ -74,6 +74,7 @@ def record_tool_call_span(
     latency_ms: float | None = None,
     agent_name: str | None = None,
     rollout_id: str | None = None,
+    turn_id: str | None = None,
     tool_call_id: str | None = None,
 ) -> None:
     """Project one recorded tool call into the customer's traces.
@@ -111,6 +112,12 @@ def record_tool_call_span(
                 span.set_attribute("percepteye.tool.status_code", int(status_code))
             if rollout_id:
                 span.set_attribute("percepteye.rollout.id", str(rollout_id))
+            if turn_id:
+                # A production turn is NOT a rollout, and stamping its id under
+                # `percepteye.rollout.id` made a customer's own telemetry unable
+                # to answer "how much of my traffic was training" -- every
+                # served turn looked like donated work.
+                span.set_attribute("percepteye.turn.id", str(turn_id))
             if agent_name:
                 span.set_attribute("gen_ai.agent.name", str(agent_name))
             if latency_ms is not None:

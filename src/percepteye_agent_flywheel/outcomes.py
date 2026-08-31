@@ -23,13 +23,25 @@ import threading
 import warnings
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .contract import Outcome, ToolCallOutcome
 from .errors import ContractViolation
 from .evidence import extract_entity_ids
 
-__all__ = ["TOOL_CALLS_FILENAME", "Trajectory", "current_rollout_id", "record_tool_call"]
+__all__ = [
+    "TOOL_CALLS_FILENAME",
+    "CaptureScope",
+    "Trajectory",
+    "current_capture",
+    "current_rollout_id",
+    "record_tool_call",
+]
+
+#: What a bound capture scope MEANS. Two values, and the distinction is the
+#: point: both record through the same path into the same trajectory format,
+#: so nothing downstream could tell them apart before this existed.
+CaptureScope = Literal["rollout", "turn"]
 
 TOOL_CALLS_FILENAME = "tool_calls.jsonl"
 
@@ -47,18 +59,70 @@ _current_rollout: ContextVar[str | None] = ContextVar(
 _current_trajectory_dir: ContextVar[str | None] = ContextVar(
     "percepteye_current_trajectory_dir", default=None
 )
+#: Which KIND of scope the two variables above are bound to. `serve()` binds a
+#: rollout; `attach().turn()` binds a production turn. They deliberately share
+#: one trajectory format and one recording path -- the only thing that differs
+#: is what the identity MEANS, and that is exactly the bit that was missing.
+_current_scope_kind: ContextVar[str | None] = ContextVar(
+    "percepteye_current_scope_kind", default=None
+)
 _write_lock = threading.Lock()
 _warned_no_destination = False
 
 
+def current_capture() -> tuple[CaptureScope, str] | None:
+    """What this thread/task is capturing into, and under which identity.
+
+    Three states, three answers, and none of them collapsed into another::
+
+        ("rollout", rollout_id)  # inside a serve() rollout, either isolation
+        ("turn",    turn_id)     # inside attach().turn(), in production
+        None                     # neither
+
+    **This is the function to branch on.** :func:`current_rollout_id` answers
+    the narrower question "which trajectory am I appending to", and inside
+    ``attach().turn()`` that is a TURN id -- so ``if current_rollout_id():``
+    is true in production and takes the rollout branch. That is the whole
+    reason this exists. There is no prefix convention to lean on instead: a
+    rollout id is opaque by contract, and a caller may pass their own
+    ``turn_id`` to :meth:`Attachment.turn`.
+
+    A ``bool`` would have been the smaller API and the wrong one, because it
+    answers "rollout?" with ``False`` for both production and no-capture-at-all
+    -- the same absence-as-zero collapse this package refuses for
+    ``outcome="unknown"`` and for ``tool_calls=None`` versus ``[]``.
+    """
+    rid = _current_rollout.get()
+    if rid:
+        kind = _current_scope_kind.get() or "rollout"
+        return ("turn" if kind == "turn" else "rollout", rid)
+    env = os.environ.get(ROLLOUT_ID_ENV) or None
+    if env:
+        # Only `build_child_env` writes this variable, and only for a rollout
+        # child. `attach()` never writes the environment at all, so reaching it
+        # here means a real rollout -- no new variable is needed to tell them
+        # apart, and the "no feature flags" posture survives.
+        return ("rollout", env)
+    return None
+
+
 def current_rollout_id() -> str | None:
-    """The rollout this thread/task is serving, or None.
+    """The identity this thread/task is recording under, or None.
 
     Resolution order is context variable, then environment. The env var is what
     a spawned child inherits; the context variable is what an in-process
-    concurrent flywheel sets. Both are per-rollout. Neither is per-process --
-    a per-process identity collides the moment two rollouts run at once, which
-    is precisely how an earlier SDK lost attribution.
+    concurrent flywheel sets. Neither is per-process -- a per-process identity
+    collides the moment two rollouts run at once, which is precisely how an
+    earlier SDK lost attribution.
+
+    .. warning::
+       Despite the name this is NOT a rollout-versus-production test. Inside
+       ``attach().turn()`` it returns that TURN's id, because a production turn
+       records through the same path. Branch on :func:`current_capture`
+       instead, which distinguishes the two. The name is kept, and the
+       behaviour with it, because :func:`record_tool_call` reads this to decide
+       where to append -- narrowing it would silently disable production
+       capture, trading a naming bug for a data-loss one.
     """
     rid = _current_rollout.get()
     if rid:
@@ -146,7 +210,7 @@ def record_tool_call(
     # with no trajectory directory still shows up in their telemetry.
     # Egress only: nothing reads these back, and a telemetry failure inside
     # cannot reach this function's caller.
-    _emit_span(rec, rid)
+    _emit_span(rec, rid, _scope_kind())
 
     path = _trajectory_path(rid)
     if path is None:
@@ -161,7 +225,18 @@ def record_tool_call(
 
 
 
-def _emit_span(rec: ToolCallOutcome, rollout_id: str) -> None:
+def _scope_kind() -> CaptureScope:
+    """Whether the bound identity is a rollout or a production turn.
+
+    Defaults to "rollout" when nothing bound a kind, which is the pre-existing
+    reading of a bare ``PERCEPTEYE_ROLLOUT_ID`` and keeps every existing caller
+    of :class:`_RolloutScope` behaving exactly as it did.
+    """
+    return "turn" if _current_scope_kind.get() == "turn" else "rollout"
+
+
+def _emit_span(rec: ToolCallOutcome, scope_id: str,
+               kind: CaptureScope = "rollout") -> None:
     """Mirror one outcome into OpenTelemetry, if the API is installed.
 
     Lazily imported so the package keeps its single runtime dependency: with
@@ -177,7 +252,8 @@ def _emit_span(rec: ToolCallOutcome, rollout_id: str) -> None:
             error=rec.error,
             latency_ms=rec.latency_ms,
             agent_name=rec.agent_name,
-            rollout_id=rollout_id,
+            rollout_id=scope_id if kind == "rollout" else None,
+            turn_id=scope_id if kind == "turn" else None,
             tool_call_id=rec.tool_call_id,
         )
     except Exception:
@@ -259,15 +335,18 @@ class _RolloutScope:
     but no destination and dropped every recorded call while appearing to work.
     """
 
-    def __init__(self, rollout_id: str, trajectory_dir: str) -> None:
+    def __init__(self, rollout_id: str, trajectory_dir: str, *,
+                 kind: CaptureScope = "rollout") -> None:
         self._rid = rollout_id
         self._trajectory_dir = str(trajectory_dir)
+        self._kind = kind
         self._tokens: list[Any] = []
 
     def __enter__(self) -> str:
         self._tokens = [
             _current_rollout.set(self._rid),
             _current_trajectory_dir.set(self._trajectory_dir),
+            _current_scope_kind.set(self._kind),
         ]
         return self._rid
 
@@ -275,4 +354,5 @@ class _RolloutScope:
         if self._tokens:
             _current_rollout.reset(self._tokens[0])
             _current_trajectory_dir.reset(self._tokens[1])
+            _current_scope_kind.reset(self._tokens[2])
             self._tokens = []

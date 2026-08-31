@@ -169,3 +169,58 @@ def test_adapters_bound_is_reported_not_implied(attached, tmp_path):
     nothing automatically, and saying so beats implying coverage."""
     px = attached(adapters=[])
     assert px.adapters_bound == ()
+
+
+# ── the rollout/production boundary ─────────────────────────────────────────
+# `current_rollout_id()` answers "which trajectory am I appending to", and in a
+# production turn that is the TURN's id -- so branching on it took the rollout
+# branch in production. `current_capture()` is the function that distinguishes
+# them, and these pin all three states.
+
+
+def test_current_capture_names_a_production_turn_a_turn(tmp_path, monkeypatch):
+    monkeypatch.delenv("PERCEPTEYE_ROLLOUT_ID", raising=False)
+    with fw.attach(agent_id="a", trajectory_root=str(tmp_path),
+                   register=False) as px, px.turn() as tid:
+        assert fw.current_capture() == ("turn", tid)
+
+
+def test_current_capture_is_none_outside_any_scope(tmp_path, monkeypatch):
+    monkeypatch.delenv("PERCEPTEYE_ROLLOUT_ID", raising=False)
+    with fw.attach(agent_id="a", trajectory_root=str(tmp_path),
+                   register=False) as px:
+        with px.turn():
+            pass
+        assert fw.current_capture() is None
+
+
+def test_current_capture_names_a_rollout_a_rollout(monkeypatch):
+    """The env var is written only by build_child_env, only for a rollout."""
+    monkeypatch.setenv("PERCEPTEYE_ROLLOUT_ID", "rl_9")
+    assert fw.current_capture() == ("rollout", "rl_9")
+
+
+def test_current_rollout_id_still_returns_the_turn_id(tmp_path, monkeypatch):
+    """Deliberate, and load-bearing.
+
+    `record_tool_call` reads this to find its destination. Narrowing it to
+    rollouts would silently disable production capture -- a naming bug traded
+    for a data-loss bug. The boundary lives in `current_capture()` instead.
+    """
+    monkeypatch.delenv("PERCEPTEYE_ROLLOUT_ID", raising=False)
+    with fw.attach(agent_id="a", trajectory_root=str(tmp_path),
+                   register=False) as px, px.turn() as tid:
+        assert fw.current_rollout_id() == tid
+
+
+def test_a_production_turn_is_not_reported_as_a_rollout(tmp_path, monkeypatch):
+    """The branch a customer actually writes."""
+    monkeypatch.delenv("PERCEPTEYE_ROLLOUT_ID", raising=False)
+    with fw.attach(agent_id="a", trajectory_root=str(tmp_path),
+                   register=False) as px, px.turn():
+        kind, _ = fw.current_capture()
+        assert kind != "rollout"
+
+
+def test_current_capture_is_exported():
+    assert "current_capture" in fw.__all__
