@@ -14,11 +14,20 @@ No listening socket, no inbound firewall rule, no public DNS.
 
 Two things are worth knowing before you read further.
 
-**There is one mode.** ``rollout`` -- Percepteye supplies the model endpoint,
-your flywheel supplies the agent loop. Modes that do not change what the SDK
-actually does are not offered, because an earlier SDK shipped five of them, of
-which four were byte-identical strings in one payload field the server never
-read.
+**There are two modes, and they are a deployment switch.** ``training`` --
+Percepteye supplies the model endpoint, your flywheel supplies the agent loop
+-- and ``production``, in which ``serve()`` returns 0 without connecting to
+anything. Set ``PERCEPTEYE_MODE`` and the same image does either, because
+"stop donating capacity" is an operational decision and it should not require
+editing the source to express it.
+
+That is the ONLY axis this word names here. An earlier SDK shipped five modes
+of which four were byte-identical strings in one payload field the server
+never read, and the rule that came out of it stands: a mode has to change what
+the SDK does. These two do -- one claims rollouts and the other opens no
+socket. The registration payload still carries ``"rollout"``, because that
+field describes the protocol rather than the deployment, and it is the only
+value intake has ever seen.
 
 **Reporting "I don't know" is a supported answer.** When your tool wrapper
 cannot tell whether a call succeeded, say ``outcome="unknown"``. It is
@@ -103,6 +112,7 @@ __all__ = [
     "apply_current_policy",
     "attach",
     "current_capture",
+    "current_mode",
     "current_policy",
     "current_prompt",
     "current_rollout_id",
@@ -111,17 +121,86 @@ __all__ = [
     "policy_source",
     "record_tool_call",
     "resolve_entrypoint",
+    "resolve_mode",
     "serve",
 ]
 
-#: Every environment variable this package reads. There are no feature flags,
-#: and no variable selects behaviour -- these are addresses and credentials.
+#: Every environment variable this package reads. Two of them select
+#: behaviour -- PERCEPTEYE_MODE and PERCEPTEYE_INTROSPECT -- and the rest are
+#: addresses and credentials.
 ENV_CONTROL_PLANE_URL = "PERCEPTEYE_CONTROL_PLANE_URL"
 ENV_API_KEY = "PERCEPTEYE_API_KEY"
+ENV_MODE = "PERCEPTEYE_MODE"
 ENV_ROLLOUT_ID = "PERCEPTEYE_ROLLOUT_ID"      # set by us, for the child
 ENV_TRAJECTORY_DIR = "PERCEPTEYE_TRAJECTORY_DIR"  # set by us, for the child
 
-FlywheelMode = Literal["rollout"]
+#: What this PROCESS is for. ``"rollout"`` is the legacy spelling of
+#: ``"training"`` and still means exactly that.
+#:
+#: This used to be ``Literal["rollout"]`` -- one value, which `serve()` checked
+#: and rejected everything else, so the parameter carried zero bits and the
+#: field of the same name on the registration payload carried zero bits with
+#: it. It is now the deployment switch, because the alternative was a SECOND
+#: thing called "mode" sitting next to a vestigial first one.
+FlywheelMode = Literal["training", "production", "rollout"]
+
+#: Accepted spellings, resolved to the two real modes. Deliberately a small
+#: closed set: an unrecognised value RAISES rather than guessing, because the
+#: two ways of guessing wrong are "silently donate capacity the operator meant
+#: to switch off" and "silently donate nothing while they believe training is
+#: running". Neither is recoverable by the operator, because both look exactly
+#: like success.
+_MODE_ALIASES: dict[str, str] = {
+    "training": "training",
+    "train": "training",
+    "rollout": "training",       # the legacy value, unchanged in meaning
+    "rollouts": "training",
+    "fine-tuning": "training",
+    "finetuning": "training",
+    "improving": "training",
+    "production": "production",
+    "prod": "production",
+    "serving": "production",
+}
+
+
+def resolve_mode(explicit: str | None = None) -> str:
+    """Which mode this process is in: ``"training"`` or ``"production"``.
+
+    Precedence is explicit argument, then ``PERCEPTEYE_MODE``, then
+    ``"training"``. The argument wins so that a caller who has hard-coded a
+    mode gets what they wrote; the environment provides the default in the
+    ordinary case where nobody passed one, which is what lets an operator flip
+    a deployment WITHOUT editing code.
+
+    Raises:
+        ConfigurationError: for any value that is not a recognised mode. There
+            is no safe guess -- see ``_MODE_ALIASES``.
+    """
+    raw = explicit if explicit is not None else os.environ.get(ENV_MODE)
+    if raw is None or str(raw).strip() == "":
+        return "training"
+    key = str(raw).strip().lower()
+    if key not in _MODE_ALIASES:
+        source = "mode=" if explicit is not None else f"{ENV_MODE}="
+        raise ConfigurationError(
+            f"{source}{raw!r} is not a mode. Use 'training' (this process "
+            f"donates capacity: it claims rollouts and runs them) or "
+            f"'production' (it does not). Recognised spellings: "
+            f"{', '.join(sorted(_MODE_ALIASES))}."
+        )
+    return _MODE_ALIASES[key]
+
+
+def current_mode() -> str:
+    """The mode this process would serve in, from the environment alone.
+
+    ``"training"`` or ``"production"``. Read it to log which way a deployment
+    is configured, or to assert it in a smoke test. Raises for an unrecognised
+    ``PERCEPTEYE_MODE``, exactly as :func:`serve` does, so a typo surfaces
+    wherever it is first read rather than only at startup.
+    """
+    return resolve_mode()
 
 
 def _env_true(name: str, *, default: bool) -> bool:
@@ -373,7 +452,7 @@ def serve(
     *,
     agent_id: str,
     input_shape: InputShape,
-    mode: FlywheelMode = "rollout",
+    mode: FlywheelMode | None = None,
     transport: Literal["attach"] = "attach",
     control_plane_url: str | None = None,
     api_key: str | None = None,
@@ -412,6 +491,16 @@ def serve(
         entrypoint: ``"module:attr"`` (required for subprocess isolation, so a
             child can rebuild the agent) or a constructed object
             (``isolation="inprocess"`` only).
+        mode: ``"training"`` to donate capacity, ``"production"`` to do
+            nothing. Omit it -- which is the point -- and ``PERCEPTEYE_MODE``
+            decides, so the same deployed image serves or does not without an
+            edit. Unset means ``"training"``, preserving the behaviour of every
+            existing call. ``"rollout"`` is the legacy spelling of
+            ``"training"``. In production mode this returns 0 before opening
+            any connection, and prints one line saying so; it does NOT raise,
+            because a switch that crashes the service it was meant to quiet is
+            not a switch. An unrecognised value raises
+            :class:`ConfigurationError` rather than guessing.
         input_shape: how ``turn_input`` reaches your agent -- ``"text"``,
             ``"messages"`` or ``"dict"``. Declared, never guessed.
         adapters: framework integrations, by NAME, bound inside whichever
@@ -441,11 +530,29 @@ def serve(
             queue is indistinguishable from a broken claim route --
             ``claim_empty`` versus ``claim_failed`` is what separates them.
     """
-    if mode != "rollout":
-        raise ModeNotAvailable(
-            f"mode={mode!r} is not available in contract {CONTRACT_VERSION}. "
-            f"See https://docs.percepteye.com/flywheel/modes"
+    # ── the deployment switch ────────────────────────────────────────────────
+    # Resolved FIRST, before the credential checks and before any socket, so
+    # that a production deployment needs neither a control-plane URL nor a key
+    # to start clean. Turning training off must not require being configured
+    # for it.
+    resolved_mode = resolve_mode(mode)
+    if resolved_mode == "production":
+        # Return, never raise: this is a running service, and a switch that
+        # crashes the process it was meant to quiet is not a switch. Return 0
+        # because zero rollouts is the literal truth.
+        #
+        # And never SILENTLY: a no-op serve() that printed nothing is the exact
+        # failure this package refuses everywhere else -- the operator believes
+        # capacity is being donated and nothing says otherwise. One line, on
+        # the way out, naming what decided it.
+        print(
+            f"[percepteye] mode=production — not claiming rollouts. "
+            f"(set {ENV_MODE}=training to donate capacity"
+            + (", or remove mode= from this call" if mode is not None else "")
+            + ")",
+            flush=True,
         )
+        return 0
     if transport != "attach":
         raise ModeNotAvailable(
             f"transport={transport!r} is not available in contract {CONTRACT_VERSION}."
@@ -528,7 +635,11 @@ def serve(
 
     payload: dict[str, Any] = {
         "agent_id": agent_id,
-        "mode": mode,
+        # The WIRE value, which is not the deployment mode and never was: intake
+        # has only ever seen "rollout", and changing that is a control-plane
+        # decision rather than ours. Reaching this line at all means
+        # resolved_mode == "training".
+        "mode": "rollout",
         "sdk": f"percepteye-agent-flywheel-python/{__version__}",
         "contract_version": CONTRACT_VERSION,
         "reports_tool_calls": bool(reports_tool_calls),
