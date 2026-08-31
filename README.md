@@ -50,7 +50,7 @@ fw.serve("my_package.agent:build", agent_id="my-coding-agent", input_shape="text
 Everything that can be misconfigured — entrypoint, credential, contract version, isolation mode — is checked **before the first rollout** and raises there, never mid-run.
 
 > [!TIP]
-> Rollouts are real runs with your real credentials, so bound the first one with `max_rollouts=8` and point `artifacts_dir=` somewhere you don't mind it writing. To stand the same image up without donating, set `AGENT_MODE=production` — [one switch, both ways](#configuration).
+> Rollouts are real runs with your real credentials, so bound the first one with `max_rollouts=8` and point `artifacts_dir=` somewhere you don't mind it writing. To stand the same image up without donating, set `PERCEPTEYE_AGENT_MODE=production` — [one switch, both ways](#configuration).
 
 <br/>
 
@@ -323,8 +323,8 @@ prompt = fw.current_prompt(agent_id="my-agent")
 **One switch turns capacity donation on and off**, so the same deployed image does either without a code edit:
 
 ```bash
-AGENT_MODE=production    # serve() returns 0 immediately. No claim, no connection.
-AGENT_MODE=training      # donate capacity (the default when unset)
+PERCEPTEYE_AGENT_MODE=production    # serve() returns 0 immediately. No claim, no connection.
+PERCEPTEYE_AGENT_MODE=training      # donate capacity (the default when unset)
 ```
 
 In `production` the call returns **before opening any connection**, so a production deployment needs no control-plane URL and no key — turning training off never requires being configured for it. It returns rather than raising, because a switch that crashes the service it was meant to quiet is not a switch, and it prints one line saying which mode it took, because a silent no-op is the failure mode this package refuses everywhere else. An unrecognised value raises instead of guessing: both ways of guessing wrong are invisible from the outside.
@@ -332,7 +332,7 @@ In `production` the call returns **before opening any connection**, so a product
 `training` · `train` · `rollout` · `rollouts` · `fine-tuning` · `finetuning` · `improving` all mean donate. `production` · `prod` · `serving` all mean don't. Passing `mode=` in code beats the variable, and the printed line tells you when that happened — in both directions.
 
 > [!NOTE]
-> This switch gates **`serve()`** — the surface that donates capacity. It does not gate `attach()`, which *is* the production surface and captures evidence from the turns you already serve. Gating that on the same variable would mean the correct setting for a production agent was `AGENT_MODE=training`. To stop capture, don't call `attach()`, or pass `register=False` to keep it entirely local.
+> This switch gates **`serve()`** — the surface that donates capacity. It does not gate `attach()`, which *is* the production surface and captures evidence from the turns you already serve. Gating that on the same variable would mean the correct setting for a production agent was `PERCEPTEYE_AGENT_MODE=training`. To stop capture, don't call `attach()`, or pass `register=False` to keep it entirely local.
 
 **Stopping a run that is already going.** The switch is read at startup, so flipping it does not stop a loop that is mid-flight. For that:
 
@@ -392,13 +392,13 @@ Without a callback a flywheel is silent, and **an empty queue and a broken claim
 |:--|:--|
 | `PERCEPTEYE_CONTROL_PLANE_URL` | Control-plane base URL. |
 | `PERCEPTEYE_API_KEY` | Your flywheel key. |
-| `AGENT_MODE` | `training` (default) or `production`. In production `serve()` returns 0 without connecting. Gates capacity donation only — not `attach()`. **The one name here outside the `PERCEPTEYE_` namespace**, so a value it cannot parse raises rather than being ignored. |
+| `PERCEPTEYE_AGENT_MODE` | `training` (default) or `production`. In production `serve()` returns 0 without connecting. Gates capacity donation only — not `attach()`. A value it cannot parse raises rather than being guessed. |
 | `PERCEPTEYE_INTROSPECT` | Set to `0` to disable [agent discovery](#configuration). |
 | `PERCEPTEYE_ROLLOUT_ID` | *Set by us* for the child. Read it to tag your own logs. |
 | `PERCEPTEYE_TRAJECTORY_DIR` | *Set by us* for the child — already this rollout's directory. Append to `$PERCEPTEYE_TRAJECTORY_DIR/tool_calls.jsonl`; any other file you leave there is collected as an artifact. |
 | `PERCEPTEYE_TURN_INPUT` | *Set by us* for a command entrypoint. The task, also on stdin. |
 
-Two variables change what the SDK does — `AGENT_MODE` and `PERCEPTEYE_INTROSPECT`. The rest are addresses and credentials.
+Two variables change what the SDK does — `PERCEPTEYE_AGENT_MODE` and `PERCEPTEYE_INTROSPECT`. The rest are addresses and credentials.
 
 **Your agent must sample through an OpenAI-compatible client**, because the per-rollout gateway speaks that API. Provider variables we cannot point at it are removed from the child ([`UNROUTABLE_PROVIDER_VARS`](src/percepteye_agent_flywheel/isolation.py)), and `serve()` warns at startup if it finds any — a loud failure beats an agent quietly sampling its live provider unobserved.
 </details>

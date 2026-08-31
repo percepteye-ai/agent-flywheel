@@ -143,7 +143,7 @@ def test_serve_registers_as_a_rollout_and_attach_does_not(captured):
 
     "rollout" rather than "training" deliberately: this is the wire, where the
     field names the protocol, and renaming a value intake already accepts would
-    be a breaking change for no gain. `AGENT_MODE=training` is the
+    be a breaking change for no gain. `PERCEPTEYE_AGENT_MODE=training` is the
     customer-facing spelling of the same thing.
     """
     spec = captured("tests.fixtures_agent:build", isolation="inprocess")
