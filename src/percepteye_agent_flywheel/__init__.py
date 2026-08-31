@@ -17,7 +17,7 @@ Two things are worth knowing before you read further.
 **There are two modes, and they are a deployment switch.** ``training`` --
 Percepteye supplies the model endpoint, your flywheel supplies the agent loop
 -- and ``production``, in which ``serve()`` returns 0 without connecting to
-anything. Set ``PERCEPTEYE_MODE`` and the same image does either, because
+anything. Set ``AGENT_MODE`` and the same image does either, because
 "stop donating capacity" is an operational decision and it should not require
 editing the source to express it.
 
@@ -132,11 +132,22 @@ __all__ = [
 ]
 
 #: Every environment variable this package reads. Two of them select
-#: behaviour -- PERCEPTEYE_MODE and PERCEPTEYE_INTROSPECT -- and the rest are
+#: behaviour -- AGENT_MODE and PERCEPTEYE_INTROSPECT -- and the rest are
 #: addresses and credentials.
+#:
+#: AGENT_MODE is the one name here OUTSIDE the PERCEPTEYE_ namespace, which has
+#: two consequences worth knowing. It is a deployment-level word rather than a
+#: vendor one, so an operator setting it is describing their process, not
+#: configuring us -- which is the point. But it is also a name we do not own,
+#: so a value we cannot parse raises rather than being ignored: silently
+#: reading someone else's variable and acting on it would be worse than saying
+#: we found a word here we do not understand. And `build_child_env` does NOT
+#: strip it from a rollout child, precisely because it may be the customer's
+#: own: scrubbing the PERCEPTEYE_ namespace is ours to do, and this is not in
+#: it.
 ENV_CONTROL_PLANE_URL = "PERCEPTEYE_CONTROL_PLANE_URL"
 ENV_API_KEY = "PERCEPTEYE_API_KEY"
-ENV_MODE = "PERCEPTEYE_MODE"
+ENV_MODE = "AGENT_MODE"
 ENV_ROLLOUT_ID = "PERCEPTEYE_ROLLOUT_ID"      # set by us, for the child
 ENV_TRAJECTORY_DIR = "PERCEPTEYE_TRAJECTORY_DIR"  # set by us, for the child
 
@@ -190,7 +201,7 @@ def _resolve_mode_source(explicit: str | None = None) -> tuple[str, str]:
     being honoured as a value. ``mode=cfg.get("percepteye_mode", "")`` is the
     ordinary way a config layer says "not set", and treating it as a value
     silently pinned the process to "training" without ever reading
-    ``PERCEPTEYE_MODE`` -- so an operator who had flipped the switch to stop
+    ``AGENT_MODE`` -- so an operator who had flipped the switch to stop
     donating kept donating, on their own credentials, with nothing printed.
     That is the exact failure ``_MODE_ALIASES`` calls unrecoverable, arrived at
     through the one input that skipped the closed-set check entirely.
@@ -206,7 +217,7 @@ def _resolve_mode_source(explicit: str | None = None) -> tuple[str, str]:
 def resolve_mode(explicit: str | None = None) -> str:
     """Which mode this process is in: ``"training"`` or ``"production"``.
 
-    Precedence is explicit argument, then ``PERCEPTEYE_MODE``, then
+    Precedence is explicit argument, then ``AGENT_MODE``, then
     ``"training"``. The argument wins so that a caller who has hard-coded a
     mode gets what they wrote; the environment provides the default in the
     ordinary case where nobody passed one, which is what lets an operator flip
@@ -225,7 +236,7 @@ def current_mode() -> str:
 
     ``"training"`` or ``"production"``. Read it to log which way a deployment
     is configured, or to assert it in a smoke test. Raises for an unrecognised
-    ``PERCEPTEYE_MODE``, exactly as :func:`serve` does, so a typo surfaces
+    ``AGENT_MODE``, exactly as :func:`serve` does, so a typo surfaces
     wherever it is first read rather than only at startup.
     """
     return resolve_mode()
@@ -520,7 +531,7 @@ def serve(
             child can rebuild the agent) or a constructed object
             (``isolation="inprocess"`` only).
         mode: ``"training"`` to donate capacity, ``"production"`` to do
-            nothing. Omit it -- which is the point -- and ``PERCEPTEYE_MODE``
+            nothing. Omit it -- which is the point -- and ``AGENT_MODE``
             decides, so the same deployed image serves or does not without an
             edit. Unset means ``"training"``, preserving the behaviour of every
             existing call. ``"rollout"`` is the legacy spelling of

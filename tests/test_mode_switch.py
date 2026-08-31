@@ -1,4 +1,4 @@
-"""``PERCEPTEYE_MODE`` — the switch that turns donation on and off.
+"""``AGENT_MODE`` — the switch that turns donation on and off.
 
 Before this existed, the only way to stop donating capacity was to delete the
 ``serve()`` call and redeploy, and the only way to resume was to put it back.
@@ -33,8 +33,8 @@ CALL = dict(agent_id="a", input_shape="text")
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     """No ambient Percepteye configuration, so each test states its own."""
-    for name in ("PERCEPTEYE_MODE", "PERCEPTEYE_CONTROL_PLANE_URL",
-                 "PERCEPTEYE_API_KEY"):
+    for name in ("AGENT_MODE", "PERCEPTEYE_MODE",
+                 "PERCEPTEYE_CONTROL_PLANE_URL", "PERCEPTEYE_API_KEY"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -58,33 +58,33 @@ def test_training_still_reaches_the_ordinary_preflight():
 def test_production_needs_no_credentials_and_opens_no_connection(monkeypatch):
     """The whole point: turning training OFF must not require the
     configuration that turning it ON would."""
-    monkeypatch.setenv("PERCEPTEYE_MODE", "production")
+    monkeypatch.setenv("AGENT_MODE", "production")
     assert fw.serve("m:b", **CALL) == 0
 
 
 def test_production_returns_rather_than_raising(monkeypatch):
     """A switch that crashes the service it was meant to quiet is not a
     switch. Zero rollouts is also the literal truth."""
-    monkeypatch.setenv("PERCEPTEYE_MODE", "production")
+    monkeypatch.setenv("AGENT_MODE", "production")
     assert fw.serve("m:b", **CALL) == 0
 
 
 def test_production_says_so_out_loud(monkeypatch, capsys):
-    monkeypatch.setenv("PERCEPTEYE_MODE", "production")
+    monkeypatch.setenv("AGENT_MODE", "production")
     fw.serve("m:b", **CALL)
     out = capsys.readouterr().out
     assert "mode=production" in out
     assert "not claiming rollouts" in out
     # and names the way back, because the operator reading this line is
     # usually the one who needs to flip it the other way
-    assert "PERCEPTEYE_MODE=training" in out
+    assert "AGENT_MODE=training" in out
 
 
 def test_production_does_not_resolve_the_entrypoint(monkeypatch):
     """An entrypoint that does not exist is not an error in production mode:
     the switch is read before anything is imported, so a deployment that never
     trains does not have to carry an importable agent."""
-    monkeypatch.setenv("PERCEPTEYE_MODE", "production")
+    monkeypatch.setenv("AGENT_MODE", "production")
     assert fw.serve("no.such.module:nope", **CALL) == 0
 
 
@@ -93,10 +93,10 @@ def test_production_does_not_resolve_the_entrypoint(monkeypatch):
 
 def test_one_variable_flips_a_deployment_both_ways(monkeypatch):
     """The same call site, the same image, two behaviours."""
-    monkeypatch.setenv("PERCEPTEYE_MODE", "production")
+    monkeypatch.setenv("AGENT_MODE", "production")
     assert fw.serve("m:b", **CALL) == 0
 
-    monkeypatch.setenv("PERCEPTEYE_MODE", "training")
+    monkeypatch.setenv("AGENT_MODE", "training")
     with pytest.raises(ConfigurationError):
         fw.serve("m:b", **CALL)          # off the switch, on to real preflight
 
@@ -114,21 +114,21 @@ def test_one_variable_flips_a_deployment_both_ways(monkeypatch):
     ("  Production  ", "production"), ("TRAINING", "training"),
 ])
 def test_recognised_spellings(monkeypatch, raw, expected):
-    monkeypatch.setenv("PERCEPTEYE_MODE", raw)
+    monkeypatch.setenv("AGENT_MODE", raw)
     assert fw.current_mode() == expected
 
 
 def test_the_legacy_value_still_means_what_it_meant(monkeypatch):
     """``mode="rollout"`` was the only accepted value before this change, and
     it meant "donate". It still does."""
-    monkeypatch.setenv("PERCEPTEYE_MODE", "rollout")
+    monkeypatch.setenv("AGENT_MODE", "rollout")
     assert fw.current_mode() == "training"
     with pytest.raises(ConfigurationError, match="control_plane_url"):
         fw.serve("m:b", mode="rollout", **CALL)
 
 
 def test_empty_is_treated_as_unset(monkeypatch):
-    monkeypatch.setenv("PERCEPTEYE_MODE", "   ")
+    monkeypatch.setenv("AGENT_MODE", "   ")
     assert fw.current_mode() == "training"
 
 
@@ -145,7 +145,7 @@ def test_an_unrecognised_mode_raises_rather_than_guessing(monkeypatch, typo):
     meant to stop keeps donating capacity on their own credentials. Neither is
     visible from the outside, so neither is recoverable.
     """
-    monkeypatch.setenv("PERCEPTEYE_MODE", typo)
+    monkeypatch.setenv("AGENT_MODE", typo)
     with pytest.raises(ConfigurationError, match="is not a mode"):
         fw.current_mode()
     with pytest.raises(ConfigurationError, match="is not a mode"):
@@ -153,12 +153,12 @@ def test_an_unrecognised_mode_raises_rather_than_guessing(monkeypatch, typo):
 
 
 def test_the_refusal_names_both_modes_and_what_they_do(monkeypatch):
-    monkeypatch.setenv("PERCEPTEYE_MODE", "nonsense")
+    monkeypatch.setenv("AGENT_MODE", "nonsense")
     with pytest.raises(ConfigurationError) as e:
         fw.current_mode()
     msg = str(e.value)
     assert "training" in msg and "production" in msg
-    assert "PERCEPTEYE_MODE=" in msg      # names the source it read
+    assert "AGENT_MODE=" in msg      # names the source it read
 
 
 def test_an_unrecognised_explicit_mode_names_the_argument(monkeypatch):
@@ -171,14 +171,14 @@ def test_an_unrecognised_explicit_mode_names_the_argument(monkeypatch):
 
 
 def test_an_explicit_mode_beats_the_environment(monkeypatch):
-    monkeypatch.setenv("PERCEPTEYE_MODE", "training")
+    monkeypatch.setenv("AGENT_MODE", "training")
     assert fw.serve("m:b", mode="production", **CALL) == 0
 
 
 def test_the_environment_decides_when_nobody_passed_one(monkeypatch):
     """The ordinary case, and the reason the parameter defaults to None rather
     than to a mode: omitting it is what hands the decision to the operator."""
-    monkeypatch.setenv("PERCEPTEYE_MODE", "production")
+    monkeypatch.setenv("AGENT_MODE", "production")
     assert fw.serve("m:b", **CALL) == 0
 
 
@@ -186,7 +186,7 @@ def test_a_hardcoded_mode_says_that_is_why(monkeypatch, capsys):
     """If code overrode the environment, the line an operator reads has to say
     so -- otherwise they flip the variable, nothing changes, and there is
     nothing on stdout explaining it."""
-    monkeypatch.setenv("PERCEPTEYE_MODE", "training")
+    monkeypatch.setenv("AGENT_MODE", "training")
     fw.serve("m:b", mode="production", **CALL)
     assert "remove mode= from this call" in capsys.readouterr().out
 
@@ -200,7 +200,7 @@ def test_the_mode_helpers_are_exported():
 
 
 def test_resolve_mode_is_callable_without_touching_the_environment(monkeypatch):
-    monkeypatch.setenv("PERCEPTEYE_MODE", "production")
+    monkeypatch.setenv("AGENT_MODE", "production")
     assert fw.resolve_mode("training") == "training"
     assert fw.resolve_mode() == "production"
 
@@ -214,11 +214,11 @@ def test_an_empty_mode_argument_falls_through_to_the_environment(
 ):
     """``mode=cfg.get("percepteye_mode", "")`` is how a config layer says
     "not set". Honouring it as a value pinned the process to training without
-    ever reading PERCEPTEYE_MODE -- so an operator who had flipped the switch
+    ever reading AGENT_MODE -- so an operator who had flipped the switch
     to stop donating kept donating, on their own credentials, silently. It is
     the one input that reached the donate direction without passing the
     closed-set check."""
-    monkeypatch.setenv("PERCEPTEYE_MODE", "production")
+    monkeypatch.setenv("AGENT_MODE", "production")
     assert fw.resolve_mode(empty) == "production"
     assert fw.serve("m:b", mode=empty, **CALL) == 0
 
@@ -238,11 +238,11 @@ def test_code_overriding_the_environment_to_donate_says_so(monkeypatch, capsys):
     operator who flipped the variable saw the flywheel keep claiming and had
     no way to learn why.
     """
-    monkeypatch.setenv("PERCEPTEYE_MODE", "production")
+    monkeypatch.setenv("AGENT_MODE", "production")
     with pytest.raises(ConfigurationError):        # stopped by the missing URL
         fw.serve("m:b", mode="training", **CALL)
     out = capsys.readouterr().out
-    assert "overriding PERCEPTEYE_MODE=production" in out
+    assert "overriding AGENT_MODE=production" in out
     assert "mode=training" in out
 
 
@@ -252,6 +252,52 @@ def test_an_unreadable_environment_switch_is_reported_even_when_overridden(
     """The argument is authoritative, so a typo'd variable must not crash a
     process that was told what to do -- but it must not pass unremarked
     either, or the next operator to rely on that variable is misled."""
-    monkeypatch.setenv("PERCEPTEYE_MODE", "prodction")
+    monkeypatch.setenv("AGENT_MODE", "prodction")
     with pytest.warns(RuntimeWarning, match="is not a mode"):
         assert fw.serve("m:b", mode="production", **CALL) == 0
+
+
+# ── the name itself ─────────────────────────────────────────────────────────
+
+
+def test_the_switch_is_agent_mode_not_a_percepteye_variable(monkeypatch):
+    """Deliberately outside the PERCEPTEYE_ namespace.
+
+    It is a deployment-level word: an operator setting it is describing what
+    their process is FOR, not configuring a vendor. The cost of that choice is
+    that we do not own the name, which is why an unparseable value raises
+    instead of being ignored -- silently reading someone else's variable and
+    acting on it would be worse than saying we found a word we do not
+    understand.
+    """
+    from percepteye_agent_flywheel import ENV_MODE
+    assert ENV_MODE == "AGENT_MODE"
+
+
+def test_the_old_percepteye_spelling_is_not_read(monkeypatch):
+    """No dual-read fallback. One name, so there is one place to look when the
+    switch is not doing what an operator expects."""
+    monkeypatch.setenv("PERCEPTEYE_MODE", "production")
+    assert fw.current_mode() == "training"
+
+
+def test_agent_mode_reaches_a_rollout_child(tmp_path, monkeypatch):
+    """`build_child_env` scrubs the PERCEPTEYE_ namespace; AGENT_MODE is not
+    in it, and that is correct rather than an oversight.
+
+    The name is generic enough that it may already mean something to the
+    customer's own agent. Stripping a variable we do not own out of the
+    environment their agent runs in would be presumptuous, and the child never
+    reads it for our purposes anyway -- a child does not call serve().
+    """
+    from percepteye_agent_flywheel.isolation import build_child_env
+
+    monkeypatch.setenv("AGENT_MODE", "training")
+    monkeypatch.setenv("PERCEPTEYE_API_KEY", "pek_long_lived")
+    env = build_child_env(
+        rollout_id="rl_1", trajectory_dir=str(tmp_path),
+        llm_url="http://gw.invalid", api_key="perk_single_use",
+    )
+    assert env.get("AGENT_MODE") == "training"
+    # ours, and it still must not reach code the model can influence
+    assert "PERCEPTEYE_API_KEY" not in env
