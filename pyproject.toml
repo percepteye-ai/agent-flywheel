@@ -78,6 +78,11 @@ otel = ["opentelemetry-api>=1.20"]
 # side effect of an unrelated package's dependency tree. A suite that passes
 # because something else pulled in its dependency is a suite that disappears
 # silently the day that changes, and a green build says nothing went wrong.
+# The documentation site. BUILD-time only: mkdocs never ships to a customer, so
+# this cannot touch the one-runtime-dependency invariant that
+# tests/test_oss_boundary.py enforces against [project.dependencies].
+docs = ["mkdocs-material>=9.7"]
+
 otel-test = ["opentelemetry-sdk>=1.20"]
 
 # Third parties ship adapters through this group. Ours live in

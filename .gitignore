@@ -52,3 +52,7 @@ _percepteye-artifacts/
 
 # Cross-language ABI check scratch output (CI writes this, never committed)
 abi/
+
+# The built documentation site. Generated from website/docs by mkdocs;
+# the source is tracked, the output is not.
+website/site/

@@ -1,0 +1,221 @@
+# Production
+
+Your production agent is a **different process** from the one that donates capacity. [`serve()`](quickstart.md) claims rollouts and runs them in child processes. This page is about the process that serves your users, and it does three things: picks up the model training produced, picks up the prompt training produced, and — optionally — donates evidence from the turns it is already serving.
+
+None of it requires a redeploy of your agent's code, and none of it opens an inbound port.
+
+!!! warning "For your production agent, never for `serve()`"
+    A `serve()` rollout samples through the **per-rollout gateway**, which is what attributes the completion to that rollout and captures it — and the gateway already rewrites the model field to the policy under test. Pointing a donor agent at the policy endpoint bypasses capture entirely and silently produces a run with nothing to train on. `apply_current_policy()`, `policy_source()` and `current_prompt()` belong in the agent serving your users.
+
+## One shot, at startup
+
+```python
+import percepteye_agent_flywheel as fw
+from openai import OpenAI
+
+kw = fw.apply_current_policy(agent_id="my-coding-agent")
+if kw:                                    # {} means keep your current config
+    client = OpenAI(base_url=kw["base_url"], api_key=kw["api_key"])
+    model = kw["model"]
+```
+
+One `GET /policy/current`. **It donates nothing** — no registration, no rollouts, no capture — so it is the whole integration for a team that wants the trained model and nothing else.
+
+| key | value |
+|:--|:--|
+| `base_url` | OpenAI-compatible base URL, e.g. `https://gw.percepteye.ai/v1` |
+| `api_key` | resolved credential (see below) |
+| `model` | the model name to send; `""` when the control plane did not name one |
+
+**`{}` means keep your current configuration.** It is the answer for every reason you cannot act, and they deliberately read the same: nothing deployed, no `endpoint` in the body, no `base_url`, no credential to authenticate with, an unreachable control plane, or no URL and key configured at all. An endpoint you cannot authenticate to is not usable, so it is returned as "nothing to apply" here rather than as 401s at your first request.
+
+**It never raises into your startup.** An unreachable control plane must never stop an agent from serving its users.
+
+The credential is resolved in this order, and never invented:
+
+| order | source |
+|:--|:--|
+| 1 | the `api_key=` argument |
+| 2 | the env var named by the response's `endpoint.api_key_env` |
+| 3 | `PERCEPTEYE_API_KEY` |
+
+`set_env=True` additionally exports `OPENAI_BASE_URL` and `OPENAI_API_KEY` for libraries that read the environment instead of accepting arguments. It is off by default because mutating the process environment is a side effect a caller should ask for, and it does **not** export the model.
+
+Two lower-level functions sit underneath, both exported:
+
+| function | returns |
+|:--|:--|
+| `current_policy(agent_id=...)` | the raw `/policy/current` body, unparsed |
+| `endpoint_kwargs(body, api_key=None)` | the one place a body becomes client kwargs |
+
+`endpoint_kwargs()` is extracted rather than inlined because it now has two callers — `apply_current_policy()` and `PolicySource` — and a caller who unpacks the body slightly differently is a caller sampling from something other than what was trained.
+
+## A handle that keeps up
+
+`apply_current_policy()` is one-shot, and the client you build from it lives for the process. So the policy your agent runs is the policy that was current when that process started.
+
+The obvious cost is that a promotion waits for your next deploy. **The larger cost runs the other way: a regressed candidate could only be withdrawn by redeploying your production agent.** The control plane can demote it instantly and nothing happens — every running process keeps sampling the bad model until someone ships. Delayed promotion is an inconvenience; delayed rollback is an incident, and one whose remedy sits in your deploy pipeline rather than ours. `policy_source()` is the transport for rollback first and promotion second, and its design follows from that ordering.
+
+```python
+policy = fw.policy_source(agent_id="my-coding-agent", ttl_s=300)
+
+while True:                       # per turn, or per request
+    snap = policy.current()
+    if snap.changed:              # rebuild ONLY on an actual change
+        client = OpenAI(base_url=snap.base_url, api_key=snap.api_key)
+        model = snap.model
+    ...
+```
+
+**Call `current()` per turn.** It is the natural unit for an agent and it is the recommendation. A caller who calls it once has re-created the problem the handle exists to solve.
+
+### The snapshot
+
+`PolicySnapshot` is a frozen dataclass returned by value, because production agents are concurrent: a caller holding a snapshot across an in-flight request must be unaffected by a refresh completing underneath them.
+
+| field | type | meaning |
+|:--|:--|:--|
+| `base_url` · `api_key` · `model` | `str` | what to run; empty when nothing is deployed or the control plane has never answered |
+| `changed` | `bool` | `True` on the **one** snapshot that first reports a change |
+| `stale_for_s` | `float` | `0.0` while refreshes succeed; seconds **past the TTL** while they fail |
+| `last_refresh_ok` | `bool` | `False` after a failed attempt — the snapshot still stands |
+| `serving_generation` | `str` | the control plane's own answer to "is what I booted with still current?" |
+
+`bool(snap)` is truthy only when there is something to act on — the same meaning as `apply_current_policy()`'s `{}`. `snap.as_kwargs()` returns a dict identical in shape to it, so migrating from the one-shot function changes where the dict comes from and nothing else.
+
+**`changed` is an edge, and it is consumed by whoever observes it** — so a second caller does not rebuild a client that is already correct. Two threads sharing one handle will not both see the edge. Build one client per handle.
+
+**`serving_generation` is deliberately not what `changed` is computed from.** `changed` asks "must I rebuild my client?" and moves only when the endpoint does. The generation moves when *anything* about what to run moves — including the system prompt, which the snapshot does not carry and a client rebuild would not apply. A fleet holds this value and cycles a replica when it differs; a turn loop reads `changed`.
+
+**`stale_for_s` is the number to alert on.** It is the only outward sign that an agent is running a policy the control plane may have moved on from.
+
+### `on_change`
+
+```python
+src = fw.policy_source(agent_id="my-coding-agent", on_change=reconfigure)
+```
+
+It fires on **promotion and rollback alike** — any move in the `(base_url, api_key, model)` triple, including the first actionable answer, since without that the documented `if snap.changed:` usage would never build a client at all. It does **not** fire when a refresh fails, and it does not fire when the control plane answers "nothing deployed": withdrawal is expressed by deploying the base, not by an absence. Exceptions it raises are swallowed.
+
+### Nothing polls in the background
+
+There is no thread, timer or task in this package. The refresh runs **inside your `current()` call**, on the request that observed staleness — which is why its budget is one attempt and one second. A retry ladder would spend several users' latency, and the next stale observation retries naturally.
+
+| rule | value | why |
+|:--|:--|:--|
+| default TTL | `ttl_s=300.0` | |
+| server hint | the body's `ttl_s` beats your `ttl_s=` | the control plane knows its own promotion cadence and you do not |
+| floor | `MIN_TTL_S = 30.0` s, beats both | a misconfigured `ttl_s=1` across a fleet is a denial of service aimed at our own control plane |
+| jitter | ±10%, drawn **once** at construction | a fleet of replicas that boots together shares a TTL and would re-poll in lockstep, delivering a synchronized spike every TTL |
+| refresh budget | `REFRESH_TIMEOUT_S = 1.0` s, one attempt, no retries | it is spending a user's latency |
+
+Jitter is decided once per handle rather than per refresh, because the problem is separating handles from each other, not smearing one handle across the window. A server hint of `5` still polls at 30 s; a hint of `60` against `ttl_s=300` polls at roughly 60 s.
+
+Compare the one-shot functions, which build their client with the transport defaults — 30 s and up to four attempts. They run at startup and can afford it; the handle runs on a user's request path and cannot.
+
+### Serve-stale, always
+
+After the first call, `current()` returns the cached snapshot. **A failed refresh is a non-event**: the snapshot stands, `changed` stays `False`, `last_refresh_ok` goes `False`, and `stale_for_s` accumulates visibly.
+
+The naive reading of "fail open" would be to return the empty answer meaning "keep your current configuration" — but a handle that returns empty after having *had* a policy makes `changed` fire and the caller rebuild against the base model. **A control-plane blip would silently demote production from the trained model back to the untrained one**, which is strictly worse than serving a slightly stale policy.
+
+**No stampede.** Exactly one caller refreshes; everyone else is handed the cached snapshot immediately rather than queueing behind the lock. Fifty concurrent turns cost one request and forty-nine cache reads. Only the very first call can block, because there is nothing cached to serve instead — and even it fails open.
+
+`PolicySource` is a context manager, and `close()` releases the pooled connection and is idempotent.
+
+??? note "What `policy_source()` will not do"
+    | | |
+    |:--|:--|
+    | **It never chooses an arm.** | The agent is *told* its arm, which is what keeps results attributable. No client-side splitting, no fallback picking, no dice. |
+    | **It never damps a flapping control plane.** | If the assignment flips, the handle flips. Second-guessing an assignment is how a client stops being a faithful reader of one, and damping belongs on the side that knows why the assignment moved. |
+    | **It has no `set_env`.** | `apply_current_policy(set_env=True)` mutates the process environment once, at a moment you chose. Re-exporting `OPENAI_BASE_URL` on a timer is that same global mutation on a schedule, landing under whatever else the process happens to be doing. Read `snap.base_url`. |
+    | **It is never for `serve()`.** | See the warning at the top of this page. |
+
+## The prompt
+
+Training produces a better model *and* a better system prompt, co-optimized and gated by the same human approval.
+
+```python
+p = fw.current_prompt(agent_id="my-coding-agent")
+if p and p["sha256"] != my_current_prompt_sha:
+    ...                                   # your decision, not ours
+```
+
+A separate `GET /prompt/current`, deliberately not folded into `/policy/current`: that one is polled and identity-sized, and a system prompt is unbounded text, so putting it in the poll would make every tick carry a payload the caller already has.
+
+| field | meaning |
+|:--|:--|
+| `name` · `version` · `text` | the deliverable |
+| `sha256` | prompt identity — read this to tell whether it differs from what you run |
+| `candidate_kind` · `status` | e.g. `"replacement"`, `"approved"` |
+| `model_prompt_checksum` | the prompt identity stamped on the **model** at certification |
+| `stale_baseline` | `true` when the prompt you supplied as the baseline has changed since this was certified |
+
+The contract is a **pair**: this prompt was approved against that checkpoint, and applying it over a different one is not the thing that was approved. `stale_baseline` does not invalidate the deliverable — it was just shaped against a version of your prompt you no longer ship.
+
+**It is deliberately not applied for you, and that is the difference from `apply_current_policy()`.** Swapping a model endpoint is invisible to an agent's behavior; swapping its system prompt changes what it *does*. That is a decision for whoever owns the agent, so this hands back the text and stops.
+
+`{}` means **keep the prompt you have** — nothing has passed the approval gate, or the control plane could not answer. It never means "use no prompt".
+
+## `attach()` — evidence from live turns
+
+`serve()` donates capacity. `attach()` donates evidence, from turns you are already serving — same [adapters](python.md), same tri-state [outcomes](outcomes.md), same trajectory format, same absence contract, scoped around a live user turn instead of a claimed rollout.
+
+```python
+px = fw.attach(agent_id="support-agent", trajectory_root="/var/lib/percepteye")
+
+with px.turn(conversation_id=conv_id) as turn_id:
+    reply = agent.invoke(user_text)       # your agent, unmodified
+```
+
+**It captures. It never reroutes.** That is a property of how the adapters are bound, not a promise about the code: `attach()` binds them with `llm_url=""` and `api_key=""`, and both built-ins treat "no endpoint" as "do not touch routing". Bound by name, `LangChainAdapter` holds no chat model and its `_route()` returns at once; the ADK adapter never reads the URL at all. Attaching cannot re-point a single byte of production traffic.
+
+| parameter | default | notes |
+|:--|:--|:--|
+| `agent_id` | required | empty raises `ConfigurationError` |
+| `trajectory_root` | **required** | see below |
+| `adapters` | `"auto"` | binds every built-in whose framework is installed |
+| `register` | `True` | `False` skips the control-plane call entirely |
+| `control_plane_url` · `api_key` | env | `PERCEPTEYE_CONTROL_PLANE_URL` / `PERCEPTEYE_API_KEY` |
+
+**`trajectory_root` is required and that is deliberate.** Turns accumulate there as directories and nothing removes them, because until the contract carries a production turn there is nowhere to ship them and deleting a customer's only copy would be the worse failure. Naming the directory is how **retention becomes a decision somebody made** rather than a surprise. It is yours.
+
+With `register=True` the call makes exactly two outbound requests, once, at startup: `POST /agents` then `GET /policy/current`. It registers as `mode: "production"` — `serve()` sends `"rollout"`, and a training donor versus a production reader is the one distinction a `mode` on a registration exists to draw. `register=False` skips both, for a process that should make no outbound connection at all.
+
+**Everything fails open.** An unreachable control plane yields an attachment with `policy == {}` and costs you nothing else; a framework that cannot be bound yields `adapters_bound == ()` rather than a process that will not start. (`serve()` raises there instead, and correctly: a rollout with no capture is a wasted rollout, while a production turn with no capture is still a served user.) A registration the control plane *refuses* while the policy read succeeds emits a `RuntimeWarning` and nothing more — the two calls no longer share one `except`, so a payload intake dislikes cannot also demote you to the untrained policy.
+
+| on the `Attachment` | |
+|:--|:--|
+| `.turn(turn_id=None, conversation_id=None)` | context manager; yields the turn id |
+| `.read(turn_id)` | that turn's `list[ToolCallOutcome]`, or `None` if nothing was recorded |
+| `.policy` | what the control plane said to run — **informational here**; `attach()` does not act on it |
+| `.adapters_bound` | e.g. `("adk", "langchain")`; `()` is a real answer, not a failure |
+| `.close()` | unbinds the adapters; idempotent, never raises. Also a context manager |
+
+**A turn boundary is declared, not inferred.** Guessing where one request ends and the next begins is the same class of guess this SDK refuses everywhere else, and getting it wrong silently merges two users' tool calls into one record. Keep the yielded id: it is the join key for any outcome that arrives later than the turn does — the draft kept an hour afterwards, the pull request merged the next morning. Absent a `turn_id=` you get `t_` plus 16 hex characters; `conversation_id=` is written to a `conversation_id` file beside `tool_calls.jsonl` in the turn's directory.
+
+**Nothing in `turn()` can fail the turn.** If the directory cannot be created, capture is skipped and the body still runs.
+
+`record_tool_call()` works inside a turn exactly as it does inside a rollout. With the `otel` extra installed, a turn's span carries `percepteye.turn.id` rather than `percepteye.rollout.id`, so your own telemetry can tell the two apart too.
+
+**`PERCEPTEYE_AGENT_MODE` does not gate `attach()`.** That switch gates `serve()`, the surface that donates capacity. `attach()` *is* the production surface, and gating it on the same variable would mean the correct setting for a production agent was `PERCEPTEYE_AGENT_MODE=training`. To stop capture, don't call `attach()`, or pass `register=False` to keep it entirely local. See [Configuration](configuration.md).
+
+**What this does not do yet, stated plainly: it ships nothing.** The `flywheel/1` contract has no route for a production turn — `/health`, `/agents`, `/policy/current`, `/prompt/current` and `/rollouts/*` are the whole surface — so turns accumulate as trajectory directories under the root you name, and you own them until that route exists.
+
+## Which capture am I in?
+
+```python
+match fw.current_capture():
+    case ("rollout", rid): ...      # inside a serve() rollout, either isolation
+    case ("turn", tid):    ...      # inside attach().turn(), in production
+    case None:             ...      # neither
+```
+
+Three states, three answers, none collapsed into another. A `bool` would have been the smaller API and the wrong one: it answers "rollout?" with `False` for both production and no-capture-at-all — the same absence-as-zero collapse this package refuses for `outcome="unknown"` and for `tool_calls=None` versus `[]`.
+
+!!! warning "`current_rollout_id()` is not a rollout-versus-production test"
+    Despite the name, inside `attach().turn()` it returns that **turn's** id, because a production turn records through the same path. So `if fw.current_rollout_id():` is **true in production** and takes the rollout branch. Branch on `current_capture()` instead.
+
+    The name and the behavior are kept because `record_tool_call()` reads this function to decide where to append — narrowing it would silently disable production capture, trading a naming bug for a data-loss one.
+
+There is no prefix convention to lean on instead: a rollout id is opaque by contract, and you may pass your own `turn_id` to `Attachment.turn()`.

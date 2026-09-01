@@ -1,0 +1,140 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 900" width="1200" height="900" role="img" aria-label="The agent flywheel as a closed ring: your agent runs a rollout, Percepteye scores the observed outcomes and trains a policy, your production agent picks it up, and its live evidence feeds the next lap. A dashed trust boundary runs down the middle; the two stations on the left are processes you run, the two on the right are the control plane. Four numbered lanes cross the boundary.">
+<defs>
+<marker id="a58a6ff" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#58a6ff"/></marker>
+<marker id="aa371f7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a371f7"/></marker>
+<marker id="a3fb950" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#3fb950"/></marker>
+</defs>
+<rect x="0" y="0" width="1200" height="900" rx="0" fill="#0d1117"/>
+<circle cx="52" cy="52" r="17" fill="none" stroke="#58a6ff" stroke-width="1.6"/>
+<circle cx="52" cy="52" r="5.5" fill="none" stroke="#58a6ff" stroke-width="1.6"/>
+<line x1="52" y1="52" x2="52" y2="35" stroke="#58a6ff" stroke-width="1.4" transform="rotate(0 52 52)" opacity="0.75"/>
+<line x1="52" y1="52" x2="52" y2="35" stroke="#58a6ff" stroke-width="1.4" transform="rotate(90 52 52)" opacity="0.75"/>
+<line x1="52" y1="52" x2="52" y2="35" stroke="#58a6ff" stroke-width="1.4" transform="rotate(180 52 52)" opacity="0.75"/>
+<line x1="52" y1="52" x2="52" y2="35" stroke="#58a6ff" stroke-width="1.4" transform="rotate(270 52 52)" opacity="0.75"/>
+<text x="84" y="58" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="21" font-weight="700" fill="#e6edf3">the loop closes</text>
+<text x="258" y="58" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#8b949e">one import  ·  one call  ·  one runtime dependency</text>
+<text x="1148" y="58" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#3fb950" text-anchor="end">0 lines changed inside your agent</text>
+<line x1="600" y1="112" x2="600" y2="826" stroke="#30363d" stroke-width="1.4" stroke-dasharray="5 9"/>
+<rect x="548.045" y="92" width="103.91000000000001" height="24" rx="12" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+<text x="600" y="108" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#8b949e" text-anchor="middle" letter-spacing="1.1">TRUST BOUNDARY</text>
+<text x="52" y="134" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#58a6ff" letter-spacing="1.2">YOUR INFRASTRUCTURE</text>
+<text x="52" y="152" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681">your process · your credentials · your firewall</text>
+<text x="1148" y="134" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#a371f7" text-anchor="end" letter-spacing="1.2">PERCEPTEYE CONTROL PLANE</text>
+<text x="1148" y="152" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="end">you don't build it — you can watch every lap of it</text>
+<text x="52" y="184" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#8b949e" letter-spacing="1.2">ONCE, AT STARTUP</text>
+<text x="202" y="184" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5" font-weight="400" fill="#6e7681">before the first rollout, never during one</text>
+<rect x="52" y="200" width="380" height="104" rx="14" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+<rect x="52" y="214" width="3" height="76" rx="1.5" fill="#58a6ff"/>
+<text x="76" y="232" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="17" font-weight="700" fill="#e6edf3">describes your agent</text>
+<rect x="76" y="246" width="90.345" height="22" rx="11" fill="#58a6ff" stroke="#58a6ff" stroke-width="1" opacity="0.14"/>
+<rect x="76" y="246" width="90.345" height="22" rx="11" fill="none" stroke="#58a6ff" stroke-width="1" opacity="0.55"/>
+<text x="85" y="261.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#58a6ff">system prompt</text>
+<rect x="172.345" y="246" width="84.78" height="22" rx="11" fill="#58a6ff" stroke="#58a6ff" stroke-width="1" opacity="0.14"/>
+<rect x="172.345" y="246" width="84.78" height="22" rx="11" fill="none" stroke="#58a6ff" stroke-width="1" opacity="0.55"/>
+<text x="181.345" y="261.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#58a6ff">tool schemas</text>
+<rect x="263.125" y="246" width="95.91000000000001" height="22" rx="11" fill="#58a6ff" stroke="#58a6ff" stroke-width="1" opacity="0.14"/>
+<rect x="263.125" y="246" width="95.91000000000001" height="22" rx="11" fill="none" stroke="#58a6ff" stroke-width="1" opacity="0.55"/>
+<text x="272.125" y="261.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#58a6ff">sub-agent tree</text>
+<text x="76" y="292" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#8b949e">read from inside the process, after templating</text>
+<rect x="768" y="200" width="380" height="104" rx="14" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+<rect x="768" y="214" width="3" height="76" rx="1.5" fill="#a371f7"/>
+<text x="792" y="232" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="17" font-weight="700" fill="#e6edf3">the tasks worth training on</text>
+<text x="792" y="260" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#8b949e">derived from the tool surface you actually have</text>
+<text x="792" y="284" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681">not a list you enumerate, not a rubric you write</text>
+<line x1="450" y1="252" x2="750" y2="252" stroke="#58a6ff" stroke-width="1.6" marker-end="url(#a58a6ff)" opacity="1.0"/>
+<circle cx="600" cy="252" r="13" fill="#0d1117"/>
+<circle cx="600" cy="252" r="12" fill="#58a6ff" opacity="0.16"/>
+<circle cx="600" cy="252" r="12" fill="none" stroke="#58a6ff" stroke-width="1.2" opacity="0.7"/>
+<text x="600" y="256.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#58a6ff" text-anchor="middle">0</text>
+<text x="600" y="226" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e6edf3" text-anchor="middle">registers, on its own</text>
+<text x="600" y="278" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="middle">fw.serve() and fw.attach() both do it</text>
+<text x="76" y="330" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#6e7681">a CLI agent has no object to read, so it is warmed up once — well under a second — and described from that</text>
+<text x="1148" y="330" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#6e7681" text-anchor="end">opt out with introspect=False</text>
+<text x="52" y="358" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#8b949e" letter-spacing="1.2">THEN, EVERY LAP</text>
+<text x="190" y="358" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5" font-weight="400" fill="#6e7681">four lanes, and every one of them opened from your side</text>
+<rect x="52" y="380" width="380" height="132" rx="14" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+<rect x="52" y="396" width="3" height="100" rx="1.5" fill="#58a6ff"/>
+<text x="76" y="416" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="18" font-weight="700" fill="#e6edf3">your agent</text>
+<rect x="184" y="401" width="72.855" height="22" rx="11" fill="#3fb950" stroke="#3fb950" stroke-width="1" opacity="0.14"/>
+<rect x="184" y="401" width="72.855" height="22" rx="11" fill="none" stroke="#3fb950" stroke-width="1" opacity="0.55"/>
+<text x="193" y="416.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="600" fill="#3fb950">unchanged</text>
+<rect x="76" y="434" width="52.980000000000004" height="22" rx="11" fill="#58a6ff" stroke="#58a6ff" stroke-width="1" opacity="0.14"/>
+<rect x="76" y="434" width="52.980000000000004" height="22" rx="11" fill="none" stroke="#58a6ff" stroke-width="1" opacity="0.55"/>
+<text x="85" y="449.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#58a6ff">Python</text>
+<rect x="135.98000000000002" y="434" width="41.32" height="22" rx="11" fill="#58a6ff" stroke="#58a6ff" stroke-width="1" opacity="0.14"/>
+<rect x="135.98000000000002" y="434" width="41.32" height="22" rx="11" fill="none" stroke="#58a6ff" stroke-width="1" opacity="0.55"/>
+<text x="144.98000000000002" y="449.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#58a6ff">Node</text>
+<rect x="184.3" y="434" width="58.81" height="22" rx="11" fill="#58a6ff" stroke="#58a6ff" stroke-width="1" opacity="0.14"/>
+<rect x="184.3" y="434" width="58.81" height="22" rx="11" fill="none" stroke="#58a6ff" stroke-width="1" opacity="0.55"/>
+<text x="193.3" y="449.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#58a6ff">any CLI</text>
+<text x="76" y="484" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="12.5" font-weight="400" fill="#8b949e">fw.serve("my_package.agent:build")</text>
+<rect x="768" y="380" width="380" height="132" rx="14" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+<rect x="768" y="396" width="3" height="100" rx="1.5" fill="#a371f7"/>
+<text x="792" y="416" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="18" font-weight="700" fill="#e6edf3">scores what was observed</text>
+<rect x="792" y="434" width="43.19" height="22" rx="11" fill="#3fb950" stroke="#3fb950" stroke-width="1" opacity="0.14"/>
+<rect x="792" y="434" width="43.19" height="22" rx="11" fill="none" stroke="#3fb950" stroke-width="1" opacity="0.55"/>
+<circle cx="804" cy="445.0" r="3" fill="#3fb950"/>
+<text x="814" y="449.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="600" fill="#3fb950">ok</text>
+<rect x="843.19" y="434" width="67.57" height="22" rx="11" fill="#f85149" stroke="#f85149" stroke-width="1" opacity="0.14"/>
+<rect x="843.19" y="434" width="67.57" height="22" rx="11" fill="none" stroke="#f85149" stroke-width="1" opacity="0.55"/>
+<circle cx="855.19" cy="445.0" r="3" fill="#f85149"/>
+<text x="865.19" y="449.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="600" fill="#f85149">failed</text>
+<rect x="918.76" y="434" width="73.66499999999999" height="22" rx="11" fill="#d29922" stroke="#d29922" stroke-width="1" opacity="0.14"/>
+<rect x="918.76" y="434" width="73.66499999999999" height="22" rx="11" fill="none" stroke="#d29922" stroke-width="1" opacity="0.55"/>
+<circle cx="930.76" cy="445.0" r="3" fill="#d29922"/>
+<text x="940.76" y="449.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="600" fill="#d29922">unknown</text>
+<text x="792" y="484" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#8b949e">unknown is never rounded up to ok</text>
+<rect x="768" y="672" width="380" height="132" rx="14" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+<rect x="768" y="688" width="3" height="100" rx="1.5" fill="#a371f7"/>
+<text x="792" y="708" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="18" font-weight="700" fill="#e6edf3">trains + promotes</text>
+<rect x="792" y="726" width="70.47" height="22" rx="11" fill="#a371f7" stroke="#a371f7" stroke-width="1" opacity="0.14"/>
+<rect x="792" y="726" width="70.47" height="22" rx="11" fill="none" stroke="#a371f7" stroke-width="1" opacity="0.55"/>
+<text x="801" y="741.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#a371f7">the model</text>
+<rect x="869.47" y="726" width="117.11" height="22" rx="11" fill="#a371f7" stroke="#a371f7" stroke-width="1" opacity="0.14"/>
+<rect x="869.47" y="726" width="117.11" height="22" rx="11" fill="none" stroke="#a371f7" stroke-width="1" opacity="0.55"/>
+<text x="878.47" y="741.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#a371f7">the system prompt</text>
+<text x="792" y="776" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#8b949e">co-optimized, and gated by the same approval</text>
+<rect x="52" y="672" width="380" height="132" rx="14" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+<rect x="52" y="688" width="3" height="100" rx="1.5" fill="#58a6ff"/>
+<text x="76" y="708" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="18" font-weight="700" fill="#e6edf3">your production agent</text>
+<text x="76" y="734" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="12.5" font-weight="400" fill="#58a6ff">fw.apply_current_policy()</text>
+<text x="76" y="776" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#8b949e">promotion and rollback reach it with no redeploy</text>
+<line x1="750" y1="408" x2="450" y2="408" stroke="#a371f7" stroke-width="1.6" marker-end="url(#aa371f7)" opacity="1.0"/>
+<circle cx="600" cy="408" r="13" fill="#0d1117"/>
+<circle cx="600" cy="408" r="12" fill="#a371f7" opacity="0.16"/>
+<circle cx="600" cy="408" r="12" fill="none" stroke="#a371f7" stroke-width="1.2" opacity="0.7"/>
+<text x="600" y="412.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#a371f7" text-anchor="middle">1</text>
+<text x="600" y="382" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e6edf3" text-anchor="middle">claims a task</text>
+<text x="600" y="434" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="middle">generated from your real tool surface</text>
+<line x1="450" y1="490" x2="750" y2="490" stroke="#58a6ff" stroke-width="1.6" marker-end="url(#a58a6ff)" opacity="1.0"/>
+<circle cx="600" cy="490" r="13" fill="#0d1117"/>
+<circle cx="600" cy="490" r="12" fill="#58a6ff" opacity="0.16"/>
+<circle cx="600" cy="490" r="12" fill="none" stroke="#58a6ff" stroke-width="1.2" opacity="0.7"/>
+<text x="600" y="494.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#58a6ff" text-anchor="middle">2</text>
+<text x="600" y="464" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e6edf3" text-anchor="middle">rollout + per-call outcomes</text>
+<text x="600" y="516" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="middle">ok · failed · unknown, per tool call</text>
+<line x1="750" y1="700" x2="450" y2="700" stroke="#a371f7" stroke-width="1.6" marker-end="url(#aa371f7)" opacity="1.0"/>
+<circle cx="600" cy="700" r="13" fill="#0d1117"/>
+<circle cx="600" cy="700" r="12" fill="#a371f7" opacity="0.16"/>
+<circle cx="600" cy="700" r="12" fill="none" stroke="#a371f7" stroke-width="1.2" opacity="0.7"/>
+<text x="600" y="704.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#a371f7" text-anchor="middle">3</text>
+<text x="600" y="674" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e6edf3" text-anchor="middle">the promoted policy</text>
+<text x="600" y="726" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="middle">an endpoint your agent already calls</text>
+<line x1="450" y1="782" x2="750" y2="782" stroke="#58a6ff" stroke-width="1.6" marker-end="url(#a58a6ff)" opacity="1.0"/>
+<circle cx="600" cy="782" r="13" fill="#0d1117"/>
+<circle cx="600" cy="782" r="12" fill="#58a6ff" opacity="0.16"/>
+<circle cx="600" cy="782" r="12" fill="none" stroke="#58a6ff" stroke-width="1.2" opacity="0.7"/>
+<text x="600" y="786.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#58a6ff" text-anchor="middle">4</text>
+<text x="600" y="756" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e6edf3" text-anchor="middle">live evidence, via fw.attach()</text>
+<text x="600" y="808" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="middle">captured from the turns you already serve</text>
+<line x1="958" y1="522" x2="958" y2="660" stroke="#a371f7" stroke-width="1.4" marker-end="url(#aa371f7)" opacity="1.0"/>
+<rect x="877.9075" y="550" width="160.185" height="22" rx="11" fill="#0d1117"/>
+<text x="958" y="565" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="middle">scored, then trained on</text>
+<line x1="242" y1="660" x2="242" y2="522" stroke="#3fb950" stroke-width="1.4" marker-end="url(#a3fb950)" opacity="1.0"/>
+<rect x="128.385" y="550" width="227.23000000000002" height="22" rx="11" fill="#0d1117"/>
+<text x="242" y="565" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#3fb950" text-anchor="middle" opacity="0.9">the better agent runs the next lap</text>
+<line x1="52" y1="842" x2="1148" y2="842" stroke="#30363d" stroke-width="1"/>
+<text x="52" y="868" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#e6edf3">every lane is opened from your side</text>
+<text x="284" y="868" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#6e7681">no inbound port  ·  no public DNS  ·  no container  ·  no GPU</text>
+<text x="1148" y="868" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#58a6ff" text-anchor="end">outbound only</text>
+</svg>

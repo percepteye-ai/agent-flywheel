@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="Agent Flywheel">
+  <g fill="none" stroke="#2563eb" stroke-width="2" stroke-linecap="round">
+    <circle cx="16" cy="16" r="11"/>
+    <circle cx="16" cy="16" r="3.5"/>
+    <path d="M16 5 V12"/><path d="M27 16 H20"/><path d="M16 27 V20"/><path d="M5 16 H12"/>
+  </g>
+</svg>

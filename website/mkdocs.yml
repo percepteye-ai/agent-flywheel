@@ -1,0 +1,114 @@
+site_name: Agent Flywheel
+site_description: Self-improving agents through continual learning. Your agent keeps running in your process, unchanged.
+site_url: https://docs.percepteye.ai/flywheel/
+repo_url: https://github.com/percepteye-ai/agent-flywheel
+repo_name: percepteye-ai/agent-flywheel
+edit_uri: ""
+copyright: MIT © Percepteye
+
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  language: en
+  favicon: assets/favicon.svg
+  logo: assets/mark.svg
+  icon:
+    repo: fontawesome/brands/github
+  font:
+    text: Inter
+    code: JetBrains Mono
+  features:
+    # Top-level sections become tabs across the header, the way the reference
+    # sites lay out Guides / API / Changelog.
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.top
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tracking
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Match your system
+    - media: "(prefers-color-scheme: light)"
+      scheme: flywheel-light
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light
+
+extra_css:
+  - stylesheets/flywheel.css
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      permalink_title: Link to this section
+      toc_depth: 3
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+plugins:
+  - search
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/percepteye-ai/agent-flywheel
+      name: The SDK on GitHub
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/percepteye-agent-flywheel/
+      name: The package on PyPI
+  generator: false
+
+nav:
+  - Guides:
+      - Overview: index.md
+      - Quickstart: quickstart.md
+      - How the loop closes: how-it-works.md
+      - Outcomes: outcomes.md
+      - Production: production.md
+  - Integrations:
+      - Python agents: python.md
+      - Node harnesses: node.md
+      - CLI and other languages: cli.md
+  - Reference:
+      - Configuration: configuration.md
+      - The contract: contract.md
+      - FAQ: faq.md
