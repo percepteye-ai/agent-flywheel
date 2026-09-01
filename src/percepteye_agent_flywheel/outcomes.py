@@ -66,7 +66,6 @@ _current_trajectory_dir: ContextVar[str | None] = ContextVar(
 _current_scope_kind: ContextVar[str | None] = ContextVar(
     "percepteye_current_scope_kind", default=None
 )
-_write_lock = threading.Lock()
 _warned_no_destination = False
 
 
@@ -215,14 +214,150 @@ def record_tool_call(
     path = _trajectory_path(rid)
     if path is None:
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(rec.to_wire(), default=str, ensure_ascii=False)
-    # Append-only, one line per call, flushed. A crash mid-rollout leaves every
-    # call recorded up to that point rather than nothing.
-    with _write_lock, path.open("a", encoding="utf-8") as fh:
-        fh.write(line + "\n")
-        fh.flush()
+    _append(path, line)
 
+
+
+class _Sink:
+    """One open append handle per trajectory file, with its own lock.
+
+    Two things were wrong with opening the file per call.
+
+    It was SLOW: open + write + flush + close cost ~18us of the ~38us it took
+    to record one outcome, and holding the handle instead costs ~1.2us -- the
+    same work, 15x cheaper, for a file that is appended to hundreds of times
+    and read once.
+
+    And it did not scale. The lock was process-global and was held across the
+    whole open/write/close, so every recording thread in the process queued
+    behind every other one even when they were writing to DIFFERENT rollouts.
+    Measured: ~20,000 records/second flat from 1 to 8 threads, with per-call
+    latency 8.7x worse at 8. The contention was on the lock, not the GIL --
+    with the write ablated the same code showed no inflation at any thread
+    count. A lock per file makes concurrent turns independent, which is what
+    they always were.
+
+    The handle is opened LAZILY, on the first record. A turn that records
+    nothing now costs no file and no directory -- see `Attachment.turn`.
+    """
+
+    __slots__ = ("_broken", "_fh", "_lock", "_path")
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._lock = threading.Lock()
+        self._fh: Any = None
+        self._broken = False
+
+    def write(self, line: str) -> None:
+        """Append one record. NEVER raises into the caller.
+
+        Creating the directory moved from turn-entry to here, which moved the
+        failure with it: an unwritable trajectory root used to be caught by
+        `Attachment.turn` and skip capture for that turn, and would otherwise
+        now surface inside `record_tool_call` in the middle of a customer's
+        tool. A capture bug costs the observation and nothing else -- so the
+        sink disables itself, says so once, and the turn carries on.
+        """
+        if self._broken:
+            return
+        try:
+            self._write(line)
+        except OSError as exc:
+            self._broken = True
+            warnings.warn(
+                f"[percepteye] could not write the trajectory at "
+                f"{self._path.parent}: {type(exc).__name__}: {exc}. Outcomes "
+                f"for this trajectory are NOT being recorded. Capture is "
+                f"disabled for it; nothing else is affected.",
+                RuntimeWarning,
+                stacklevel=4,
+            )
+
+    def _write(self, line: str) -> None:
+        with self._lock:
+            if self._fh is None:
+                # Created here rather than at scope entry, so the directory is
+                # a consequence of having something to put in it.
+                self._path.parent.mkdir(parents=True, exist_ok=True)
+                self._fh = self._path.open("a", encoding="utf-8")
+            self._fh.write(line + "\n")
+            # Flushed, never fsynced. Flushing puts the record in the OS page
+            # cache, which survives this process dying -- a crashed agent, a
+            # SIGKILL on a blown deadline -- and that is the failure this
+            # capture path actually has to survive. fsync would additionally
+            # survive the machine losing power, at roughly 1-10ms per record
+            # against the ~20us the whole write costs now, which would make
+            # recording slower than most of the tool calls being recorded.
+            # The trade is deliberate: a machine crash loses recent outcomes.
+            self._fh.flush()
+
+    def close(self) -> None:
+        with self._lock:
+            if self._fh is not None:
+                try:
+                    self._fh.close()
+                finally:
+                    self._fh = None
+
+
+#: Open sinks, keyed by absolute path. Bounded by the number of trajectories
+#: this process has written to and released as each scope exits, so it does not
+#: grow with the number of records.
+_sinks: dict[str, _Sink] = {}
+_sinks_lock = threading.Lock()
+
+
+#: Set once, the first time a sink is actually opened.
+_atexit_registered = False
+
+
+def _close_all_sinks() -> None:
+    with _sinks_lock:
+        sinks = list(_sinks.values())
+        _sinks.clear()
+    for sink in sinks:
+        sink.close()
+
+
+def _sink_for(path: Path) -> _Sink:
+    global _atexit_registered
+    key = str(path)
+    with _sinks_lock:
+        sink = _sinks.get(key)
+        if sink is None:
+            sink = _sinks[key] = _Sink(path)
+            if not _atexit_registered:
+                # Registered HERE rather than at module scope, so importing
+                # this package remains completely inert -- no atexit hook, no
+                # thread, no file, no socket. It costs one hook only in a
+                # process that has actually recorded something.
+                #
+                # It exists for the environment-variable path: a child process
+                # given PERCEPTEYE_ROLLOUT_ID has no scope to exit, so nothing
+                # else would close its handle. Records are flushed on every
+                # write, so this closes a handle rather than saving data.
+                import atexit
+
+                atexit.register(_close_all_sinks)
+                _atexit_registered = True
+        return sink
+
+
+def _append(path: Path, line: str) -> None:
+    _sink_for(path).write(line)
+
+
+def _release(path_str: str | None) -> None:
+    """Close and forget the sink for one trajectory, if it was ever opened."""
+    if not path_str:
+        return
+    key = str(Path(path_str) / TOOL_CALLS_FILENAME)
+    with _sinks_lock:
+        sink = _sinks.pop(key, None)
+    if sink is not None:
+        sink.close()
 
 
 def _scope_kind() -> CaptureScope:
@@ -360,3 +495,8 @@ class _RolloutScope:
             _current_trajectory_dir.reset(self._tokens[1])
             _current_scope_kind.reset(self._tokens[2])
             self._tokens = []
+        # The handle lives exactly as long as the scope that writes through it.
+        # Without this the sink registry would grow one entry per turn for the
+        # life of the process, which is the leak that holding a handle open
+        # would otherwise trade for the speed.
+        _release(self._trajectory_dir)

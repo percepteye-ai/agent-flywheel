@@ -14,9 +14,16 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from ._http import ControlPlaneClient
+# NOT imported at module scope. `_http` pulls in httpx, which is 83-87% of
+# this package's import time and ~88% of its resident memory -- and a process
+# that only reads the promoted policy, or only captures locally, never opens a
+# socket at all. Deferring it means those customers stop paying for a transport
+# they do not use. `policy.py` has always done this; these were the paths that
+# forced it anyway.
+if TYPE_CHECKING:
+    from ._http import ControlPlaneClient
 from .contract import RolloutOutput, RolloutRequest
 from .errors import TransportError
 

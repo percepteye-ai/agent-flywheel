@@ -33,22 +33,37 @@ nobody read; this module will not repeat it.
 from __future__ import annotations
 
 import os
+import shutil
 import threading
+import time
 import uuid
 import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ._http import ControlPlaneClient
+# NOT imported at module scope. `_http` pulls in httpx, which is 83-87% of
+# this package's import time and ~88% of its resident memory -- and a process
+# that only reads the promoted policy, or only captures locally, never opens a
+# socket at all. Deferring it means those customers stop paying for a transport
+# they do not use. `policy.py` has always done this; these were the paths that
+# forced it anyway.
+if TYPE_CHECKING:
+    from ._http import ControlPlaneClient
 from .errors import ConfigurationError
-from .outcomes import Trajectory, _RolloutScope
+from .outcomes import Trajectory, _release, _RolloutScope
 
 __all__ = ["Attachment", "attach"]
 
 ENV_CONTROL_PLANE_URL = "PERCEPTEYE_CONTROL_PLANE_URL"
 ENV_API_KEY = "PERCEPTEYE_API_KEY"
+
+
+#: How many turns pass between automatic prunes when `retention_turns` is set.
+#: Amortises one directory scan over many turns; the ceiling is therefore
+#: `retention_turns + _PRUNE_EVERY`, not `retention_turns` exactly.
+_PRUNE_EVERY = 256
 
 
 class Attachment:
@@ -66,6 +81,7 @@ class Attachment:
         policy: dict[str, Any],
         unbinds: list[Any],
         adapters_bound: tuple[str, ...],
+        retention_turns: int | None = None,
     ) -> None:
         self.agent_id = agent_id
         self.trajectory_root = trajectory_root
@@ -81,6 +97,12 @@ class Attachment:
         self.adapters_bound = adapters_bound
         self._unbinds = unbinds
         self._closed = False
+        #: When set, `prune(keep_last=...)` runs itself. Checked every
+        #: _PRUNE_EVERY turns rather than every turn, because pruning is a
+        #: directory scan and doing one per user request would cost more than
+        #: the capture it is cleaning up after.
+        self._retention_turns = retention_turns
+        self._turns_since_prune = 0
         self._lock = threading.Lock()
 
     @contextmanager
@@ -97,24 +119,36 @@ class Attachment:
         refuses everywhere else, and getting it wrong silently merges two
         users' tool calls into one record.
 
-        Nothing in here can fail the turn. If the directory cannot be created,
-        capture is skipped for that turn and the body still runs.
+        Nothing in here can fail the turn. A trajectory that cannot be written
+        disables capture for itself and says so once; the body still runs.
+
+        **A turn that records nothing leaves nothing behind.** The directory is
+        created by the first write, not by entering the turn. It used to be
+        created here, unconditionally, so an agent that answered from context
+        without calling a tool still cost one directory -- and at a million
+        turns that was a third of a gigabyte and a million inodes of empty
+        directories, for turns that had nothing to say.
         """
         tid = turn_id or f"t_{uuid.uuid4().hex[:16]}"
         path = Path(self.trajectory_root) / tid
-        try:
-            path.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            # No destination, so nothing to scope. The turn is the customer's
-            # user request; it runs regardless of whether we can watch it.
-            yield tid
-            return
         if conversation_id:
+            # The one thing that still needs the directory up front, because it
+            # writes a file whether or not a tool is ever called.
             try:
+                path.mkdir(parents=True, exist_ok=True)
                 (path / "conversation_id").write_text(
                     str(conversation_id), encoding="utf-8")
             except OSError:
                 pass
+        if self._retention_turns is not None:
+            with self._lock:
+                self._turns_since_prune += 1
+                due = self._turns_since_prune >= _PRUNE_EVERY
+                if due:
+                    self._turns_since_prune = 0
+            if due:
+                self.prune(keep_last=self._retention_turns)
+
         with _RolloutScope(tid, str(path), kind="turn"):
             yield tid
 
@@ -126,6 +160,74 @@ class Attachment:
         not be rendered as an assertion that zero tool calls occurred.
         """
         return Trajectory(Path(self.trajectory_root) / turn_id).read()
+
+    def prune(
+        self,
+        *,
+        keep_last: int | None = None,
+        older_than_s: float | None = None,
+    ) -> int:
+        """Delete recorded turns from ``trajectory_root``. Returns how many.
+
+        The trajectory is append-only and nothing else removes it, so without
+        this a long-running production process accumulates one directory per
+        RECORDING turn forever -- roughly 2.4 GB and a million inodes per
+        million turns at typical record sizes, and far more if tool outputs are
+        large, because ``output`` is stored verbatim.
+
+        This is a method rather than a default because the trajectory is the
+        customer's data, sitting in a directory the customer named, and a
+        library that silently deletes it would be worse than one that grows.
+        Pass ``retention_turns=`` to :func:`attach` to have it called for you.
+
+        Args:
+            keep_last: keep this many most-recent turns, delete the rest.
+            older_than_s: delete turns last modified longer ago than this.
+
+        Both may be given; a turn is deleted if EITHER says so. Passing neither
+        deletes nothing and returns 0 -- an unqualified "prune" would be a
+        request to delete everything, and that is not a thing to infer.
+
+        Never raises. A turn that cannot be read or removed is left alone and
+        does not stop the others; retention failing must not take down the
+        process it was protecting.
+        """
+        if keep_last is None and older_than_s is None:
+            return 0
+
+        root = Path(self.trajectory_root)
+        try:
+            entries = [e for e in root.iterdir() if e.is_dir()]
+        except OSError:
+            return 0
+
+        def mtime(e: Path) -> float:
+            try:
+                return e.stat().st_mtime
+            except OSError:
+                return 0.0
+
+        # Newest first, so "keep_last" is a slice rather than a sort per turn.
+        entries.sort(key=mtime, reverse=True)
+        doomed: list[Path] = []
+        if keep_last is not None:
+            doomed.extend(entries[max(0, keep_last):])
+        if older_than_s is not None:
+            cutoff = time.time() - older_than_s
+            doomed.extend(e for e in entries[:max(0, keep_last or 0)]
+                          if mtime(e) < cutoff)
+
+        removed = 0
+        for e in dict.fromkeys(doomed):
+            # Release any handle we still hold on it first, or on a platform
+            # that refuses to unlink an open file this would silently no-op.
+            _release(str(e))
+            try:
+                shutil.rmtree(e)
+                removed += 1
+            except OSError:
+                continue
+        return removed
 
     def close(self) -> None:
         """Unbind the adapters. Idempotent, and never raises."""
@@ -157,6 +259,7 @@ def attach(
     api_key: str | None = None,
     adapters: list[str] | str | None = "auto",
     register: bool = True,
+    retention_turns: int | None = None,
 ) -> Attachment:
     """Bind capture in THIS process, for an agent already serving users.
 
@@ -174,6 +277,14 @@ def attach(
     carries a production turn there is nowhere to ship them and deleting a
     customer's only copy would be the worse failure. Naming the directory is
     how retention becomes a decision somebody made rather than a surprise.
+
+    ``retention_turns=N`` keeps only the N most recently written turns, pruning
+    on an interval so it costs one directory scan per 256 turns rather than one
+    per turn. Unset, NOTHING is deleted and the trajectory grows without bound:
+    roughly 2.4 GB and a million inodes per million recording turns, and more
+    if tool outputs are large. That default is deliberate -- the trajectory is
+    your data in a directory you named, and a library that silently deleted it
+    would be worse than one that grows -- but it is a decision, so make it.
 
     ``register=False`` skips the control-plane call entirely, for a process
     that should make no outbound connection at all.
@@ -228,6 +339,7 @@ def attach(
         client: ControlPlaneClient | None = None
         try:
             from . import __version__
+            from ._http import ControlPlaneClient
             from .contract import CONTRACT_VERSION
             from .transport import AttachTransport
 
@@ -304,4 +416,5 @@ def attach(
         policy=policy,
         unbinds=unbinds,
         adapters_bound=bound,
+        retention_turns=retention_turns,
     )

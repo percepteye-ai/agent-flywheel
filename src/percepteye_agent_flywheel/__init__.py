@@ -49,7 +49,6 @@ import warnings
 from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
-from ._http import ControlPlaneClient
 from .contract import (
     CONTRACT_VERSION,
     ExclusionReason,
@@ -293,6 +292,8 @@ def current_policy(
     key = api_key or os.environ.get(ENV_API_KEY)
     if not url or not key:
         return {}
+    from ._http import ControlPlaneClient
+
     client = ControlPlaneClient(base_url=url, api_key=key)
     try:
         from .transport import AttachTransport
@@ -350,6 +351,8 @@ def current_prompt(
     key = api_key or os.environ.get(ENV_API_KEY)
     if not url or not key:
         return {}
+    from ._http import ControlPlaneClient
+
     client = ControlPlaneClient(base_url=url, api_key=key)
     try:
         from .transport import AttachTransport
@@ -643,6 +646,8 @@ def serve(
 
     adir = artifacts_dir or os.path.join(os.getcwd(), ".percepteye-artifacts")
     os.makedirs(adir, exist_ok=True)
+
+    from ._http import ControlPlaneClient
 
     client = ControlPlaneClient(url, key)
     tr = AttachTransport(client, agent_id)

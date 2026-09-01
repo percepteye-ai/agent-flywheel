@@ -219,3 +219,42 @@ Three states, three answers, none collapsed into another. A `bool` would have be
     The name and the behavior are kept because `record_tool_call()` reads this function to decide where to append — narrowing it would silently disable production capture, trading a naming bug for a data-loss one.
 
 There is no prefix convention to lean on instead: a rollout id is opaque by contract, and you may pass your own `turn_id` to `Attachment.turn()`.
+
+## Retention
+
+The trajectory is append-only and nothing else removes it. Left alone it grows
+without bound — roughly **2.4 GB and a million inodes per million recording
+turns** at typical record sizes, and considerably more if your tool outputs are
+large, because `output` is stored verbatim.
+
+A turn that records nothing costs nothing: the directory is created by the first
+write, not by entering the turn.
+
+```python
+px = fw.attach(agent_id="a", trajectory_root="/var/lib/percepteye",
+               retention_turns=50_000)      # keep the most recent 50k turns
+
+px.prune(keep_last=10_000)                  # or do it yourself, when you choose
+px.prune(older_than_s=7 * 24 * 3600)
+```
+
+`retention_turns` prunes on an interval — one directory scan per 256 turns
+rather than one per turn — so the real ceiling is `retention_turns + 256`.
+
+!!! note "Nothing is deleted unless you ask"
+
+    Unset, `prune()` with no argument deletes nothing and returns 0. The
+    trajectory is your data in a directory you named, and a library that
+    silently deleted it would be worse than one that grows. But it *is* a
+    decision, so make it.
+
+## Durability
+
+Records are **flushed, never fsynced**. A flush puts the record in the OS page
+cache, which survives this process dying — a crashed agent, a `SIGKILL` on a
+blown deadline — and that is the failure capture actually has to survive.
+
+`fsync` would additionally survive the machine losing power, at roughly 1–10 ms
+per record against the ~13 µs the whole write costs. That would make recording
+slower than many of the tool calls being recorded. The trade is deliberate: **a
+machine crash loses recent outcomes.**

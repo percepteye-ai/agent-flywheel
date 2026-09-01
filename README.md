@@ -14,7 +14,7 @@ One import. One call. One runtime dependency.
 <br/>
 [![runtime dependencies](https://img.shields.io/badge/runtime_deps-1-f59e0b?style=for-the-badge)](#what-it-costs-to-integrate)
 [![lines changed in your agent](https://img.shields.io/badge/lines_changed_in_your_agent-0-ec4899?style=for-the-badge)](#zero-instrumentation-concretely)
-[![tests](https://img.shields.io/badge/tests-491_·_0_skips-22c55e?style=for-the-badge)](#development)
+[![tests](https://img.shields.io/badge/tests-509_·_0_skips-22c55e?style=for-the-badge)](#development)
 [![license](https://img.shields.io/badge/license-MIT-14b8a6?style=for-the-badge)](LICENSE)
 
 <img src="https://raw.githubusercontent.com/percepteye-ai/agent-flywheel/main/docs/assets/flywheel-overview.gif"
@@ -274,7 +274,7 @@ Every row is a structural property of this repository, checkable from it.
 | Environment variables required | **2** — URL and key, both overridable in code | [Configuration](#configuration) |
 | Frameworks captured with no instrumentation | **LangChain · LangGraph · Google ADK · OpenClaw · DeepSeek Harness · any OTel-GenAI CLI** | [`adapters/`](src/percepteye_agent_flywheel/adapters/), [`event_stream.py`](src/percepteye_agent_flywheel/event_stream.py) |
 | Languages | **Python by import path, anything else by argv** | [above](#runs-whatever-you-already-run) |
-| Tests | **491, zero skips permitted in CI** | `pytest` + [`ci.yml`](.github/workflows/ci.yml) |
+| Tests | **509, zero skips permitted in CI** | `pytest` + [`ci.yml`](.github/workflows/ci.yml) |
 | License | **MIT** | [LICENSE](LICENSE) |
 
 <details>
@@ -452,7 +452,7 @@ python -m venv .venv
 ./scripts/cross_language_abi_check.sh     # the JS suite, against the same Python reader
 ```
 
-491 tests at roughly a 1:1 test-to-source line ratio. Five CI jobs, each protecting a specific claim on this page:
+509 tests at roughly a 1:1 test-to-source line ratio. Five CI jobs, each protecting a specific claim on this page:
 
 | job | what it catches |
 |:--|:--|
