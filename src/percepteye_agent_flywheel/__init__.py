@@ -392,8 +392,33 @@ def endpoint_kwargs(
     ep = policy.get("endpoint")
     if not isinstance(ep, Mapping) or not ep.get("base_url"):
         return {}
+    # PRECEDENCE, and the order is the contract:
+    #
+    #   1. an explicit ``api_key=`` argument — the caller's own override always
+    #      wins, so a customer who wants full control keeps it;
+    #   2. ``endpoint.api_key`` from the control plane, when it sent one;
+    #   3. the environment variable the control plane NAMED;
+    #   4. ``PERCEPTEYE_API_KEY``.
+    #
+    # (2) exists for one case, and without it that case fails silently. A
+    # checkpoint promotion normally moves only ``model`` — base_url and the
+    # credential stay put, so an agent upgrades with nothing new. They do NOT
+    # stay put when the control plane moves an agent to a DIFFERENT provider:
+    # then base_url and the credential both change, and an agent cannot read an
+    # env var it was never given. Without (2) this function returns ``{}``, the
+    # caller keeps its previous configuration, and the agent FREEZES on its
+    # last policy — receiving no further upgrades and reporting nothing wrong.
+    #
+    # The value is never persisted or logged here; it goes straight into the
+    # client kwargs the caller builds, exactly like a key read from the
+    # environment.
     key_env = str(ep.get("api_key_env") or ENV_API_KEY)
-    key = api_key or os.environ.get(key_env) or os.environ.get(ENV_API_KEY)
+    key = (
+        api_key
+        or str(ep.get("api_key") or "").strip()
+        or os.environ.get(key_env)
+        or os.environ.get(ENV_API_KEY)
+    )
     if not key:
         return {}
     return {
