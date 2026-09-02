@@ -153,6 +153,64 @@ ARGV = [
 ]
 
 
+#: The agent id this flywheel serves under. Read once so the prompt pull and
+#: the registration cannot disagree about whose prompt is being applied.
+AGENT_ID = os.environ.get("PERCEPTEYE_AGENT_ID", "goose")
+
+
+def _trained_prompt_argv() -> list[str]:
+    """``["--system", <approved prompt>]``, or ``[]`` to keep goose's own.
+
+    THE SECOND HALF OF TRAINING, and the only one goose can accept. A run
+    co-optimizes a model AND a system prompt; ``apply_current_policy`` moves
+    the model, and until something applies the prompt the agent improves on one
+    axis only. goose takes it on the command line and nowhere else — there is
+    no prompt field on a rollout (``RolloutRequest`` deliberately carries no
+    configuration channel), so this is resolved once at startup exactly as
+    ``serve()`` resolves the policy, and for the same reason: a prompt that
+    changes under a running agent is the confound the control plane refuses on
+    its own training runs.
+
+    ``--system`` is ADDITIVE — it maps to goose's ``additional_system_prompt``
+    (cli.rs), not to a replacement — which is what makes this safe to apply
+    without knowing what goose put in its own prompt. The trained text layers
+    over goose's tool instructions instead of deleting them.
+
+    ``{}`` from the SDK means KEEP THE PROMPT YOU HAVE: nothing has passed the
+    approval gate for this agent, or the control plane could not answer. Both
+    return ``[]`` here, and neither is an error — an unreachable control plane
+    must never blank a running agent's instructions.
+
+    The SDK deliberately does NOT apply this for you, because swapping a
+    prompt changes what an agent does and that is the owner's call. Applying it
+    here IS that decision, made once, out loud, in the integration that owns
+    this deployment — and printed, because a prompt that changed with nothing
+    on stdout to say so is indistinguishable from one that did not.
+    """
+    try:
+        prompt = fw.current_prompt(agent_id=AGENT_ID)
+    except Exception as exc:  # never fail to serve over a prompt
+        print(f"[percepteye] prompt pull failed ({exc}); keeping goose's own.")
+        return []
+    text = (prompt or {}).get("text")
+    if not isinstance(text, str) or not text.strip():
+        print("[percepteye] prompt: none approved — keeping goose's own.")
+        return []
+    print(
+        f"[percepteye] prompt: applying v{prompt.get('version')} "
+        f"sha={str(prompt.get('sha256'))[:12]} ({len(text)} chars) as "
+        f"--system, ADDITIVE to goose's own."
+    )
+    # A PAIR, and worth saying when it does not hold. The prompt was approved
+    # against a specific checkpoint; over a different one it is not the thing
+    # that was approved. Reported rather than refused -- the operator asked for
+    # this agent's approved prompt and gets it -- but never silently.
+    if prompt.get("stale_baseline"):
+        print("[percepteye] prompt: WARNING stale_baseline — this was shaped "
+              "against a version of the prompt this agent no longer ships.")
+    return ["--system", text]
+
+
 def main() -> int:
     if _SCRUBBED:
         print(f"[percepteye] scrubbed goose routing overrides: {', '.join(_SCRUBBED)}")
@@ -186,9 +244,11 @@ def main() -> int:
     if plugin is not None:
         print(f"[percepteye] hook plugin: {plugin}")
 
+    argv = list(ARGV) + _trained_prompt_argv()
+
     return fw.serve(
-        ARGV,
-        agent_id=os.environ.get("PERCEPTEYE_AGENT_ID", "goose"),
+        argv,
+        agent_id=AGENT_ID,
         input_shape="text",
         # TRUE, and backed by the hook plugin at
         # https://github.com/percepteye-ai/agent-flywheel-hooks — which main()
