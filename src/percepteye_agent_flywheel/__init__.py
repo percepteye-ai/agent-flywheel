@@ -68,7 +68,13 @@ from .errors import (
     RoutingNotInstallable,
     TransportError,
 )
-from .host_description import WARMUP_PROMPT, read_discovered_agent, warm_up_command
+from .host_description import WARMUP_PROMPT, warm_up_command
+
+# Re-exported, not used in this module. The redundant alias is the
+# explicit-re-export form: it keeps `from percepteye_agent_flywheel import
+# read_discovered_agent` working -- which it does today -- without adding the
+# name to __all__ and thereby claiming it as a supported public surface.
+from .host_description import read_discovered_agent as read_discovered_agent
 from .introspection import DiscoveredAgent, ToolDefinition
 from .introspection import introspect as introspect_agent
 from .isolation import unroutable_providers_present
