@@ -1,0 +1,40 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "name": "percepteye-record-ok",
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/percepteye_record.py\"",
+            "description": "Record a succeeded tool call into the flywheel trajectory"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "name": "percepteye-record-failed",
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/percepteye_record.py\"",
+            "description": "Record a failed tool call into the flywheel trajectory"
+          }
+        ]
+      }
+    ],
+    "AfterTool": [
+      {
+        "hooks": [
+          {
+            "name": "percepteye-record",
+            "type": "command",
+            "command": "python3 \"${extensionPath}/scripts/percepteye_record.py\"",
+            "description": "Record a tool call outcome into the flywheel trajectory"
+          }
+        ]
+      }
+    ]
+  }
+}
