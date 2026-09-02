@@ -179,6 +179,20 @@ def test_argv_pins_the_routed_provider_and_bounds_the_episode(tmp_path):
     assert spec[:2] == ["goose", "run"]
     assert "--provider" in spec and spec[spec.index("--provider") + 1] == "openai"
     assert "--max-turns" in spec
-    # Task on stdin, and no session file between rollouts.
+    # Task on stdin.
     assert "-i" in spec and spec[spec.index("-i") + 1] == "-"
-    assert "--no-session" in spec
+    # A NAMED session, and deliberately not `--no-session` (they are mutually
+    # exclusive). `maybe_update_name` returns early on `user_set_name`, which
+    # `--name` sets — and that is the only way to stop goose spending a
+    # COMPLETION on a 3-5 word session title. Under a rollout that title
+    # authenticates as the rollout, lands as inference_calls seq 0, passes the
+    # logprobs-only trainable predicate, and is emitted as a GRPO row carrying
+    # the episode's advantage sign while diluting every real decision to
+    # adv/(K+1). Measured: 2 completions per run before this flag, 1 after.
+    assert "--name" in spec and spec[spec.index("--name") + 1]
+    assert "--no-session" not in spec, (
+        "`--no-session` reintroduces the session-naming completion")
+    # The tool catalogue is a property of the rollout, not of whatever
+    # `goose configure` last wrote: 0 tools before this pair, 5 after.
+    assert "--no-profile" in spec
+    assert "--with-builtin" in spec and spec[spec.index("--with-builtin") + 1]

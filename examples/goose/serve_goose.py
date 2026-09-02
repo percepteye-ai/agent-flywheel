@@ -113,9 +113,35 @@ ARGV = [
     # stdin" (cli.rs :: parse_run_input). The SDK also exports it as
     # PERCEPTEYE_TURN_INPUT, which goose does not read.
     "-i", "-",
-    # No session file. These are automated runs and a session per rollout is
-    # both leakage between rollouts and litter on disk.
-    "--no-session",
+    # A NAMED SESSION, and it is `--no-session` that had to go — the two are
+    # mutually exclusive ("the argument '--no-session' cannot be used with
+    # '--name'"). This is not about sessions at all; it is the only way to stop
+    # goose spending a COMPLETION on naming one.
+    #
+    # goose opens every run by asking the model for a 3-5 word session title.
+    # That call goes through the same OPENAI_BASE_URL, so under a rollout it
+    # authenticates as the rollout and lands as `inference_calls` seq 0 — and
+    # the trainable predicate tests only "does it carry logprobs", which the
+    # managed sampler attaches to every completion. So the title became
+    # transition 0 of the trajectory, inherited the task text as its input,
+    # was emitted as a GRPO row whose target is a session title carrying the
+    # episode's advantage sign, and inflated the transition count so every
+    # REAL decision trained at adv/(K+1) instead of adv/K. It is also the call
+    # the scaffold fingerprint is computed from, so `agent_fingerprint_sha`
+    # was sha256 of `{"tools": null}` for every rollout and the 5-tool block
+    # never entered it.
+    #
+    # `maybe_update_name` returns early on `session.user_set_name`
+    # (session_manager.rs:592), and `--name` is what sets it
+    # (cli.rs:456-470). MEASURED: 2 completions per run before, 1 after, and
+    # the survivor is the agent's own turn carrying all 5 tools.
+    #
+    # The leakage `--no-session` was guarding against does not appear: two
+    # consecutive runs under the SAME name each started from 2 messages
+    # (system + user), so nothing carries over. What it costs is a row per
+    # rollout in goose's sessions DB — litter, where the alternative was a
+    # corrupted gradient.
+    "--name", os.environ.get("GOOSE_SESSION_NAME", "percepteye-rollout"),
     # Quiet: stdout is the model's final response and nothing else, which is
     # what the SDK records as `final_text`. goose's `stream-json` format was
     # the obvious choice here and is the WRONG one now — tool outcomes arrive
