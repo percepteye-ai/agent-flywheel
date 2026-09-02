@@ -252,6 +252,7 @@ Branch on this, not on `current_rollout_id()` — that one answers the narrower 
 | **OpenClaw** | ⬢ Node | `openclaw plugins install percepteye-agent-flywheel` |
 | **DeepSeek Harness** | ⬢ Node | `dsh plugin --profile <name> add percepteye-agent-flywheel` |
 | **prime-agent** | ⌘ CLI | argv + `--mode json` event stream — **[full worked example →](examples/prime_agent/)** |
+| **goose** | ⌘ CLI | argv + a [hook plugin](https://github.com/percepteye-ai/agent-flywheel-hooks) for outcomes — **[worked example →](examples/goose/)** |
 | **opencode** | ⌘ CLI | `fw.serve(["opencode", "run"], ...)` — nothing added to the binary |
 | **anything else with a CLI** | ⌘ CLI | argv list; outcomes free if it logs [OTel GenAI events](#runs-whatever-you-already-run) |
 
