@@ -196,3 +196,113 @@ def test_argv_pins_the_routed_provider_and_bounds_the_episode(tmp_path):
     # `goose configure` last wrote: 0 tools before this pair, 5 after.
     assert "--no-profile" in spec
     assert "--with-builtin" in spec and spec[spec.index("--with-builtin") + 1]
+
+
+# ── the recorder as a SUBPROCESS, which is what the contract actually is ────
+#
+# Restored with the payload. When the plugin lived in its own repository this
+# coverage was lost: the deleted suite's docstring put it exactly right — "the
+# plugin's contract is a SUBPROCESS and a FILE, not a function: goose spawns
+# `python3 scripts/percepteye_record.py`, pipes a JSON event to its stdin". A
+# test that imports and calls `_record` proves something the host never does.
+
+
+def _fire(event, env_extra, script=None):
+    """Drive the real recorder the way goose does: argv, JSON on stdin."""
+    from percepteye_agent_flywheel.hosts import RECORDER
+
+    return subprocess.run(
+        [sys.executable, str(script or RECORDER)],
+        input=json.dumps(event), text=True, capture_output=True,
+        env={**os.environ, **env_extra},
+    )
+
+
+def _goose_turn(traj_dir):
+    """The four event shapes one goose turn actually emits."""
+    env = {"PERCEPTEYE_TRAJECTORY_DIR": str(traj_dir)}
+    _fire({"event": "UserPromptSubmit", "session_id": "s1",
+           "message": "Write solve.py"}, env)
+    _fire({"event": "PostToolUse", "session_id": "s1", "tool_name": "write",
+           "tool_input": {"path": "solve.py"}, "tool_call_id": "c1"}, env)
+    _fire({"event": "PostToolUseFailure", "session_id": "s1",
+           "tool_name": "shell", "tool_input": {"command": "false"}}, env)
+    _fire({"event": "Stop", "session_id": "s1",
+           "last_assistant_message": "Created solve.py",
+           "working_dir": "/w"}, env)
+
+
+def test_turn_records_never_corrupt_the_tool_call_file(tmp_path):
+    """THE reason turns get their own file.
+
+    ``Trajectory.read`` builds rows with REQUIRED subscripts and counts anything
+    else as ``malformed``; that becomes ``tool_calls_omitted_count``, and
+    non-zero forbids the training grade. So a task or answer record in
+    ``tool_calls.jsonl`` would not be politely ignored by an older reader — it
+    would silently demote the rollout out of training.
+    """
+    _goose_turn(tmp_path)
+    traj = Trajectory(tmp_path)
+    calls = traj.read()
+    assert traj.malformed == 0, "turn records leaked into tool_calls.jsonl"
+    assert [(c.name, c.outcome) for c in calls] == [("write", "ok"), ("shell", "failed")]
+
+
+def test_the_turn_file_carries_the_task_and_the_answer(tmp_path):
+    """Without these the trajectory is tool calls with no task and no answer."""
+    _goose_turn(tmp_path)
+    rows = [json.loads(line) for line in
+            (tmp_path / "turns.jsonl").read_text().splitlines() if line.strip()]
+    assert [r["kind"] for r in rows] == ["task", "answer"]
+    assert rows[0]["text"] == "Write solve.py"
+    assert rows[1]["text"] == "Created solve.py"
+    assert rows[1]["working_dir"] == "/w"
+
+
+def test_capture_needs_no_rollout_and_no_worker(tmp_path):
+    """The line that made zero-instrumentation impossible.
+
+    The recorder used to return 0 unless ``PERCEPTEYE_TRAJECTORY_DIR`` was set,
+    and the only thing that ever set it was an external worker — so the plugin's
+    own day-one promise ("your agent's real tool failure rate", no account, no
+    network) was unreachable unless the customer exported it by hand, which is
+    what the report tool's help text still tells them to do.
+    """
+    env = {k: v for k, v in os.environ.items()
+           if k != "PERCEPTEYE_TRAJECTORY_DIR"}
+    env["PERCEPTEYE_HOME"] = str(tmp_path)
+    _fire({"event": "PostToolUse", "session_id": "sess-42",
+           "tool_name": "shell", "tool_input": {}}, env)
+    assert (tmp_path / "turns" / "sess-42" / "tool_calls.jsonl").is_file()
+
+
+def test_capture_has_a_kill_switch(tmp_path):
+    """Default ON, per the standing rule — but a switch that turns it off."""
+    env = {k: v for k, v in os.environ.items()
+           if k != "PERCEPTEYE_TRAJECTORY_DIR"}
+    env["PERCEPTEYE_HOME"] = str(tmp_path)
+    env["PERCEPTEYE_CAPTURE"] = "0"
+    _fire({"event": "PostToolUse", "session_id": "sess-99",
+           "tool_name": "shell", "tool_input": {}}, env)
+    assert not (tmp_path / "turns").exists()
+
+
+def test_a_session_with_no_id_is_not_guessed_at(tmp_path):
+    """Two concurrent sessions sharing one file are two half-turns and no
+    trajectory. With nothing to key on, record nothing."""
+    env = {k: v for k, v in os.environ.items()
+           if k != "PERCEPTEYE_TRAJECTORY_DIR"}
+    env["PERCEPTEYE_HOME"] = str(tmp_path)
+    _fire({"event": "PostToolUse", "tool_name": "shell", "tool_input": {}}, env)
+    assert not (tmp_path / "turns").exists()
+
+
+def test_the_recorder_never_fails_the_agent_and_says_nothing(tmp_path):
+    """Both invariants, and ``Stop`` is a BLOCKING event whose chain can deny —
+    goose reads a denial from exit code 2 or a JSON verdict on stdout, so these
+    two properties are what make subscribing it safe."""
+    for event in ({}, {"event": "Stop"}, {"garbage": True},
+                  {"event": "PostToolUse", "tool_name": None}):
+        r = _fire(event, {"PERCEPTEYE_TRAJECTORY_DIR": str(tmp_path)})
+        assert r.returncode == 0, (event, r.stderr)
+        assert r.stdout == "", (event, r.stdout)

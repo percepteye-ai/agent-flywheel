@@ -93,6 +93,13 @@ otel-test = ["opentelemetry-sdk>=1.20"]
 # class of silent breakage the probe design exists to remove.
 [project.entry-points."percepteye_agent_flywheel.adapters"]
 
+#: THE ONE COMMAND a CLI-agent customer runs. A wheel has no post-install hook
+#: -- pip executes no code from one -- so `pip install` alone can register
+#: nothing with the host, and it cannot be deferred to serve(): the customer
+#: this is for runs a binary and may never start a Python process at all.
+[project.scripts]
+percepteye = "percepteye_agent_flywheel.cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/percepteye_agent_flywheel"]
 
