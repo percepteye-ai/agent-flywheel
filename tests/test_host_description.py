@@ -9,7 +9,6 @@ at startup to make it do so.
 from __future__ import annotations
 
 import json
-import os
 import stat
 import sys
 
@@ -37,7 +36,12 @@ HOST_RECORD = {
             "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}}},
             "original_format": "openclaw_tool",
         },
-        {"name": "read", "description": "Read a file", "input_schema": {}, "original_format": "openclaw_tool"},
+        {
+            "name": "read",
+            "description": "Read a file",
+            "input_schema": {},
+            "original_format": "openclaw_tool",
+        },
     ],
     "discovered_model_config": {"provider": "anthropic", "model_name": "claude-opus-5"},
 }
@@ -68,7 +72,9 @@ def test_the_description_survives_to_wire_with_its_tool_names():
 
 def test_null_tools_means_not_observed_and_empty_means_observed_empty():
     """The absence contract, which the consumer grades on."""
-    assert parse_discovered_agent({**HOST_RECORD, "tool_definitions": None}).tool_definitions is None
+    assert (
+        parse_discovered_agent({**HOST_RECORD, "tool_definitions": None}).tool_definitions is None
+    )
     assert parse_discovered_agent({**HOST_RECORD, "tool_definitions": []}).tool_definitions == []
 
 
@@ -118,6 +124,11 @@ def _fake_cli(tmp_path, body: str, name: str = "fake_agent.py") -> list[str]:
     return [sys.executable, str(script)]
 
 
+# `%r` embeds HOST_RECORD as a Python literal into GENERATED SOURCE. Kept as
+# percent-format on purpose: an f-string or .format() gives brace characters
+# meaning inside a template whose whole job is emitting Python, so a dict or
+# set literal added here later would break confusingly or silently. UP031 is a
+# good rule with a bad fit for generated source.
 WRITES_THEN_SLEEPS = """
 import json, os, sys, time
 d = os.environ["PERCEPTEYE_TRAJECTORY_DIR"]
@@ -125,7 +136,7 @@ open(os.path.join(d, "discovered_agent.json"), "w").write(json.dumps(%r))
 # The real agent keeps running after its first model call; the warm-up must
 # not wait for it to finish.
 time.sleep(600)
-""" % (HOST_RECORD,)
+""" % (HOST_RECORD,)  # noqa: UP031
 
 
 def test_warm_up_reads_the_description_and_does_not_wait_for_the_agent(tmp_path):
@@ -148,6 +159,7 @@ def test_warm_up_passes_the_trajectory_dir_the_plugin_reads(tmp_path):
     assert (out / "seen").exists()
 
 
+# Percent-format on purpose -- same reason as WRITES_THEN_SLEEPS above.
 WRITES_THEN_ENRICHES = """
 import json, os, sys, time
 d = os.environ["PERCEPTEYE_TRAJECTORY_DIR"]
@@ -160,7 +172,7 @@ first = dict(rec); first["tool_definitions"] = rec["tool_definitions"][:1]
 open(p, "w").write(json.dumps(first))
 time.sleep(0.6)
 open(p, "w").write(json.dumps(rec))
-""" % (HOST_RECORD,)
+""" % (HOST_RECORD,)  # noqa: UP031
 
 
 def test_warm_up_waits_for_the_catalogue_to_settle(tmp_path):

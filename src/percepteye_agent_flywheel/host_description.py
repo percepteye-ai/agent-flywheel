@@ -54,7 +54,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .introspection import DiscoveredAgent, ModelConfig, ToolDefinition, _MAX_PROMPT_CHARS
+from .introspection import _MAX_PROMPT_CHARS, DiscoveredAgent, ModelConfig, ToolDefinition
 
 #: The file the companion plugin writes. One end of an ABI -- do not rename
 #: without renaming ``DISCOVERED_AGENT_FILENAME`` on the plugin side.
