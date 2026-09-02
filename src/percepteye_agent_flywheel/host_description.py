@@ -16,11 +16,25 @@ Every phase of the flywheel is downstream of it.
 
 The answer is not to reflect harder. It is to let the host describe the agent,
 because the host is the only party that can: it assembled the system prompt and
-it built the tool list it sent to the model. The companion plugin observes one
-``llm_input`` event and writes ``discovered_agent.json``; this module reads it.
-The two are one ABI, exactly as the plugin's trajectory writer and
-``outcomes.py`` are the two ends of the tool-outcome ABI. A file, not a
-function call, so anything that can write JSON can describe an agent.
+it built the tool list it sent to the model.
+
+TWO SOURCES, IN PREFERENCE ORDER.
+
+1. ``discovered_agent.json``, written by the companion plugin from one
+   ``llm_input`` event. A file, not a function call, so anything that can write
+   JSON can describe an agent -- one ABI, exactly as the plugin's trajectory
+   writer and ``outcomes.py`` are the two ends of the tool-outcome ABI. This
+   is the richer source and it always wins: only the host knows its own
+   framework, its sub-agents, and its tools' read-only annotations.
+
+2. THE WIRE, when no plugin can write that file. Some hosts have no event that
+   carries a catalogue at all -- goose has twelve hook events and not one of
+   them names a tool list, so a hook-based describer for goose is unwritable
+   rather than merely unwritten. What every routable host does have is the
+   ``tools`` field of the completion request. The warm-up already stands a
+   loopback endpoint in front of the child; having it READ what arrives turns
+   "we could not describe this agent" into "we could not route this agent",
+   which is a far smaller set. See ``_CatalogueObserver``.
 
 THE BOOTSTRAP PROBLEM, AND WHY THE WARM-UP IS NOT OPTIONAL
 ----------------------------------------------------------
@@ -50,6 +64,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -211,6 +226,306 @@ def read_discovered_agent(trajectory_dir: str | os.PathLike[str]) -> DiscoveredA
     return parse_discovered_agent(payload)
 
 
+# ── the second source: the catalogue on its way to the model ────────────────
+#
+# ``discovered_agent.json`` needs a plugin, and a plugin needs a host event
+# that carries the catalogue. Not every host has one. goose, for instance, has
+# twelve hook events and NONE of them carries a tool list -- its ``HookContext``
+# is (event, session_id, tool_name, tool_input, tool_output, ...), so a
+# hook-based describer for goose is not unwritten, it is unwritable.
+#
+# But every host that can be routed at all puts its catalogue in exactly one
+# place: the ``tools`` field of the completion request. That is the same fact
+# ``describe.js`` reads from OpenClaw's ``llm_input`` -- "the real tool list AS
+# SENT TO THE MODEL" -- observed one layer lower, where being lower is what
+# makes it host-agnostic. If we can route an agent, we can describe it.
+#
+# THIS ENDPOINT ANSWERS, WHERE THE OLD ONE REFUSED. The warm-up used to point
+# the child at ``127.0.0.1:1`` so that a dispatch outrunning the kill would
+# fail closed. It still cannot reach a provider -- this socket is ours, on
+# loopback, and forwards nothing -- but it now replies, because a request that
+# is refused is a catalogue we never see. Two properties keep that safe:
+#
+#   * the reply carries NO tool calls, ever, so the agent has nothing to act
+#     on and finishes its turn without touching the machine; and
+#   * nothing said here is captured, graded or trained on -- this is not a
+#     rollout, and ``_describe_via_host`` reports it as none.
+
+#: What the observer answers with. Deliberately the warm-up's own expected
+#: reply: short, inert, and recognisable in a log as ours rather than a model's.
+_OBSERVER_REPLY = "ready"
+
+#: Stop answering after this many completions. The deadline and the kill are
+#: the real bounds; this is the cheap one that keeps a confused agent from
+#: spinning against us for the whole timeout.
+_OBSERVER_MAX_REQUESTS = 12
+
+
+def _tools_from_request(body: Any) -> list[dict[str, Any]]:
+    """The tool declarations in one completion request, in wire order.
+
+    Both dialects, because which one an agent speaks is its business and not
+    a fact we get to require: OpenAI nests the declaration under ``function``,
+    Anthropic puts it flat with ``input_schema``. Anything else yields nothing
+    rather than a guess.
+    """
+    if not isinstance(body, dict):
+        return []
+    raw = body.get("tools")
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        fn = entry.get("function")
+        if isinstance(fn, dict):                       # OpenAI
+            out.append({
+                "name": fn.get("name"),
+                "description": fn.get("description"),
+                "input_schema": fn.get("parameters"),
+                "original_format": "openai_function",
+            })
+        elif entry.get("name"):                        # Anthropic
+            out.append({
+                "name": entry.get("name"),
+                "description": entry.get("description"),
+                "input_schema": entry.get("input_schema"),
+                "original_format": "anthropic_tool",
+            })
+    return out
+
+
+def _system_prompt_from_request(body: Any) -> str | None:
+    """The assembled system prompt in one completion request, or None."""
+    if not isinstance(body, dict):
+        return None
+    top = body.get("system")                           # Anthropic
+    if isinstance(top, str) and top.strip():
+        return top
+    if isinstance(top, list):                          # Anthropic blocks
+        joined = "\n".join(
+            b.get("text", "") for b in top
+            if isinstance(b, dict) and isinstance(b.get("text"), str)
+        ).strip()
+        if joined:
+            return joined
+    for msg in body.get("messages") or []:             # OpenAI
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") in ("system", "developer"):
+            content = msg.get("content")
+            if isinstance(content, str) and content.strip():
+                return content
+            if isinstance(content, list):
+                joined = "\n".join(
+                    b.get("text", "") for b in content
+                    if isinstance(b, dict) and isinstance(b.get("text"), str)
+                ).strip()
+                if joined:
+                    return joined
+    return None
+
+
+class _CatalogueObserver:
+    """A loopback completion endpoint that records what an agent declares.
+
+    Accumulates the UNION of every catalogue it sees, keyed by tool name and
+    in first-seen order, rather than keeping the first request's. An agent may
+    enable an extension part-way through a turn, and the file-based path
+    already learned this lesson the expensive way: the first write is a lower
+    bound, not the answer (see ``_SETTLE_S``).
+
+    The first request is very often NOT the agent's turn. goose opens a run by
+    asking the model to name the session -- a toolless auxiliary completion
+    that arrives BEFORE the agent's own first request -- so a describer that
+    takes request #1 and stops reports zero tools for an agent that has five.
+    """
+
+    def __init__(self) -> None:
+        # LAZY, and load-bearing. ``http.server`` pulls in ``socketserver`` and
+        # with it ``ssl``, and ``test_importing_the_package_does_not_import_
+        # httpx`` asserts that neither reaches a process that merely imports
+        # this package. A describer used once per serve() must not cost every
+        # importer an ssl context.
+        import http.server
+
+        self._lock = threading.Lock()
+        self._tools: dict[str, dict[str, Any]] = {}
+        self._system: str | None = None
+        self._model: str | None = None
+        self._requests = 0
+        observer = self
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *args: Any) -> None:
+                return              # never write to the serving process's stderr
+
+            def _send(self, code: int, body: bytes, ctype: str) -> None:
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                try:
+                    self.wfile.write(body)
+                except OSError:
+                    pass            # the child was killed mid-write
+
+            def do_GET(self) -> None:
+                # Model-list probes. Some CLIs refuse to start against an
+                # endpoint that cannot enumerate models.
+                self._send(200, b'{"object":"list","data":[]}', "application/json")
+
+            def do_POST(self) -> None:
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                    raw = self.rfile.read(length) if length else b""
+                    body = json.loads(raw or b"{}")
+                except (OSError, ValueError):
+                    body = {}
+                over_budget = observer._record(body)
+                if over_budget:
+                    self._send(429, b'{"error":{"message":"percepteye describe probe"}}',
+                               "application/json")
+                    return
+                if body.get("stream"):
+                    self._send(200, _sse_reply(), "text/event-stream")
+                else:
+                    self._send(200, _json_reply(), "application/json")
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        self._server.daemon_threads = True
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def _record(self, body: Any) -> bool:
+        """Fold one request in. Returns True once the request budget is spent.
+
+        THE PROMPT AND THE MODEL ARE TAKEN FROM A TOOL-BEARING REQUEST ONLY.
+        An auxiliary completion is still a completion: goose's session-namer
+        arrives first, carries its own 1.4 KB "generate a short title" prompt,
+        and may run on a different model entirely (``complete_fast``). Keying
+        these to "the first request seen" describes the namer, not the agent --
+        measured against goose 1.48.0: 1444 chars of the namer's prompt in
+        place of the agent's own 2185. Tools are what distinguish the agent's
+        turn, so tools are what gate the fields that must belong to it.
+        """
+        with self._lock:
+            self._requests += 1
+            spent = self._requests > _OBSERVER_MAX_REQUESTS
+            tools = _tools_from_request(body)
+            if not tools:
+                return spent
+            for tool in tools:
+                name = str(tool.get("name") or "").strip()
+                if name and name not in self._tools:
+                    self._tools[name] = tool
+            if self._system is None:
+                self._system = _system_prompt_from_request(body)
+            if self._model is None and isinstance(body, dict):
+                model = body.get("model")
+                if isinstance(model, str) and model.strip():
+                    self._model = model
+            return spent
+
+    @property
+    def base_url(self) -> str:
+        host, port = self._server.server_address[:2]
+        return f"http://{host}:{port}/v1"
+
+    def described(self, *, agent_name: str, framework: str) -> DiscoveredAgent | None:
+        """What was observed, or None if no request ever declared a tool.
+
+        ``None`` and "an agent with no tools" are NOT the same answer and this
+        returns None for both on purpose: an agent that declared nothing may
+        genuinely have nothing, or may have died before its first turn, and
+        this vantage point cannot tell those apart. Claiming ``[]`` here would
+        assert the difference we cannot see, and the consumer grades on it.
+        """
+        with self._lock:
+            if not self._tools:
+                return None
+            tools = [_tool_from_wire(t) for t in self._tools.values()]
+            prompt = self._system
+            model = self._model
+        return DiscoveredAgent(
+            agent_name=agent_name,
+            framework=framework,
+            #: A PROVENANCE claim, and not ``sdk_runtime``: nothing inside the
+            #: agent's process described it. We read what it put on the wire.
+            source_type="host_wire",
+            system_prompt=prompt[:_MAX_PROMPT_CHARS] if prompt else None,
+            tool_definitions=[t for t in tools if t is not None],
+            discovered_model_config=(
+                ModelConfig(provider="openai_compatible", model_name=model)
+                if model else None),
+            #: The wire carries a tool's name, description and schema -- and
+            #: DROPS its annotations. MCP's ``readOnlyHint`` never survives
+            #: translation into an OpenAI function, so every tool here reports
+            #: ``read_only=None``: not observed. Saying so is the whole point;
+            #: the consumer treats an unstated read_only as "assume it writes",
+            #: which is the safe direction, and a False here would have
+            #: asserted it.
+            incomplete=["tool_annotations"],
+        )
+
+    def close(self) -> None:
+        try:
+            self._server.shutdown()
+        except Exception:
+            pass
+        try:
+            self._server.server_close()
+        except Exception:
+            pass
+
+
+def _sse_reply() -> bytes:
+    """One complete streaming completion carrying text and NO tool calls."""
+    chunks = [
+        {"id": "percepteye-describe", "object": "chat.completion.chunk",
+         "created": 0, "model": "percepteye-describe",
+         "choices": [{"index": 0, "finish_reason": None,
+                      "delta": {"role": "assistant", "content": _OBSERVER_REPLY}}]},
+        {"id": "percepteye-describe", "object": "chat.completion.chunk",
+         "created": 0, "model": "percepteye-describe",
+         "choices": [{"index": 0, "finish_reason": "stop", "delta": {}}],
+         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}},
+    ]
+    body = "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
+    return body.encode("utf-8")
+
+
+def _json_reply() -> bytes:
+    """The non-streaming form of the same inert answer."""
+    return json.dumps({
+        "id": "percepteye-describe", "object": "chat.completion", "created": 0,
+        "model": "percepteye-describe",
+        "choices": [{"index": 0, "finish_reason": "stop",
+                     "message": {"role": "assistant", "content": _OBSERVER_REPLY}}],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }).encode("utf-8")
+
+
+def framework_from_argv(argv: list[str]) -> str:
+    """A framework name for a command agent: the binary it runs.
+
+    The host's own plugin states its framework; the wire does not carry one,
+    and the executable's name is the only thing here that is a fact rather
+    than an inference. ``unknown`` when even that is unavailable, never a
+    guess dressed as an observation.
+    """
+    if not argv:
+        return "unknown"
+    name = os.path.basename(str(argv[0])).strip()
+    for suffix in (".exe", ".cmd", ".bat"):
+        if name.lower().endswith(suffix):
+            name = name[: -len(suffix)]
+    return name or "unknown"
+
+
 def warm_up_command(
     argv: list[str],
     *,
@@ -219,6 +534,8 @@ def warm_up_command(
     prompt: str = WARMUP_PROMPT,
     env: dict[str, str] | None = None,
     cwd: str | None = None,
+    agent_name: str | None = None,
+    observe_wire: bool = True,
 ) -> DiscoveredAgent | None:
     """Run the agent once, only far enough for the host to describe it.
 
@@ -272,7 +589,7 @@ def warm_up_command(
         del child_env[_name]
     child_env["PERCEPTEYE_TRAJECTORY_DIR"] = str(target)
 
-    # A DELIBERATELY UNROUTABLE endpoint, forced rather than defaulted.
+    # A DELIBERATELY UNREACHABLE PROVIDER, forced rather than defaulted.
     #
     # Two things are true at once. Many agent CLIs refuse to start at all
     # without a configured provider, so leaving these unset means the warm-up
@@ -282,15 +599,16 @@ def warm_up_command(
     # here would let it sample from a live provider unobserved -- the precise
     # thing the rollout path strips these variables to prevent.
     #
-    # So they are overwritten with an address nothing can answer. The host
-    # gets a provider it can configure, `llm_input` fires (it is emitted
-    # BEFORE the request is dispatched, which is what makes this work at all),
-    # and a dispatch that somehow outruns the kill fails closed against a
-    # closed loopback port instead of reaching anyone. Loopback also avoids
-    # tripping the private-network guards some hosts apply to LAN endpoints.
-    unroutable = "http://127.0.0.1:1/v1"
+    # So they are overwritten with an address that is ours. Either it is a
+    # closed loopback port (``observe_wire=False``) or it is the observer
+    # above, which answers on loopback and forwards nothing. In both cases no
+    # completion can reach a provider; the difference is only whether we get
+    # to READ the catalogue on its way past. Loopback also avoids tripping the
+    # private-network guards some hosts apply to LAN endpoints.
+    observer = _CatalogueObserver() if observe_wire else None
+    endpoint = observer.base_url if observer is not None else "http://127.0.0.1:1/v1"
     for name in ("OPENAI_BASE_URL", "OPENAI_API_BASE", "ANTHROPIC_BASE_URL"):
-        child_env[name] = unroutable
+        child_env[name] = endpoint
     for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
         child_env[name] = "percepteye-warmup-no-sampling"
 
@@ -307,7 +625,26 @@ def warm_up_command(
     except (OSError, ValueError):
         # The binary could not be started. The caller reports this; it is a
         # configuration error, not a missing description.
+        if observer is not None:
+            observer.close()
         return None
+
+    def _resolve() -> DiscoveredAgent | None:
+        """The best description available, from either source.
+
+        THE FILE WINS, always. A host that describes itself states its own
+        framework, its sub-agents and its tools' read-only annotations --
+        everything the wire drops on the way to the model. The observer is the
+        floor under hosts that have no way to write that file, not a rival to
+        the ones that do.
+        """
+        described = read_discovered_agent(target)
+        if described is not None or observer is None:
+            return described
+        return observer.described(
+            agent_name=agent_name or framework_from_argv(argv),
+            framework=framework_from_argv(argv),
+        )
 
     try:
         if proc.stdin is not None:
@@ -323,7 +660,7 @@ def warm_up_command(
             if proc.poll() is not None:
                 # The child exited. It may have written -- or REWRITTEN -- the
                 # file on its way out, so read after the exit, never before.
-                return read_discovered_agent(target)
+                return _resolve()
             if settle_deadline is None and path.exists():
                 # THE FILE APPEARING IS NOT THE END OF THE STORY.
                 #
@@ -341,9 +678,11 @@ def warm_up_command(
             if settle_deadline is not None and time.time() >= settle_deadline:
                 break
             time.sleep(_POLL_INTERVAL_S)
-        return read_discovered_agent(target)
+        return _resolve()
     finally:
         _kill(proc)
+        if observer is not None:
+            observer.close()
 
 
 def _kill(proc: subprocess.Popen) -> None:

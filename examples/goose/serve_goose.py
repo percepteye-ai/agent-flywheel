@@ -122,6 +122,23 @@ ARGV = [
     # through the hook plugin, so buying structure on stdout would only turn
     # the final answer into a JSON blob the reward has to dig through.
     "-q",
+    # THE TOOL CATALOGUE IS A PROPERTY OF THE ROLLOUT, not of a developer's
+    # saved profile. Same argument as `--provider` below, one layer up.
+    #
+    # `--no-profile` drops the operator's configured extensions and
+    # `--with-builtin` names the ones this flywheel runs with. Without the
+    # pair, every rollout's task universe is whatever `goose configure` last
+    # wrote — so two machines serving the same agent_id report DIFFERENT
+    # catalogues, the control plane keeps the last registration, and workflows
+    # get generated naming tools half the fleet does not have.
+    #
+    # It is also the difference between describing this agent and not. A fresh
+    # goose config has NO extensions (`config/extensions.rs` defaults to none;
+    # `DEFAULT_EXTENSION` is a struct default, not an auto-enable), so goose
+    # sends `tools: []` and registers as `introspection_state=unreadable` —
+    # measured, not assumed: 0 tools before this flag, 5 after.
+    "--no-profile",
+    "--with-builtin", os.environ.get("GOOSE_BUILTINS", "developer"),
     # SELECTING the routed provider, not merely making it available. Without
     # these goose keeps whatever `goose configure` persisted, and the completion
     # wire is not ours — the exact failure prime-agent's route.ts was written

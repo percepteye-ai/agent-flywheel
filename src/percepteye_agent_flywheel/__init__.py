@@ -493,29 +493,42 @@ def _describe_via_host(
     argv = [WARMUP_PROMPT if a is TASK else str(a) for a in command]
     warm_dir = os.path.join(artifacts_dir, "_describe")
 
-    described = warm_up_command(argv, trajectory_dir=warm_dir)
+    described = warm_up_command(argv, trajectory_dir=warm_dir, agent_name=agent_id)
     if described is not None:
         n = described.tool_definitions
         print(
             f"[percepteye] described {agent_id} from the host: "
             f"{len(n) if n is not None else 'no'} tool(s), "
-            f"{len(described.system_prompt or '')} chars of system prompt."
+            f"{len(described.system_prompt or '')} chars of system prompt"
+            # WHICH SOURCE answered, named rather than inferred. The two carry
+            # different amounts -- the wire drops read-only annotations and
+            # sub-agents -- so an operator reading a thin catalogue needs to
+            # know whether that is the agent or the vantage point.
+            f" (via {'the wire' if described.source_type == 'host_wire' else 'the host plugin'})."
         )
         return described
 
     warnings.warn(
-        f"Could not describe {agent_id!r}: the agent ran but its host wrote no "
-        f"description. This agent will register as "
-        f"introspection_state=unreadable, no workflows will be generated for "
-        f"it, and every phase downstream of that (reward suites, graded "
-        f"rollouts, training) has nothing to work from.\n"
-        f"For OpenClaw, the usual cause is the conversation-hook opt-in: the "
-        f"host silently refuses to register `llm_input` for a non-bundled "
-        f"plugin unless the config sets\n"
+        f"Could not describe {agent_id!r}: the agent ran, its host wrote no "
+        f"description, and no completion request it made declared any tools. "
+        f"This agent will register as introspection_state=unreadable, no "
+        f"workflows will be generated for it, and every phase downstream of "
+        f"that (reward suites, graded rollouts, training) has nothing to work "
+        f"from.\n"
+        f"Two things to check, in this order:\n"
+        f"  1. Does the agent reach its provider from an env var? The warm-up "
+        f"points OPENAI_BASE_URL / OPENAI_API_BASE / ANTHROPIC_BASE_URL at a "
+        f"local endpoint and reads the tool catalogue off the request. An "
+        f"agent that resolves its endpoint some other way never arrives, and "
+        f"is also not routable for rollouts -- pass endpoint_env= to serve().\n"
+        f"  2. Does it declare any tools at all? A CLI agent whose extensions "
+        f"are configured per-profile can start with an empty catalogue; goose, "
+        f"for one, sends zero tools unless an extension is enabled.\n"
+        f"For OpenClaw specifically, the usual cause is the conversation-hook "
+        f"opt-in: the host silently refuses to register `llm_input` for a "
+        f"non-bundled plugin unless the config sets\n"
         f"  plugins.entries.percepteye-agent-flywheel.hooks."
-        f"allowConversationAccess = true\n"
-        f"Check that the plugin is installed (`openclaw plugins list`) and "
-        f"that the option is set.",
+        f"allowConversationAccess = true",
         RuntimeWarning,
         stacklevel=3,
     )
