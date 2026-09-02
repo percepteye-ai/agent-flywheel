@@ -13,17 +13,14 @@ added to goose itself.
 from the environment, and the names it reads are the ones `build_child_env`
 already sets per rollout — so `serve_goose.py` is the whole integration.
 
-**Tool outcomes** come from the hook plugin in
-[`packages/percepteye-agent-flywheel-hooks/`](../../packages/percepteye-agent-flywheel-hooks/).
+**Tool outcomes** come from the hook plugin at
+[percepteye-ai/agent-flywheel-hooks](https://github.com/percepteye-ai/agent-flywheel-hooks).
 Install it once; it is inert unless `PERCEPTEYE_TRAJECTORY_DIR` is set, which the
-SDK sets per rollout.
-
-`goose plugin install` takes a git URL, so a local checkout is installed by
-copying it into a plugins directory (`~/.agents/plugins/` for user scope,
-`<project>/.agents/plugins/` for project scope):
+SDK sets per rollout. `serve_goose.py` refuses to start without it, because
+`reports_tool_calls=True` is an assertion that only the plugin makes true.
 
 ```bash
-cp -R ../../packages/percepteye-agent-flywheel-hooks ~/.agents/plugins/percepteye-agent-flywheel
+goose plugin install https://github.com/percepteye-ai/agent-flywheel-hooks
 PERCEPTEYE_CONTROL_PLANE_URL=... PERCEPTEYE_API_KEY=... python serve_goose.py
 ```
 

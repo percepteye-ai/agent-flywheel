@@ -18,8 +18,8 @@ resolves the endpoint from the environment, and the names it reads are the ones
 
 So step 2 is ours and routing is the argv below plus two scrubs.
 
-TOOL OUTCOMES come from a separate piece: the hook plugin in
-``packages/percepteye-agent-flywheel-hooks/``, which subscribes to goose's
+TOOL OUTCOMES come from a separate piece: the hook plugin at
+https://github.com/percepteye-ai/agent-flywheel-hooks, which subscribes to goose's
 post-tool hook events and appends to ``$PERCEPTEYE_TRAJECTORY_DIR``. Install it
 once; it is inert whenever that variable is unset, so the same install is a
 no-op outside a rollout. Nothing in goose's source is modified.
@@ -162,10 +162,9 @@ def main() -> int:
             "[percepteye] the goose hook plugin is not installed, so no tool "
             "outcomes would be recorded.\n"
             f"    Searched:\n      {searched}\n"
-            "    Install it (user scope) with:\n"
-            "      mkdir -p ~/.agents/plugins && cp -R "
-            "packages/percepteye-agent-flywheel-hooks "
-            "~/.agents/plugins/percepteye-agent-flywheel"
+            "    Install it with:\n"
+            "      goose plugin install "
+            "https://github.com/percepteye-ai/agent-flywheel-hooks"
         )
     if plugin is not None:
         print(f"[percepteye] hook plugin: {plugin}")
@@ -174,9 +173,10 @@ def main() -> int:
         ARGV,
         agent_id=os.environ.get("PERCEPTEYE_AGENT_ID", "goose"),
         input_shape="text",
-        # TRUE, and backed by the hook plugin in
-        # packages/percepteye-agent-flywheel-hooks/ — install it before serving
-        # (see this directory's README).
+        # TRUE, and backed by the hook plugin at
+        # https://github.com/percepteye-ai/agent-flywheel-hooks — which main()
+        # above refuses to start without, so this assertion cannot outlive the
+        # thing that makes it true.
         #
         # goose's own stream-json vocabulary carries NO flat tool events
         # (StreamEvent is message / notification / error / complete), so
