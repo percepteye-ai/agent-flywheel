@@ -258,6 +258,125 @@ def _capture_dir(event):
     return os.path.join(home, "turns", safe)
 
 
+#: The claim's own record, written beside the captured files and keyed by the
+#: same session. SessionStart writes it; Stop consumes and removes it.
+CLAIM_FILENAME = "claim.json"
+
+#: Where a claimed task is delivered. A hook cannot inject a prompt — the host
+#: emits ``UserPromptSubmit`` observe-only — so the working directory is the
+#: channel, and the hook's cwd IS the agent's.
+TASK_FILENAME = "PERCEPTEYE_TASK.md"
+
+
+def _contributing():
+    """The control-plane client, or ``None`` when this install only records.
+
+    IMPORTED HERE AND NOWHERE ELSE. This file runs once per TOOL CALL and blocks
+    the agent each time; importing the SDK costs 46 ms against a 16 ms
+    interpreter floor, so the per-tool-call path must never reach it. Inside
+    these two session branches it runs once per SESSION, where it is nothing.
+
+    Returns ``None`` for the ordinary case, not an error: a customer with no key
+    is not misconfigured, they are recording locally, which is the plugin's
+    day-one promise. A marketplace install with no SDK at all lands in the same
+    branch through the ImportError.
+    """
+    url = os.environ.get("CONTROL_PLANE_ENV_URL") or os.environ.get(
+        "PERCEPTEYE_CONTROL_PLANE_URL")
+    key = os.environ.get("PERCEPTEYE_API_KEY")
+    if not url or not key:
+        return None
+    try:
+        from percepteye_agent_flywheel._http import ControlPlaneClient
+        from percepteye_agent_flywheel.transport import AttachTransport
+    except Exception:
+        return None
+    agent = os.environ.get("PERCEPTEYE_AGENT_ID") or "goose"
+    client = ControlPlaneClient(base_url=url, api_key=key)
+    return AttachTransport(client, agent_id=agent), client
+
+
+def _claim(event, base):
+    """Claim ONE rollout and put its task where the agent will find it.
+
+    One, not a batch: a batch is a worker's idea, so a spawning parent can run
+    several children at once. This session is one agent doing one task, and
+    claiming more would lease work nobody executes until the lease lapses.
+
+    An empty queue is the NORMAL case — the customer started their agent and the
+    control plane had nothing for it.
+    """
+    got = _contributing()
+    if got is None:
+        return
+    transport, client = got
+    try:
+        rollouts, _ = transport.claim(1)
+        if not rollouts:
+            return
+        r = rollouts[0]
+        work = event.get("working_dir")
+        if isinstance(work, str) and work:
+            # The task lands BEFORE the claim record, so a crash between them
+            # leaves a task with no claim (harmless — the lease lapses) rather
+            # than a claim whose task never arrived, which would report an
+            # empty turn as though the agent had tried and failed.
+            with open(os.path.join(work, TASK_FILENAME), "w",
+                      encoding="utf-8") as fh:
+                fh.write(r.turn_input)
+        os.makedirs(base, exist_ok=True)
+        with open(os.path.join(base, CLAIM_FILENAME), "w",
+                  encoding="utf-8") as fh:
+            json.dump({"rollout_id": r.rollout_id, "task": r.turn_input,
+                       "lease_token": r.lease_token,
+                       "deadline_ts": r.deadline_ts, "llm_url": r.llm_url}, fh)
+    finally:
+        client.close()
+
+
+def _report(event, base):
+    """Report the captured turn against the rollout this session claimed."""
+    path = os.path.join(base, CLAIM_FILENAME)
+    if not os.path.isfile(path):
+        return                      # nothing was claimed for this session
+    got = _contributing()
+    if got is None:
+        return
+    transport, client = got
+    try:
+        with open(path, encoding="utf-8") as fh:
+            state = json.load(fh)
+        from percepteye_agent_flywheel.contract import (
+            RolloutOutput,
+            RolloutRequest,
+        )
+        from percepteye_agent_flywheel.outcomes import Trajectory
+
+        traj = Trajectory(base)
+        transport.report(
+            RolloutRequest(
+                rollout_id=state["rollout_id"],
+                turn_input=state.get("task") or "",
+                llm_url=state.get("llm_url") or "",
+                api_key="",          # the report authenticates with OUR key
+                artifacts_dir="",
+                deadline_ts=float(state.get("deadline_ts") or 0.0),
+                lease_token=state.get("lease_token"),
+            ),
+            RolloutOutput(
+                final_text=str(event.get("last_assistant_message") or ""),
+                tool_calls=traj.read(),
+                # Reported, never swallowed: non-zero forbids the training
+                # grade, so a partly unreadable trajectory must not be graded
+                # as a complete one.
+                tool_calls_omitted_count=traj.malformed,
+            ),
+        )
+        os.unlink(path)
+    finally:
+        client.close()
+
+
 def main() -> int:
     try:
         event = json.loads(sys.stdin.read() or "{}")
@@ -269,6 +388,25 @@ def main() -> int:
     base = _capture_dir(event)
     if not base:
         return 0  # Capture is off, or there is nothing to key this on.
+
+    # ── the two SESSION events, which talk to the control plane ────────────
+    # Everything else on this path is local and stdlib-only. These two run once
+    # per session and are the whole difference between recording locally and
+    # contributing a graded rollout. Both are wrapped: a control plane that is
+    # unreachable, or absent entirely, must not fail the customer's turn.
+    kind = event.get("event") or event.get("hook_event_name") or ""
+    if kind == "SessionStart":
+        try:
+            _claim(event, base)
+        except Exception:
+            pass
+        return 0
+    if kind in ("Stop", "SessionEnd"):
+        try:
+            _report(event, base)
+        except Exception:
+            pass
+        # falls through: Stop also records the ANSWER locally
 
     try:
         record = _record(event)

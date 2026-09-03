@@ -118,6 +118,18 @@ def _hooks_document(python: str, recorder: str) -> dict[str, Any]:
             "Stop": [_hook(
                 "percepteye-record-answer",
                 "Record the agent's answer when the turn ends")],
+            # THE CLAIM. This is the whole difference between recording locally
+            # and contributing a graded rollout, and it is why no worker
+            # process is needed: the host runs this before the agent's first
+            # turn, it blocks, and its cwd IS the agent's working directory --
+            # so it can fetch a task and put it where the agent will read it.
+            #
+            # Inert without PERCEPTEYE_API_KEY, which is what keeps the install
+            # a single decision: the same plugin records locally for a customer
+            # who has no account and contributes for one who does.
+            "SessionStart": [_hook(
+                "percepteye-claim",
+                "Claim a rollout and deliver its task to the working directory")],
         }
     }
 

@@ -40,20 +40,52 @@ def test_the_recorder_ships_with_the_wheel():
         ("#!/usr/bin/env python3", '"""', "#"))
 
 
-def test_the_recorder_is_standard_library_only():
-    """It runs once per tool call and BLOCKS the agent — goose awaits each hook.
+def test_the_tool_call_path_never_imports_the_sdk():
+    """The recorder runs once per TOOL CALL and BLOCKS the agent each time.
 
     Measured on CPython 3.14: importing this package costs 46 ms against a 16 ms
-    interpreter floor, so an ``import percepteye_agent_flywheel`` here would
-    nearly triple the per-tool-call latency of every rollout.
+    interpreter floor, so a module-level import would nearly triple the
+    per-tool-call latency of every rollout.
+
+    The assertion moved from "this file never names the package" to "no import
+    of it runs at module scope", because the two SESSION events — claim on
+    SessionStart, report on Stop — legitimately need the transport and pay that
+    cost once per session. What must stay true is that the tool-call path never
+    reaches it.
     """
     src = RECORDER.read_text(encoding="utf-8")
-    assert "percepteye_agent_flywheel" not in src, (
-        "the recorder must not import this package")
     for line in src.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(("import ", "from ")) and "percepteye" in stripped:
-            pytest.fail(f"non-stdlib import in the recorder: {stripped}")
+        if line.startswith(("import ", "from ")):        # column 0 == module scope
+            assert "percepteye_agent_flywheel" not in line, (
+                f"module-level SDK import in the recorder: {line.strip()}")
+
+
+def test_the_sdk_is_reached_only_from_the_session_branches():
+    """Every SDK import sits inside a function the tool-call path cannot enter."""
+    import ast
+
+    tree = ast.parse(RECORDER.read_text(encoding="utf-8"))
+    allowed = {"_contributing", "_claim", "_report"}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef,)):
+            continue
+        if node.name in allowed:
+            continue
+        for sub in ast.walk(node):
+            if isinstance(sub, (ast.Import, ast.ImportFrom)):
+                names = getattr(sub, "module", "") or ""
+                names += " ".join(a.name for a in sub.names)
+                assert "percepteye_agent_flywheel" not in names, (
+                    f"SDK import inside {node.name}, which the per-tool-call "
+                    f"path can reach")
+
+
+def test_a_missing_sdk_degrades_to_local_recording():
+    """A marketplace install has the plugin and no Python package at all. The
+    import failure must land in the same branch as "no key": record locally,
+    exit 0, say nothing."""
+    src = RECORDER.read_text(encoding="utf-8")
+    assert "except Exception:\n        return None" in src or "return None" in src
 
 
 # ── what gets rendered ─────────────────────────────────────────────────────
@@ -82,10 +114,10 @@ def test_the_command_is_absolute_on_both_halves(tmp_path):
 def test_paths_are_quoted_because_virtualenv_paths_contain_spaces(tmp_path):
     """The command is handed to ``sh -c``; "Application Support" is a real path
     on every macOS install."""
-    install_goose(plugins_dir=tmp_path, python="/Users/a/Application Support/py")
+    install_goose(plugins_dir=tmp_path, python="/opt/Application Support/py")
     doc = json.loads((tmp_path / PLUGIN_NAME / "hooks" / "hooks.json").read_text())
     cmd = doc["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-    assert cmd.startswith('"/Users/a/Application Support/py"')
+    assert cmd.startswith('"/opt/Application Support/py"')
 
 
 def test_pre_tool_use_is_never_subscribed(tmp_path):
@@ -103,8 +135,18 @@ def test_the_turn_events_are_subscribed(tmp_path):
     doc = json.loads((tmp_path / PLUGIN_NAME / "hooks" / "hooks.json").read_text())
     assert set(doc["hooks"]) == {
         "PostToolUse", "PostToolUseFailure", "AfterTool",
-        "UserPromptSubmit", "Stop",
+        "UserPromptSubmit", "Stop", "SessionStart",
     }
+
+
+def test_session_start_is_subscribed_because_it_is_what_claims(tmp_path):
+    """The whole difference between recording locally and contributing a graded
+    rollout. It is also why no worker is needed: the host runs it before the
+    agent's first turn, it blocks, and its cwd IS the working directory — so it
+    can fetch a task and put it where the agent reads it."""
+    install_goose(plugins_dir=tmp_path)
+    doc = json.loads((tmp_path / PLUGIN_NAME / "hooks" / "hooks.json").read_text())
+    assert "SessionStart" in doc["hooks"]
 
 
 def test_the_recorder_can_never_deny_a_turn(tmp_path):
