@@ -116,7 +116,7 @@ def record_tool_call_span(
                 # A production turn is NOT a rollout, and stamping its id under
                 # `percepteye.rollout.id` made a customer's own telemetry unable
                 # to answer "how much of my traffic was training" -- every
-                # served turn looked like donated work.
+                # served turn looked like contributed work.
                 span.set_attribute("percepteye.turn.id", str(turn_id))
             if agent_name:
                 span.set_attribute("gen_ai.agent.name", str(agent_name))

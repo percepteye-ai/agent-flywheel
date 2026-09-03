@@ -18,7 +18,7 @@ Two things are worth knowing before you read further.
 Percepteye supplies the model endpoint, your flywheel supplies the agent loop
 -- and ``production``, in which ``serve()`` returns 0 without connecting to
 anything. Set ``PERCEPTEYE_AGENT_MODE`` and the same image does either, because
-"stop donating capacity" is an operational decision and it should not require
+"stop contributing capacity" is an operational decision and it should not require
 editing the source to express it.
 
 That is the ONLY axis this word names here. An earlier SDK shipped five modes
@@ -170,8 +170,8 @@ FlywheelMode = Literal["training", "production", "rollout"]
 
 #: Accepted spellings, resolved to the two real modes. Deliberately a small
 #: closed set: an unrecognised value RAISES rather than guessing, because the
-#: two ways of guessing wrong are "silently donate capacity the operator meant
-#: to switch off" and "silently donate nothing while they believe training is
+#: two ways of guessing wrong are "silently contribute capacity the operator meant
+#: to switch off" and "silently contribute nothing while they believe training is
 #: running". Neither is recoverable by the operator, because both look exactly
 #: like success.
 _MODE_ALIASES: dict[str, str] = {
@@ -194,7 +194,7 @@ def _mode_from(raw: Any, *, source: str) -> str:
     if key not in _MODE_ALIASES:
         raise ConfigurationError(
             f"{source}{raw!r} is not a mode. Use 'training' (this process "
-            f"donates capacity: it claims rollouts and runs them) or "
+            f"contributes capacity: it claims rollouts and runs them) or "
             f"'production' (it does not). Recognised spellings: "
             f"{', '.join(sorted(_MODE_ALIASES))}."
         )
@@ -209,7 +209,7 @@ def _resolve_mode_source(explicit: str | None = None) -> tuple[str, str]:
     ordinary way a config layer says "not set", and treating it as a value
     silently pinned the process to "training" without ever reading
     ``PERCEPTEYE_AGENT_MODE`` -- so an operator who had flipped the switch to stop
-    donating kept donating, on their own credentials, with nothing printed.
+    contributing kept contributing, on their own credentials, with nothing printed.
     That is the exact failure ``_MODE_ALIASES`` calls unrecoverable, arrived at
     through the one input that skipped the closed-set check entirely.
     """
@@ -271,7 +271,7 @@ def current_policy(
     """Ask the control plane what model this agent should be running.
 
     For the customer's OWN agent process — the one serving their users —
-    which is a different process from :func:`serve`. ``serve`` donates
+    which is a different process from :func:`serve`. ``serve`` contributes
     capacity for training; this is how the production agent picks up what
     that training produced.
 
@@ -579,7 +579,7 @@ def serve(
         entrypoint: ``"module:attr"`` (required for subprocess isolation, so a
             child can rebuild the agent) or a constructed object
             (``isolation="inprocess"`` only).
-        mode: ``"training"`` to donate capacity, ``"production"`` to do
+        mode: ``"training"`` to contribute capacity, ``"production"`` to do
             nothing. Omit it -- which is the point -- and ``PERCEPTEYE_AGENT_MODE``
             decides, so the same deployed image serves or does not without an
             edit. Unset means ``"training"``, preserving the behaviour of every
@@ -663,11 +663,11 @@ def serve(
         #
         # And never SILENTLY: a no-op serve() that printed nothing is the exact
         # failure this package refuses everywhere else -- the operator believes
-        # capacity is being donated and nothing says otherwise. One line, on
+        # capacity is being contributed and nothing says otherwise. One line, on
         # the way out, naming what decided it.
         print(
             f"[percepteye] mode=production — not claiming rollouts. "
-            f"(set {ENV_MODE}=training to donate capacity"
+            f"(set {ENV_MODE}=training to contribute capacity"
             + (", or remove mode= from this call"
                if _mode_source == "argument" else "")
             + ")",

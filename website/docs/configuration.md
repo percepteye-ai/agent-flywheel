@@ -4,14 +4,14 @@ Every knob is a keyword argument on `serve()` or one of seven environment variab
 
 ## The mode switch
 
-`PERCEPTEYE_AGENT_MODE` decides whether this process donates capacity. It is the one knob that turns the flywheel off.
+`PERCEPTEYE_AGENT_MODE` decides whether this process contributes capacity. It is the one knob that turns the flywheel off.
 
 ```bash
 PERCEPTEYE_AGENT_MODE=training      # claim rollouts and run them (the default when unset)
 PERCEPTEYE_AGENT_MODE=production    # serve() returns 0 immediately. No claim, no connection.
 ```
 
-**The same deployed image does either without a code edit.** "Stop donating capacity" is an operational decision, and it should not require editing source to express it.
+**The same deployed image does either without a code edit.** "Stop contributing capacity" is an operational decision, and it should not require editing source to express it.
 
 ### What `production` actually does
 
@@ -19,13 +19,13 @@ PERCEPTEYE_AGENT_MODE=production    # serve() returns 0 immediately. No claim, n
 |:--|:--|
 | **Returns `0` before opening any connection** | a production deployment needs no control-plane URL and no key. Turning training off must never require being configured for it. |
 | **Returns rather than raises** | a switch that crashes the service it was meant to quiet is not a switch. Zero rollouts is the literal truth, so `0` is the literal return. |
-| **Prints exactly one line** | a silent no-op is the failure mode this package refuses everywhere else. The operator would otherwise believe capacity was being donated with nothing saying otherwise. |
+| **Prints exactly one line** | a silent no-op is the failure mode this package refuses everywhere else. The operator would otherwise believe capacity was being contributed with nothing saying otherwise. |
 | **Resolved before the entrypoint is imported** | `serve("does_not_exist:build", …)` under `production` still returns `0`. Nothing is loaded, nothing is validated, nothing is dialed. |
 
 The line, verbatim:
 
 ```text
-[percepteye] mode=production — not claiming rollouts. (set PERCEPTEYE_AGENT_MODE=training to donate capacity)
+[percepteye] mode=production — not claiming rollouts. (set PERCEPTEYE_AGENT_MODE=training to contribute capacity)
 ```
 
 ### Accepted spellings
@@ -34,16 +34,16 @@ Case-insensitive, surrounding whitespace stripped.
 
 | value | resolves to |
 |:--|:--|
-| `training` · `train` · `rollout` · `rollouts` · `fine-tuning` · `finetuning` · `improving` | **donate capacity** |
+| `training` · `train` · `rollout` · `rollouts` · `fine-tuning` · `finetuning` · `improving` | **contribute capacity** |
 | `production` · `prod` · `serving` | **do not** |
 
 `rollout` is the legacy spelling of `training` and is unchanged in meaning — on the wire, a donor still registers `mode: "rollout"`, which names the protocol the process speaks rather than the deployment mode.
 
-**An unrecognised value raises `ConfigurationError` rather than guessing.** The set is deliberately small and closed, because both ways of guessing wrong are invisible from the outside: silently donating capacity the operator switched off, or silently donating nothing while they believe training is running. Neither is recoverable, because both look exactly like success.
+**An unrecognised value raises `ConfigurationError` rather than guessing.** The set is deliberately small and closed, because both ways of guessing wrong are invisible from the outside: silently contributing capacity the operator switched off, or silently contributing nothing while they believe training is running. Neither is recoverable, because both look exactly like success.
 
 ```text
 ConfigurationError: PERCEPTEYE_AGENT_MODE='staging' is not a mode. Use 'training'
-(this process donates capacity: it claims rollouts and runs them) or 'production'
+(this process contributes capacity: it claims rollouts and runs them) or 'production'
 (it does not). Recognised spellings: fine-tuning, finetuning, improving, prod,
 production, rollout, rollouts, serving, train, training.
 ```
@@ -56,7 +56,7 @@ production, rollout, rollouts, serving, train, training.
 | 2 | `PERCEPTEYE_AGENT_MODE` | what lets an operator flip a deployment without editing code |
 | 3 | `"training"` | the default when neither is set |
 
-The empty-string rule is load-bearing. `mode=cfg.get("percepteye_mode", "")` is the ordinary way a config layer says "not set"; honoring it as a value pinned the process to `training` without ever reading the variable, so an operator who had flipped the switch kept donating, on their own credentials, with nothing printed.
+The empty-string rule is load-bearing. `mode=cfg.get("percepteye_mode", "")` is the ordinary way a config layer says "not set"; honoring it as a value pinned the process to `training` without ever reading the variable, so an operator who had flipped the switch kept contributing, on their own credentials, with nothing printed.
 
 **An override is announced in both directions.** When `mode=` in code disagrees with the environment, the line says which won:
 
@@ -272,7 +272,7 @@ Symlinks are **never** followed — one dropped in the agent's own directory wou
 
 | Variable | Meaning |
 |:--|:--|
-| `PERCEPTEYE_AGENT_MODE` | `training` (default) or `production`. In production `serve()` returns 0 without connecting. Gates capacity donation only — not `attach()`. A value it cannot parse raises rather than being guessed. |
+| `PERCEPTEYE_AGENT_MODE` | `training` (default) or `production`. In production `serve()` returns 0 without connecting. Gates capacity contribution only — not `attach()`. A value it cannot parse raises rather than being guessed. |
 | `PERCEPTEYE_CONTROL_PLANE_URL` | Control-plane base URL. Overridable with `control_plane_url=`. |
 | `PERCEPTEYE_API_KEY` | Your flywheel key. Overridable with `api_key=`. |
 | `PERCEPTEYE_INTROSPECT` | Set to `0`, `false`, `no` or `off` to disable agent discovery. |

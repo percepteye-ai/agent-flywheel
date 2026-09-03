@@ -56,16 +56,16 @@ The first row belongs to no vendor, so an agent instrumented for observability n
 
 ## Running it
 
-### How do I stop donating capacity?
+### How do I stop contributing capacity?
 
 One environment variable, so the same deployed image does either without a code edit:
 
 ```bash
 PERCEPTEYE_AGENT_MODE=production    # serve() returns 0 immediately. No claim, no connection.
-PERCEPTEYE_AGENT_MODE=training      # donate capacity (the default when unset)
+PERCEPTEYE_AGENT_MODE=training      # contribute capacity (the default when unset)
 ```
 
-In `production` the call returns **before opening any connection**, so that deployment needs no control-plane URL and no key. It returns rather than raising, and prints one line naming the mode it took. `prod` and `serving` also mean don't; `train`, `rollout`, `rollouts`, `fine-tuning`, `finetuning` and `improving` also mean donate. A value it cannot parse raises instead of guessing.
+In `production` the call returns **before opening any connection**, so that deployment needs no control-plane URL and no key. It returns rather than raising, and prints one line naming the mode it took. `prod` and `serving` also mean don't; `train`, `rollout`, `rollouts`, `fine-tuning`, `finetuning` and `improving` also mean contribute. A value it cannot parse raises instead of guessing.
 
 !!! warning "Read at startup, and it gates `serve()` only"
     Flipping the variable does not stop a loop already in flight — `max_rollouts=N` is the only clean exit, and nothing in the package catches SIGINT or SIGTERM. It does not gate `attach()`, which *is* the production surface; to stop that, don't call it, or pass `register=False`. → [Configuration](configuration.md)

@@ -1,6 +1,6 @@
 # Production
 
-Your production agent is a **different process** from the one that donates capacity. [`serve()`](quickstart.md) claims rollouts and runs them in child processes. This page is about the process that serves your users, and it does three things: picks up the model training produced, picks up the prompt training produced, and — optionally — donates evidence from the turns it is already serving.
+Your production agent is a **different process** from the one that contributes capacity. [`serve()`](quickstart.md) claims rollouts and runs them in child processes. This page is about the process that serves your users, and it does three things: picks up the model training produced, picks up the prompt training produced, and — optionally — contributes evidence from the turns it is already serving.
 
 None of it requires a redeploy of your agent's code, and none of it opens an inbound port.
 
@@ -19,7 +19,7 @@ if kw:                                    # {} means keep your current config
     model = kw["model"]
 ```
 
-One `GET /policy/current`. **It donates nothing** — no registration, no rollouts, no capture — so it is the whole integration for a team that wants the trained model and nothing else.
+One `GET /policy/current`. **It contributes nothing** — no registration, no rollouts, no capture — so it is the whole integration for a team that wants the trained model and nothing else.
 
 | key | value |
 |:--|:--|
@@ -159,7 +159,7 @@ The contract is a **pair**: this prompt was approved against that checkpoint, an
 
 ## `attach()` — evidence from live turns
 
-`serve()` donates capacity. `attach()` donates evidence, from turns you are already serving — same [adapters](python.md), same tri-state [outcomes](outcomes.md), same trajectory format, same absence contract, scoped around a live user turn instead of a claimed rollout.
+`serve()` contributes capacity. `attach()` contributes evidence, from turns you are already serving — same [adapters](python.md), same tri-state [outcomes](outcomes.md), same trajectory format, same absence contract, scoped around a live user turn instead of a claimed rollout.
 
 ```python
 px = fw.attach(agent_id="support-agent", trajectory_root="/var/lib/percepteye")
@@ -198,7 +198,7 @@ With `register=True` the call makes exactly two outbound requests, once, at star
 
 `record_tool_call()` works inside a turn exactly as it does inside a rollout. With the `otel` extra installed, a turn's span carries `percepteye.turn.id` rather than `percepteye.rollout.id`, so your own telemetry can tell the two apart too.
 
-**`PERCEPTEYE_AGENT_MODE` does not gate `attach()`.** That switch gates `serve()`, the surface that donates capacity. `attach()` *is* the production surface, and gating it on the same variable would mean the correct setting for a production agent was `PERCEPTEYE_AGENT_MODE=training`. To stop capture, don't call `attach()`, or pass `register=False` to keep it entirely local. See [Configuration](configuration.md).
+**`PERCEPTEYE_AGENT_MODE` does not gate `attach()`.** That switch gates `serve()`, the surface that contributes capacity. `attach()` *is* the production surface, and gating it on the same variable would mean the correct setting for a production agent was `PERCEPTEYE_AGENT_MODE=training`. To stop capture, don't call `attach()`, or pass `register=False` to keep it entirely local. See [Configuration](configuration.md).
 
 **What this does not do yet, stated plainly: it ships nothing.** The `flywheel/1` contract has no route for a production turn — `/health`, `/agents`, `/policy/current`, `/prompt/current` and `/rollouts/*` are the whole surface — so turns accumulate as trajectory directories under the root you name, and you own them until that route exists.
 

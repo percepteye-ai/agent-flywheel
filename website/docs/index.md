@@ -118,8 +118,8 @@ generates the better evidence.**
 
 Every row is checkable from [the repository](https://github.com/percepteye-ai/agent-flywheel).
 
-!!! tip "Not ready to donate capacity?"
+!!! tip "Not ready to contribute capacity?"
 
     Set `PERCEPTEYE_AGENT_MODE=production` and `serve()` returns immediately without
-    opening a connection — so the same deployed image either donates or does not,
+    opening a connection — so the same deployed image either contributes or does not,
     with no code change. See [Configuration](configuration.md).

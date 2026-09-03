@@ -1,8 +1,8 @@
 """``attach()`` -- capture in the process that serves your users.
 
-:func:`~percepteye_agent_flywheel.serve` donates CAPACITY: it claims tasks from
+:func:`~percepteye_agent_flywheel.serve` contributes CAPACITY: it claims tasks from
 the control plane and runs your agent against them in a child process. This
-module donates EVIDENCE instead, from the turns your agent is already serving.
+module contributes EVIDENCE instead, from the turns your agent is already serving.
 Same adapters, same tri-state, same trajectory file, same absence contract --
 scoped around a live user turn rather than a claimed rollout.
 
@@ -348,7 +348,7 @@ def attach(
             try:
                 tr.register({
                     "agent_id": agent_id,
-                    # This process serves users; it does not donate capacity.
+                    # This process serves users; it does not contribute capacity.
                     # `serve()` sends "rollout". Sending the same value from
                     # here made the field carry zero bits -- intake could not
                     # tell a training donor from a production reader, which is

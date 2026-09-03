@@ -8,7 +8,7 @@ an importable Python object, so there is no protocol to implement and nothing is
 added to goose itself.
 
 > [!IMPORTANT]
-> **This is the capacity-donation path, and it is not the only one.** Here the
+> **This is the capacity-contribution path, and it is not the only one.** Here the
 > SDK drives goose: it claims a rollout, spawns the binary, and reports the
 > outcome. That fits an operator who wants to lend the flywheel capacity.
 >

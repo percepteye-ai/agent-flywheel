@@ -39,7 +39,7 @@
 
 ```bash
 PERCEPTEYE_AGENT_MODE=production   # serve() returns 0 immediately. No claim, no connection.
-PERCEPTEYE_AGENT_MODE=training     # donate capacity (the default when unset)
+PERCEPTEYE_AGENT_MODE=training     # contribute capacity (the default when unset)
 ```
 
 Step 8 is why a bad entrypoint stops startup rather than surfacing an hour later as a missing member of a comparison group. Resolution is probed once, in order: `invoke`, `run`, `execute`, `chat`, `__call__`.

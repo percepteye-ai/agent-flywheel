@@ -1,6 +1,6 @@
-"""``PERCEPTEYE_AGENT_MODE`` — the switch that turns donation on and off.
+"""``PERCEPTEYE_AGENT_MODE`` — the switch that turns contribution on and off.
 
-Before this existed, the only way to stop donating capacity was to delete the
+Before this existed, the only way to stop contributing capacity was to delete the
 ``serve()`` call and redeploy, and the only way to resume was to put it back.
 That is a code change to express an operational decision, which is both tedious
 and the kind of edit that gets made on the wrong branch at the wrong time.
@@ -13,11 +13,11 @@ failure it would otherwise allow:
   before anything asks for one.
 * **Off must not be silent.** A ``serve()`` that quietly does nothing is the
   precise failure this package refuses everywhere else -- the operator believes
-  capacity is being donated and nothing contradicts them.
+  capacity is being contributed and nothing contradicts them.
 * **Off must not crash.** This is a switch for a running service. Raising would
-  turn "stop donating" into an outage.
+  turn "stop contributing" into an outage.
 * **A typo must not be guessed.** Both directions of a wrong guess are silent
-  and unrecoverable: donating capacity that was meant to be off, or donating
+  and unrecoverable: contributing capacity that was meant to be off, or contributing
   nothing while the operator believes training is running.
 """
 from __future__ import annotations
@@ -120,7 +120,7 @@ def test_recognised_spellings(monkeypatch, raw, expected):
 
 def test_the_legacy_value_still_means_what_it_meant(monkeypatch):
     """``mode="rollout"`` was the only accepted value before this change, and
-    it meant "donate". It still does."""
+    it meant "contribute". It still does."""
     monkeypatch.setenv("PERCEPTEYE_AGENT_MODE", "rollout")
     assert fw.current_mode() == "training"
     with pytest.raises(ConfigurationError, match="control_plane_url"):
@@ -140,9 +140,9 @@ def test_empty_is_treated_as_unset(monkeypatch):
 def test_an_unrecognised_mode_raises_rather_than_guessing(monkeypatch, typo):
     """Guessing wrong is silent in BOTH directions.
 
-    Read "off" as production and an operator who meant something else donates
+    Read "off" as production and an operator who meant something else contributes
     nothing while believing training runs. Read it as training and one who
-    meant to stop keeps donating capacity on their own credentials. Neither is
+    meant to stop keeps contributing capacity on their own credentials. Neither is
     visible from the outside, so neither is recoverable.
     """
     monkeypatch.setenv("PERCEPTEYE_AGENT_MODE", typo)
@@ -215,8 +215,8 @@ def test_an_empty_mode_argument_falls_through_to_the_environment(
     """``mode=cfg.get("percepteye_mode", "")`` is how a config layer says
     "not set". Honouring it as a value pinned the process to training without
     ever reading PERCEPTEYE_AGENT_MODE -- so an operator who had flipped the switch
-    to stop donating kept donating, on their own credentials, silently. It is
-    the one input that reached the donate direction without passing the
+    to stop contributing kept contributing, on their own credentials, silently. It is
+    the one input that reached the contribute direction without passing the
     closed-set check."""
     monkeypatch.setenv("PERCEPTEYE_AGENT_MODE", "production")
     assert fw.resolve_mode(empty) == "production"
@@ -230,7 +230,7 @@ def test_an_empty_argument_with_no_environment_is_still_training(monkeypatch):
 # ── an override is announced in BOTH directions ────────────────────────────
 
 
-def test_code_overriding_the_environment_to_donate_says_so(monkeypatch, capsys):
+def test_code_overriding_the_environment_to_contribute_says_so(monkeypatch, capsys):
     """The direction that was silent, and the one an operator cares about.
 
     Env says stop, code says go. serve() proceeds -- the precedence is correct

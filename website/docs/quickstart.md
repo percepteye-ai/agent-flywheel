@@ -132,23 +132,23 @@ Two lines `serve()` prints on its own, both to stdout:
 
 ```text
 [percepteye] policy: <arm> — <reason> → <model> at <base_url>
-[percepteye] mode=production — not claiming rollouts. (set PERCEPTEYE_AGENT_MODE=training to donate capacity)
+[percepteye] mode=production — not claiming rollouts. (set PERCEPTEYE_AGENT_MODE=training to contribute capacity)
 ```
 
 The first is informational only. A `serve()` rollout samples through the per-rollout gateway URL — that is what attributes and captures the completion — so the policy is reported and deliberately not applied. Production agents call `apply_current_policy()` instead; see [production](production.md).
 
-## Standing the same image up without donating
+## Standing the same image up without contributing
 
 !!! note "One switch, both ways"
 
     ```bash
     PERCEPTEYE_AGENT_MODE=production    # serve() returns 0 immediately
-    PERCEPTEYE_AGENT_MODE=training      # donate capacity (the default when unset)
+    PERCEPTEYE_AGENT_MODE=training      # contribute capacity (the default when unset)
     ```
 
     In `production`, `serve()` returns **before opening any connection**, so that deployment needs no control-plane URL and no key — turning training off never requires being configured for it. It returns rather than raising, because a switch that crashes the service it was meant to quiet is not a switch, and it prints the line above, because a silent no-op is the failure mode this package refuses everywhere else. An unrecognized value raises instead of guessing. Full table of accepted spellings and precedence in [configuration](configuration.md).
 
-The switch gates `serve()` — the surface that donates capacity. It does not gate `attach()`, which is the production capture surface.
+The switch gates `serve()` — the surface that contributes capacity. It does not gate `attach()`, which is the production capture surface.
 
 ## Next
 

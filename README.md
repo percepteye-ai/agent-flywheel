@@ -50,7 +50,7 @@ fw.serve("my_package.agent:build", agent_id="my-coding-agent", input_shape="text
 Everything that can be misconfigured — entrypoint, credential, contract version, isolation mode — is checked **before the first rollout** and raises there, never mid-run.
 
 > [!TIP]
-> Rollouts are real runs with your real credentials, so bound the first one with `max_rollouts=8` and point `artifacts_dir=` somewhere you don't mind it writing. To stand the same image up without donating, set `PERCEPTEYE_AGENT_MODE=production` — [one switch, both ways](#configuration).
+> Rollouts are real runs with your real credentials, so bound the first one with `max_rollouts=8` and point `artifacts_dir=` somewhere you don't mind it writing. To stand the same image up without contributing, set `PERCEPTEYE_AGENT_MODE=production` — [one switch, both ways](#configuration).
 
 <br/>
 
@@ -101,11 +101,11 @@ OPENAI_BASE_URL=https://my-own-proxy/v1 goose session   # we are not in the path
 
 ## How the loop closes
 
-**Register once, then loop forever.** Four lanes cross the trust boundary, and **every one of them is opened from your side** — there is no listening socket anywhere in this package.
+**Register once, then loop forever.** Three lanes cross the trust boundary, and **every one of them is opened from your side** — there is no listening socket anywhere in this package.
 
 <p align="center">
   <img src="docs/assets/flywheel-architecture.svg" width="960"
-       alt="Onboarding once, then the flywheel as a closed ring, split by a dashed trust boundary. At the top, once at startup: the SDK describes your agent — system prompt, tool schemas, sub-agent tree, read from inside the process — and lane ⓪ registers it on its own, giving the control plane the tasks worth training on, derived from the tool surface you actually have. A CLI agent with no object to read is warmed up once, well under a second, and described from that. Below, every lap: your agent runs the rollout and your production agent applies the policy on the left, inside your infrastructure; the control plane scores observed outcomes and trains the policy on the right. Four numbered lanes cross the boundary — ① it claims a task, ② your agent returns the rollout and its per-call outcomes, ③ the promoted policy comes back as an endpoint, ④ fw.attach() donates live evidence. A green arrow up the left side closes the ring: the better agent runs the next lap.">
+       alt="Onboarding once, then the flywheel as a closed ring, split by a dashed trust boundary. At the top, once at startup: the SDK describes your agent — system prompt, tool schemas, sub-agent tree, read from inside the process — and lane ⓪ registers it on its own, giving the control plane the tasks worth training on, derived from the tool surface you actually have. A CLI agent with no object to read is warmed up once, well under a second, and described from that. Below, every lap: your agent runs the rollout and your production agent applies the policy on the left, inside your infrastructure; the control plane scores observed outcomes and trains the policy on the right. Three numbered lanes cross the boundary — ① it claims a task, ② your agent returns the rollout and its per-call outcomes, ③ the promoted policy comes back as an endpoint. A green arrow up the left side closes the ring: the better agent runs the next lap.">
 </p>
 
 | beat | what happens | who does the work |
@@ -115,7 +115,7 @@ OPENAI_BASE_URL=https://my-own-proxy/v1 goose session   # we are not in the path
 | **② Run** | fresh child process, own environment, single-use credential, own trajectory | your agent, unchanged |
 | **③ Record** | every tool call lands as `ok` / `failed` / **`unknown`**; artifacts collected on every path | adapters, from the outside |
 | **④ Score** | tasks generated from your real tool surface, graded against compiled checks | **Percepteye — you build none of it** |
-| **⑤ Improve** | your production agent picks up the promoted policy — and its live turns feed the next lap | one call at startup |
+| **⑤ Improve** | your production agent picks up the promoted policy; the next lap is fed by the next round of rollouts | one call at startup |
 
 That last beat is what makes it a flywheel rather than a pipeline: **the better agent generates the better evidence**. And beat ⓪ is why you never write a task list: the tasks come from **the tool surface you actually have**, read after templating and conditional registration — the prompt your agent really assembled, the tools it really registered, the sub-agents it really built. A CLI agent with no object to read is warmed up once, well under a second, and described from that.
 
@@ -265,7 +265,7 @@ prompt = fw.current_prompt(agent_id="my-coding-agent")   # the approved prompt, 
 
 **Nothing polls in the background.** No thread in this package — the refresh runs inside your call. After its first success, `policy_source()` keeps serving the last good policy, so a network blip can never silently demote production back to the untrained model.
 
-**And your live traffic can donate evidence too.** `attach()` captures from the turns you are already serving — same adapters, same tri-state, same trajectory:
+**And your live traffic can be captured too — locally.** `attach()` records the turns you are already serving, with the same adapters, the same tri-state and the same trajectory format:
 
 ```python
 px = fw.attach(agent_id="support-agent", trajectory_root="/var/lib/percepteye")
@@ -273,6 +273,13 @@ px = fw.attach(agent_id="support-agent", trajectory_root="/var/lib/percepteye")
 with px.turn(conversation_id=conv_id) as turn_id:
     reply = agent.invoke(user_text)       # your agent, unmodified
 ```
+
+> [!IMPORTANT]
+> **Turns captured by `attach()` stay on your machine — they are not uploaded, and they do not train anything.** The `flywheel/1` contract has no route for a production turn (`/health`, `/agents`, `/policy/current` and `/rollouts/*` are the whole surface), so turns accumulate as trajectory directories under the `trajectory_root` you name, and you own them.
+>
+> Training is fed by **rollouts**, not by production traffic: `serve()` (or the CLI hooks) claims a rollout, runs it, and reports the result — that report is the upload. So a continual-learning loop is repeated rounds of rollouts, and `attach()` today is local observability plus the policy read.
+>
+> Sending production traces to the control plane needs a mode that does not exist yet. When it lands, this section changes; until then, treat `attach()` as local.
 
 **It captures. It never reroutes.** Adapters bind with no endpoint at all, so attaching cannot re-point a single byte of production traffic. Everything fails open: an unreachable control plane costs you the observation and nothing else.
 
@@ -356,24 +363,24 @@ Counts are not a quality judgement — but inside a live production process, an 
 
 **Starting is a call, not a mode.** Which surface you use *is* the boundary:
 
-| you call | you donate | outbound |
+| you call | you contribute | outbound |
 |:--|:--|:--|
 | `fw.serve(...)` | **capacity** — control-plane tasks run on your credentials | `/health`, `POST /agents`, `GET /policy/current`, then claim in a loop |
 | `fw.attach(...)` | **evidence** — outcomes from turns you already serve | `POST /agents` + `GET /policy/current`, once |
 | `fw.apply_current_policy(...)` | **nothing** | one `GET /policy/current` |
 
-**Donate nothing, still get the trained model.** No `serve()`, no `attach()`, no registration:
+**Contribute nothing, still get the trained model.** No `serve()`, no `attach()`, no registration:
 
 ```python
 kw = fw.apply_current_policy(agent_id="my-agent")
 prompt = fw.current_prompt(agent_id="my-agent")
 ```
 
-**One switch turns capacity donation on and off**, so the same deployed image does either without a code edit:
+**One switch turns capacity contribution on and off**, so the same deployed image does either without a code edit:
 
 ```bash
 PERCEPTEYE_AGENT_MODE=production    # serve() returns 0 immediately. No claim, no connection.
-PERCEPTEYE_AGENT_MODE=training      # donate capacity (the default when unset)
+PERCEPTEYE_AGENT_MODE=training      # contribute capacity (the default when unset)
 ```
 
 **The same switch governs a CLI install**, so one variable means one thing everywhere:
@@ -383,14 +390,14 @@ PERCEPTEYE_AGENT_MODE=training      # donate capacity (the default when unset)
 | `fw.serve(...)` | claims and runs rollouts | returns 0 immediately |
 | `percepteye install-hooks` | endpoint → our gateway; sessions claim and report | endpoint → **the one you had**; nothing claimed, nothing reported |
 
-An unrecognised value **raises** rather than guessing — a typo that silently picked `training` would keep donating on your credentials with nothing printed. See [CLI agents](#cli-agents-three-commands) for the one timing caveat.
+An unrecognised value **raises** rather than guessing — a typo that silently picked `training` would keep contributing on your credentials with nothing printed. See [CLI agents](#cli-agents-three-commands) for the one timing caveat.
 
 In `production` the call returns **before opening any connection**, so a production deployment needs no control-plane URL and no key — turning training off never requires being configured for it. It returns rather than raising, because a switch that crashes the service it was meant to quiet is not a switch, and it prints one line saying which mode it took, because a silent no-op is the failure mode this package refuses everywhere else. An unrecognised value raises instead of guessing: both ways of guessing wrong are invisible from the outside.
 
-`training` · `train` · `rollout` · `rollouts` · `fine-tuning` · `finetuning` · `improving` all mean donate. `production` · `prod` · `serving` all mean don't. Passing `mode=` in code beats the variable, and the printed line tells you when that happened — in both directions.
+`training` · `train` · `rollout` · `rollouts` · `fine-tuning` · `finetuning` · `improving` all mean contribute. `production` · `prod` · `serving` all mean don't. Passing `mode=` in code beats the variable, and the printed line tells you when that happened — in both directions.
 
 > [!NOTE]
-> This switch gates **`serve()`** — the surface that donates capacity. It does not gate `attach()`, which *is* the production surface and captures evidence from the turns you already serve. Gating that on the same variable would mean the correct setting for a production agent was `PERCEPTEYE_AGENT_MODE=training`. To stop capture, don't call `attach()`, or pass `register=False` to keep it entirely local.
+> This switch gates **`serve()`** — the surface that contributes capacity. It does not gate `attach()`, which *is* the production surface and captures evidence from the turns you already serve. Gating that on the same variable would mean the correct setting for a production agent was `PERCEPTEYE_AGENT_MODE=training`. To stop capture, don't call `attach()`, or pass `register=False` to keep it entirely local.
 
 **Stopping a run that is already going.** The switch is read at startup, so flipping it does not stop a loop that is mid-flight. For that:
 
@@ -450,7 +457,7 @@ Without a callback a flywheel is silent, and **an empty queue and a broken claim
 |:--|:--|
 | `PERCEPTEYE_CONTROL_PLANE_URL` | Control-plane base URL. |
 | `PERCEPTEYE_API_KEY` | Your flywheel key. |
-| `PERCEPTEYE_AGENT_MODE` | `training` (default) or `production`. In production `serve()` returns 0 without connecting. Gates capacity donation only — not `attach()`. A value it cannot parse raises rather than being guessed. |
+| `PERCEPTEYE_AGENT_MODE` | `training` (default) or `production`. In production `serve()` returns 0 without connecting. Gates capacity contribution only — not `attach()`. A value it cannot parse raises rather than being guessed. |
 | `PERCEPTEYE_INTROSPECT` | Set to `0` to disable [agent discovery](#configuration). |
 | `PERCEPTEYE_ROLLOUT_ID` | *Set by us* for the child. Read it to tag your own logs. |
 | `PERCEPTEYE_TRAJECTORY_DIR` | *Set by us* for the child — already this rollout's directory. Append to `$PERCEPTEYE_TRAJECTORY_DIR/tool_calls.jsonl`; any other file you leave there is collected as an artifact. |
