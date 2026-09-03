@@ -15,7 +15,7 @@
  *
  * Zero dependencies, `node:fs` only. This runs inside someone else's agent.
  */
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export const TRAJECTORY_DIR_ENV = "PERCEPTEYE_TRAJECTORY_DIR";
@@ -96,4 +96,43 @@ export function createWriter({ dir = null, onError = null } = {}) {
       }
     },
   };
+}
+
+/**
+ * Read a trajectory back, preserving the two distinctions the report depends on.
+ *
+ * `null` vs `[]` is load-bearing at BOTH ends: null means "there was no
+ * trajectory to read", `[]` means "I read one and it recorded zero calls". The
+ * writer's absence and an empty run are different claims.
+ *
+ * Unparseable lines are COUNTED, never thrown on and never skipped silently.
+ * The tally becomes `tool_calls_omitted_count`, whose non-zero value forbids the
+ * training grade -- so losing it would let a partly-unreadable trajectory be
+ * graded as a complete one.
+ */
+export function readTrajectory(dir) {
+  if (!dir) return { calls: null, malformed: 0 };
+  const path = join(dir, TOOL_CALLS_FILENAME);
+  let text;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return { calls: null, malformed: 0 };
+  }
+  const calls = [];
+  let malformed = 0;
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const row = JSON.parse(line);
+      // The reader the Python end uses builds each row with REQUIRED
+      // subscripts and counts anything else as malformed. Mirror that: a row
+      // missing either field is not a tool call, it is corruption.
+      if (row && typeof row === "object" && row.name && row.outcome) calls.push(row);
+      else malformed += 1;
+    } catch {
+      malformed += 1;
+    }
+  }
+  return { calls, malformed };
 }

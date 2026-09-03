@@ -1,7 +1,7 @@
 {
   "name": "percepteye-agent-flywheel",
   "version": "0.1.0",
-  "description": "Record agent tool-call outcomes into a PerceptEye flywheel trajectory. Plugins for OpenClaw and DeepSeek Harness. Observes only.",
+  "description": "Close the loop on your OpenClaw agent: record real tool-call outcomes, claim graded rollouts, and report them back \u2014 so the model that runs your agent gets better at YOUR work. Observes only; never alters a tool result.",
   "license": "MIT",
   "type": "module",
   "main": "./src/index.js",
@@ -13,6 +13,7 @@
   },
   "files": [
     "src",
+    "schema",
     "openclaw.plugin.json",
     "cordis.patch.yml",
     "README.md"
@@ -43,11 +44,25 @@
   "openclaw": {
     "extensions": [
       "./src/index.js"
-    ]
+    ],
+    "compat": {
+      "pluginApi": ">=2026.7.1"
+    },
+    "build": {
+      "openclawVersion": "2026.7.1"
+    }
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.7.1"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
     }
   }
 }

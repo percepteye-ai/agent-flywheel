@@ -1,12 +1,37 @@
 {
   "id": "percepteye-agent-flywheel",
   "name": "PerceptEye Agent Flywheel",
-  "description": "Records tool-call outcomes (ok/failed/unknown) into the active rollout's trajectory. Observes only; never alters a tool result.",
+  "description": "Close the loop on your OpenClaw agent: record real tool-call outcomes, claim graded rollouts, and report them back \u2014 so the model that runs your agent gets better at YOUR work. Observes only; never alters a tool result.",
   "version": "0.1.0",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "properties": {}
+    "properties": {
+      "apiKey": {
+        "type": "string",
+        "minLength": 1,
+        "description": "PerceptEye flywheel key (pefw_...). Without it the plugin records locally and contacts nothing."
+      },
+      "agentId": {
+        "type": "string",
+        "minLength": 1,
+        "default": "openclaw",
+        "description": "The agent name this install reports as."
+      },
+      "controlPlaneUrl": {
+        "type": "string",
+        "format": "uri",
+        "description": "Override the control-plane base URL."
+      },
+      "capture": {
+        "type": [
+          "string",
+          "boolean"
+        ],
+        "default": true,
+        "description": "Set false/0/off to disable local capture entirely."
+      }
+    }
   },
   "activation": {
     "onStartup": true
