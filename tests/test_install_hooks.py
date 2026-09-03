@@ -65,7 +65,12 @@ def test_the_sdk_is_reached_only_from_the_session_branches():
     import ast
 
     tree = ast.parse(RECORDER.read_text(encoding="utf-8"))
-    allowed = {"_contributing", "_claim", "_report"}
+    # A name belongs here ONLY if every one of its call sites is inside a
+    # session-event branch of main(). The list is a proxy -- widening it is
+    # exactly how this guard would be silenced by accident -- so
+    # `test_a_tool_call_never_pays_for_the_sdk` measures the real property on
+    # the real subprocess, and this one stays as the fast, precise locator.
+    allowed = {"_contributing", "_claim", "_report", "_reconcile"}
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef,)):
             continue
@@ -253,3 +258,41 @@ def test_the_plugins_dir_honours_goose_path_root(monkeypatch, tmp_path):
 
     monkeypatch.delenv("GOOSE_PATH_ROOT")
     assert goose_plugins_dir() == __import__("pathlib").Path.home() / ".agents" / "plugins"
+
+
+def _importtime(event: dict) -> str:
+    """Run the recorder exactly as goose does, and report what it imported."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    env = dict(os.environ)
+    env.pop("PERCEPTEYE_API_KEY", None)
+    env["PERCEPTEYE_TRAJECTORY_DIR"] = env.get("TMPDIR", "/tmp") + "/pe-importtime"
+    return subprocess.run(
+        [sys.executable, "-X", "importtime", str(RECORDER)],
+        input=json.dumps(event), capture_output=True, text=True, env=env,
+        timeout=60).stderr
+
+
+def test_a_tool_call_never_pays_for_the_sdk():
+    """THE PROPERTY, measured rather than inferred from function names.
+
+    This file runs once per TOOL CALL and blocks the agent each time. Importing
+    the package costs 46 ms against a 16 ms interpreter floor -- a tax on every
+    tool call in every session, for a benefit only two session events ever use.
+
+    The positive control is not decoration: without it this test would also pass
+    if `-X importtime` printed nothing at all, which is the failure mode of
+    every "assert X not in output" check ever written.
+    """
+    hot = _importtime({"event": "PostToolUse", "session_id": "s",
+                       "tool_name": "shell", "tool_input": {}})
+    assert "percepteye_agent_flywheel" not in hot, (
+        "the per-tool-call path imported the SDK")
+
+    control = _importtime({"event": "SessionStart", "session_id": "s"})
+    assert "percepteye_agent_flywheel" in control, (
+        "positive control failed: this test cannot detect an SDK import at all, "
+        "so its real assertion above proves nothing")

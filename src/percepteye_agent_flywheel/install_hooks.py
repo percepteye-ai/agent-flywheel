@@ -40,7 +40,23 @@ from pathlib import Path
 from typing import Any
 
 from .contract import CONTRACT_VERSION
+from .endpoint import (
+    GOOSE_ENDPOINT_KEY,
+    goose_config_path,
+    overriding_env,
+    plan,
+    read_scalar,
+    set_scalar,
+    write_config,
+)
 from .hosts import GOOSE_MANIFEST, RECORDER
+
+#: The stamp key holding the endpoint the config carried BEFORE we first wrote
+#: to it. Its ABSENCE and a null VALUE mean different things — "never captured"
+#: versus "captured, and there was nothing there" — which is why every read of
+#: it tests for the key rather than for truthiness. Getting that backwards makes
+#: production restore a default over a customer's deliberate blank.
+ORIGINAL_ENDPOINT_KEY = "original_endpoint"
 
 
 #: Where goose looks. ``Paths::plugins_dir`` is ``$HOME/.agents/plugins``, or
@@ -163,11 +179,55 @@ def installed_state(plugins_dir: Path | None = None) -> dict[str, Any]:
     return data
 
 
+def reconcile_endpoint(
+    *,
+    mode: str | None = None,
+    plugins_dir: Path | None = None,
+    config_path: Path | None = None,
+) -> dict[str, Any]:
+    """Make the host's endpoint match the current mode. Idempotent.
+
+    Called from two places for one reason: :func:`install_goose` runs it so the
+    install takes effect, and the ``SessionStart`` hook runs it so a MODE FLIP
+    takes effect without the customer re-running anything. A flip is one
+    environment variable, and the next session honours it.
+
+    Returns a report and never raises on a missing config — a customer who has
+    not configured goose yet has nothing to reconcile, and the install must not
+    fail on it.
+    """
+    from . import resolve_mode
+
+    path = config_path or goose_config_path()
+    state = installed_state(plugins_dir)
+    # Not installed means we never wrote an endpoint, so there is nothing of
+    # ours to remove and nothing of theirs to restore. Writing here would route
+    # a customer who never ran install-hooks.
+    if not state.get("installed"):
+        return {"changed": False, "reason": "the plugin is not installed",
+                "path": str(path)}
+
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    current = read_scalar(text, GOOSE_ENDPOINT_KEY)
+    decision = plan(
+        mode or resolve_mode(),
+        original=state.get(ORIGINAL_ENDPOINT_KEY),
+    )
+    report = {"path": str(path), "from": current, "changed": False,
+              "shadowed_by": overriding_env(), **decision}
+    if current == decision["value"]:
+        return report
+    write_config(path, set_scalar(text, GOOSE_ENDPOINT_KEY, decision["value"]))
+    report["changed"] = True
+    return report
+
+
 def install_goose(
     plugins_dir: Path | None = None,
     *,
     force: bool = False,
     python: str | None = None,
+    config_path: Path | None = None,
 ) -> dict[str, Any]:
     """Render the goose plugin directory. Idempotent; returns what it did.
 
@@ -209,11 +269,30 @@ def install_goose(
     # broken to a human even when it works.
     if GOOSE_MANIFEST.is_file():
         shutil.copyfile(GOOSE_MANIFEST, root / "plugin.json")
+    # THE ORIGINAL IS CAPTURED ONCE AND NEVER RECAPTURED. On a re-install --
+    # `pip install --upgrade` then `percepteye install-hooks` is the ordinary
+    # upgrade path -- the config may already hold OUR gateway URL, because a
+    # previous install put it there. Reading it again would record our own URL
+    # as "what the customer had", and `production` would then restore the
+    # training endpoint: the kill switch would look like it worked and change
+    # nothing. So a stamp that already carries the key wins over the file.
+    cfg = config_path or goose_config_path()
+    if ORIGINAL_ENDPOINT_KEY in state:
+        original = state[ORIGINAL_ENDPOINT_KEY]
+    else:
+        text = cfg.read_text(encoding="utf-8") if cfg.is_file() else ""
+        original = read_scalar(text, GOOSE_ENDPOINT_KEY)
+
     (root / STAMP_FILENAME).write_text(json.dumps({
         "contract_version": CONTRACT_VERSION,
         "python": interpreter,
         "recorder": recorder,
+        ORIGINAL_ENDPOINT_KEY: original,
     }, indent=2) + "\n", encoding="utf-8")
 
+    # Now that the stamp exists, the endpoint follows the mode.
+    endpoint = reconcile_endpoint(plugins_dir=plugins_dir, config_path=cfg)
+
     return {"root": str(root), "python": interpreter, "recorder": recorder,
-            "replaced_foreign": bool(state.get("foreign"))}
+            "replaced_foreign": bool(state.get("foreign")),
+            "endpoint": endpoint}

@@ -20,17 +20,26 @@ error inline instead, so the branch differs while the meaning does not.
 
 THREE PROPERTIES THIS FILE MUST KEEP:
 
-1. Inert when ``PERCEPTEYE_TRAJECTORY_DIR`` is unset. That is the whole reason
-   the same install is safe to leave in place permanently: no rollout, no file,
-   no behaviour. Absence is the normal production case, not an error.
-2. Never fails the agent. Every path exits 0. A telemetry writer that can break
+1. Local by default, and silent about it. Capture no longer requires
+   ``PERCEPTEYE_TRAJECTORY_DIR``: without one it writes under
+   ``$PERCEPTEYE_HOME/turns/<session>``, which is what makes the plugin's
+   day-one promise -- your agent's real tool failure rate, no account, no
+   network -- reachable for a customer who never signs up. ``PERCEPTEYE_CAPTURE=0``
+   turns it off entirely. Nothing leaves the machine without an API key.
+2. Never fails the agent. Every path exits 0, and every branch that can touch
+   the network or the filesystem is wrapped. A telemetry writer that can break
    someone's tool call is worse than no telemetry.
-3. Writes nothing to stdout. It subscribes only to POST-tool events, which are
-   fire-and-forget on both hosts (goose emits them via `emit`, not
-   `emit_blocking_with_outcome`). Observing cannot change what is observed --
-   a property of which events we register for, not a promise about this code.
+3. Writes nothing to stdout. This is now a property of THIS SCRIPT, not of the
+   events it subscribes to: ``Stop`` is delivered through ``emit_blocking`` and
+   its chain CAN deny a turn, so the guarantee rests on ``classify_output``
+   producing a denial only for exit code 2 or a JSON verdict on stdout --
+   neither of which this file ever emits. Both lines above are load-bearing for
+   a reason they were not originally written for.
 
-Standard library only. This runs inside someone else's agent.
+Standard library only ON THE PER-TOOL-CALL PATH, which is the path that runs
+hundreds of times and blocks the agent each time. The three SESSION branches --
+reconcile, claim, report -- import the SDK, once per session, and say so at
+their own definitions. This runs inside someone else's agent.
 """
 from __future__ import annotations
 
@@ -296,6 +305,25 @@ def _contributing():
     return AttachTransport(client, agent_id=agent), client
 
 
+def _reconcile():
+    """Make the host's endpoint match ``PERCEPTEYE_AGENT_MODE``.
+
+    DELIBERATELY NOT GATED ON THE API KEY, unlike everything else that talks to
+    the control plane. The state this exists to repair is precisely the one
+    where the key is gone: a customer who flips to production AND unsets
+    ``PERCEPTEYE_API_KEY`` would otherwise keep a config pointing at our gateway
+    with nothing left to authenticate it -- every completion failing, and the
+    kill switch they just used appearing to be the cause.
+
+    Takes effect on the NEXT session: goose resolves its endpoint at process
+    start (measured -- see ``endpoint.py``). Running it every SessionStart is
+    what makes that self-correcting instead of a repair someone must remember.
+    """
+    from percepteye_agent_flywheel.install_hooks import reconcile_endpoint
+
+    reconcile_endpoint()
+
+
 def _claim(event, base):
     """Claim ONE rollout and put its task where the agent will find it.
 
@@ -385,6 +413,19 @@ def main() -> int:
     except Exception:
         return 0
 
+    kind = event.get("event") or event.get("hook_event_name") or ""
+
+    # BEFORE the capture check, not after. `_capture_dir` returns None when the
+    # customer has set PERCEPTEYE_CAPTURE=0 -- and a customer who has turned
+    # capture off is exactly the one whose endpoint most needs handing back.
+    # Reconciling below the early return would strand them routed at us with
+    # capture disabled: the worst of both, and silent.
+    if kind == "SessionStart":
+        try:
+            _reconcile()
+        except Exception:
+            pass
+
     base = _capture_dir(event)
     if not base:
         return 0  # Capture is off, or there is nothing to key this on.
@@ -394,7 +435,6 @@ def main() -> int:
     # per session and are the whole difference between recording locally and
     # contributing a graded rollout. Both are wrapped: a control plane that is
     # unreachable, or absent entirely, must not fail the customer's turn.
-    kind = event.get("event") or event.get("hook_event_name") or ""
     if kind == "SessionStart":
         try:
             _claim(event, base)

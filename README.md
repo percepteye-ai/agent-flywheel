@@ -54,6 +54,51 @@ Everything that can be misconfigured — entrypoint, credential, contract versio
 
 <br/>
 
+## CLI agents: three commands
+
+**Your agent is a binary — goose, opencode, a Node CLI — so there is no `import` to add.** There is also nothing to run alongside it: no worker, no sidecar, no wrapper process. You start your agent the way you always did.
+
+```bash
+pip install percepteye-agent-flywheel     # 1. the wheel, one dependency
+percepteye install-hooks                  # 2. register the plugin with your agent
+export PERCEPTEYE_API_KEY=pefw_...        # 3. optional — see below
+```
+
+```bash
+goose session                             # unchanged. That is the whole point.
+```
+
+**Step 3 is optional, and that is the design.** With no key, the plugin records your agent's real tool-failure rate to `~/.percepteye/turns/` and nothing leaves the machine — no account, no network, useful on day one. Add a key and the same install starts claiming rollouts and contributing them. One decision, not two.
+
+### One switch owns the endpoint
+
+Capturing a completion means your agent's traffic has to reach us — and for a binary, the only place that lives is its own config. So `install-hooks` sets it, and **the mode you are in decides what it says**:
+
+> [!NOTE]
+> **No key, no routing.** Your traffic is re-pointed only when you are in `training` **and** `PERCEPTEYE_API_KEY` is set. A keyless install records locally and leaves your endpoint exactly where it was — and unsetting the key later hands it back, with no mode flip needed. The mode is the switch; the key is the consent, and routing needs both.
+
+```bash
+PERCEPTEYE_AGENT_MODE=training      # our gateway — completions captured (the default)
+PERCEPTEYE_AGENT_MODE=production    # your own endpoint, exactly as it was
+```
+
+**`production` restores the value you had**, not a default we picked. It is read once, before the first time we ever write to your config, and kept — so upgrading the wheel and re-running `install-hooks` cannot lose it.
+
+**No command is needed to flip.** Set the variable and start your agent; the `SessionStart` hook reconciles the config before the session begins.
+
+> [!IMPORTANT]
+> goose resolves its endpoint **once, at process start**. A flip therefore takes effect on the **next** session, not the one already running. The hook re-checks on every session start, so the config is self-correcting rather than something you have to remember to repair.
+
+**Your environment always wins.** goose ranks `OPENAI_HOST` and `OPENAI_BASE_URL` from the environment *above* its config file, so the instant escape hatch needs no command from us at all:
+
+```bash
+OPENAI_BASE_URL=https://my-own-proxy/v1 goose session   # we are not in the path
+```
+
+`percepteye status` prints where traffic will actually go on the next run — and says so explicitly if one of those variables is shadowing us, which is the failure that otherwise costs an hour.
+
+<br/>
+
 ## How the loop closes
 
 **Register once, then loop forever.** Four lanes cross the trust boundary, and **every one of them is opened from your side** — there is no listening socket anywhere in this package.
@@ -231,6 +276,9 @@ with px.turn(conversation_id=conv_id) as turn_id:
 
 **It captures. It never reroutes.** Adapters bind with no endpoint at all, so attaching cannot re-point a single byte of production traffic. Everything fails open: an unreachable control plane costs you the observation and nothing else.
 
+> [!NOTE]
+> That is a promise about **`attach()`**, and it holds because your Python process already hands us the turn. A **CLI agent** has no such seam — a binary's completions only become capturable if its endpoint points at us — so `percepteye install-hooks` *does* set one, and [`PERCEPTEYE_AGENT_MODE` owns it in both directions](#cli-agents-three-commands). Different mechanism, same rule: you can always see it, and you can always take it back.
+
 **Telling the two apart in your own code** — `current_capture()` answers with three states and never collapses them:
 
 ```python
@@ -252,7 +300,7 @@ Branch on this, not on `current_rollout_id()` — that one answers the narrower 
 | **OpenClaw** | ⬢ Node | `openclaw plugins install percepteye-agent-flywheel` |
 | **DeepSeek Harness** | ⬢ Node | `dsh plugin --profile <name> add percepteye-agent-flywheel` |
 | **prime-agent** | ⌘ CLI | argv + `--mode json` event stream — **[full worked example →](examples/prime_agent/)** |
-| **goose** | ⌘ CLI | argv + a [hook plugin](https://github.com/percepteye-ai/agent-flywheel-hooks) for outcomes — **[worked example →](examples/goose/)** |
+| **goose** | ⌘ CLI | `percepteye install-hooks` — **[three commands, no worker →](#cli-agents-three-commands)** |
 | **opencode** | ⌘ CLI | `fw.serve(["opencode", "run"], ...)` — nothing added to the binary |
 | **anything else with a CLI** | ⌘ CLI | argv list; outcomes free if it logs [OTel GenAI events](#runs-whatever-you-already-run) |
 
@@ -327,6 +375,15 @@ prompt = fw.current_prompt(agent_id="my-agent")
 PERCEPTEYE_AGENT_MODE=production    # serve() returns 0 immediately. No claim, no connection.
 PERCEPTEYE_AGENT_MODE=training      # donate capacity (the default when unset)
 ```
+
+**The same switch governs a CLI install**, so one variable means one thing everywhere:
+
+| | `training` | `production` |
+|:--|:--|:--|
+| `fw.serve(...)` | claims and runs rollouts | returns 0 immediately |
+| `percepteye install-hooks` | endpoint → our gateway; sessions claim and report | endpoint → **the one you had**; nothing claimed, nothing reported |
+
+An unrecognised value **raises** rather than guessing — a typo that silently picked `training` would keep donating on your credentials with nothing printed. See [CLI agents](#cli-agents-three-commands) for the one timing caveat.
 
 In `production` the call returns **before opening any connection**, so a production deployment needs no control-plane URL and no key — turning training off never requires being configured for it. It returns rather than raising, because a switch that crashes the service it was meant to quiet is not a switch, and it prints one line saying which mode it took, because a silent no-op is the failure mode this package refuses everywhere else. An unrecognised value raises instead of guessing: both ways of guessing wrong are invisible from the outside.
 
