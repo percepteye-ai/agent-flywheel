@@ -7,20 +7,33 @@ goose is served through the **command entrypoint**: it is a compiled binary, not
 an importable Python object, so there is no protocol to implement and nothing is
 added to goose itself.
 
+> [!IMPORTANT]
+> **This is the capacity-donation path, and it is not the only one.** Here the
+> SDK drives goose: it claims a rollout, spawns the binary, and reports the
+> outcome. That fits an operator who wants to lend the flywheel capacity.
+>
+> If instead you *run goose yourself* and want the turns you already serve to
+> feed the flywheel, you do not need this file or any worker process — see
+> [CLI agents: three commands](../../README.md#cli-agents-three-commands).
+> `pip install`, `percepteye install-hooks`, and you start goose exactly as
+> before.
+
 ## The two halves
 
 **Routing** needs no extension. goose's openai provider resolves its endpoint
 from the environment, and the names it reads are the ones `build_child_env`
-already sets per rollout — so `serve_goose.py` is the whole integration.
+already sets per rollout — so on this path `serve_goose.py` carries the routing.
 
-**Tool outcomes** come from the hook plugin at
-[percepteye-ai/agent-flywheel-hooks](https://github.com/percepteye-ai/agent-flywheel-hooks).
-Install it once; it is inert unless `PERCEPTEYE_TRAJECTORY_DIR` is set, which the
-SDK sets per rollout. `serve_goose.py` refuses to start without it, because
-`reports_tool_calls=True` is an assertion that only the plugin makes true.
+**Tool outcomes** come from the hook plugin, which **ships in this wheel**. There
+is no second install and no external repository to clone: `percepteye
+install-hooks` renders it, pointed at this virtualenv's interpreter. It is inert
+unless `PERCEPTEYE_TRAJECTORY_DIR` is set — which the SDK sets per rollout — so
+the same install is a no-op outside one. `serve_goose.py` refuses to start
+without it, because `reports_tool_calls=True` is an assertion only the plugin
+makes true.
 
 ```bash
-goose plugin install https://github.com/percepteye-ai/agent-flywheel-hooks
+percepteye install-hooks
 PERCEPTEYE_CONTROL_PLANE_URL=... PERCEPTEYE_API_KEY=... python serve_goose.py
 ```
 
@@ -29,8 +42,10 @@ PERCEPTEYE_CONTROL_PLANE_URL=... PERCEPTEYE_API_KEY=... python serve_goose.py
 Both are closed in `serve_goose.py`, and both are worth understanding because
 each produces a rollout that looks perfect and teaches nothing.
 
-1. **`OPENAI_HOST` outranks `OPENAI_BASE_URL`.** goose resolves the host in the
-   order *`OPENAI_HOST` env → `OPENAI_BASE_URL` env → `OPENAI_HOST` config*. The
+1. **`OPENAI_HOST` outranks `OPENAI_BASE_URL`.** Read from
+   `crates/goose/src/providers/openai_def.rs::resolve_base_url`, the order is
+   *`OPENAI_HOST` env → `OPENAI_BASE_URL` env → `OPENAI_BASE_URL` config →
+   `OPENAI_HOST` config → `https://api.openai.com`*. The
    SDK sets `OPENAI_BASE_URL` last so it beats anything inherited, but that only
    settles ties among names the SDK knows — `OPENAI_HOST` is not in
    `isolation.UNROUTABLE_PROVIDER_VARS`, so an operator with it exported sends

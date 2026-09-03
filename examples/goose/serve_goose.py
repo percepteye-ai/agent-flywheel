@@ -11,18 +11,27 @@ Unlike prime-agent, goose needs NO routing extension. Its openai provider
 resolves the endpoint from the environment, and the names it reads are the ones
 ``build_child_env`` already sets per rollout:
 
-    crates/goose-providers/src/openai.rs :: resolve_base_url
+    crates/goose/src/providers/openai_def.rs :: resolve_base_url
       1. OPENAI_HOST      env var   (session override, deprecated but honoured)
       2. OPENAI_BASE_URL  env var
-      3. OPENAI_HOST      config file (persisted by `goose configure`)
+      3. OPENAI_BASE_URL  config file
+      4. OPENAI_HOST      config file (persisted by `goose configure`)
+      5. https://api.openai.com
 
-So step 2 is ours and routing is the argv below plus two scrubs.
+So step 2 is ours and routing is the argv below plus two scrubs. Note ranks 3
+and 4: a config-file OPENAI_BASE_URL beats a config-file OPENAI_HOST, which is
+why ``install_hooks`` writes the former.
 
-TOOL OUTCOMES come from a separate piece: the hook plugin at
-https://github.com/percepteye-ai/agent-flywheel-hooks, which subscribes to goose's
-post-tool hook events and appends to ``$PERCEPTEYE_TRAJECTORY_DIR``. Install it
-once; it is inert whenever that variable is unset, so the same install is a
-no-op outside a rollout. Nothing in goose's source is modified.
+TOOL OUTCOMES come from the hook plugin, which SHIPS IN THIS WHEEL -- there is
+no second install and no external repository. ``percepteye install-hooks``
+renders it, pointed at this virtualenv's interpreter; it subscribes to goose's
+post-tool hook events and appends to ``$PERCEPTEYE_TRAJECTORY_DIR``. It is inert
+whenever that variable is unset, so the same install is a no-op outside a
+rollout. Nothing in goose's source is modified.
+
+THIS FILE IS THE CAPACITY-DONATION PATH, not the only one. Here the SDK drives
+goose. A customer who runs goose THEMSELVES needs no worker at all -- see
+"CLI agents: three commands" in the repository README.
 
 VERIFIED AGAINST THE CHECKOUT, not against the docs — every claim in this file
 names the file it was read from.
@@ -264,8 +273,7 @@ def main() -> int:
             "outcomes would be recorded.\n"
             f"    Searched:\n      {searched}\n"
             "    Install it with:\n"
-            "      goose plugin install "
-            "https://github.com/percepteye-ai/agent-flywheel-hooks"
+            "      percepteye install-hooks"
         )
     if plugin is not None:
         print(f"[percepteye] hook plugin: {plugin}")
@@ -276,8 +284,7 @@ def main() -> int:
         argv,
         agent_id=AGENT_ID,
         input_shape="text",
-        # TRUE, and backed by the hook plugin at
-        # https://github.com/percepteye-ai/agent-flywheel-hooks — which main()
+        # TRUE, and backed by the hook plugin this wheel ships — which main()
         # above refuses to start without, so this assertion cannot outlive the
         # thing that makes it true.
         #

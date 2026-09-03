@@ -1,22 +1,26 @@
-"""The goose integration's two halves that live in THIS repository.
+"""The goose integration's two halves, both of which now live in THIS repository.
 
-The hook plugin itself moved to its own repository, because both marketplaces
-install from a repository ROOT and neither can install a subdirectory:
+THE SPLIT IS GONE. The plugin used to live in its own repository because both
+marketplaces install from a repository ROOT and neither can install a
+subdirectory -- so the customer needed two installs. The wheel now ships the
+recorder itself (`percepteye_agent_flywheel/hosts/scripts/`) and `percepteye
+install-hooks` renders the plugin directory pointed at it, which is what
+collapsed two installs into one.
 
-    https://github.com/percepteye-ai/agent-flywheel-hooks
+That matters for what this file can PROVE, not just for how it reads:
 
-What stays here is everything that is ours rather than the plugin's:
+1.  The WIRE FORMAT. The recorder appends to `$PERCEPTEYE_TRAJECTORY_DIR/
+    tool_calls.jsonl` and this SDK reads it. The fixtures below are verbatim
+    lines captured from the real plugin driven by a live goose 1.48.0, so this
+    fails if the READER drifts from what the recorder emits. Unlike before, the
+    other direction is now checkable here too -- producer and consumer are one
+    artifact -- so a drift on either side is this suite's problem and not
+    another repository's.
 
-1.  The WIRE FORMAT. The plugin appends to `$PERCEPTEYE_TRAJECTORY_DIR/
-    tool_calls.jsonl` and this SDK reads it -- two ends of one ABI, now in two
-    repositories. The fixtures below are verbatim lines captured from the real
-    plugin driven by a live goose 1.48.0, so this fails if the READER drifts
-    away from what the plugin emits. It cannot catch the plugin drifting away
-    from the reader; that direction is covered by the plugin's own suite, and
-    the split is the cost of the two repositories.
-
-2.  `examples/goose/serve_goose.py`, which is this repository's code and whose
-    `reports_tool_calls=True` is an assertion only the plugin makes true.
+2.  `examples/goose/serve_goose.py`, the CAPACITY-DONATION path, whose
+    `reports_tool_calls=True` is an assertion only the recorder makes true. It
+    is not the only path: a customer running goose themselves uses
+    `percepteye install-hooks` and no worker process at all.
 """
 from __future__ import annotations
 
@@ -124,7 +128,12 @@ def test_serving_without_the_plugin_refuses_rather_than_downgrading(tmp_path):
     proc = run_serve(tmp_path, mode="training", workspace=tmp_path / "ws")
     assert proc.returncode != 0
     assert "hook plugin is not installed" in proc.stderr
-    assert "goose plugin install" in proc.stderr
+    # THE REMEDY, not just the diagnosis -- and it must be the remedy that
+    # actually works today. This used to say `goose plugin install <url>`,
+    # sending the operator to a second install that the wheel now ships; a
+    # refusal naming a stale fix costs more than one naming none.
+    assert "percepteye install-hooks" in proc.stderr
+    assert "goose plugin install" not in proc.stderr
 
 
 def test_production_mode_does_not_raise_over_a_missing_plugin(tmp_path):
