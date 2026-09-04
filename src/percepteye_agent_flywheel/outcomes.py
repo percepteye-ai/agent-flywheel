@@ -452,9 +452,31 @@ def record_turn_text(
         path.mkdir(parents=True, exist_ok=True)
         with open(path / TURNS_FILENAME, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-        return True
     except (OSError, TypeError, ValueError):
         return False
+
+    # The OTel projection rides the SAME call that writes the file, for the
+    # same reason the tool-call path does: two call sites for one fact drift,
+    # and a turn that reached the trajectory but not the customer's traces is
+    # the drift nobody notices until they are comparing the two.
+    #
+    # Imported here, not at module scope: `tracing` reaches for the OTel API,
+    # and a customer who never installed the extra should not pay an import for
+    # a projection that will be a no-op.
+    try:
+        from .tracing import record_turn_span
+
+        record_turn_span(
+            **{("input_text" if kind == "task" else "output_text"): record["text"]},
+            turn_id=ids.get("turn_id"),
+            conversation_id=ids.get("conversation_id"),
+            rollout_id=ids.get("rollout_id"),
+        )
+    except Exception:
+        # A capture bug costs the observation and never the turn -- and the
+        # file is already written, so this cannot cost that either.
+        pass
+    return True
 
 
 def read_turn_text(

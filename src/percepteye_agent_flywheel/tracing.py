@@ -5,15 +5,33 @@ plane grades. This module additionally emits them as OpenTelemetry spans so
 they show up in whatever the customer already runs -- Datadog, Phoenix, Grafana
 -- alongside the rest of their agent's telemetry.
 
-**Egress only. Nothing here is ever read back.** The trajectory stays the record of
-what was trained on, for a reason that is a fact about the OTel spec rather
-than about maturity: the GenAI semantic conventions define no attribute for
-per-token logprobs or token ids. The string "logprob" appears in the whole
-convention three times, every one a note telling instrumentors NOT to report
-``top_logprobs`` as ``gen_ai.request.top_k``. So spans cannot carry the thing
-training needs, and a system that ingested them would be quietly training on
-less than it captured. Because we never read them back, the customer's
-sampler, queue overflow and exporter failures cost us nothing.
+**Tool spans are egress only. THE TURN SPAN IS NOT** -- see below, because that
+changed and the old reasoning does not survive the change.
+
+The original rule was that nothing here is ever read back, justified by a fact
+about the spec rather than about maturity: the GenAI semantic conventions define
+no attribute for per-token logprobs or token ids. The string "logprob" appears
+in the whole convention three times, every one a note telling instrumentors NOT
+to report ``top_logprobs`` as ``gen_ai.request.top_k``. So a span could not carry
+the thing training needed, and ingesting one would be training on less than we
+captured.
+
+THAT ARGUMENT WAS SCOPED TO ONE OBJECTIVE, and it only became visible when the
+scope narrowed. A SAMPLED logprob -- the behaviour policy's own, as opposed to
+one recomputed from the model at training time -- is read by exactly one family
+of objective: those forming an importance ratio against the policy that
+produced the text. Every other objective this SDK's evidence feeds either
+recomputes what it needs by forward pass or has no logprob in its loss at all.
+For those, "the thing training needs" is the prompt, the completion and a
+verdict, all of which a span carries perfectly well.
+
+So :func:`record_turn_span` is a capture surface, not a projection, and it is
+OPT-IN for a reason the tool spans do not share: a tool name and an outcome are
+telemetry, while a prompt and a completion are the user's own words.
+
+The rest of the original rule still holds for tool spans: because we never read
+those back, the customer's sampler, queue overflow and exporter failures cost us
+nothing.
 
 **We never install a TracerProvider.** ``set_tracer_provider`` is once-only:
 the second caller gets a log line, not an exception. So calling it would either
@@ -32,7 +50,7 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["record_tool_call_span", "tracing_available"]
+__all__ = ["record_tool_call_span", "record_turn_span", "tracing_available"]
 
 #: Resolved once. ``None`` means the API is not installed, which is the normal
 #: case: the ``otel`` extra is opt-in and the package ships with one runtime
@@ -153,3 +171,80 @@ def _short(value: Any, limit: int = 2000) -> str:
     except Exception:
         out = str(value)
     return out if len(out) <= limit else out[:limit] + "...[truncated]"
+
+
+#: Turn content is bounded before it leaves. A pasted stack trace or a long
+#: answer must not make one span dominate the customer's export, and an
+#: exporter that silently drops an oversized span costs us the whole turn
+#: rather than its tail.
+_MAX_TURN_CHARS = 20_000
+
+
+def record_turn_span(
+    *,
+    input_text: str | None = None,
+    output_text: str | None = None,
+    turn_id: str | None = None,
+    conversation_id: str | None = None,
+    agent_name: str | None = None,
+    model: str | None = None,
+    rollout_id: str | None = None,
+) -> None:
+    """Emit one span carrying what the agent was ASKED and what it ANSWERED.
+
+    THE CAPTURE SURFACE FOR THE FOUR TRAINABLE ALGORITHMS. SFT wants the
+    messages; OPSD wants them plus a privileged reference; RAFT wants them plus
+    a reward and a proven success; DPO wants two of them to pair. None reads a
+    sampled logprob, which is why a span suffices here where it would not for
+    offline GRPO.
+
+    OPT-IN, and the caller decides. Nothing in this package can see a prompt or
+    a completion on its own -- the adapters observe tool calls, not turn content
+    -- so this is only ever called with text the customer handed over
+    deliberately. That asymmetry with :func:`record_tool_call_span` is the
+    point: a tool name is telemetry, a prompt is the user's own words.
+
+    Never raises, like everything else here.
+
+    ``rollout_id`` is stamped when the turn IS a rollout, because that is the
+    marker the ingest side reads to keep our own training traffic out of the
+    customer's observed-traffic accounting. A production turn carries
+    ``percepteye.turn.id`` instead and no rollout id, so it is correctly counted
+    as the customer's own -- which is exactly what it is.
+    """
+    if not input_text and not output_text:
+        # Nothing to say. An empty turn span would assert a turn happened and
+        # carried no content, which is a different claim from not being given
+        # the content.
+        return
+    tracer = _tracer()
+    if tracer is None:
+        return
+    try:
+        with tracer.start_as_current_span("chat") as span:
+            if not getattr(span, "is_recording", lambda: False)():
+                return
+            span.set_attribute("gen_ai.operation.name", "chat")
+            if model:
+                span.set_attribute("gen_ai.request.model", str(model))
+            if agent_name:
+                span.set_attribute("gen_ai.agent.name", str(agent_name))
+            # The convention's names for turn content. Carried as attributes
+            # rather than events because the ingest side normalises attributes
+            # into `raw_attributes` verbatim, and an event body does not
+            # survive that path.
+            if input_text:
+                span.set_attribute(
+                    "gen_ai.input.messages", str(input_text)[:_MAX_TURN_CHARS])
+            if output_text:
+                span.set_attribute(
+                    "gen_ai.output.messages", str(output_text)[:_MAX_TURN_CHARS])
+            if rollout_id:
+                span.set_attribute("percepteye.rollout.id", str(rollout_id))
+            if turn_id:
+                span.set_attribute("percepteye.turn.id", str(turn_id))
+            if conversation_id:
+                span.set_attribute(
+                    "percepteye.conversation.id", str(conversation_id))
+    except Exception:
+        return

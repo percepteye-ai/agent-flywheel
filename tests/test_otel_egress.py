@@ -203,3 +203,115 @@ def test_recording_an_outcome_still_writes_the_trajectory_and_also_emits(spans, 
 
 def test_tracing_available_reports_the_api_not_the_provider():
     assert isinstance(tracing_available(), bool)
+
+
+# ── the turn span: a capture surface, not a projection ─────────────────────
+
+
+def test_a_turn_span_carries_the_prompt_and_the_completion(spans):
+    """THE CAPTURE the four trainable algorithms need. SFT wants the messages;
+    OPSD wants them plus a reference; RAFT plus a reward and a proven success;
+    DPO wants two to pair. None reads a sampled logprob, which is why a span
+    suffices here where it would not for offline GRPO."""
+    from percepteye_agent_flywheel.tracing import record_turn_span
+
+    record_turn_span(input_text="summarise the incident",
+                     output_text="Three services timed out.",
+                     turn_id="t1", conversation_id="c1", model="gpt-4o")
+    span = _only(spans)
+    assert span.attributes["gen_ai.operation.name"] == "chat"
+    assert span.attributes["gen_ai.input.messages"] == "summarise the incident"
+    assert span.attributes["gen_ai.output.messages"] == "Three services timed out."
+    assert span.attributes["gen_ai.request.model"] == "gpt-4o"
+
+
+def test_a_turn_with_no_content_emits_no_span(spans):
+    """An empty turn span would assert a turn happened and carried no content,
+    which is a different claim from not being given the content."""
+    from percepteye_agent_flywheel.tracing import record_turn_span
+
+    record_turn_span(turn_id="t2")
+    assert spans.get_finished_spans() == ()
+
+
+def test_half_a_turn_still_emits(spans):
+    """The answer arrives later than the question; neither half waits for the
+    other."""
+    from percepteye_agent_flywheel.tracing import record_turn_span
+
+    record_turn_span(input_text="just the question", turn_id="t3")
+    span = _only(spans)
+    assert span.attributes["gen_ai.input.messages"] == "just the question"
+    assert "gen_ai.output.messages" not in span.attributes
+
+
+def test_a_production_turn_is_not_stamped_as_a_rollout(spans):
+    """THE SELF-FEEDING GUARD, from the emitting side. The ingest side keys on
+    `percepteye.rollout.id` to keep our own training traffic out of the
+    customer's observed-traffic accounting. A production turn must carry the
+    turn id and NO rollout id, or every served turn looks like our work."""
+    from percepteye_agent_flywheel.tracing import record_turn_span
+
+    record_turn_span(input_text="q", output_text="a", turn_id="t4")
+    span = _only(spans)
+    assert span.attributes["percepteye.turn.id"] == "t4"
+    assert "percepteye.rollout.id" not in span.attributes
+
+
+def test_a_rollout_turn_IS_stamped_so_ingest_can_exclude_it(spans):
+    from percepteye_agent_flywheel.tracing import record_turn_span
+
+    record_turn_span(input_text="q", output_text="a", rollout_id="r9")
+    span = _only(spans)
+    assert span.attributes["percepteye.rollout.id"] == "r9"
+
+
+def test_turn_content_is_bounded(spans):
+    """One span must not dominate the customer's export, and an exporter that
+    drops an oversized span costs the whole turn rather than its tail."""
+    from percepteye_agent_flywheel.tracing import _MAX_TURN_CHARS, record_turn_span
+
+    record_turn_span(input_text="x" * (_MAX_TURN_CHARS + 5_000), turn_id="t5")
+    assert len(_only(spans).attributes["gen_ai.input.messages"]) == _MAX_TURN_CHARS
+
+
+def test_recording_a_turn_emits_the_span_from_the_same_call(spans, tmp_path):
+    """One call site for one fact. A turn that reached the trajectory but not
+    the customer's traces is the drift nobody notices until they compare."""
+    from percepteye_agent_flywheel.outcomes import record_turn_text
+
+    record_turn_text(tmp_path, "task", "asked", turn_id="t6")
+    span = _only(spans)
+    assert span.attributes["gen_ai.input.messages"] == "asked"
+    assert span.attributes["percepteye.turn.id"] == "t6"
+
+
+# ── the same guard on the TOOL span ────────────────────────────────────────
+#
+# Found by a mis-aimed mutation: the two functions carry a byte-identical
+# `if rollout_id: ... if turn_id:` block, so a mutation meant for the turn span
+# landed on the tool span and EVERY test still passed. The turn span's guard was
+# covered; this one was not, and it is the span that has been flowing all along.
+
+
+def test_a_production_tool_call_is_not_stamped_as_a_rollout(spans):
+    """`percepteye.rollout.id` is the marker the ingest side keys on to keep
+    our own training traffic out of the customer's observed-traffic accounting.
+    Stamping a served turn's tool call with it makes every one of them look
+    like contributed work -- which is the exact failure the comment beside this
+    code describes."""
+    from percepteye_agent_flywheel.tracing import record_tool_call_span
+
+    record_tool_call_span("shell", {"cmd": "ls"}, outcome="ok", turn_id="t9")
+    span = _only(spans)
+    assert span.attributes["percepteye.turn.id"] == "t9"
+    assert "percepteye.rollout.id" not in span.attributes
+
+
+def test_a_rollout_tool_call_IS_stamped_so_ingest_can_exclude_it(spans):
+    from percepteye_agent_flywheel.tracing import record_tool_call_span
+
+    record_tool_call_span("shell", {"cmd": "ls"}, outcome="ok", rollout_id="r9")
+    span = _only(spans)
+    assert span.attributes["percepteye.rollout.id"] == "r9"
+    assert "percepteye.turn.id" not in span.attributes
