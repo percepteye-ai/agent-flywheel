@@ -1,0 +1,172 @@
+"""Render captured production turns into the shape the control plane ingests.
+
+WHY THIS IS THE WHOLE MISSING PIECE. Everything downstream of a production turn
+already exists: the control plane has a post-hoc pipeline that ingests recorded
+trajectories, compiles a reward suite against them, scores them WITHOUT an
+environment to re-execute against, and emits training rows. What it had no way
+to receive was a turn -- because nothing rendered one into a record it accepts.
+
+WHY NOTHING NEW IS INVENTED HERE. The ingest side already accepts a "unified
+messages log": one record per rollout carrying an OpenAI-style ``messages`` list
+and an optional ``tool_calls`` list, which it chunks into per-step transitions
+keyed by assistant turns. A production turn IS that shape. So this module is a
+projection, not a format -- and deliberately so, because a second format would
+be a second thing to keep in sync with a parser we do not own.
+
+``messages`` is OpenAI-style rather than ours for the same reason: it is the
+interoperable shape, not a private one, so a customer can feed these records to
+anything that reads chat logs and we have not locked them in.
+
+WHAT IS DELIBERATELY ABSENT. No reward and no success. A production turn has no
+verdict -- nobody graded it -- and inventing one here would be the exact defect
+the emitter's ``success is None`` rule exists to prevent: an ungraded turn
+cloned as a demonstration of good work. Grading happens on the control-plane
+side, against a compiled suite, and this module must not pre-empt it.
+"""
+from __future__ import annotations
+
+import json
+import os
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
+
+from .outcomes import Trajectory, read_turn_text
+
+__all__ = ["iter_records", "turn_to_record", "write_records"]
+
+
+def turn_to_record(
+    turn_dir: str | os.PathLike[str],
+    *,
+    turn_id: str | None = None,
+) -> dict[str, Any] | None:
+    """One captured turn as an ingestible record, or ``None``.
+
+    ``None`` means the turn recorded nothing that can be trained on. A turn with
+    tool calls but NO text is deliberately included -- its tool sequence is real
+    evidence and several verifier kinds score exactly that -- while a turn with
+    neither is not a record of anything.
+    """
+    path = Path(turn_dir)
+    text = read_turn_text(path) or {}
+    traj = Trajectory(path)
+    calls = traj.read()
+
+    messages: list[dict[str, Any]] = []
+    if text.get("task"):
+        messages.append({"role": "user", "content": text["task"]})
+    if text.get("answer"):
+        messages.append({"role": "assistant", "content": text["answer"]})
+    if not messages and not calls:
+        return None
+
+    record: dict[str, Any] = {
+        "messages": messages,
+        # The turn id is the join key for anything that arrives later, and it
+        # is what the ingest side's identity ladder prefers over hashing the
+        # first user message -- so two differently-worded turns stay distinct
+        # rather than colliding on a content hash.
+        "rollout_id": turn_id or path.name,
+        "task_id": turn_id or path.name,
+    }
+    if calls:
+        record["tool_calls"] = [_tool_call(c) for c in calls]
+    # REPORTED, NOT SWALLOWED. A partly unreadable trajectory must not be
+    # graded as a complete one, and the count is the only thing that can say so.
+    if traj.malformed:
+        record["tool_calls_omitted_count"] = traj.malformed
+    conv = _conversation_id(path)
+    if conv:
+        record["conversation_id"] = conv
+    return record
+
+
+def _tool_call(call: Any) -> dict[str, Any]:
+    """One recorded outcome as an OpenAI-ish tool call.
+
+    THE TRI-STATE SURVIVES, under our own key. The chat-log shape has no way to
+    say "this call's result was never observed", and collapsing ``unknown`` into
+    a success or a failure is the single most damaging thing this projection
+    could do -- every downstream verifier that scores tool outcomes would be
+    scoring a verdict nobody reached.
+    """
+    out: dict[str, Any] = {
+        "name": call.name,
+        "arguments": call.arguments,
+        # Verbatim, so nothing downstream has to invert the mapping below.
+        "percepteye_outcome": call.outcome,
+    }
+    # AND under the key the ingest side actually reads. It maps this through
+    # `_maybe_bool` onto a `bool | None` field whose three states are exactly
+    # ours -- and its own comment names this path: "an external trajectory that
+    # does not state an outcome is unobserved ... this is the ingest path a
+    # Flywheel capture would arrive on."
+    #
+    # `unknown` is therefore OMITTED rather than sent as False. Absent means
+    # unobserved, which is the truth; False would assert a failure nobody saw.
+    if call.outcome == "ok":
+        out["success"] = True
+    elif call.outcome == "failed":
+        out["success"] = False
+    for src, dst in (
+        ("status_code", "status_code"), ("output", "output"),
+        ("error", "error"), ("tool_call_id", "id"),
+        ("latency_ms", "latency_ms"),
+    ):
+        value = getattr(call, src, None)
+        if value is not None:
+            out[dst] = value
+    return out
+
+
+def _conversation_id(path: Path) -> str | None:
+    try:
+        return (path / "conversation_id").read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def iter_records(trajectory_root: str | os.PathLike[str]) -> Iterator[dict[str, Any]]:
+    """Every capturable turn under a trajectory root, oldest first.
+
+    Ordered by modification time so a conversation's turns arrive in the order
+    they happened -- the ingest side chunks by assistant turn and an out-of-order
+    stream would interleave two users' conversations.
+    """
+    root = Path(trajectory_root)
+    try:
+        dirs = [d for d in root.iterdir() if d.is_dir()]
+    except OSError:
+        return
+    for d in sorted(dirs, key=lambda p: _mtime(p)):
+        record = turn_to_record(d, turn_id=d.name)
+        if record is not None:
+            yield record
+
+
+def _mtime(p: Path) -> float:
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def write_records(
+    trajectory_root: str | os.PathLike[str],
+    out_path: str | os.PathLike[str],
+) -> int:
+    """Write every turn as JSONL. Returns how many records were written.
+
+    JSONL because that is what the ingest side's loader reads, and because one
+    record per line means a truncated write costs that record and nothing else --
+    the same property the trajectory files themselves keep.
+    """
+    written = 0
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", encoding="utf-8") as fh:
+        for record in iter_records(trajectory_root):
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            written += 1
+    return written
