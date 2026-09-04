@@ -127,20 +127,105 @@ def _conversation_id(path: Path) -> str | None:
         return None
 
 
-def iter_records(trajectory_root: str | os.PathLike[str]) -> Iterator[dict[str, Any]]:
+def conversation_to_record(
+    turn_dirs: list[Path],
+    *,
+    conversation_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Several turns of ONE conversation as a single record.
+
+    WHY A CONVERSATION AND NOT A TURN, for anything beyond plain cloning: the
+    ingest side chunks a messages list into one transition per assistant turn,
+    and the messages that follow an assistant turn are that turn's OBSERVED
+    NEXT STATE. A lone turn exported by itself has nothing after it, so it can
+    never carry one -- and that observation is the only privileged reference
+    obtainable without a verifier, a passing sibling or a grader.
+
+    So a conversation of N turns yields N-1 references and one final turn with
+    none, which is the honest shape: the last thing an agent said has not been
+    responded to yet.
+
+    Turn order is the caller's, not inferred. Guessing which turn preceded
+    which is the same class of guess this SDK refuses everywhere else, and
+    getting it wrong would attach one turn's outcome to another's answer.
+    """
+    messages: list[dict[str, Any]] = []
+    tool_calls: list[dict[str, Any]] = []
+    omitted = 0
+    first_id: str | None = None
+    for d in turn_dirs:
+        text = read_turn_text(d) or {}
+        traj = Trajectory(d)
+        calls = traj.read()
+        omitted += traj.malformed
+        if text.get("task"):
+            messages.append({"role": "user", "content": text["task"]})
+        if text.get("answer"):
+            messages.append({"role": "assistant", "content": text["answer"]})
+        if calls:
+            tool_calls.extend(_tool_call(c) for c in calls)
+        first_id = first_id or d.name
+    if not messages and not tool_calls:
+        return None
+
+    cid = conversation_id or (_conversation_id(turn_dirs[0]) if turn_dirs else None)
+    record: dict[str, Any] = {
+        "messages": messages,
+        "rollout_id": cid or first_id,
+        "task_id": cid or first_id,
+    }
+    if tool_calls:
+        record["tool_calls"] = tool_calls
+    if omitted:
+        record["tool_calls_omitted_count"] = omitted
+    if cid:
+        record["conversation_id"] = cid
+    return record
+
+
+def iter_records(
+    trajectory_root: str | os.PathLike[str],
+    *,
+    group_conversations: bool = True,
+) -> Iterator[dict[str, Any]]:
     """Every capturable turn under a trajectory root, oldest first.
 
     Ordered by modification time so a conversation's turns arrive in the order
-    they happened -- the ingest side chunks by assistant turn and an out-of-order
-    stream would interleave two users' conversations.
+    they happened -- the ingest side chunks by assistant turn, and an
+    out-of-order stream would attach one turn's outcome to another's answer.
+
+    ``group_conversations`` (the default) emits ONE record per
+    ``conversation_id``, which is what lets each non-final turn carry the
+    observed next state that follows it. Turns with no conversation id are
+    emitted individually, because a turn that never declared which conversation
+    it belonged to cannot be placed in one -- and guessing is how two users'
+    turns end up in a single record.
     """
     root = Path(trajectory_root)
     try:
         dirs = [d for d in root.iterdir() if d.is_dir()]
     except OSError:
         return
-    for d in sorted(dirs, key=lambda p: _mtime(p)):
-        record = turn_to_record(d, turn_id=d.name)
+    ordered = sorted(dirs, key=lambda p: _mtime(p))
+
+    if not group_conversations:
+        for d in ordered:
+            record = turn_to_record(d, turn_id=d.name)
+            if record is not None:
+                yield record
+        return
+
+    grouped: dict[str, list[Path]] = {}
+    for d in ordered:
+        cid = _conversation_id(d)
+        if cid is None:
+            record = turn_to_record(d, turn_id=d.name)
+            if record is not None:
+                yield record
+            continue
+        grouped.setdefault(cid, []).append(d)
+    for cid, turn_dirs in grouped.items():
+        record = conversation_to_record(turn_dirs, conversation_id=cid)
         if record is not None:
             yield record
 

@@ -164,3 +164,63 @@ def test_an_empty_root_writes_an_empty_file_rather_than_failing(tmp_path):
     out = tmp_path / "empty.jsonl"
     assert write_records(tmp_path / "nothing-here", out) == 0
     assert out.read_text() == ""
+
+
+# ── conversations: what makes a privileged reference obtainable ────────────
+
+
+def test_a_conversation_exports_as_ONE_record(px, tmp_path):
+    """The ingest side chunks a messages list into one transition per
+    assistant turn, and the messages that follow a turn are its observed next
+    state. A lone turn exported by itself has nothing after it, so it can never
+    carry one -- and that observation is the only privileged reference
+    obtainable without a verifier, a passing sibling or a grader."""
+    for i, (ask, ans) in enumerate([("q0", "a0"), ("q1", "a1"), ("q2", "a2")]):
+        with px.turn(turn_id=f"t{i}", conversation_id="c1", input_text=ask):
+            pass
+        px.record_answer(f"t{i}", ans)
+    recs = list(iter_records(tmp_path))
+    assert len(recs) == 1
+    assert [m["content"] for m in recs[0]["messages"]] == \
+        ["q0", "a0", "q1", "a1", "q2", "a2"]
+    assert recs[0]["conversation_id"] == "c1"
+
+
+def test_turns_from_DIFFERENT_conversations_do_not_merge(px, tmp_path):
+    """Merging them would attach one user's outcome to another's answer."""
+    for cid in ("c1", "c2"):
+        with px.turn(turn_id=f"{cid}-t", conversation_id=cid, input_text="q"):
+            pass
+        px.record_answer(f"{cid}-t", "a")
+    recs = list(iter_records(tmp_path))
+    assert len(recs) == 2
+    assert {r["conversation_id"] for r in recs} == {"c1", "c2"}
+
+
+def test_a_turn_with_no_conversation_id_stays_on_its_own(px, tmp_path):
+    """A turn that never declared which conversation it belonged to cannot be
+    placed in one, and guessing is how two users' turns end up in one record."""
+    with px.turn(turn_id="lonely", input_text="q"):
+        pass
+    px.record_answer("lonely", "a")
+    recs = list(iter_records(tmp_path))
+    assert len(recs) == 1 and recs[0]["task_id"] == "lonely"
+
+
+def test_grouping_can_be_turned_off(px, tmp_path):
+    for i in range(2):
+        with px.turn(turn_id=f"t{i}", conversation_id="c1", input_text="q"):
+            pass
+        px.record_answer(f"t{i}", "a")
+    assert len(list(iter_records(tmp_path, group_conversations=False))) == 2
+
+
+def test_conversation_order_follows_the_turns_not_the_dict(px, tmp_path):
+    """Out of order, one turn's outcome attaches to another's answer."""
+    for i in range(3):
+        with px.turn(turn_id=f"t{i}", conversation_id="c1", input_text=f"q{i}"):
+            pass
+        px.record_answer(f"t{i}", f"a{i}")
+    rec = next(iter(iter_records(tmp_path)))
+    msgs = [m["content"] for m in rec["messages"]]
+    assert msgs.index("q0") < msgs.index("q1") < msgs.index("q2")
