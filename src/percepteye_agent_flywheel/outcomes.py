@@ -45,6 +45,28 @@ CaptureScope = Literal["rollout", "turn"]
 
 TOOL_CALLS_FILENAME = "tool_calls.jsonl"
 
+#: The turn record: what the agent was ASKED and what it ANSWERED.
+#:
+#: A SEPARATE FILE from the tool calls, and that separation is load-bearing.
+#: :meth:`Trajectory.read` builds each row with required subscripts and counts
+#: anything else as ``malformed``; that count becomes
+#: ``tool_calls_omitted_count``, whose non-zero value forbids the training
+#: grade. So a turn record written into ``tool_calls.jsonl`` would not be
+#: politely ignored -- it would read as CORRUPTION and demote the rollout.
+#:
+#: TWO PRODUCERS, ONE FORMAT. The CLI recorder
+#: (``hosts/scripts/percepteye_record.py``) writes these from host hook events
+#: and is stdlib-only by contract, so it cannot import this module; ``attach()``
+#: writes them through :func:`record_turn_text`. They must stay byte-compatible,
+#: which is asserted by a test that reads BOTH producers' output back through
+#: the one reader below rather than by a comment asking someone to remember.
+TURNS_FILENAME = "turns.jsonl"
+
+#: The two halves of a turn. ``task`` is what was asked, ``answer`` is what the
+#: agent finally said -- the same two kinds the CLI recorder emits from
+#: ``UserPromptSubmit`` and ``Stop``.
+TURN_KINDS = ("task", "answer")
+
 ROLLOUT_ID_ENV = "PERCEPTEYE_ROLLOUT_ID"
 TRAJECTORY_DIR_ENV = "PERCEPTEYE_TRAJECTORY_DIR"
 
@@ -397,6 +419,83 @@ def _emit_span(rec: ToolCallOutcome, scope_id: str, kind: CaptureScope) -> None:
         )
     except Exception:
         return
+
+
+def record_turn_text(
+    trajectory_dir: str | os.PathLike[str],
+    kind: str,
+    text: str,
+    *,
+    max_chars: int = 20_000,
+    **ids: str,
+) -> bool:
+    """Append one turn record. Returns whether anything was written.
+
+    Never raises. This runs inside a customer's production request, and the
+    module's standing rule is that a capture bug costs the observation and
+    never the turn.
+
+    Empty text writes NOTHING rather than an empty record: "the agent answered
+    with silence" and "we were not given the answer" are different claims, and
+    only the second is true here.
+    """
+    if kind not in TURN_KINDS:
+        raise ValueError(f"turn kind must be one of {TURN_KINDS}, got {kind!r}")
+    if not isinstance(text, str) or not text.strip():
+        return False
+    record: dict[str, Any] = {"kind": kind, "text": text.strip()[:max_chars]}
+    for key, value in ids.items():
+        if isinstance(value, str) and value:
+            record[key] = value
+    try:
+        path = Path(trajectory_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        with open(path / TURNS_FILENAME, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def read_turn_text(
+    trajectory_dir: str | os.PathLike[str],
+) -> dict[str, str] | None:
+    """The turn's task and answer, or ``None`` if nothing was recorded.
+
+    THE CONSUMER THIS FORMAT NEVER HAD. The CLI recorder has written
+    ``turns.jsonl`` since it learned to subscribe to the turn events, and
+    nothing has ever read it back -- a producer with no consumer, which is the
+    shape this codebase keeps finding and the reason a trainable production
+    turn was unreachable.
+
+    Returns ``{"task": ..., "answer": ...}`` with only the halves actually
+    present. ``None`` means no file, which is not the same as a turn that
+    recorded neither half -- absence is never collapsed here either.
+
+    The LAST record of each kind wins. A turn that was answered twice (a retry,
+    a correction) ends with the answer that was actually returned.
+    """
+    path = Path(trajectory_dir) / TURNS_FILENAME
+    if not path.exists():
+        return None
+    out: dict[str, str] = {}
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            # A truncated final write costs that record and nothing else --
+            # the same rule Trajectory.read keeps.
+            continue
+        kind, text = rec.get("kind"), rec.get("text")
+        if kind in TURN_KINDS and isinstance(text, str) and text:
+            out[kind] = text
+    return out
 
 
 class Trajectory:

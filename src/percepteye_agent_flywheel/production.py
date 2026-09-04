@@ -52,7 +52,13 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ._http import ControlPlaneClient
 from .errors import ConfigurationError
-from .outcomes import Trajectory, _release, _RolloutScope
+from .outcomes import (
+    Trajectory,
+    _release,
+    _RolloutScope,
+    read_turn_text,
+    record_turn_text,
+)
 
 __all__ = ["Attachment", "attach"]
 
@@ -107,7 +113,8 @@ class Attachment:
 
     @contextmanager
     def turn(self, *, turn_id: str | None = None,
-             conversation_id: str | None = None) -> Iterator[str]:
+             conversation_id: str | None = None,
+             input_text: str | None = None) -> Iterator[str]:
         """Scope one user turn. Tool calls inside it land in its own trajectory.
 
         Yields the turn id, which the caller should keep: it is the join key
@@ -128,6 +135,15 @@ class Attachment:
         without calling a tool still cost one directory -- and at a million
         turns that was a third of a gigabyte and a million inodes of empty
         directories, for turns that had nothing to say.
+
+        ``input_text`` records what the user ASKED, and :meth:`record_answer`
+        records what the agent finally said. Both are OPTIONAL and both must be
+        passed by the caller, because nothing here can see them: the adapters
+        declare ``reports_outcomes=True`` and observe tool calls, not turn
+        content, so a prompt and a completion are facts only the customer's own
+        code holds. Without them a turn records its tool calls and nothing
+        else, which is exactly what it did before -- and is why tool outcomes
+        stay zero-instrumentation while turn text is opt-in.
         """
         tid = turn_id or f"t_{uuid.uuid4().hex[:16]}"
         path = Path(self.trajectory_root) / tid
@@ -140,6 +156,9 @@ class Attachment:
                     str(conversation_id), encoding="utf-8")
             except OSError:
                 pass
+        if input_text:
+            record_turn_text(path, "task", input_text,
+                             turn_id=tid, conversation_id=conversation_id or "")
         if self._retention_turns is not None:
             with self._lock:
                 self._turns_since_prune += 1
@@ -151,6 +170,31 @@ class Attachment:
 
         with _RolloutScope(tid, str(path), kind="turn"):
             yield tid
+
+    def record_answer(self, turn_id: str, text: str) -> bool:
+        """Record what the agent finally answered for one turn.
+
+        SEPARATE FROM ``turn(input_text=...)`` because the answer does not
+        exist yet when the turn opens. Callable after the scope has closed,
+        for the same reason :meth:`turn` yields its id: an outcome can arrive
+        later than the turn does.
+
+        Returns whether anything was written, and never raises -- a capture bug
+        costs the observation and never the turn.
+        """
+        return record_turn_text(
+            Path(self.trajectory_root) / turn_id, "answer", text,
+            turn_id=turn_id,
+        )
+
+    def read_turn(self, turn_id: str) -> dict[str, str] | None:
+        """The task and answer recorded for one turn, or ``None``.
+
+        ``None`` means nothing was recorded, which is not the same as a turn
+        that recorded neither half -- the distinction absence is never
+        collapsed into.
+        """
+        return read_turn_text(Path(self.trajectory_root) / turn_id)
 
     def read(self, turn_id: str) -> Any:
         """The tool calls captured for one turn, or ``None`` if none were.
