@@ -565,18 +565,36 @@ class Attachment:
         interpreter open at exit. Anything it would have sent is sent by the
         ``atexit`` hook instead, which runs before daemon threads are killed.
         """
-        # A CHEAP SHORT-CIRCUIT, NOT THE GATE. The authoritative consent check
-        # is in `_flush_locked`, which every path goes through -- this only
-        # avoids starting a thread that would immediately return. Anyone
-        # tightening consent must change it THERE; loosening it here can cost
-        # a wasted thread and nothing else.
-        if not self.may_upload or self._closed:
+        # "IS THERE ANY POINT STARTING A THREAD?" -- and deliberately NOT
+        # "have we already been told yes". This used to short-circuit on
+        # ``may_upload``, which quietly defeated the whole late-consent path:
+        # the thread that re-reads the verdict never started, so an agent told
+        # "no" at startup could never learn otherwise, and only its own test
+        # revealed it.
+        #
+        # A process with no control plane configured has nothing to ask and
+        # nothing to send, so it starts nothing. The authoritative consent
+        # check stays in `_flush_locked`, which every path goes through.
+        if self._closed or not (self._cp_url and self._api_key):
             return
 
         def _run() -> None:
             if not self._flush_lock.acquire(blocking=False):
                 return
             try:
+                if not self.may_upload:
+                    # AN OPERATOR MAY HAVE SAID YES SINCE STARTUP. Consent is a
+                    # human decision made in Mission Control, on their clock,
+                    # not ours -- and before the verdict was readable this cost
+                    # a restart to notice, so a customer who enabled capture
+                    # watched nothing arrive until they bounced the process.
+                    #
+                    # Asked only while the answer is NO, and only on the flush
+                    # cadence, so it is one request per 32 turns at most and
+                    # stops entirely once permission is granted.
+                    self._recheck_capture()
+                    if not self.may_upload:
+                        return
                 self._flush_locked(include_unanswered=False, batch_size=64)
             except Exception:
                 # `_flush_locked` already swallows everything; this is the
@@ -595,6 +613,48 @@ class Attachment:
             # Interpreter shutting down: threads can no longer be started.
             # The atexit hook is the flush that matters at this point.
             pass
+
+    def _recheck_capture(self) -> None:
+        """Re-read the capture verdict. Never raises; fails closed.
+
+        A READ, which is the whole reason this is safe to do periodically:
+        before ``GET /agents/{id}/capture`` existed the only way to ask was to
+        re-register, and a registration that omits ``discovered_agent`` records
+        introspection as ``disabled`` -- so polling for permission would have
+        repeatedly disabled the agent's own description.
+
+        ONLY EVER TURNS CAPTURE ON, never off. A control plane that cannot
+        answer returns ``{}``, and reading that as a revocation would stop a
+        consenting customer's uploads on a network blip. Revocation is enforced
+        where it belongs: the intake refuses, and those turns stay on disk.
+        """
+        if not self._cp_url or not self._api_key:
+            return
+        client = None
+        try:
+            from ._http import ControlPlaneClient
+            from .transport import AttachTransport
+
+            client = ControlPlaneClient(self._cp_url, self._api_key)
+            cap = (AttachTransport(client, self.agent_id)
+                   .capture_current(self.agent_id).get("capture") or {})
+            if cap.get("turns") is True:
+                self.may_upload = True
+                self.upload_refusal = None
+            elif cap.get("reason"):
+                # Keep the reason current even while the answer stays no: an
+                # operator who fixes consent but not the key's scope should see
+                # the second sentence, not the first one from startup.
+                self.upload_refusal = cap["reason"]
+        except Exception:
+            # A capture bug costs the observation, never the turn.
+            pass
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
     def flush(self, *, include_unanswered: bool = False,
               batch_size: int = 64) -> dict[str, int]:

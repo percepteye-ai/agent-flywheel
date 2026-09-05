@@ -211,6 +211,13 @@ enables capture for that agent. The registration response tells the SDK whether
 it may, which is why it never finds out by uploading. `px.may_upload` is that
 answer and `px.upload_refusal` is the sentence explaining a `False`.
 
+**Enabling it does not require restarting your agent.** While the answer is no,
+the SDK re-reads the verdict from `GET /agents/{agent_id}/capture` on its flush
+cadence and begins uploading as soon as an operator says yes. That read is a
+plain `GET`: it changes nothing, which is precisely why it can be repeated —
+the verdict used to be reachable only through a registration, and registering
+to ask a permission question had side effects of its own.
+
 The cadence is **every 32 turns, on a short-lived daemon thread**, plus an
 `atexit` hook that sends the remainder — including turns that never recorded an
 answer, since at shutdown none is coming. Uploading is therefore automatic; you

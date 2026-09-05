@@ -165,6 +165,33 @@ class AttachTransport:
             idempotency_key=f"result-{rollout.rollout_id}",
         )
 
+    def capture_current(self, agent_id: str) -> dict[str, Any]:
+        """May this key upload this agent's production turns, right now?
+
+        A READ, and that is the point. The verdict used to be reachable only
+        through ``POST /agents`` -- an upsert -- so re-asking cost a write, and
+        a registration that omits ``discovered_agent`` is recorded as
+        introspection ``disabled``, which stops that agent's description
+        driving workflow generation. Asking a permission question should not
+        change an unrelated column.
+
+        What it makes possible: an operator enables capture on a running
+        agent, and the agent notices. Before this, consent granted after
+        startup was invisible until the process restarted.
+
+        FAILS CLOSED. An unreachable control plane returns ``{}``, which the
+        caller reads as "no", so a network blip can never be mistaken for
+        permission. That is the opposite of :meth:`policy_current`, which fails
+        OPEN because keeping the current policy is the safe answer there -- and
+        the two must not be made to look alike, because their safe directions
+        are opposite.
+        """
+        try:
+            return self._c.request(
+                "GET", f"/agents/{agent_id}/capture") or {}
+        except Exception:  # see docstring
+            return {}
+
     def report_turns(
         self, agent_id: str, turns: list[dict[str, Any]]
     ) -> dict[str, Any]:

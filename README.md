@@ -277,6 +277,8 @@ with px.turn(conversation_id=conv_id) as turn_id:
 > [!IMPORTANT]
 > **Turns captured by `attach()` are uploaded only if you turn capture on for that agent — and it is off by default.** A production turn is your end users' own message and the answer you gave them, so nothing is sent until an operator enables capture for the agent; the registration response tells the SDK whether it may. Until then turns accumulate as trajectory directories under the `trajectory_root` you name and go nowhere.
 >
+> **You do not have to restart the agent after enabling it.** While the answer is no, the SDK re-reads the verdict on its flush cadence — a plain `GET`, so asking costs nothing and changes nothing — and starts uploading as soon as an operator says yes. `px.may_upload` is the live answer and `px.upload_refusal` is the sentence explaining a `False`.
+>
 > When capture is on, uploading is automatic and you do not have to call anything. Every 32 turns the SDK sends the ones that have an answer, on a short-lived daemon thread so the network is never on your request path; at process exit an `atexit` hook sends the rest, including turns that never recorded an answer. `flush()` and `close()` remain available for explicit control, and are serialized against the automatic one so a turn cannot be sent twice.
 >
 > **Turns with an answer are held back until the periodic flush, not sent at turn-scope exit.** `record_answer()` is callable after the `with` block closes — the example below does exactly that — so uploading on exit would ship every turn before its answer existed. Uploads never raise into your process and never block a turn on the network.

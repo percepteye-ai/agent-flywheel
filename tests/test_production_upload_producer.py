@@ -374,3 +374,102 @@ def test_no_warning_when_everything_deleted_was_already_sent(
             px.prune(keep_last=1)
         assert not [c for c in caught
                     if "had not been uploaded" in str(c.message)]
+
+
+# ── consent granted AFTER startup ─────────────────────────────────────────
+
+
+class _LateConsent(_Transport):
+    """Says no at registration, yes once an operator flips it."""
+
+    def __init__(self):
+        super().__init__(capture=False)
+        self.enabled = False
+        self.verdict_reads = 0
+
+    def capture_current(self, agent_id):
+        self.verdict_reads += 1
+        if self.enabled:
+            return {"agent_id": agent_id, "capture": {"turns": True}}
+        return {"agent_id": agent_id,
+                "capture": {"turns": False, "reason": "opt-in per agent"}}
+
+
+def test_consent_granted_after_startup_is_noticed_without_a_restart(
+        monkeypatch, tmp_path):
+    """THE reason the verdict is a READ.
+
+    Consent is a human decision made in Mission Control on someone else's
+    clock. Before ``GET /agents/{id}/capture`` existed the only way to re-ask
+    was to re-register -- and a registration omitting ``discovered_agent``
+    records introspection as ``disabled``, so polling for permission would
+    have repeatedly disabled the agent's own description. A customer who
+    enabled capture watched nothing arrive until they bounced the process.
+    """
+    tr = _LateConsent()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        assert px.may_upload is False
+        _serve(px, _FLUSH_EVERY)
+        assert not _until(lambda: tr.sent, timeout=0.5)
+
+        tr.enabled = True                       # an operator says yes
+        _serve(px, _FLUSH_EVERY, start=100)
+        assert _until(lambda: tr.sent), (
+            "consent granted after startup was never noticed; the agent still "
+            "needs a restart to pick it up"
+        )
+        assert px.may_upload is True
+
+
+def test_it_only_asks_while_the_answer_is_no(monkeypatch, tmp_path):
+    """One request per cadence at most, and none once permission is granted."""
+    tr = _LateConsent()
+    tr.enabled = True
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _serve(px, _FLUSH_EVERY)
+        assert _until(lambda: tr.batches)
+        asked = tr.verdict_reads
+        _serve(px, _FLUSH_EVERY, start=100)
+        # WAIT FOR A SECOND BATCH, not for `len(sent) > 1`. The first flush
+        # sends 32 turns, so `sent` is already long before the second flush
+        # runs -- the wait returned immediately and the assertion below then
+        # measured a state the second flush had not reached. A mutation that
+        # polled on every flush survived it.
+        assert _until(lambda: len(tr.batches) > 1), "no second flush happened"
+        assert tr.verdict_reads == asked, (
+            "the verdict is still being polled after permission was granted"
+        )
+
+
+def test_an_unreachable_control_plane_is_not_read_as_consent(
+        monkeypatch, tmp_path):
+    """Fails CLOSED -- the opposite of the policy read, whose safe direction is
+    the other way. A network blip must never be mistaken for permission."""
+    class _Down(_Transport):
+        def __init__(self):
+            super().__init__(capture=False)
+
+        def capture_current(self, agent_id):
+            raise RuntimeError("unreachable")
+
+    tr = _Down()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _serve(px, _FLUSH_EVERY)
+        assert not _until(lambda: tr.sent, timeout=0.5)
+        assert px.may_upload is False
+
+
+def test_a_blip_does_not_revoke_consent_already_granted(monkeypatch, tmp_path):
+    """It only ever turns capture ON. Revocation is enforced at the intake,
+    where the turns stay on disk rather than being lost."""
+    tr = _LateConsent()
+    tr.enabled = True
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _serve(px, _FLUSH_EVERY)
+        assert _until(lambda: tr.sent)
+        assert px.may_upload is True
+        tr.enabled = False                      # the control plane now says no
+        px._recheck_capture()
+        assert px.may_upload is True, (
+            "a later 'no' silently stopped a consenting customer's uploads"
+        )

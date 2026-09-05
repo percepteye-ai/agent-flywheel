@@ -149,3 +149,42 @@ def test_both_sdks_derive_the_same_idempotency_key():
         f"  python: {_sent()['idempotency_key']}\n"
         f"  node  : {node_key}"
     )
+
+
+# ── the verdict read ──────────────────────────────────────────────────────
+
+
+def test_the_verdict_is_a_GET_on_the_agent():
+    c = _Client({"agent_id": "agent-1", "capture": {"turns": True}})
+    out = AttachTransport(c, "agent-1").capture_current("agent-1")
+    assert c.calls[0]["method"] == "GET"
+    assert c.calls[0]["path"] == "/agents/agent-1/capture"
+    assert out["capture"]["turns"] is True
+
+
+def test_the_verdict_read_carries_no_idempotency_key_and_no_body():
+    """It is a READ. Sending a body or a key would make it look like the write
+    it exists to replace."""
+    c = _Client()
+    AttachTransport(c, "agent-1").capture_current("agent-1")
+    assert "json_body" not in c.calls[0]
+    assert "idempotency_key" not in c.calls[0]
+
+
+def test_an_unreachable_control_plane_FAILS_CLOSED():
+    """The opposite of ``policy_current``, whose safe direction is the other
+    way: there, keeping the current policy is right, so it fails OPEN. Here a
+    blip read as permission would send somebody's end users' messages on the
+    strength of a network error.
+
+    Asserted against the REAL method. A fake transport that raises exercises
+    the CALLER's except, not this one, which is how a mutation making this
+    return ``{"capture": {"turns": True}}`` survived.
+    """
+    class _Broken:
+        def request(self, *a, **kw):
+            raise RuntimeError("unreachable")
+
+    out = AttachTransport(_Broken(), "agent-1").capture_current("agent-1")
+    assert out == {}, out
+    assert (out.get("capture") or {}).get("turns") is not True
