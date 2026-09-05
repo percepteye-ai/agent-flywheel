@@ -270,7 +270,7 @@ snap = src.current()                      # per turn; between TTLs it is a cache
 prompt = fw.current_prompt(agent_id="my-coding-agent")
 ```
 
-`policy_source()` exists for **rollback first, promotion second**. A delayed promotion is an inconvenience; a regressed candidate that can only be withdrawn by redeploying the customer's production agent is an incident, and it is an incident whose remedy sits in someone else's deploy pipeline. Nothing polls in the background — no thread in this package — and after its first success the handle keeps serving the last good policy, so a network blip can never silently demote production back to the untrained model.
+`policy_source()` exists for **rollback first, promotion second**. A delayed promotion is an inconvenience; a regressed candidate that can only be withdrawn by redeploying the customer's production agent is an incident, and it is an incident whose remedy sits in someone else's deploy pipeline. Nothing polls in the background — the refresh runs inside your call, no timer, no poller — and after its first success the handle keeps serving the last good policy, so a network blip can never silently demote production back to the untrained model.
 
 This is the beat that makes it a flywheel rather than a pipeline: **the better agent generates the better evidence**, and the ring closes.
 
@@ -298,7 +298,7 @@ Lane ⓪ opens once, and lane ④ once from `attach()`. The rest repeat, and **e
 
 !!! warning "Lane ④ does not ship yet"
 
-    `attach()` binds the same adapters, writes the same tri-state into the same trajectory format, and scopes it to a live user turn instead of a claimed rollout. But `flywheel/1` has **no route for a production turn** — `/health`, `/agents`, `/policy/current` and `/rollouts/*` are the whole surface — so captured turns accumulate as directories under the `trajectory_root` you name, and you own them until that route exists. `trajectory_root` is required and undefaulted for exactly that reason: nothing deletes them.
+    `attach()` binds the same adapters, writes the same tri-state into the same trajectory format, and scopes it to a live user turn instead of a claimed rollout. `flywheel/1` gained `/turns` for exactly this, so captured turns are uploaded — but only once an operator enables capture for that agent, which is off by default because a production turn carries your end users' own messages. Until then, and whenever the control plane is unreachable, they accumulate as directories under the `trajectory_root` you name and you own them. `trajectory_root` is required and undefaulted for exactly that reason: nothing deletes them unless you set `retention_turns`.
 
     Writing a client for a route the server does not serve is how an earlier SDK ended up with five modes, four of which were strings nobody read.
 

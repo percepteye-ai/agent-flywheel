@@ -263,9 +263,9 @@ snap = src.current()                      # per turn; between TTLs it is a cache
 prompt = fw.current_prompt(agent_id="my-coding-agent")   # the approved prompt, co-optimized
 ```
 
-**Nothing polls in the background.** No thread in this package — the refresh runs inside your call. After its first success, `policy_source()` keeps serving the last good policy, so a network blip can never silently demote production back to the untrained model.
+**Nothing polls in the background.** The policy refresh runs inside your call — no timer, no poller. After its first success, `policy_source()` keeps serving the last good policy, so a network blip can never silently demote production back to the untrained model. (`attach()` does use one short-lived daemon thread to upload captured turns, when you have turned capture on; it is triggered by your traffic, not by a clock, and it is described below.)
 
-**And your live traffic can be captured too — locally.** `attach()` records the turns you are already serving, with the same adapters, the same tri-state and the same trajectory format:
+**And your live traffic can be captured too.** `attach()` records the turns you are already serving, with the same adapters, the same tri-state and the same trajectory format:
 
 ```python
 px = fw.attach(agent_id="support-agent", trajectory_root="/var/lib/percepteye")
@@ -277,11 +277,13 @@ with px.turn(conversation_id=conv_id) as turn_id:
 > [!IMPORTANT]
 > **Turns captured by `attach()` are uploaded only if you turn capture on for that agent — and it is off by default.** A production turn is your end users' own message and the answer you gave them, so nothing is sent until an operator enables capture for the agent; the registration response tells the SDK whether it may. Until then turns accumulate as trajectory directories under the `trajectory_root` you name and go nowhere.
 >
-> When capture is on, `flush()` uploads turns that have an answer and `close()` flushes the rest. Nothing is sent at turn-scope exit — `record_answer()` is callable after the block closes, so an upload there would ship every turn before its answer existed. Uploads never raise into your process and never block a turn on the network.
+> When capture is on, uploading is automatic and you do not have to call anything. Every 32 turns the SDK sends the ones that have an answer, on a short-lived daemon thread so the network is never on your request path; at process exit an `atexit` hook sends the rest, including turns that never recorded an answer. `flush()` and `close()` remain available for explicit control, and are serialized against the automatic one so a turn cannot be sent twice.
 >
-> Training is fed by **rollouts**, not by production traffic: `serve()` (or the CLI hooks) claims a rollout, runs it, and reports the result — that report is the upload. So a continual-learning loop is repeated rounds of rollouts, and `attach()` today is local observability plus the policy read.
+> **Turns with an answer are held back until the periodic flush, not sent at turn-scope exit.** `record_answer()` is callable after the `with` block closes — the example below does exactly that — so uploading on exit would ship every turn before its answer existed. Uploads never raise into your process and never block a turn on the network.
 >
-> Sending production traces to the control plane needs a mode that does not exist yet. When it lands, this section changes; until then, treat `attach()` as local.
+> Both halves of that matter, and until recently only the first existed: `flush()` was reachable but nothing called it unless you exited a scope on the `Attachment` itself, which the usage above never does. A server following this page captured turns forever and uploaded none.
+>
+> Production turns are **graded advisory, always**. They were produced by whatever you run — no logprobs, no sampled policy, no group — so they inform training rather than being scored as rollouts are. Training capacity still comes from **rollouts**: `serve()` (or the CLI hooks) claims one, runs it, and reports the result.
 
 **It captures. It never reroutes.** Adapters bind with no endpoint at all, so attaching cannot re-point a single byte of production traffic. Everything fails open: an unreachable control plane costs you the observation and nothing else.
 

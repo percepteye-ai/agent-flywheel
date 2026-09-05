@@ -44,9 +44,11 @@ disk for the next flush.
 """
 from __future__ import annotations
 
+import atexit
 import os
 import shutil
 import threading
+import weakref
 import time
 import uuid
 import warnings
@@ -83,6 +85,41 @@ ENV_API_KEY = "PERCEPTEYE_API_KEY"
 #: Amortises one directory scan over many turns; the ceiling is therefore
 #: `retention_turns + _PRUNE_EVERY`, not `retention_turns` exactly.
 _PRUNE_EVERY = 256
+
+#: Turns between automatic upload attempts.
+#:
+#: THE PRODUCER THIS PATH NEVER HAD. ``flush()`` existed, ``close()`` called it
+#: and ``__exit__`` called ``close()`` -- and the documented usage is
+#: ``px = attach(...)`` held for the life of the process with a ``with
+#: px.turn(...)`` per request, which never exits a scope on the Attachment
+#: itself. So a long-running server following this package's own README
+#: captured turns forever and uploaded none of them. An upload path whose only
+#: trigger is a shutdown the process never performs is not a path.
+#:
+#: Smaller than ``_PRUNE_EVERY`` because the two answer different questions:
+#: pruning is a directory scan protecting disk, and 256 turns of delay costs
+#: nothing; uploading is how the data becomes reachable at all, and a turn that
+#: sits unsent is a turn training cannot see. 32 sits under the 64-turn batch
+#: so an ordinary flush is one request.
+#:
+#: WHAT THIS COSTS A LOW-TRAFFIC AGENT, said plainly rather than left to be
+#: discovered: an agent serving a handful of turns a day reaches 32 slowly, so
+#: its turns leave at the next process exit rather than the same afternoon.
+#: That is accepted. The alternative is a timer thread running for the life of
+#: a customer's serving process to move data nobody is waiting on, and an
+#: unasked-for background thread is a worse thing to put in someone else's
+#: process than a delay.
+_FLUSH_EVERY = 32
+
+#: How long ``close()`` waits for an in-flight periodic flush before giving up.
+#:
+#: ``close()`` runs from the ``atexit`` hook, and a periodic flush may be
+#: holding the upload lock with a request that can take the HTTP client's full
+#: timeout. Blocking on it unbounded would let an unresponsive control plane
+#: keep a customer's process from exiting -- a far worse outcome than the one
+#: it prevents, because a turn that is not sent now is still on disk and the
+#: next process to attach uploads it.
+_CLOSE_FLUSH_GRACE_S = 5.0
 
 
 class Attachment:
@@ -126,7 +163,15 @@ class Attachment:
         #: the capture it is cleaning up after.
         self._retention_turns = retention_turns
         self._turns_since_prune = 0
+        self._turns_since_flush = 0
         self._lock = threading.Lock()
+        #: SEPARATE FROM ``_lock`` on purpose. ``_lock`` guards the turn
+        #: counters and is taken on the request path; an upload holding it
+        #: would put the network between a user and their answer, which is the
+        #: one thing this class promises never to do. This one serializes
+        #: uploads against each other so two flushes cannot send the same turn
+        #: twice before either has written its marker.
+        self._flush_lock = threading.Lock()
         self._cp_url = control_plane_url
         self._api_key = api_key
         #: What the control plane SAID at registration, not what we assume.
@@ -186,14 +231,25 @@ class Attachment:
         if input_text:
             record_turn_text(path, "task", input_text,
                              turn_id=tid, conversation_id=conversation_id or "")
-        if self._retention_turns is not None:
-            with self._lock:
-                self._turns_since_prune += 1
-                due = self._turns_since_prune >= _PRUNE_EVERY
-                if due:
-                    self._turns_since_prune = 0
-            if due:
-                self.prune(keep_last=self._retention_turns)
+        # ONE counter block for both cadences, because they are the same
+        # question -- "is periodic maintenance due?" -- asked twice. They were
+        # split while only pruning existed and the flush counter was added
+        # beside it; two lock acquisitions per turn on the request path for one
+        # answer is the kind of duplication that drifts.
+        with self._lock:
+            self._turns_since_prune += 1
+            self._turns_since_flush += 1
+            prune_due = (self._retention_turns is not None
+                         and self._turns_since_prune >= _PRUNE_EVERY)
+            if prune_due:
+                self._turns_since_prune = 0
+            flush_due = self._turns_since_flush >= _FLUSH_EVERY
+            if flush_due:
+                self._turns_since_flush = 0
+        if prune_due:
+            self.prune(keep_last=self._retention_turns)
+        if flush_due:
+            self._flush_soon()
 
         with _RolloutScope(tid, str(path), kind="turn",
                            conversation_id=conversation_id):
@@ -450,9 +506,70 @@ class Attachment:
                 return i
         return 0
 
+    def _flush_soon(self) -> None:
+        """Upload in the background. Returns immediately; never raises.
+
+        OFF THE REQUEST PATH, which is the whole reason this is not simply a
+        call to :meth:`flush` from :meth:`turn`. This package promises that an
+        upload never blocks a turn, and a customer's user is waiting on the
+        other end of the one that triggered it. So the network happens on a
+        daemon thread and the request returns at once.
+
+        AT MOST ONE IN FLIGHT. The thread takes ``_flush_lock`` without
+        blocking and gives up if another flush already holds it -- rather than
+        queueing, because a queued flush would find the same turns the running
+        one is about to mark as sent. Whatever it skips, the next cadence
+        picks up.
+
+        A daemon thread is used deliberately: it must never hold a customer's
+        interpreter open at exit. Anything it would have sent is sent by the
+        ``atexit`` hook instead, which runs before daemon threads are killed.
+        """
+        # A CHEAP SHORT-CIRCUIT, NOT THE GATE. The authoritative consent check
+        # is in `_flush_locked`, which every path goes through -- this only
+        # avoids starting a thread that would immediately return. Anyone
+        # tightening consent must change it THERE; loosening it here can cost
+        # a wasted thread and nothing else.
+        if not self.may_upload or self._closed:
+            return
+
+        def _run() -> None:
+            if not self._flush_lock.acquire(blocking=False):
+                return
+            try:
+                self._flush_locked(include_unanswered=False, batch_size=64)
+            except Exception:
+                # `_flush_locked` already swallows everything; this is the
+                # thread-boundary backstop, because an exception escaping a
+                # thread's target prints a traceback into a customer's logs
+                # under our name for a failure that cost only the observation.
+                pass
+            finally:
+                self._flush_lock.release()
+
+        try:
+            threading.Thread(
+                target=_run, name="percepteye-flush", daemon=True,
+            ).start()
+        except RuntimeError:
+            # Interpreter shutting down: threads can no longer be started.
+            # The atexit hook is the flush that matters at this point.
+            pass
+
     def flush(self, *, include_unanswered: bool = False,
               batch_size: int = 64) -> dict[str, int]:
         """Upload captured turns to the control plane. Returns counts.
+
+        Serialized against the automatic background flush, so a manual call
+        cannot race it into sending the same turn twice.
+        """
+        with self._flush_lock:
+            return self._flush_locked(
+                include_unanswered=include_unanswered, batch_size=batch_size)
+
+    def _flush_locked(self, *, include_unanswered: bool = False,
+                      batch_size: int = 64) -> dict[str, int]:
+        """The upload itself. Caller holds ``_flush_lock``.
 
         WHY NOT AT TURN-SCOPE EXIT, which is where an earlier design put it:
         ``record_answer`` is callable AFTER the scope closes, and the package's
@@ -564,11 +681,23 @@ class Attachment:
         # LAST CHANCE, and the only place unanswered turns are sent: nothing
         # more is coming after this. Before unbinding, so a turn completed
         # during shutdown is still on disk to find.
-        try:
-            self.flush(include_unanswered=True)
-        except Exception:
-            # Shutdown must not raise. The turns remain on disk.
-            pass
+        #
+        # BOUNDED, because this also runs from the ``atexit`` hook. A periodic
+        # flush may be in flight holding ``_flush_lock``, and each of its
+        # requests can take the client's full 30s timeout; waiting on it
+        # without a bound would let an unresponsive control plane hold a
+        # customer's process open at shutdown. That is a worse failure than the
+        # one it avoids: a turn we do not send now is still on disk, and the
+        # next process that attaches uploads it. So give the running flush a
+        # short grace period and then let go.
+        if self._flush_lock.acquire(timeout=_CLOSE_FLUSH_GRACE_S):
+            try:
+                self._flush_locked(include_unanswered=True)
+            except Exception:
+                # Shutdown must not raise. The turns remain on disk.
+                pass
+            finally:
+                self._flush_lock.release()
         for u in unbinds:
             try:
                 u()
@@ -754,7 +883,7 @@ def attach(
         except Exception:  # -W error turns the line above into a raise
             pass
 
-    return Attachment(
+    px = Attachment(
         agent_id,
         trajectory_root=trajectory_root,
         policy=policy,
@@ -766,3 +895,49 @@ def attach(
         may_upload=may_upload,
         upload_refusal=upload_refusal,
     )
+    if may_upload:
+        _flush_at_exit(px)
+    return px
+
+
+def _flush_at_exit(attachment: Attachment) -> None:
+    """Send whatever is still on disk when the process shuts down.
+
+    THE OTHER HALF OF THE PRODUCER. The periodic cadence in :meth:`turn` holds
+    back turns that have no answer yet, because one may still be coming, and it
+    only runs while requests are arriving. Neither is true at shutdown: nothing
+    more is coming for any turn, and no further turn will trigger a cadence. So
+    the last thing the process does is a flush that includes the unanswered
+    ones -- exactly what :meth:`close` does, which is what a caller using
+    ``with attach(...)`` already got and a caller holding the attachment for
+    the life of the process never did.
+
+    A WEAK REFERENCE, so registering this cannot be what keeps a customer's
+    Attachment alive for the life of the interpreter. If the object is already
+    gone, so is anything it would have sent -- and its turns are still on disk
+    for the next process to pick up.
+
+    Registered only when the control plane has said this agent may upload. An
+    agent without consent would do nothing here but cost a hook, and would
+    make every process that merely imported the SDK look like one that talks
+    to us at exit.
+
+    ``close()`` is idempotent, so a caller who closes explicitly, uses the
+    context manager, AND gets this hook flushes exactly once.
+    """
+    ref = weakref.ref(attachment)
+
+    def _drain() -> None:
+        px = ref()
+        if px is None:
+            return
+        try:
+            px.close()
+        except Exception:
+            # An interpreter that is shutting down is a hostile place to do
+            # I/O. Losing the final batch costs the observation; raising here
+            # would print a traceback under our name as the customer's process
+            # exits, for turns that are still safely on disk.
+            pass
+
+    atexit.register(_drain)

@@ -99,7 +99,9 @@ It fires on **promotion and rollback alike** — any move in the `(base_url, api
 
 ### Nothing polls in the background
 
-There is no thread, timer or task in this package. The refresh runs **inside your `current()` call**, on the request that observed staleness — which is why its budget is one attempt and one second. A retry ladder would spend several users' latency, and the next stale observation retries naturally.
+There is no thread, timer or task behind the POLICY read. The refresh runs **inside your `current()` call**, on the request that observed staleness — which is why its budget is one attempt and one second. A retry ladder would spend several users' latency, and the next stale observation retries naturally.
+
+The one thread this package does start is `attach()`'s turn upload, and it is not a poller either: when capture is enabled it runs a short-lived daemon thread every `_FLUSH_EVERY` turns, triggered by your own traffic, so the network is never on the request path. It is joined by nothing and holds your interpreter open at exit for nothing — the final send is an `atexit` hook.
 
 | rule | value | why |
 |:--|:--|:--|
@@ -200,7 +202,24 @@ With `register=True` the call makes exactly two outbound requests, once, at star
 
 **`PERCEPTEYE_AGENT_MODE` does not gate `attach()`.** That switch gates `serve()`, the surface that contributes capacity. `attach()` *is* the production surface, and gating it on the same variable would mean the correct setting for a production agent was `PERCEPTEYE_AGENT_MODE=training`. To stop capture, don't call `attach()`, or pass `register=False` to keep it entirely local. See [Configuration](configuration.md).
 
-**What this does not do yet, stated plainly: it ships nothing.** The `flywheel/1` contract has no route for a production turn — `/health`, `/agents`, `/policy/current`, `/prompt/current` and `/rollouts/*` are the whole surface — so turns accumulate as trajectory directories under the root you name, and you own them until that route exists.
+**What it ships, and when.** `flywheel/1` gained `POST /turns`, so captured turns
+are uploaded — subject to one gate and one cadence.
+
+The gate is **per-agent capture consent, and it is off by default**: a production
+turn carries your end users' own messages, so nothing is sent until an operator
+enables capture for that agent. The registration response tells the SDK whether
+it may, which is why it never finds out by uploading. `px.may_upload` is that
+answer and `px.upload_refusal` is the sentence explaining a `False`.
+
+The cadence is **every 32 turns, on a short-lived daemon thread**, plus an
+`atexit` hook that sends the remainder — including turns that never recorded an
+answer, since at shutdown none is coming. Uploading is therefore automatic; you
+do not have to call anything. `flush()` and `close()` remain available and are
+serialized against the automatic flush, so a turn cannot be sent twice.
+
+Turns that have not been uploaded — no consent, an unreachable control plane, a
+low-traffic agent that has not reached the cadence — stay as trajectory
+directories under the root you name, and you own them.
 
 ## Which capture am I in?
 
