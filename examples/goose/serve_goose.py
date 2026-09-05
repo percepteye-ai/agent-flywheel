@@ -216,34 +216,39 @@ def _trained_prompt_argv() -> list[str]:
     return ``[]`` here, and neither is an error — an unreachable control plane
     must never blank a running agent's instructions.
 
-    The SDK deliberately does NOT apply this for you, because swapping a
-    prompt changes what an agent does and that is the owner's call. Applying it
-    here IS that decision, made once, out loud, in the integration that owns
-    this deployment — and printed, because a prompt that changed with nothing
-    on stdout to say so is indistinguishable from one that did not.
+    WHETHER it may be applied is ``fw.prompt_decision``'s answer, not this
+    file's. The SDK deliberately does not APPLY the prompt for you, because
+    swapping a prompt changes what an agent does and that is the owner's call
+    — but the four checks that decide whether it MAY be applied are the SDK's
+    to make, and asking them here would be a second answer to the same
+    question. Applying the result IS the owner's decision, made once, out
+    loud, in the integration that owns this deployment — and printed, because
+    a prompt that changed with nothing on stdout to say so is
+    indistinguishable from one that did not.
     """
     try:
         prompt = fw.current_prompt(agent_id=AGENT_ID)
     except Exception as exc:  # never fail to serve over a prompt
         print(f"[percepteye] prompt pull failed ({exc}); keeping goose's own.")
         return []
-    text = (prompt or {}).get("text")
-    if not isinstance(text, str) or not text.strip():
-        print("[percepteye] prompt: none approved — keeping goose's own.")
+    # THE WHOLE PREDICATE, asked in one call. This used to check that the text
+    # was non-blank and warn on `stale_baseline`, which is two of the four
+    # questions: a bundle whose status was never approved, or whose prompt
+    # identity disagrees with the checkpoint it was certified against, went
+    # onto goose's command line anyway. Half a predicate at a call site is the
+    # defect `fw.prompt_decision` exists to end, and re-deriving it here would
+    # also let this integration answer differently from the SDK it ships with.
+    decision = fw.prompt_decision(prompt)
+    if not decision.apply:
+        print(f"[percepteye] prompt: keeping goose's own — {decision.reason}.")
         return []
     print(
         f"[percepteye] prompt: applying v{prompt.get('version')} "
-        f"sha={str(prompt.get('sha256'))[:12]} ({len(text)} chars) as "
-        f"--system, ADDITIVE to goose's own."
+        f"sha={str(prompt.get('sha256'))[:12]} ({len(decision.text)} chars) "
+        f"as --system, ADDITIVE to goose's own. Certified as a PAIR with the "
+        f"checkpoint stamped {(decision.checksum or 'none')[:12]}."
     )
-    # A PAIR, and worth saying when it does not hold. The prompt was approved
-    # against a specific checkpoint; over a different one it is not the thing
-    # that was approved. Reported rather than refused -- the operator asked for
-    # this agent's approved prompt and gets it -- but never silently.
-    if prompt.get("stale_baseline"):
-        print("[percepteye] prompt: WARNING stale_baseline — this was shaped "
-              "against a version of the prompt this agent no longer ships.")
-    return ["--system", text]
+    return ["--system", decision.text]
 
 
 def main() -> int:

@@ -19,11 +19,10 @@ import json
 import os
 import re
 import subprocess
-from pathlib import Path
-
-import pytest
 
 from percepteye_agent_flywheel.transport import AttachTransport
+
+from .node_sdk import ABI_CHECK, node_sdk, require_node_sdk, run_node
 
 
 class _Client:
@@ -106,35 +105,10 @@ def test_ambiguous_retries_stay_enabled():
 
 # ── the cross-SDK half ────────────────────────────────────────────────────
 
-#: The ONE resolver that knows where the Node SDK is. It honours
-#: ``PERCEPTEYE_NODE_SDK`` and the sibling checkout names, and it lives in the
-#: shell script because that script needs it too -- asking it here is what
-#: stops the two from drifting.
-_ABI_CHECK = Path(__file__).resolve().parents[1] / "scripts" / "cross_language_abi_check.sh"
-
-
-def _node_sdk() -> tuple[Path | None, bool]:
-    """Where the Node SDK is, and whether somebody NAMED it.
-
-    This used to be ``Path(__file__).resolve().parents[2] /
-    "percepteye-agent-flywheel-node"`` -- a second copy of the rule, and a
-    wrong one. CI checks the SDK out inside the workspace and points at it
-    with ``PERCEPTEYE_NODE_SDK``; two directories up from the tests is the
-    runner's work root, where nothing ever is. So the parity test below
-    skipped on every CI run -- and ``test-full`` fails the build on any skip,
-    which made the whole matrix red for a reason unrelated to the change under
-    test while the parity it exists to prove went unchecked.
-
-    A NAMED path that is not there is an error, not a skip: the script exits
-    non-zero and this fails. Only auto-discovery skips.
-    """
-    named = bool(os.environ.get("PERCEPTEYE_NODE_SDK"))
-    res = subprocess.run(
-        [str(_ABI_CHECK), "--print-node-sdk"], capture_output=True, text=True)
-    if res.returncode != 0:
-        pytest.fail(f"resolving the Node SDK failed:\n{res.stdout}{res.stderr}")
-    out = res.stdout.strip()
-    return (Path(out) if out else None), named
+#: WHERE THE NODE SDK IS, and whether it may be skipped, live in
+#: ``tests/node_sdk.py`` -- one definition, now that two suites drive the Node
+#: package. That module asks ``scripts/cross_language_abi_check.sh``, which is
+#: THE resolver, because the script needs the rule too.
 
 
 def test_the_node_sdk_is_resolved_where_it_was_NAMED(tmp_path, monkeypatch):
@@ -147,7 +121,7 @@ def test_the_node_sdk_is_resolved_where_it_was_NAMED(tmp_path, monkeypatch):
     fake = tmp_path / "agent-flywheel-node"
     (fake / "src").mkdir(parents=True)
     monkeypatch.setenv("PERCEPTEYE_NODE_SDK", str(fake))
-    assert _node_sdk() == (fake, True)
+    assert node_sdk() == (fake, True)
 
 
 def test_a_NAMED_node_sdk_that_is_not_there_fails_the_check(tmp_path):
@@ -158,7 +132,7 @@ def test_a_NAMED_node_sdk_that_is_not_there_fails_the_check(tmp_path):
     """
     missing = str(tmp_path / "not-checked-out")
     res = subprocess.run(
-        [str(_ABI_CHECK)], capture_output=True, text=True,
+        [str(ABI_CHECK)], capture_output=True, text=True,
         env={**os.environ, "PERCEPTEYE_NODE_SDK": missing})
     both = res.stdout + res.stderr
     assert res.returncode == 1, f"exited {res.returncode}:\n{both}"
@@ -176,25 +150,7 @@ def test_both_sdks_derive_the_same_idempotency_key():
     depth to match. This asserts the two agree on a real payload rather than
     trusting that they do.
     """
-    sdk, named = _node_sdk()
-    if sdk is None:
-        # Auto-discovery only: a named path that is missing already failed.
-        pytest.skip("the Node package is not checked out here")
-
-    node = None
-    for candidate in ("/opt/homebrew/opt/node@24/bin/node", "node"):
-        try:
-            subprocess.run([candidate, "--version"], capture_output=True, check=True)
-            node = candidate
-            break
-        except (OSError, subprocess.CalledProcessError):
-            continue
-    if node is None:
-        if named:
-            pytest.fail(
-                "PERCEPTEYE_NODE_SDK names a Node SDK but there is no usable "
-                "node binary to run it with")
-        pytest.skip("no usable node binary")
+    sdk, node = require_node_sdk()
 
     script = (
         "import {AttachTransport} from './src/transport.js';\n"
@@ -204,12 +160,7 @@ def test_both_sdks_derive_the_same_idempotency_key():
         f"tx.reportTurns('agent-1', {json.dumps(TURNS)});\n"
         "console.log(calls[0].idempotencyKey);\n"
     )
-    res = subprocess.run(
-        [node, "--input-type=module", "-e", script],
-        cwd=sdk, capture_output=True, text=True,
-    )
-    assert res.returncode == 0, res.stderr
-    node_key = res.stdout.strip()
+    node_key = run_node(sdk, node, script).strip()
     assert node_key == _sent()["idempotency_key"], (
         f"the two SDKs derive different idempotency keys for one batch:\n"
         f"  python: {_sent()['idempotency_key']}\n"

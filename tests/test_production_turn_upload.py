@@ -18,11 +18,8 @@ wrong order when the thing being asked about is whether to send.
 """
 from __future__ import annotations
 
-import json
 import time
 from contextlib import contextmanager
-
-import pytest
 
 import percepteye_agent_flywheel as fw
 from percepteye_agent_flywheel.outcomes import record_tool_call

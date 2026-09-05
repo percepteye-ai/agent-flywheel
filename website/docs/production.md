@@ -138,9 +138,12 @@ The naive reading of "fail open" would be to return the empty answer meaning "ke
 Training produces a better model *and* a better system prompt, co-optimized and gated by the same human approval.
 
 ```python
-p = fw.current_prompt(agent_id="my-coding-agent")
-if p and p["sha256"] != my_current_prompt_sha:
-    ...                                   # your decision, not ours
+served = fw.current_prompt(agent_id="my-coding-agent")
+decision = fw.prompt_decision(served)     # may it be applied, and if not why
+if decision.apply:
+    system_prompt = decision.text         # never None here
+else:
+    log.info("keeping the current prompt: %s", decision.reason)
 ```
 
 A separate `GET /prompt/current`, deliberately not folded into `/policy/current`: that one is polled and identity-sized, and a system prompt is unbounded text, so putting it in the poll would make every tick carry a payload the caller already has.
@@ -155,7 +158,18 @@ A separate `GET /prompt/current`, deliberately not folded into `/policy/current`
 
 The contract is a **pair**: this prompt was approved against that checkpoint, and applying it over a different one is not the thing that was approved. `stale_baseline` does not invalidate the deliverable — it was just shaped against a version of your prompt you no longer ship.
 
-**It is deliberately not applied for you, and that is the difference from `apply_current_policy()`.** Swapping a model endpoint is invisible to an agent's behavior; swapping its system prompt changes what it *does*. That is a decision for whoever owns the agent, so this hands back the text and stops.
+**Do not re-derive the rule from those fields — ask `prompt_decision()`.** It is the whole predicate in one call, and it refuses for four distinct reasons, each naming its own cause:
+
+| it refuses when | because |
+|:--|:--|
+| there is no text to apply (`{}`, missing, or blank) | nothing has passed the approval gate, or the control plane could not answer — the prompt you already have stands |
+| `stale_baseline` is `true` | your own baseline prompt changed after the pair was certified, so the approved text was shaped against a prompt you no longer ship. Re-certification is manual |
+| `status` is not `"approved"` or `"delivered"` | only a bundle a person approved is applied |
+| `sha256` and `model_prompt_checksum` are both present and differ | the bundle disagrees with itself, so it is not the pair that was validated |
+
+`apply` is false unless all four hold; `reason` is the sentence explaining which one failed; `text` is `None` on every refusal rather than `""`, so assigning it can never blank the prompt your agent is running on. A body that is missing, null or not a mapping refuses rather than raising — nothing here throws into your process. The Node SDK's `promptDecision` answers the same four questions with the same sentences, and one parity test drives a table of cases through both and asserts every field agrees.
+
+**The text is still not applied for you, and that is the difference from `apply_current_policy()`.** Swapping a model endpoint is invisible to an agent's behavior; swapping its system prompt changes what it *does*. That is a decision for whoever owns the agent, so this hands back the text and the verdict on it and stops.
 
 `{}` means **keep the prompt you have** — nothing has passed the approval gate, or the control plane could not answer. It never means "use no prompt".
 

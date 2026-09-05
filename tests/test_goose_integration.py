@@ -315,3 +315,56 @@ def test_the_recorder_never_fails_the_agent_and_says_nothing(tmp_path):
         r = _fire(event, {"PERCEPTEYE_TRAJECTORY_DIR": str(tmp_path)})
         assert r.returncode == 0, (event, r.stderr)
         assert r.stdout == "", (event, r.stdout)
+
+
+# ── the trained prompt goose is actually handed ───────────────────────────
+
+
+def _prompt_argv(tmp_path: Path, served: object) -> list[str]:
+    """``_trained_prompt_argv`` with the control plane's answer substituted.
+
+    A child process because importing ``serve_goose`` runs its module body,
+    which scrubs routing variables out of the environment it finds itself in.
+    """
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import json,importlib.util;"
+         f"s=importlib.util.spec_from_file_location('sg', {str(SERVE)!r});"
+         "m=importlib.util.module_from_spec(s);s.loader.exec_module(m);"
+         f"m.fw.current_prompt=lambda **kw: json.loads({json.dumps(json.dumps(served))});"
+         "print(json.dumps(m._trained_prompt_argv()))"],
+        capture_output=True, text=True,
+        env={**os.environ, "PERCEPTEYE_AGENT_MODE": "production",
+             "HOME": str(tmp_path)}, timeout=60)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+def test_goose_is_handed_an_approved_prompt():
+    """``--system`` is ADDITIVE in goose, which is what makes applying the
+    approved text safe without knowing what goose put in its own prompt."""
+    argv = _prompt_argv(Path.cwd(), {
+        "text": "You triage carefully.", "status": "approved", "version": 3,
+        "sha256": "c" * 64, "model_prompt_checksum": "c" * 64,
+    })
+    assert argv == ["--system", "You triage carefully."]
+
+
+@pytest.mark.parametrize("served,why", [
+    ({"text": "t", "status": "draft"}, "an unapproved status"),
+    ({"text": "t", "status": "approved", "stale_baseline": True},
+     "a baseline that moved after certification"),
+    ({"text": "t", "status": "approved", "sha256": "a" * 64,
+      "model_prompt_checksum": "b" * 64}, "a bundle that disagrees with itself"),
+    ({}, "nothing served"),
+])
+def test_goose_is_NOT_handed_a_prompt_that_did_not_clear_the_gate(served, why):
+    """The whole predicate, not the half this file used to ask.
+
+    It checked for non-blank text and warned about a stale baseline; a bundle
+    whose status nobody approved, or whose prompt identity disagrees with the
+    checkpoint it was certified against, went onto goose's command line
+    anyway. ``fw.prompt_decision`` is the one answer, and this asserts the
+    integration takes it rather than deriving its own.
+    """
+    assert _prompt_argv(Path.cwd(), served) == [], why

@@ -51,6 +51,10 @@ _F = {
         "l2": 'fw.serve("my.agent:build")',
         "foot": "1 import  \u00b7  1 call  \u00b7  MIT",
         "prod": "fw.apply_current_policy(...)",
+        # The Python SDK hands the policy back for YOUR code to apply -- one
+        # call at startup. It deliberately does not apply the prompt at all.
+        "improve": "Your production agent picks up what training produced — as an endpoint it can call.",
+        "policy_note": "\u2190 the better policy, as an endpoint you can call",
     },
     "node": {
         "cmd": "openclaw plugins install percepteye-agent-flywheel",
@@ -65,6 +69,12 @@ _F = {
         # endpoint. Drawing a call the package does not make would be inventing
         # a capability in the one figure people trust to be literal.
         "prod": "PERCEPTEYE_AGENT_MODE=production",
+        # The plugin applies BOTH halves itself -- prompt via before_prompt_build,
+        # model via before_model_resolve + its own registered provider -- so the
+        # Python caption ("an endpoint it can call") understates it here: on this
+        # lane there is nothing for the customer's code to call.
+        "improve": "The plugin applies both halves itself — the approved prompt and the approved model.",
+        "policy_note": "\u2190 both halves, applied by the plugin",
     },
 }[FLAVOUR]
 
@@ -249,8 +259,7 @@ STAGES = [
      "Result, artifacts and outcomes go back — a crash reports as a typed exclusion."),
     ("score",    19.90, 22.30, "8", "score & train",
      "Percepteye grades the rollout and trains the policy. This is the part you don't build."),
-    ("improve",  22.30, 26.40, "9", "improve",
-     "Your production agent picks up what training produced — as an endpoint it can call."),
+    ("improve",  22.30, 26.40, "9", "improve", _F["improve"]),
 ]
 
 # When each element of the picture arrives. (fade-in start, fade-in end)
@@ -756,7 +765,7 @@ def draw_frame(i: int) -> Image.Image:
             q = (praw - 0.34) / 0.66
             rail("policy", mix(BG, PURPLE, 0.34 * seam), upto=1.0)
             flow("policy", min(1.0, q / 0.72), PURPLE, back=True, n=2, clamp=True)
-            note("policy", "← the better policy, as an endpoint you can call",
+            note("policy", _F["policy_note"],
                  PURPLE, ease(prog(q, 0.12, 0.45)))
     else:
         lane_labels("policy", 0.16 if a_rl > 0.5 else 0.0)

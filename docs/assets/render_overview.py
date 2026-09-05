@@ -53,6 +53,23 @@ _WRAP_LABEL = {
 }[FLAVOUR]
 #: The harnesses THIS package actually supports. The Python list in the Node
 #: figure advertised LangChain and ADK to an OpenClaw customer.
+#: The card's three rows, and which of them the SDK in question actually moves.
+#: A row with ``None`` is one this package leaves alone; the sweep animation is
+#: driven by that field, so this table IS the claim the figure makes.
+#: The AFTER line has to name the same halves the rows above moved, or the
+#: caption quietly contradicts the picture directly beneath it.
+_AFTER_CAPTION = {
+    "python": "your prompt  ·  a policy trained on this agent's own work",
+    "node": "the approved prompt  ·  a policy trained on this agent's own work",
+}[FLAVOUR]
+_ROWS = {
+    "python": [("system prompt", "yours, unchanged", None),
+               ("tools", "yours, unchanged", None),
+               ("model", "your-model", "policy · gw.percepteye.ai/r/…")],
+    "node": [("system prompt", "yours", "approved · v3"),
+             ("tools", "yours, unchanged", None),
+             ("model", "your-model", "policy · gw.percepteye.ai/r/…")],
+}[FLAVOUR]
 _HARNESS_CHIP = {
     "python": "LangChain \u00b7 ADK \u00b7 a CLI",
     "node": "OpenClaw \u00b7 DeepSeek Harness",
@@ -470,11 +487,15 @@ def draw_frame(i):
          fade(MUTED, a_ag), anchor="lm")
     dashed_h(d, AGENT[1] + 80, AGENT[0] + 22, AGENT[2] - 22, fade(SOFT, a_ag))
 
-    # three rows. Only the third ever changes -- that is the product.
+    # WHICH ROWS MOVE IS A PER-SDK FACT, not decoration. The Python SDK applies
+    # the model (apply_current_policy) and deliberately hands the prompt back
+    # WITHOUT applying it, so there only the model row may move. The Node plugin
+    # applies BOTH halves -- the approved prompt through before_prompt_build and
+    # the served model through before_model_resolve + its own provider -- and a
+    # figure showing its prompt row "unchanged" would contradict the package.
+    # Tools never move in either: nothing here rewrites a tool catalogue.
     swap = ease(prog(t, 17.55, 18.25)) * seam
-    rows = [("system prompt", "yours, unchanged", None),
-            ("tools", "yours, unchanged", None),
-            ("model", "your-model", "policy · gw.percepteye.ai/r/…")]
+    rows = _ROWS
     for k, (key, val, newval) in enumerate(rows):
         ry = AGENT[1] + 112 + k * 40
         text(d, (AGENT[0] + 22, ry), key, F_ROWK, fade(DIM, a_rw), anchor="lm")
@@ -583,7 +604,7 @@ def draw_frame(i):
         text(d, (AGENT[0], BA_Y + 24), "AFTER", F_ZONE, fade(ZR_LABEL, a_st),
              anchor="lm")
         text(d, (AGENT[0] + 74, BA_Y + 24),
-             "your prompt  ·  a policy trained on this agent's own work", F_TINY,
+             _AFTER_CAPTION, F_TINY,
              fade(CHIP_ON2, a_st), anchor="lm")
 
     # ── caption ──

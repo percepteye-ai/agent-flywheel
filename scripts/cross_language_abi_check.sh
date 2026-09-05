@@ -15,7 +15,13 @@
 #
 #   ./scripts/cross_language_abi_check.sh
 #
-# Requires: node on PATH, and the package importable (pip install -e .).
+# Requires: a WORKING node, and the package importable (pip install -e .).
+#
+# NODE IS RESOLVED, NOT ASSUMED. A bare `node` is not a working node: this
+# machine's Homebrew node 25.4.0 aborts before running a line of script on a
+# broken simdjson link, so the check died with a dyld error that says nothing
+# about the ABI it exists to guard. tests/node_sdk.py already resolves the same
+# way; two answers to "which node" is one too many.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -92,9 +98,39 @@ echo "cross-language ABI check: reading the Node SDK at $PKG"
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
 
-PYTHON="${PYTHON:-python}"
+# SAME RULE AS $NODE ABOVE. A bare `python` is not a Python: it does not exist
+# on a modern macOS, and where it does it is not necessarily the interpreter
+# with this package installed. Prefer the repo venv, which by definition has it.
+PYTHON="${PYTHON:-}"
+if [ -z "$PYTHON" ]; then
+  for cand in "$ROOT/.venv/bin/python" python3 python; do
+    if command -v "$cand" >/dev/null 2>&1 \
+       && "$cand" -c "import percepteye_agent_flywheel" >/dev/null 2>&1; then
+      PYTHON="$cand"; break
+    fi
+  done
+fi
+if [ -z "$PYTHON" ]; then
+  echo "✗ no python with percepteye_agent_flywheel importable" >&2
+  echo "  (tried \$PYTHON, $ROOT/.venv/bin/python, python3, python)." >&2
+  echo "  Run: pip install -e ." >&2
+  exit 1
+fi
 
-node --input-type=module -e "
+NODE=""
+for cand in ${PERCEPTEYE_NODE_BIN:-} /opt/homebrew/opt/node@24/bin/node node; do
+  if [ -n "$cand" ] && command -v "$cand" >/dev/null 2>&1 \
+     && "$cand" --version >/dev/null 2>&1; then
+    NODE="$cand"; break
+  fi
+done
+if [ -z "$NODE" ]; then
+  echo "✗ no working node found (tried \$PERCEPTEYE_NODE_BIN, node@24, node)." >&2
+  echo "  A node that cannot run --version cannot run the ABI check." >&2
+  exit 1
+fi
+
+"$NODE" --input-type=module -e "
 import { createRecorder } from '$PKG/record.js';
 import { createWriter } from '$PKG/trajectory.js';
 import { recordFor } from '$PKG/dsh.js';

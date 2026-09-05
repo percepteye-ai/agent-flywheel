@@ -87,6 +87,11 @@ from .outcomes import (
 )
 from .policy import PolicySnapshot, PolicySource, policy_source
 from .production import Attachment, attach
+from .prompt import (
+    SERVABLE_PROMPT_STATUSES,
+    PromptDecision,
+    prompt_decision,
+)
 from .runner import RolloutRunner
 from .transport import AttachTransport, FlywheelTransport
 
@@ -94,6 +99,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     "CONTRACT_VERSION",
+    "SERVABLE_PROMPT_STATUSES",
     "TASK",
     "AttachTransport",
     "Attachment",
@@ -111,6 +117,7 @@ __all__ = [
     "Outcome",
     "PolicySnapshot",
     "PolicySource",
+    "PromptDecision",
     "RolloutOutput",
     "RolloutRequest",
     "RolloutRunner",
@@ -130,6 +137,7 @@ __all__ = [
     "endpoint_kwargs",
     "introspect_agent",
     "policy_source",
+    "prompt_decision",
     "record_tool_call",
     "resolve_entrypoint",
     "resolve_mode",
@@ -340,18 +348,24 @@ def current_prompt(
     :func:`apply_current_policy`. Swapping a model endpoint is invisible to an
     agent's behaviour; swapping its system prompt changes what it DOES. That is
     a decision for the person who owns the agent, so this hands back the text
-    and stops. Read ``sha256`` to tell whether it differs from what you are
-    running.
+    and stops.
 
-    Two fields are worth checking before you apply it:
+    **Do not re-derive whether it may be applied — ask** :func:`prompt_decision`.
+    This docstring used to list the fields to check and the order to check them
+    in, which made every caller reimplement a rule with no mechanism behind it.
+    The rule is a function now::
 
-    * ``model_prompt_checksum`` — the prompt identity stamped on the MODEL at
-      certification. The contract is a PAIR: this prompt was approved against
-      that checkpoint, and applying it over a different one is not the thing
-      that was approved.
-    * ``stale_baseline`` — true when the prompt you supplied as the baseline
-      has changed since this was certified. The deliverable still stands; it
-      was just shaped against a version of your prompt you no longer ship.
+        served = fw.current_prompt(agent_id="my-agent")
+        decision = fw.prompt_decision(served)
+        if decision.apply:
+            system_prompt = decision.text          # never None here
+        else:
+            log.info("keeping the current prompt: %s", decision.reason)
+
+    It answers the same four questions the Node SDK's ``promptDecision`` asks,
+    in the same order and with the same sentences, so the two packages refuse
+    the same bundles for the same stated reason. See
+    :mod:`percepteye_agent_flywheel.prompt`.
     """
     url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL)
     key = api_key or os.environ.get(ENV_API_KEY)

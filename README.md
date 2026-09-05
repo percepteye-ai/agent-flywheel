@@ -131,12 +131,34 @@ if kw:                                   # {} means keep your current config
     client = OpenAI(base_url=kw["base_url"], api_key=kw["api_key"])
     model = kw["model"]
 
-prompt = fw.current_prompt(agent_id="my-agent")          # the approved prompt
+served = fw.current_prompt(agent_id="my-agent")          # the approved prompt
+decision = fw.prompt_decision(served)                   # may I apply it?
+if decision.apply:
+    system_prompt = decision.text
+else:
+    log.info("keeping the current prompt: %s", decision.reason)
+
 src = fw.policy_source(agent_id="my-agent", on_change=reconfigure)
 snap = src.current()                     # per turn; between TTLs it's a cache read
 ```
 
 **Nothing polls in the background.** The refresh runs inside your call — no timer, no poller — so a promotion *or a rollback* reaches production with no redeploy. After its first success `policy_source()` keeps serving the last good policy, so a network blip can never silently demote production back to the untrained model.
+
+`prompt_decision()` is the whole rule in one call, and the SDK never applies a prompt for you: it checks that a prompt is actually being served, that your own baseline prompt has not changed since the pair was certified, that the bundle's status is one a person approved, and that the prompt's identity matches the checkpoint it was certified against. `apply` is false unless all four hold, `reason` says which one failed, and `text` is `None` rather than `""` — so a refusal can never blank the instructions your agent is already running on. The Node SDK asks the identical question, and [`tests/test_prompt_decision_parity.py`](tests/test_prompt_decision_parity.py) drives one table of cases through both implementations and asserts every field of the answer agrees.
+
+## ✋ Nothing reaches your users until a person approves it
+
+**Both halves of an improvement — the model and the prompt — require a human decision.** Not a threshold, not a scheduler, not a language model reading a report and deciding it looks good.
+
+**The model.** Your agent keeps serving the model it is on today — the **champion** — until *all three* of these are true, and every one of them fails closed back to it:
+
+1. **A person with the operator role moves that agent onto the candidate**, from the dashboard. It is an explicit, role-gated call on that one agent. No promotion applies it, no percentage rollout applies it, and there is no automatic path to it — moving *back* is the same call with the other value, which is what makes rollback fast enough to use during an incident.
+2. **The candidate's certification did not go against it.** A verdict of *regressed*, *inconclusive* or *escalated* makes it unservable — the same set the promotion gate itself refuses on, so a candidate your agent could be moved onto is one that gate would also have accepted.
+3. **It is genuinely deployed somewhere your agent can call.** An address that is a stored artifact rather than a running endpoint — a bucket or file path — is refused, so an approved candidate that nobody has served yet keeps the champion in place instead of pointing your agent at something that answers nothing.
+
+**The prompt** is a separate chain with its own approval: the control plane serves a prompt only from a delivery a person approved, and `prompt_decision()` above re-checks that status on your side before anything is applied.
+
+**And no language model can grant either approval.** Promoting a model, delivering a prompt pair, and promoting a research result are all marked irreversible in the approval system: only the explicit approve or reject control can resolve them. A model reading free-form text and interpreting "sure, go ahead" as consent is recorded as *answered* and never as *approved*, so it cannot promote, deliver, or roll anything out.
 
 ## 🔭 Production observability
 

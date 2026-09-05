@@ -48,10 +48,10 @@ import atexit
 import os
 import shutil
 import threading
-import weakref
 import time
 import uuid
 import warnings
+import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
