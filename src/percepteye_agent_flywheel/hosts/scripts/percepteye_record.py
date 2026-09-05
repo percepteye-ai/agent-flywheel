@@ -3,7 +3,7 @@
 
 Reads a hook event as JSON on stdin and appends one line to
 ``$PERCEPTEYE_TRAJECTORY_DIR/tool_calls.jsonl`` -- the wire format documented in
-``packages/percepteye-agent-flywheel/src/trajectory.js``. That format is a FILE,
+``trajectory.js`` in the Node SDK (percepteye-ai/agent-flywheel-node). That format is a FILE,
 not a function call, precisely so a host we have no SDK for can feed the
 flywheel by appending a line.
 

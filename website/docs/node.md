@@ -149,7 +149,8 @@ Zero dependencies is a hard constraint, not a preference: this runs inside someo
 The plugins and the Python SDK are two ends of one ABI — whatever a plugin appends, `percepteye_agent_flywheel.outcomes.Trajectory` has to read back with the same meaning. **A JS suite that only checked itself would let a plugin stay green while writing a line the reader counts as malformed**, surfacing later as a silently short tool-call list.
 
 ```bash
-cd packages/percepteye-agent-flywheel && npm test   # 89 tests, zero skips
+git clone https://github.com/percepteye-ai/agent-flywheel-node
+cd agent-flywheel-node && npm test                 # 152 tests, zero skips
 ./scripts/cross_language_abi_check.sh               # the JS writers, the Python reader
 ```
 

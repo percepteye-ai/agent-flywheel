@@ -20,7 +20,33 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
-PKG="./packages/percepteye-agent-flywheel/src"
+
+# WHERE THE NODE SDK IS, now that it is a separate repo
+# (percepteye-ai/agent-flywheel-node). It used to be a subdirectory here, and
+# this line was a relative path into it.
+#
+# Resolved rather than assumed, and SKIPPED rather than failed when it is
+# absent. A developer checking out only this repo has no Node SDK to check
+# against, and turning that into a red suite would teach everyone to ignore
+# the failure -- which costs more than the check is worth. CI checks the
+# sibling out explicitly, so there it always runs.
+if [ -n "${PERCEPTEYE_NODE_SDK:-}" ]; then
+  PKG="${PERCEPTEYE_NODE_SDK%/}/src"
+else
+  for cand in \
+    "$ROOT/../percepteye-agent-flywheel-node" \
+    "$ROOT/../agent-flywheel-node"; do
+    if [ -d "$cand/src" ]; then PKG="$cand/src"; break; fi
+  done
+fi
+if [ -z "${PKG:-}" ] || [ ! -d "$PKG" ]; then
+  echo "cross-language ABI check SKIPPED: the Node SDK is not checked out."
+  echo "  It lives at github.com/percepteye-ai/agent-flywheel-node."
+  echo "  Clone it beside this repo, or set PERCEPTEYE_NODE_SDK=/path/to/it."
+  exit 0
+fi
+echo "cross-language ABI check: reading the Node SDK at $PKG"
+
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
 

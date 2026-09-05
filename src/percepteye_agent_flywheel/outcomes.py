@@ -92,6 +92,16 @@ _current_trajectory_dir: ContextVar[str | None] = ContextVar(
 _current_scope_kind: ContextVar[str | None] = ContextVar(
     "percepteye_current_scope_kind", default=None
 )
+#: The conversation the OPEN scope belongs to, or ``None``.
+#:
+#: A context var rather than a read of the turn directory's
+#: ``conversation_id`` file, because the one consumer is the tool-call span and
+#: that runs on every tool call a customer's agent makes. A stat-and-read per
+#: call is a cost this package has no business adding to somebody's hot path
+#: for a value the scope already knew when it opened.
+_current_conversation: ContextVar[str | None] = ContextVar(
+    "percepteye_current_conversation", default=None
+)
 _warned_no_destination = False
 
 
@@ -419,6 +429,7 @@ def _emit_span(rec: ToolCallOutcome, scope_id: str, kind: CaptureScope) -> None:
             agent_name=rec.agent_name,
             rollout_id=scope_id if kind == "rollout" else None,
             turn_id=scope_id if kind == "turn" else None,
+            conversation_id=_current_conversation.get(),
             tool_call_id=rec.tool_call_id,
         )
     except Exception:
@@ -618,10 +629,12 @@ class _RolloutScope:
     """
 
     def __init__(self, rollout_id: str, trajectory_dir: str, *,
+                 conversation_id: str | None = None,
                  kind: CaptureScope = "rollout") -> None:
         self._rid = rollout_id
         self._trajectory_dir = str(trajectory_dir)
         self._kind = kind
+        self._conversation_id = conversation_id or None
         self._tokens: list[Any] = []
 
     def __enter__(self) -> str:
@@ -629,6 +642,7 @@ class _RolloutScope:
             _current_rollout.set(self._rid),
             _current_trajectory_dir.set(self._trajectory_dir),
             _current_scope_kind.set(self._kind),
+            _current_conversation.set(self._conversation_id),
         ]
         return self._rid
 
@@ -637,6 +651,7 @@ class _RolloutScope:
             _current_rollout.reset(self._tokens[0])
             _current_trajectory_dir.reset(self._tokens[1])
             _current_scope_kind.reset(self._tokens[2])
+            _current_conversation.reset(self._tokens[3])
             self._tokens = []
         # The handle lives exactly as long as the scope that writes through it.
         # Without this the sink registry would grow one entry per turn for the

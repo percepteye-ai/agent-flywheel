@@ -10,7 +10,7 @@ One import. One call. One runtime dependency.
 [![ci](https://img.shields.io/github/actions/workflow/status/percepteye-ai/agent-flywheel/ci.yml?branch=main&label=ci&style=for-the-badge&logo=githubactions&logoColor=white&color=22c55e)](https://github.com/percepteye-ai/agent-flywheel/actions)
 [![pypi](https://img.shields.io/pypi/v/percepteye-agent-flywheel?style=for-the-badge&logo=pypi&logoColor=white&label=pypi&color=3b82f6)](https://pypi.org/project/percepteye-agent-flywheel/)
 [![python](https://img.shields.io/badge/python-3.10%20→%203.13-3b82f6?style=for-the-badge&logo=python&logoColor=white)](https://pypi.org/project/percepteye-agent-flywheel/)
-[![node](https://img.shields.io/badge/node-plugin-8b5cf6?style=for-the-badge&logo=nodedotjs&logoColor=white)](packages/percepteye-agent-flywheel/)
+[![node](https://img.shields.io/badge/node-plugin-8b5cf6?style=for-the-badge&logo=nodedotjs&logoColor=white)](https://github.com/percepteye-ai/agent-flywheel-node)
 <br/>
 [![runtime dependencies](https://img.shields.io/badge/runtime_deps-1-f59e0b?style=for-the-badge)](#what-it-costs-to-integrate)
 [![lines changed in your agent](https://img.shields.io/badge/lines_changed_in_your_agent-0-ec4899?style=for-the-badge)](#zero-instrumentation-concretely)
@@ -154,7 +154,7 @@ dsh plugin --profile <name> add percepteye-agent-flywheel     # DeepSeek Harness
 
 Then set `PERCEPTEYE_TRAJECTORY_DIR` on the process running your agent. **Unset, the plugin does nothing at all** — so the same install is a no-op in production and a recorder during a rollout. Leave it installed permanently.
 
-**Both plugins observe and cannot do anything else** — a property of the hooks, not a promise about the code. OpenClaw's `after_tool_call` returns `void`; DeepSeek Harness publishes `tools/result` emit-only over a deep-frozen object. Capturing evidence can never change the behaviour being measured. → [`packages/percepteye-agent-flywheel/`](packages/percepteye-agent-flywheel/)
+**Both plugins observe and cannot do anything else** — a property of the hooks, not a promise about the code. OpenClaw's `after_tool_call` returns `void`; DeepSeek Harness publishes `tools/result` emit-only over a deep-frozen object. Capturing evidence can never change the behaviour being measured. → [`percepteye-ai/agent-flywheel-node`](https://github.com/percepteye-ai/agent-flywheel-node)
 
 ### ⌘ Any CLI, any language — an argv list
 

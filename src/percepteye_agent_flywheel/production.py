@@ -195,7 +195,8 @@ class Attachment:
             if due:
                 self.prune(keep_last=self._retention_turns)
 
-        with _RolloutScope(tid, str(path), kind="turn"):
+        with _RolloutScope(tid, str(path), kind="turn",
+                           conversation_id=conversation_id):
             yield tid
 
     def record_answer(self, turn_id: str, text: str) -> bool:

@@ -368,3 +368,57 @@ def test_a_turn_writes_one_span_per_turn_text_not_one_per_turn(spans, tmp_path):
     # And the tool span falls BETWEEN them, which is what makes it
     # attributable to the turn the second span closes.
     assert first.start_time <= tool[0].start_time <= second.start_time
+
+
+def test_the_tool_span_carries_the_conversation_too(spans, tmp_path):
+    """A consumer grouping an export into conversations must put a tool call in
+    the same bucket as the turn that made it.
+
+    The turn id can recover that link — a consumer can build turn -> conversation
+    from the chat spans — but only when the SAME export also carries a chat span
+    for that turn. An
+    export sliced by time, or sampled by the collector, may carry the tool span
+    and not its turn. Then the call has nothing to group by.
+
+    This was claimed in a commit message before it was true: the edit failed
+    and was not re-checked. The assertion is here so the claim cannot drift
+    from the code again.
+    """
+    from percepteye_agent_flywheel.outcomes import record_tool_call
+    from percepteye_agent_flywheel.production import attach
+
+    px = attach(agent_id="a", trajectory_root=str(tmp_path), register=False)
+    try:
+        with px.turn(turn_id="t1", input_text="hi", conversation_id="conv-7"):
+            record_tool_call(name="book", arguments={}, outcome="ok",
+                             status_code=201)
+        px.record_answer("t1", "Booked.")
+    finally:
+        px.close()
+
+    tool = [s for s in spans.get_finished_spans()
+            if s.attributes.get("gen_ai.tool.name")]
+    assert len(tool) == 1
+    assert tool[0].attributes.get("percepteye.conversation.id") == "conv-7"
+    # And the turn id is still there — this adds a key, it does not swap one.
+    assert tool[0].attributes.get("percepteye.turn.id") == "t1"
+
+
+def test_a_turn_with_no_conversation_sets_no_conversation_attribute(spans, tmp_path):
+    """Absence stays absence. Stamping an empty string, or the turn id, would
+    make an ungrouped call look like it belonged to a conversation."""
+    from percepteye_agent_flywheel.outcomes import record_tool_call
+    from percepteye_agent_flywheel.production import attach
+
+    px = attach(agent_id="a", trajectory_root=str(tmp_path), register=False)
+    try:
+        with px.turn(turn_id="t1", input_text="hi"):
+            record_tool_call(name="book", arguments={}, outcome="ok",
+                             status_code=201)
+    finally:
+        px.close()
+
+    tool = [s for s in spans.get_finished_spans()
+            if s.attributes.get("gen_ai.tool.name")]
+    assert len(tool) == 1
+    assert "percepteye.conversation.id" not in tool[0].attributes

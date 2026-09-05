@@ -132,10 +132,14 @@ jobs:
     # drift: a plugin would stay green while writing a line `Trajectory.read`
     # counts as malformed, and the loss would surface as a silently short
     # tool-call list.
+    #
+    # THE PLUGINS' OWN SUITE MOVED WITH THEM. They live in
+    # percepteye-ai/agent-flywheel-node now and that repo runs `npm test`. What
+    # stays here is the half that can only be checked HERE: the reader is in
+    # this repo, and this is the job that proves what the plugins write is what
+    # it reads. Keeping a copy of their unit tests here too would be a second
+    # place to update and the one more likely to be forgotten.
     runs-on: ubuntu-latest
-    # A backstop for a hang OUTSIDE a test, which the per-test timeout cannot
-    # catch. The first run of this job sat in `npm test` for six minutes and
-    # reported nothing until it was cancelled by hand.
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -149,23 +153,26 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: npm test
-        working-directory: packages/percepteye-agent-flywheel
-      - name: the plugin has no dependencies
-        # It runs inside someone else's agent process. A dependency here is a
-        # version conflict imposed on a customer who did not ask for one.
-        run: |
-          python - <<'PY'
-          import json
-          pkg = json.load(open("packages/percepteye-agent-flywheel/package.json"))
-          for key in ("dependencies", "peerDependencies", "optionalDependencies"):
-              assert not pkg.get(key), f"{key} must stay empty: {pkg[key]}"
-          print("no dependencies, as required")
-          PY
+      # The Node SDK is its own repo now (percepteye-ai/agent-flywheel-node).
+      # Checked out BESIDE this one, which is the layout
+      # cross_language_abi_check.sh looks for by default -- so CI and a
+      # developer's laptop resolve it the same way rather than CI knowing a
+      # path nobody else has.
+      #
+      # It is a private repo, so this needs a token with read access to it.
+      # Without one the checkout fails loudly here rather than the ABI check
+      # silently skipping, which is the right order: a missing credential is a
+      # CI defect, not a reason to stop checking the contract.
+      - uses: actions/checkout@v4
+        with:
+          repository: percepteye-ai/agent-flywheel-node
+          path: agent-flywheel-node
+          token: ${{ secrets.NODE_SDK_READ_TOKEN }}
       - name: what the plugins write is what the Python SDK reads
         # One definition, invoked from here and runnable by hand. It used to be
         # inline, and a local approximation of it passed while the real one
         # failed -- the JS half had grown two records and the assertion had not.
         run: |
           pip install -e .
-          ./scripts/cross_language_abi_check.sh
+          PERCEPTEYE_NODE_SDK="$GITHUB_WORKSPACE/agent-flywheel-node" \
+            ./scripts/cross_language_abi_check.sh

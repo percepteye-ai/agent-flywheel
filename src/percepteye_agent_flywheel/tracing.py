@@ -93,6 +93,7 @@ def record_tool_call_span(
     agent_name: str | None = None,
     rollout_id: str | None = None,
     turn_id: str | None = None,
+    conversation_id: str | None = None,
     tool_call_id: str | None = None,
 ) -> None:
     """Project one recorded tool call into the customer's traces.
@@ -136,6 +137,15 @@ def record_tool_call_span(
                 # to answer "how much of my traffic was training" -- every
                 # served turn looked like contributed work.
                 span.set_attribute("percepteye.turn.id", str(turn_id))
+            if conversation_id:
+                # ON THE TOOL SPAN TOO, not only on the turn span. A consumer
+                # grouping an export into conversations must put a call in the
+                # same bucket as the turn that made it. The turn id can recover
+                # that link -- but ONLY when the same export also carries a
+                # chat span for that turn, and an export sliced by time or
+                # sampled by the collector may not.
+                span.set_attribute(
+                    "percepteye.conversation.id", str(conversation_id))
             if agent_name:
                 span.set_attribute("gen_ai.agent.name", str(agent_name))
             if latency_ms is not None:
