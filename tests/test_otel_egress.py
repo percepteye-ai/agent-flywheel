@@ -315,3 +315,56 @@ def test_a_rollout_tool_call_IS_stamped_so_ingest_can_exclude_it(spans):
     span = _only(spans)
     assert span.attributes["percepteye.rollout.id"] == "r9"
     assert "percepteye.turn.id" not in span.attributes
+
+
+# ── one span per turn TEXT, which is the shape the ingest converter reads ──
+
+
+def test_a_turn_writes_one_span_per_turn_text_not_one_per_turn(spans, tmp_path):
+    """The emission ORDER is a cross-repo contract, so it is pinned here.
+
+    ``record_turn_text`` emits the OTel projection from the same call that
+    writes the file, and it is called twice per turn — once for the task, once
+    for the answer. So a turn produces an INPUT span when it starts and an
+    OUTPUT span when the answer is recorded, with any tool spans between them.
+
+    That ordering is what lets a consumer attribute a tool call to the turn it
+    belongs to: at tool time the count of assistant messages so far is exactly
+    the index the closing answer will take. A single span carrying both halves
+    would put every tool call after the whole turn, and the consumer would have
+    no turn to attach them to.
+
+    Pinned from this side only. The consumer is in another repository and this
+    package imports nothing from it.
+    """
+    from percepteye_agent_flywheel.outcomes import record_tool_call
+    from percepteye_agent_flywheel.production import attach
+
+    px = attach(agent_id="a", trajectory_root=str(tmp_path), register=False)
+    try:
+        with px.turn(turn_id="t1", input_text="book a flight"):
+            record_tool_call(name="book", arguments={}, outcome="ok",
+                             status_code=201)
+        px.record_answer("t1", "Booked.")
+    finally:
+        px.close()
+
+    got = spans.get_finished_spans()
+    chat = [s for s in got
+            if s.attributes.get("gen_ai.operation.name") == "chat"]
+    assert len(chat) == 2, (
+        f"expected an input span and an output span, got {len(chat)}: "
+        f"{[dict(s.attributes) for s in chat]}"
+    )
+    first, second = sorted(chat, key=lambda s: s.start_time)
+    # NEVER both halves on one span.
+    assert "gen_ai.input.messages" in first.attributes
+    assert "gen_ai.output.messages" not in first.attributes
+    assert "gen_ai.output.messages" in second.attributes
+    assert "gen_ai.input.messages" not in second.attributes
+
+    tool = [s for s in got if s.attributes.get("gen_ai.tool.name")]
+    assert len(tool) == 1
+    # And the tool span falls BETWEEN them, which is what makes it
+    # attributable to the turn the second span closes.
+    assert first.start_time <= tool[0].start_time <= second.start_time

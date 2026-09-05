@@ -30,6 +30,7 @@ from .errors import ContractViolation
 from .evidence import extract_entity_ids
 
 __all__ = [
+    "CONVERSATION_ID_FILENAME",
     "TOOL_CALLS_FILENAME",
     "CaptureScope",
     "Trajectory",
@@ -61,6 +62,9 @@ TOOL_CALLS_FILENAME = "tool_calls.jsonl"
 #: which is asserted by a test that reads BOTH producers' output back through
 #: the one reader below rather than by a comment asking someone to remember.
 TURNS_FILENAME = "turns.jsonl"
+
+#: Where a turn directory records which conversation it belongs to.
+CONVERSATION_ID_FILENAME = "conversation_id"
 
 #: The two halves of a turn. ``task`` is what was asked, ``answer`` is what the
 #: agent finally said -- the same two kinds the CLI recorder emits from
@@ -477,6 +481,24 @@ def record_turn_text(
         # file is already written, so this cannot cost that either.
         pass
     return True
+
+
+def read_conversation_id(path: Any) -> str | None:
+    """Which conversation this turn directory declared, or ``None``.
+
+    Lives here beside the other turn-directory readers, not in the corpus
+    projection that first needed it: the upload path reads it too, and a
+    second copy would be a second answer to "where is the conversation id
+    written". A missing or unreadable file is ``None`` -- a turn that never
+    declared a conversation is a real state, not an error.
+    """
+    from pathlib import Path as _Path
+
+    try:
+        return (_Path(path) / CONVERSATION_ID_FILENAME).read_text(
+            encoding="utf-8").strip() or None
+    except OSError:
+        return None
 
 
 def read_turn_text(

@@ -275,7 +275,9 @@ with px.turn(conversation_id=conv_id) as turn_id:
 ```
 
 > [!IMPORTANT]
-> **Turns captured by `attach()` stay on your machine — they are not uploaded, and they do not train anything.** The `flywheel/1` contract has no route for a production turn (`/health`, `/agents`, `/policy/current` and `/rollouts/*` are the whole surface), so turns accumulate as trajectory directories under the `trajectory_root` you name, and you own them.
+> **Turns captured by `attach()` are uploaded only if you turn capture on for that agent — and it is off by default.** A production turn is your end users' own message and the answer you gave them, so nothing is sent until an operator enables capture for the agent; the registration response tells the SDK whether it may. Until then turns accumulate as trajectory directories under the `trajectory_root` you name and go nowhere.
+>
+> When capture is on, `flush()` uploads turns that have an answer and `close()` flushes the rest. Nothing is sent at turn-scope exit — `record_answer()` is callable after the block closes, so an upload there would ship every turn before its answer existed. Uploads never raise into your process and never block a turn on the network.
 >
 > Training is fed by **rollouts**, not by production traffic: `serve()` (or the CLI hooks) claims a rollout, runs it, and reports the result — that report is the upload. So a continual-learning loop is repeated rounds of rollouts, and `attach()` today is local observability plus the policy read.
 >

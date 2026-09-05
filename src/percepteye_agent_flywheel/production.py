@@ -22,13 +22,25 @@ package keeps:
 * an unreachable control plane never stops the agent serving its users;
 * absence is never collapsed into zero.
 
-**What this does NOT do yet.** It does not ship anything. The ``flywheel/1``
-contract has no route for a production turn -- ``/health``, ``/agents``,
-``/policy/current`` and ``/rollouts/*`` are the whole surface -- so turns
-accumulate as trajectory directories under a root you name, and you own them
-until that route exists. Writing a client for a route the server does not serve
-is how an earlier SDK ended up with five modes of which four were strings
-nobody read; this module will not repeat it.
+**Uploading is OPT-IN, per agent, and off by default.** A production turn is
+your END USERS' own message and the answer you gave them, so nothing here
+decides to send it. :meth:`Attachment.flush` uploads only when the control
+plane said this agent is enabled for capture -- a per-agent switch an operator
+sets, which the registration response reports back. Until then turns
+accumulate as trajectory directories under the root you name and go nowhere,
+which is exactly what they did before the route existed.
+
+**When it uploads.** ``flush()`` sends turns that have an answer; ``close()``
+flushes once more and sends the rest, including turns whose answer never
+arrived -- those carry real tool calls and the control plane stores them,
+flagged and excluded from anything needing a completion. Nothing is sent at
+turn-scope exit, because :meth:`Attachment.record_answer` is callable after
+the scope closes and an upload there would ship every turn before its answer
+existed.
+
+**What it never does.** It never raises into your process, and it never blocks
+a turn on the network: a control plane that is unreachable leaves the turns on
+disk for the next flush.
 """
 from __future__ import annotations
 
@@ -56,6 +68,7 @@ from .outcomes import (
     Trajectory,
     _release,
     _RolloutScope,
+    read_conversation_id,
     read_turn_text,
     record_turn_text,
 )
@@ -88,6 +101,10 @@ class Attachment:
         unbinds: list[Any],
         adapters_bound: tuple[str, ...],
         retention_turns: int | None = None,
+        control_plane_url: str | None = None,
+        api_key: str | None = None,
+        may_upload: bool = False,
+        upload_refusal: str | None = None,
     ) -> None:
         self.agent_id = agent_id
         self.trajectory_root = trajectory_root
@@ -110,6 +127,16 @@ class Attachment:
         self._retention_turns = retention_turns
         self._turns_since_prune = 0
         self._lock = threading.Lock()
+        self._cp_url = control_plane_url
+        self._api_key = api_key
+        #: What the control plane SAID at registration, not what we assume.
+        #: Capture is opt-in per agent because a turn carries this agent's end
+        #: users' own messages -- so the default is False, and finding out by
+        #: uploading would mean sending the data whose permission is in
+        #: question.
+        self.may_upload = may_upload
+        #: Why not, in a sentence, when it is False and the control plane said.
+        self.upload_refusal = upload_refusal
 
     @contextmanager
     def turn(self, *, turn_id: str | None = None,
@@ -271,22 +298,283 @@ class Attachment:
                 removed += 1
             except OSError:
                 continue
+        if removed:
+            # The upload index describes this tree, so it is bounded by this
+            # tree. Left alone it would grow for the life of the process while
+            # the directory it describes stays capped -- which is the opposite
+            # of what a retention setting is for.
+            self._forget_uploaded({
+                e.name for e in entries if e not in set(doomed)
+            })
         return removed
 
+    #: Where upload state is kept: ONE FILE at the trajectory root, holding the
+    #: ids already accepted by the control plane, newline-delimited.
+    #:
+    #: NOT A MARKER INSIDE THE TURN DIRECTORY, which is where this started and
+    #: which was a real defect. Creating a file inside a directory bumps that
+    #: DIRECTORY's mtime, and mtime is the ordering key for both readers of
+    #: this tree: ``export.iter_records`` sorts by it to keep a conversation's
+    #: turns in the order they happened, and ``prune(keep_last=N)`` uses it to
+    #: decide which turns are newest. Marking a turn uploaded would therefore
+    #: have floated it to the end of its own conversation and made retention
+    #: delete the wrong turns -- a capture bug caused entirely by the
+    #: bookkeeping for the upload.
+    #:
+    #: A FILE and not a directory, because neither reader filters dotfiles:
+    #: they take everything under the root that ``is_dir()``, so a
+    #: ``.uploaded/`` directory would have been scanned as a turn.
+    #:
+    #: Per TURN, which is safe here and would not have been for a
+    #: conversation-shaped upload: each turn is its own row keyed on its own
+    #: id, so sending turn 4 later does not re-send or truncate turns 1-3.
+    _UPLOADED_INDEX = ".uploaded"
+
+    def _uploaded_ids(self) -> set[str]:
+        """Turn ids the control plane has already accepted."""
+        try:
+            raw = (Path(self.trajectory_root) / self._UPLOADED_INDEX).read_text(
+                encoding="utf-8")
+        except OSError:
+            return set()
+        return {line.strip() for line in raw.splitlines() if line.strip()}
+
+    def _mark_uploaded(self, turn_ids: list[str]) -> None:
+        """Append accepted ids. Append-only, so a crash mid-write can lose the
+        record of an upload but never invent one -- and a lost record costs a
+        re-send the server dedupes, never a duplicate row."""
+        if not turn_ids:
+            return
+        try:
+            with (Path(self.trajectory_root) / self._UPLOADED_INDEX).open(
+                    "a", encoding="utf-8") as fh:
+                fh.write("".join(t + "\n" for t in turn_ids))
+        except OSError:
+            # The turns landed; we just cannot remember that. A re-send is
+            # deduped server-side, so this costs bandwidth, never correctness.
+            pass
+
+    def _forget_uploaded(self, keep: set[str]) -> None:
+        """Drop ids whose turn directory no longer exists.
+
+        Called from ``prune``. Without it the index grows for the life of the
+        process while the tree it describes stays bounded -- an unbounded file
+        is not an acceptable price for retention that exists to bound things.
+        """
+        try:
+            path = Path(self.trajectory_root) / self._UPLOADED_INDEX
+            current = self._uploaded_ids() & keep
+            path.write_text("".join(t + "\n" for t in sorted(current)),
+                            encoding="utf-8")
+        except OSError:
+            pass
+
+    def _turn_wire(self, d: Path) -> dict[str, Any] | None:
+        """One captured turn in the intake's wire shape, or None if empty.
+
+        TURN-NATIVE, not corpus-shaped. What crosses the boundary is what the
+        agent observed -- the user's message, the answer, the calls -- and the
+        projection into any training-row format happens on the far side, where
+        it can change without a customer redeploying.
+        """
+        text = read_turn_text(d) or {}
+        traj = Trajectory(d)
+        calls = traj.read()
+        answer = text.get("answer")
+        if not text.get("task") and not answer and not calls:
+            return None
+        # THE TRI-STATE, asked of the trajectory FILE rather than inferred.
+        # ``[] if self.adapters_bound else None`` answered a different
+        # question: whether an adapter bound at ATTACH time, which says
+        # nothing about whether THIS turn recorded anything. A turn whose
+        # trajectory was never written would have been uploaded as a positive
+        # assertion that the agent made zero calls -- an observation nobody
+        # made, and the one transformation this SDK exists to refuse.
+        #
+        # File present, no rows  -> ``[]``  (it ran and called nothing)
+        # File absent            -> ``None`` (nothing was recorded for it)
+        if calls:
+            tool_calls: list[dict[str, Any]] | None = [c.to_wire() for c in calls]
+        elif traj.path.exists():
+            tool_calls = []
+        else:
+            tool_calls = None
+        wire: dict[str, Any] = {
+            "turn_id": d.name,
+            "input_text": text.get("task"),
+            "final_text": answer,
+            "tool_calls": tool_calls,
+            "tool_calls_omitted_count": traj.malformed,
+        }
+        cid = read_conversation_id(d)
+        if cid:
+            wire["conversation_id"] = cid
+            wire["turn_index"] = self._turn_index(d, cid)
+        return wire
+
+    def _turn_index(self, turn_dir: Path, conversation_id: str) -> int:
+        """This turn's position within its conversation.
+
+        DERIVED FROM THE SAME ORDERING ``export.iter_records`` USES -- the
+        directory mtime -- rather than from a counter. A counter held in the
+        Attachment would restart at zero on every process restart and on every
+        flush, and the control plane indexes on
+        ``(org, agent, conversation_id, turn_index)``: every turn landing at 0
+        makes a conversation unorderable, which is the one thing the index
+        exists to prevent.
+
+        Computed over every turn of the conversation ON DISK, not just the
+        ones being uploaded now, so a turn sent in a later flush keeps the
+        position it actually had. It shifts only if an earlier turn is pruned
+        away, which is the honest answer: the earlier turn is gone.
+        """
+        root = Path(self.trajectory_root)
+        siblings: list[tuple[float, str]] = []
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            return 0
+        for d in entries:
+            if not d.is_dir():
+                continue
+            if read_conversation_id(d) != conversation_id:
+                continue
+            try:
+                siblings.append((d.stat().st_mtime, d.name))
+            except OSError:
+                continue
+        siblings.sort()
+        for i, (_, name) in enumerate(siblings):
+            if name == turn_dir.name:
+                return i
+        return 0
+
+    def flush(self, *, include_unanswered: bool = False,
+              batch_size: int = 64) -> dict[str, int]:
+        """Upload captured turns to the control plane. Returns counts.
+
+        WHY NOT AT TURN-SCOPE EXIT, which is where an earlier design put it:
+        ``record_answer`` is callable AFTER the scope closes, and the package's
+        own example records the answer after the ``with`` block. Uploading on
+        exit therefore shipped a turn whose ``final_text`` did not exist yet --
+        every turn, for the documented usage.
+
+        So the default holds back a turn that has no answer, because the answer
+        may still be coming. ``close()`` passes ``include_unanswered=True``:
+        at shutdown nothing more is coming, and a turn that made real tool
+        calls and never recorded an answer is honest data rather than a
+        validation error -- the intake stores it, flags it, and excludes it
+        from objectives that need a completion.
+
+        Never raises. A control plane that is unreachable must not take down a
+        process that is serving users; the turns stay on disk and the next
+        flush retries them.
+        """
+        sent = skipped = failed = 0
+        if not self.may_upload or not self._cp_url or not self._api_key:
+            return {"sent": 0, "skipped": 0, "failed": 0, "not_permitted": 1}
+
+        root = Path(self.trajectory_root)
+        if not root.is_dir():
+            return {"sent": 0, "skipped": 0, "failed": 0}
+
+        already = self._uploaded_ids()
+        pending: list[tuple[Path, dict[str, Any]]] = []
+        try:
+            entries = sorted(root.iterdir(), key=lambda p: p.name)
+        except OSError:
+            return {"sent": 0, "skipped": 0, "failed": 0}
+        for d in entries:
+            if not d.is_dir() or d.name in already:
+                continue
+            # PER DIRECTORY. The scan used to sit outside the try below, so a
+            # truncated trajectory -- which this package documents as the
+            # EXPECTED case, not an exotic one, because a deadline kill cuts
+            # the final line -- raised straight out of a method whose docstring
+            # says it never raises, inside a customer's shutdown path. One
+            # unreadable turn now costs that turn.
+            try:
+                wire = self._turn_wire(d)
+            except Exception:
+                failed += 1
+                continue
+            if wire is None:
+                continue
+            if wire.get("final_text") is None and not include_unanswered:
+                skipped += 1
+                continue
+            pending.append((d, wire))
+
+        if not pending:
+            return {"sent": 0, "skipped": skipped, "failed": 0}
+
+        client = None
+        try:
+            from ._http import ControlPlaneClient
+            from .transport import AttachTransport
+
+            client = ControlPlaneClient(self._cp_url, self._api_key)
+            tr = AttachTransport(client, self.agent_id)
+            for i in range(0, len(pending), max(1, batch_size)):
+                chunk = pending[i:i + max(1, batch_size)]
+                try:
+                    tr.report_turns(self.agent_id, [w for _, w in chunk])
+                except Exception:
+                    # Whole chunk unacknowledged. Leave every marker unwritten
+                    # so the next flush retries it: the intake dedupes on
+                    # turn_id, so a retry of a batch that DID land is answered
+                    # as a duplicate rather than stored twice.
+                    failed += len(chunk)
+                    continue
+                self._mark_uploaded([d.name for d, _ in chunk])
+                sent += len(chunk)
+        except Exception:
+            failed += len(pending) - sent
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+        return {"sent": sent, "skipped": skipped, "failed": failed}
+
     def close(self) -> None:
-        """Unbind the adapters. Idempotent, and never raises."""
+        """Unbind the adapters. Idempotent, and never raises.
+
+        THE UPLOAD HAPPENS OUTSIDE THE LOCK, deliberately. ``turn()`` takes the
+        same lock to advance its prune counter, so flushing while holding it
+        would park a live user request behind a network call for as long as the
+        control plane took to answer -- in a threaded server, on the shutdown
+        path, which is exactly when latency is least affordable. The lock is
+        held only long enough to claim the close and take the unbind list.
+
+        Claiming ``_closed`` FIRST is what keeps this idempotent across
+        threads: a second caller returns immediately rather than flushing
+        again. And a double flush would be harmless anyway -- the uploaded
+        markers make it find nothing -- so the ordering costs nothing to get
+        right.
+        """
         with self._lock:
             if self._closed:
                 return
             self._closed = True
-            for u in self._unbinds:
-                try:
-                    u()
-                except Exception:
-                    # Unbinding is cleanup. A framework that changed shape
-                    # under us must not take the customer's shutdown with it.
-                    pass
-            self._unbinds = []
+            unbinds, self._unbinds = self._unbinds, []
+
+        # LAST CHANCE, and the only place unanswered turns are sent: nothing
+        # more is coming after this. Before unbinding, so a turn completed
+        # during shutdown is still on disk to find.
+        try:
+            self.flush(include_unanswered=True)
+        except Exception:
+            # Shutdown must not raise. The turns remain on disk.
+            pass
+        for u in unbinds:
+            try:
+                u()
+            except Exception:
+                # Unbinding is cleanup. A framework that changed shape under
+                # us must not take the customer's shutdown with it.
+                pass
 
     def __enter__(self) -> Attachment:
         return self
@@ -379,6 +667,8 @@ def attach(
     register_error: Exception | None = None
     url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL)
     key = api_key or os.environ.get(ENV_API_KEY)
+    may_upload = False
+    upload_refusal: str | None = None
     if register and url and key:
         client: ControlPlaneClient | None = None
         try:
@@ -390,7 +680,7 @@ def attach(
             client = ControlPlaneClient(url, key)
             tr = AttachTransport(client, agent_id)
             try:
-                tr.register({
+                reg = tr.register({
                     "agent_id": agent_id,
                     # This process serves users; it does not contribute capacity.
                     # `serve()` sends "rollout". Sending the same value from
@@ -407,6 +697,13 @@ def attach(
                     "input_shape": "text",
                     "entrypoint": "attach",
                 })
+                # WHAT THE SERVER SAID, not what we assume. Capture is opt-in
+                # per agent, so the default is "no" and the only way to learn
+                # otherwise is to be told -- finding out by uploading would
+                # mean sending the data whose permission is in question.
+                cap = (reg or {}).get("capture") or {}
+                may_upload = bool(cap.get("turns"))
+                upload_refusal = cap.get("reason")
             except Exception as exc:
                 # A REFUSED registration must not cost the last mile.
                 #
@@ -446,8 +743,10 @@ def attach(
                 f"agent_id={agent_id!r}: {type(register_error).__name__}: "
                 f"{register_error}. The policy read succeeded, so capture and "
                 f"the trained policy are both unaffected. The likely cause is "
-                f"a control plane that does not yet accept mode='production' "
-                f"from attach(); it is safe to ignore until intake is updated.",
+                f"an intake that has not been updated for this SDK version. "
+                f"Capture continues locally either way; turns are uploaded "
+                f"only when the control plane says this agent is enabled for "
+                f"it.",
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -461,4 +760,8 @@ def attach(
         unbinds=unbinds,
         adapters_bound=bound,
         retention_turns=retention_turns,
+        control_plane_url=url,
+        api_key=key,
+        may_upload=may_upload,
+        upload_refusal=upload_refusal,
     )

@@ -12,6 +12,8 @@ learning which one is in use.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 import uuid
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -161,6 +163,30 @@ class AttachTransport:
             # The server keys on (rollout_id, attempt); an identical replay is
             # acknowledged as a duplicate rather than double-counted.
             idempotency_key=f"result-{rollout.rollout_id}",
+        )
+
+    def report_turns(
+        self, agent_id: str, turns: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Upload a batch of captured production turns.
+
+        RETRYING AN AMBIGUOUS SEND IS SAFE HERE, unlike a claim. The server
+        keys each turn on (org, agent, turn_id) and answers an identical
+        resubmission as a duplicate; a claim, by contrast, would hand out a
+        second piece of work. So this leaves the client's default retry
+        behaviour alone rather than disabling it.
+
+        The idempotency key covers the BATCH, so a network-level replay of the
+        same bytes is collapsed before the per-turn rule is reached.
+        """
+        digest = hashlib.sha256(
+            json.dumps(turns, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:32]
+        return self._c.request(
+            "POST",
+            "/turns",
+            json_body={"agent_id": agent_id, "turns": turns},
+            idempotency_key=f"turns-{agent_id}-{digest}",
         )
 
     def abandon(self, rollout: RolloutRequest, *, reason: str, detail: str = "") -> None:

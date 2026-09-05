@@ -31,7 +31,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from .outcomes import Trajectory, read_turn_text
+from .outcomes import Trajectory, read_conversation_id, read_turn_text
 
 __all__ = ["iter_records", "turn_to_record", "write_records"]
 
@@ -120,11 +120,10 @@ def _tool_call(call: Any) -> dict[str, Any]:
     return out
 
 
-def _conversation_id(path: Path) -> str | None:
-    try:
-        return (path / "conversation_id").read_text(encoding="utf-8").strip() or None
-    except OSError:
-        return None
+#: Delegated to the canonical reader in ``outcomes``, which the upload path
+#: also uses. Kept as a module-local name so the call sites below read the
+#: same as before.
+_conversation_id = read_conversation_id
 
 
 def conversation_to_record(
@@ -153,6 +152,19 @@ def conversation_to_record(
     tool_calls: list[dict[str, Any]] = []
     omitted = 0
     first_id: str | None = None
+    # WHICH ASSISTANT TURN A CALL BELONGS TO. The ingest side chunks the
+    # messages list into one transition per assistant message, and matches the
+    # top-level tool_calls list by ``step_index`` -- treating a MISSING
+    # ``step_index`` as "belongs to every step", because the single-turn shape
+    # has exactly one step and omitting it there is correct.
+    #
+    # So a multi-turn record MUST stamp it. Emitting none made every call match
+    # every turn: MEASURED on a 2-turn, 2-call conversation, 4 attributions,
+    # turn 0 carrying turn 1's failure and turn 1 carrying turn 0's success.
+    # Both rows then score against outcomes their own turn never produced,
+    # which is the one thing this docstring says the caller's ordering exists
+    # to prevent.
+    assistant_index = 0
     for d in turn_dirs:
         text = read_turn_text(d) or {}
         traj = Trajectory(d)
@@ -160,10 +172,26 @@ def conversation_to_record(
         omitted += traj.malformed
         if text.get("task"):
             messages.append({"role": "user", "content": text["task"]})
-        if text.get("answer"):
+        answered = bool(text.get("answer"))
+        if answered:
             messages.append({"role": "assistant", "content": text["answer"]})
         if calls:
-            tool_calls.extend(_tool_call(c) for c in calls)
+            if answered:
+                for c in calls:
+                    tool_calls.append(
+                        {**_tool_call(c), "step_index": assistant_index})
+            else:
+                # This turn made calls and recorded no answer, so it produced no
+                # assistant message and there is no step for these calls to
+                # belong to. They are COUNTED, not emitted: attaching them to a
+                # neighbouring turn's answer is precisely the misattribution
+                # above, and emitting them unindexed re-creates the match-every-
+                # step bug for exactly these rows. ``record_answer`` is
+                # documented as callable after the scope closes, so an
+                # answerless turn is an ordinary state, not a corruption.
+                omitted += len(calls)
+        if answered:
+            assistant_index += 1
         first_id = first_id or d.name
     if not messages and not tool_calls:
         return None
@@ -177,6 +205,11 @@ def conversation_to_record(
     if tool_calls:
         record["tool_calls"] = tool_calls
     if omitted:
+        # Two causes, one honest count: calls this SDK could not parse, and
+        # calls whose own turn recorded no answer and which therefore have no
+        # assistant turn to attach to. Both mean the same thing to a grader --
+        # this record does not carry every call the capture saw -- and that is
+        # what stops a partly-carried trajectory being scored as a complete one.
         record["tool_calls_omitted_count"] = omitted
     if cid:
         record["conversation_id"] = cid

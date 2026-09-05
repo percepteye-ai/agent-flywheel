@@ -308,11 +308,20 @@ def test_a_refused_registration_still_yields_the_policy(monkeypatch, tmp_path):
 
 def test_a_refused_registration_is_not_silent(monkeypatch, tmp_path):
     """An empty policy already means two different benign things. A third
-    cause that looks identical is one the customer cannot act on."""
+    cause that looks identical is one the customer cannot act on.
+
+    Matched on the AGENT ID and the reassurance, not on a named cause. This
+    used to match "mode='production'" -- a cause that stopped existing the day
+    the control plane learned to accept that mode, at which point the test
+    would have been pinning a sentence the code should no longer say.
+    """
     tr = _RecordingTransport(register_raises=RuntimeError("HTTP 422"))
-    with pytest.warns(RuntimeWarning, match="mode='production'"):
+    with pytest.warns(RuntimeWarning, match="refused this registration") as rec:
         with _attach_with(monkeypatch, tmp_path, tr):
             pass
+    text = str(rec[-1].message)
+    assert "agent_id='support'" in text
+    assert "unaffected" in text, "the warning must say what still works"
 
 
 def test_a_refused_registration_still_does_not_fail_the_attach(
