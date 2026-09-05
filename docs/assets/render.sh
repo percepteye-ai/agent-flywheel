@@ -4,6 +4,7 @@
 #   flywheel-overview.{gif,png}  <- render_overview.py         (the hero)
 #   flywheel-loop.{gif,png}      <- render_flywheel_loop.py    (the architecture)
 #   flywheel-architecture.svg    <- render_architecture.py     (the closed loop)
+#   flywheel-spinner.gif         <- render_spinner.py          (the title mark)
 #
 # Both are checked in, because a README cannot fetch a build artifact -- and
 # both are generated, so a checked-in asset with no build script drifts from
@@ -50,14 +51,33 @@ render() {   # name renderer colours poster
 
 architecture() { "$PY" render_architecture.py; }
 
+# The title mark. Its own function rather than a `render` call, because it is
+# the one figure with TRANSPARENCY: it sits inline beside a heading on whatever
+# ground GitHub is painting, so the palette has to reserve a transparent index
+# and paletteuse has to be told where to cut it. Passing those flags to the two
+# opaque figures would cost them a palette slot for nothing.
+spinner() {
+  local frames; frames=$(mktemp -d)
+  trap 'rm -rf "$frames"' RETURN
+  FRAMES="$frames" "$PY" render_spinner.py
+  local fps; fps=$("$PY" -c "import re;print(re.search(r'^FPS = (\d+)',open('render_spinner.py').read(),re.M).group(1))")
+  ffmpeg -y -loglevel error -framerate "$fps" -i "$frames/f%04d.png" \
+    -vf "palettegen=max_colors=64:reserve_transparent=1:stats_mode=diff" "$frames/palette.png"
+  ffmpeg -y -loglevel error -framerate "$fps" -i "$frames/f%04d.png" -i "$frames/palette.png" \
+    -lavfi "paletteuse=dither=none:alpha_threshold=128:diff_mode=rectangle" -loop 0 flywheel-spinner.gif
+  ls -l flywheel-spinner.gif
+}
+
 case "${1:-all}" in
   overview)     render flywheel-overview render_overview.py 128 f0455.png ;;
+  spinner)      spinner ;;
   loop)         render flywheel-loop render_flywheel_loop.py 224 f0466.png ;;
   architecture) architecture ;;
   all)
     render flywheel-overview render_overview.py 128 f0455.png
     render flywheel-loop render_flywheel_loop.py 224 f0466.png
+    spinner
     architecture
     ;;
-  *) echo "usage: $0 [all|overview|loop|architecture]" >&2; exit 2 ;;
+  *) echo "usage: $0 [all|overview|loop|spinner|architecture]" >&2; exit 2 ;;
 esac
