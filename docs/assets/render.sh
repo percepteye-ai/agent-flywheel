@@ -6,6 +6,12 @@
 #   flywheel-architecture.svg    <- render_architecture.py     (the closed loop)
 #   flywheel-spinner.gif         <- render_spinner.py          (the title mark)
 #
+# The overview and loop figures come in TWO FLAVOURS. They show what a customer
+# would type, and that differs per package -- so `./render.sh node` writes
+# *-node.gif variants carrying `openclaw plugins install` instead of
+# `pip install`. Shipping the Python frames in the Node README advertised the
+# wrong SDK to everyone who opened it.
+#
 # Both are checked in, because a README cannot fetch a build artifact -- and
 # both are generated, so a checked-in asset with no build script drifts from
 # its source the first time someone edits one without the other. Run this after
@@ -30,7 +36,7 @@ PY=${PY:-python3}
 # The colour budgets are not interchangeable, and both were measured rather than
 # guessed: the overview is 1.70 MB at 128 and 1.84 MB at 192 with no visible
 # difference, so it takes 128; the loop has more simultaneous fades and keeps 224.
-render() {   # name renderer colours poster
+render() {   # name renderer colours poster   (honours $FLAVOUR)
   local name=$1 renderer=$2 colours=$3 poster=$4
   local frames; frames=$(mktemp -d)
   trap 'rm -rf "$frames"' RETURN
@@ -73,11 +79,17 @@ case "${1:-all}" in
   spinner)      spinner ;;
   loop)         render flywheel-loop render_flywheel_loop.py 224 f0466.png ;;
   architecture) architecture ;;
+  node)
+    # The Node README's copies. Same diagrams, the customer-facing strings
+    # swapped; copied into the sibling repo, which has no renderer of its own.
+    FLAVOUR=node render flywheel-overview-node render_overview.py 128 f0455.png
+    FLAVOUR=node render flywheel-loop-node render_flywheel_loop.py 224 f0466.png
+    ;;
   all)
     render flywheel-overview render_overview.py 128 f0455.png
     render flywheel-loop render_flywheel_loop.py 224 f0466.png
     spinner
     architecture
     ;;
-  *) echo "usage: $0 [all|overview|loop|spinner|architecture]" >&2; exit 2 ;;
+  *) echo "usage: $0 [all|overview|loop|spinner|architecture|node]" >&2; exit 2 ;;
 esac

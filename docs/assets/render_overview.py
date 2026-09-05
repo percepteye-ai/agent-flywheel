@@ -39,6 +39,25 @@ import os
 
 from PIL import Image, ImageDraw, ImageFont
 
+#: WHICH SDK THIS FIGURE DESCRIBES -- see render_flywheel_loop.py for why the
+#: same picture cannot carry Python code into the Node README.
+FLAVOUR = os.environ.get("FLAVOUR", "python")
+_WRAP_TITLE = {"python": "one call", "node": "one plugin"}[FLAVOUR]
+_WRAP_BODY = {
+    "python": "fw.serve() wraps it where it already runs. Nothing inside it changes.",
+    "node": "The plugin loads beside it in your harness. Nothing inside it changes.",
+}[FLAVOUR]
+_WRAP_LABEL = {
+    "python": 'fw.serve("my.agent:build")',
+    "node": "percepteye-agent-flywheel",
+}[FLAVOUR]
+#: The harnesses THIS package actually supports. The Python list in the Node
+#: figure advertised LangChain and ADK to an OpenClaw customer.
+_HARNESS_CHIP = {
+    "python": "LangChain \u00b7 ADK \u00b7 a CLI",
+    "node": "OpenClaw \u00b7 DeepSeek Harness",
+}[FLAVOUR]
+
 W, H = 1280, 720
 FPS = 20
 DUR = 23.4
@@ -106,8 +125,7 @@ CH_X0, CH_X1 = 568, 792   # outside the wrap ring, not under it
 BEATS = [
     ("today",    0.00,  3.30, "1", "your agent, today",
      "Your prompt, your tools, your model, your credentials."),
-    ("wrap",     3.30,  6.40, "2", "one call",
-     "fw.serve() wraps it where it already runs. Nothing inside it changes."),
+    ("wrap",     3.30,  6.40, "2", _WRAP_TITLE, _WRAP_BODY),
     ("connect",  6.40,  8.90, "3", "outbound only",
      "Your side opens the connection. No inbound port, no container, no GPU."),
     ("work",     8.90, 12.60, "4", "it does the work",
@@ -303,7 +321,7 @@ def draw_frame(i):
         g = ease(prog(t, 3.45, 4.55))
         b = (AGENT[0] - 16, AGENT[1] - 16, AGENT[2] + 16, AGENT[3] + 16)
         rrect(d, b, 18, outline=fade(BLUE, .55 * a_wr), width=2)
-        lab = 'fw.serve("my.agent:build")'
+        lab = _WRAP_LABEL
         lw = tw(lab, F_CODE) + 26
         rrect(d, (b[0] + 20, b[1] - 15, b[0] + 20 + lw, b[1] + 15), 15,
               fill=fade((18, 26, 38), a_wr), outline=fade(BLUE, .55 * a_wr), width=2)
@@ -329,7 +347,7 @@ def draw_frame(i):
     fw_on = ease(prog(t, .60, 1.30)) * seam
     if fw_on > .01:
         pill(d, AGENT[0] + 22 + tw("your agent", F_CARD) + 14, AGENT[1] + 21,
-             "LangChain · ADK · a CLI", F_CHIP, DIM, fw_on, dot=False)
+             _HARNESS_CHIP, F_CHIP, DIM, fw_on, dot=False)
     text(d, (AGENT[0] + 22, AGENT[1] + 58), "runs where it already runs", F_TINY,
          fade(MUTED, a_ag), anchor="lm")
     dashed_h(d, AGENT[1] + 80, AGENT[0] + 22, AGENT[2] - 22, fade(SOFT, a_ag))

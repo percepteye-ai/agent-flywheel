@@ -36,6 +36,38 @@ import os
 
 from PIL import Image, ImageDraw, ImageFont
 
+#: WHICH SDK THIS FIGURE DESCRIBES. The same diagram serves both packages, and
+#: the only thing that differs is the four strings a customer would actually
+#: type. Shipping the Python frames in the Node README advertised
+#: ``pip install`` and ``fw.serve()`` to somebody installing a harness plugin,
+#: which is worse than having no figure at all.
+FLAVOUR = os.environ.get("FLAVOUR", "python")
+_F = {
+    "python": {
+        "cmd": "pip install percepteye-agent-flywheel",
+        "dep": "+ httpx   \u2190 the only runtime dependency",
+        "box": "flywheel harness",
+        "l1": "import percepteye_agent_flywheel as fw",
+        "l2": 'fw.serve("my.agent:build")',
+        "foot": "1 import  \u00b7  1 call  \u00b7  MIT",
+        "prod": "fw.apply_current_policy(...)",
+    },
+    "node": {
+        "cmd": "openclaw plugins install percepteye-agent-flywheel",
+        "dep": "+ nothing   \u2190 zero runtime dependencies",
+        "box": "flywheel plugin",
+        "l1": "export PERCEPTEYE_AGENT_MODE=training",
+        "l2": "openclaw session          # unchanged",
+        "foot": "0 deps  \u00b7  0 lines changed  \u00b7  MIT",
+        # NOT an apply_current_policy() equivalent. `policyCurrent()` exists on
+        # the Node transport and NOTHING CALLS IT, so the plugin does not fetch
+        # a trained policy -- the customer points their harness at the served
+        # endpoint. Drawing a call the package does not make would be inventing
+        # a capability in the one figure people trust to be literal.
+        "prod": "PERCEPTEYE_AGENT_MODE=production",
+    },
+}[FLAVOUR]
+
 W, H = 1280, 720
 FPS = 18
 DUR = 26.4
@@ -389,7 +421,7 @@ def draw_frame(i: int) -> Image.Image:
             d.ellipse(S((INSTALL[0] + 16 + k * 12, INSTALL[1] + 15,
                          INSTALL[0] + 22 + k * 12, INSTALL[1] + 21)),
                       fill=mix(BG, cc, a_in))
-        cmd = "pip install percepteye-agent-flywheel"
+        cmd = _F["cmd"]
         tp = prog(t, 2.60, 4.00) if live_in else 1.0
         text(d, (INSTALL[0] + 18, INSTALL[1] + 44), "$", F_CODES,
              mix(BG, GREEN, 0.85 * a_in), anchor="lm")
@@ -403,7 +435,7 @@ def draw_frame(i: int) -> Image.Image:
         ok = ease(prog(t, 4.05, 4.45)) if live_in else 1.0
         if ok > 0.01:
             text(d, (INSTALL[0] + 31, INSTALL[1] + 62),
-                 "+ httpx   ← the only runtime dependency", F_CODES,
+                 _F["dep"], F_CODES,
                  mix(BG, mix(GREEN, MUTED, 0.35), ok * a_in), anchor="lm")
 
     # ── 2 · the harness ──────────────────────────────────────────────────────
@@ -412,10 +444,10 @@ def draw_frame(i: int) -> Image.Image:
         card(d, HARNESS, a_hn, BLUE, 0.5 * p if live_hn else 0.0)
         if live_hn:
             glow(d, HARNESS, BLUE, p * 0.8)
-        text(d, (HARNESS[0] + 18, HARNESS[1] + 26), "flywheel harness", F_BOX,
+        text(d, (HARNESS[0] + 18, HARNESS[1] + 26), _F["box"], F_BOX,
              mix(BG, TXT, a_hn), anchor="lm")
-        l1 = "import percepteye_agent_flywheel as fw"
-        l2 = 'fw.serve("my.agent:build")'
+        l1 = _F["l1"]
+        l2 = _F["l2"]
         p1 = prog(t, 4.85, 5.75) if live_hn else 1.0
         p2 = prog(t, 5.80, 6.45) if live_hn else 1.0
         text(d, (HARNESS[0] + 18, HARNESS[1] + 56), typed(l1, p1), F_CODE,
@@ -423,7 +455,7 @@ def draw_frame(i: int) -> Image.Image:
         text(d, (HARNESS[0] + 18, HARNESS[1] + 80), typed(l2, p2), F_CODE,
              mix(BG, (126, 176, 226), a_hn), anchor="lm")
         text(d, (HARNESS[0] + 18, HARNESS[1] + 99),
-             "1 import  ·  1 call  ·  MIT", F_TINY, mix(BG, DIM, a_hn), anchor="lm")
+             _F["foot"], F_TINY, mix(BG, DIM, a_hn), anchor="lm")
 
     # spawn connector, harness -> agent
     if a_sp > 0.01:
@@ -495,7 +527,7 @@ def draw_frame(i: int) -> Image.Image:
         card(d, PROD, a_pr, PURPLE, 0.5 * ease(prog(t, 24.05, 24.75)) if live_pr else 0.0)
         text(d, (PROD[0] + 18, PROD[1] + 25), "your production agent", F_BOX,
              mix(BG, TXT, a_pr), anchor="lm")
-        text(d, (PROD[0] + 18, PROD[1] + 50), "fw.apply_current_policy(...)", F_CODE,
+        text(d, (PROD[0] + 18, PROD[1] + 50), _F["prod"], F_CODE,
              mix(BG, (126, 176, 226), a_pr), anchor="lm")
         ver_on = ease(prog(t, 24.15, 24.85)) * seam
         vlabel = "policy v2" if ver_on > 0.5 else "policy v1"
