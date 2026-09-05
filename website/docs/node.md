@@ -2,6 +2,8 @@
 
 **One npm package, two harnesses, zero dependencies.** `percepteye-agent-flywheel` is a plugin the harness already loads. It records what your agent's tools actually did — `ok`, `failed` or **`unknown`** — into the same trajectory file the Python SDK writes and reads.
 
+It is its own repository — [`percepteye-ai/agent-flywheel-node`](https://github.com/percepteye-ai/agent-flywheel-node) — and that repo's README is the reference for the plugin's internals. This page is the contract it shares with the Python SDK.
+
 ```bash
 openclaw plugins install percepteye-agent-flywheel            # OpenClaw
 dsh plugin --profile <name> add percepteye-agent-flywheel     # DeepSeek Harness
@@ -12,17 +14,36 @@ dsh plugin --profile <name> add percepteye-agent-flywheel     # DeepSeek Harness
 | **OpenClaw** | `src/index.js` (default export + `register`) | `api.on("after_tool_call", …)` | no — the hook returns `void` |
 | **DeepSeek Harness** | `src/dsh.js` (`apply`, no default) | `ctx.on("tools/result", …)` | no — `@mode emit`, over a deep-frozen object |
 
-No mutation seam is registered. The OpenClaw entry adds exactly one more hook, `llm_input`, to describe the agent — the same void-returning class as `after_tool_call` — and nothing beyond those two. The suite asserts it: no `registerAgentToolResultMiddleware`, and the OpenClaw manifest declares no `contracts`, because an observer claims no capability seam.
+No mutation seam is registered, in either mode. Every hook below is void-returning or observe-only, and the suite asserts the boundary rather than trusting review: no `registerAgentToolResultMiddleware`, and the OpenClaw manifest declares no `contracts`, because an observer claims no capability seam.
 
-## The switch is one environment variable
+## The mode decides which hooks are subscribed
+
+`PERCEPTEYE_AGENT_MODE` is the switch — `training` (the default) or `production`, resolved from the same closed set of spellings the Python SDK accepts, and `plugins.entries.percepteye-agent-flywheel.config.mode` overrides the environment. A value neither can parse is not guessed: the plugin degrades to `production` and says so, because someone typing `prodction` is trying to *stop* contributing.
+
+The split is structural. `registerRolloutDriver` is called from one place under one predicate, so in production mode the module that could claim a rollout or start a turn is never reached — "observe-only" is the absence of a subscription rather than a branch inside each handler that a later edit could invert.
+
+| mode | hooks the OpenClaw entry subscribes | what they are for |
+|:--|:--|:--|
+| both | `after_tool_call` · `llm_input` | record one tool outcome; describe the agent |
+| **`production`** | `message_received` · `agent_end` · `gateway_stop` | capture the served turn — the user's message, its tool calls, and (with `allowConversationAccess`) the answer — and upload on the cadence |
+| **`training`**, and only once it can claim | `session_start` · `agent_end` · `session_end` · `gateway_start` · `cron_changed` · `gateway_stop` | claim a rollout, deliver its task, report the result, and run claimed rollouts in their own `percepteye-rollout-*` sessions |
+
+Those six are subscribed only when the driver can actually claim: with no `apiKey` configured, or on a host that exposes no next-turn injection API, it declines and registers none of them. An install with no account is therefore the first row and nothing else.
+
+The DeepSeek Harness entry is unchanged by any of this: it subscribes `tools/result` and nothing more.
+
+## What switches it off, and where it writes
 
 ```bash
-export PERCEPTEYE_TRAJECTORY_DIR=/path/to/this/rollout
+export PERCEPTEYE_CAPTURE=0   # or …config.capture=false in your OpenClaw config
 ```
 
-**Unset, the plugin does nothing at all** — no file, no write, no directory created. `createWriter()` reports `active: false` and `write()` returns `false` before touching the filesystem. That is what makes the same install a no-op in production and a recorder during a rollout, so you leave it installed permanently.
+That is the kill switch, and it is the only one: it returns from `register` before a single hook is subscribed, in either mode.
 
-The variable is read **per call, not cached at construction**. A host that sets it late still gets capture; a host that never sets it never gets a stray file.
+**`PERCEPTEYE_TRAJECTORY_DIR` is not that switch.** It names the directory one *training* rollout records into, and is read **per call, not cached at construction**, so a host that sets it late still gets capture. In production mode it is not consulted at all — a trajectory there belongs to one **turn**, so each call is routed to its own turn directory under `PERCEPTEYE_CAPTURE_DIR` (default `~/.percepteye/captured`), because one shared directory would merge every end user's calls into a single trajectory.
+
+!!! warning "A production install is not inert"
+    Production mode captures every served turn to disk **with `PERCEPTEYE_TRAJECTORY_DIR` unset** — the user's message, the tool calls, and the agent's answer. Nothing leaves the machine without both a key and the control plane's per-agent consent, but it is on disk either way. An operator leaving the plugin installed "because it does nothing without the variable" is accumulating their end users' messages. `PERCEPTEYE_CAPTURE=0` is what makes an install record nothing.
 
 !!! note
     `fw.serve()` sets `PERCEPTEYE_TRAJECTORY_DIR` for the child it spawns, already pointed at that rollout's directory — see [CLI harnesses](cli.md). Setting it by hand is for a run you are driving yourself.
@@ -116,7 +137,7 @@ dsh's exec tools declare a real output schema — `kind`, `exitCode`, `signal`, 
 
 ## Describing the agent (OpenClaw only)
 
-The OpenClaw entry also registers `llm_input` and writes `discovered_agent.json` into the same directory. This is the only way a CLI agent reaches `introspection_state = described` — Python reflection cannot cross a process *and* a language boundary, so a command entrypoint would otherwise register as `unreadable`, and an agent with no tool catalogue gets no generated workflows.
+The OpenClaw entry also registers `llm_input` and writes `discovered_agent.json` into `PERCEPTEYE_TRAJECTORY_DIR` — the rollout's directory, in either mode, and nothing is written when the variable is unset. This is the only way a CLI agent reaches `introspection_state = described` — Python reflection cannot cross a process *and* a language boundary, so a command entrypoint would otherwise register as `unreadable`, and an agent with no tool catalogue gets no generated workflows.
 
 `llm_input` is typed `(event, ctx) => Promise<void> | void`, the same structurally non-mutating class as `after_tool_call`. The mutation seams OpenClaw does expose — `before_prompt_build`'s `{systemPrompt}`, `before_tool_call`'s `{block: true}` — stay unused. Introspection is a read.
 
@@ -142,18 +163,27 @@ The DeepSeek Harness entry registers no describer. It records tool outcomes and 
 | module type | ESM (`"type": "module"`) |
 | exports | `.` · `./classify` · `./trajectory` · `./dsh` |
 
-Zero dependencies is a hard constraint, not a preference: this runs inside someone else's agent process, and every dependency added here is a version conflict imposed on a customer who did not ask for one. CI asserts all three dependency keys stay empty.
+Zero dependencies is a hard constraint, not a preference: this runs inside someone else's agent process, and every dependency added here is a version conflict imposed on a customer who did not ask for one. The Node repo's own CI asserts all three dependency keys stay empty.
 
 ## The two halves cannot drift
 
 The plugins and the Python SDK are two ends of one ABI — whatever a plugin appends, `percepteye_agent_flywheel.outcomes.Trajectory` has to read back with the same meaning. **A JS suite that only checked itself would let a plugin stay green while writing a line the reader counts as malformed**, surfacing later as a silently short tool-call list.
 
+**The check lives in the Python repository, because the reader does.** The plugins' own suite moved to `percepteye-ai/agent-flywheel-node` with them and runs there; what can only be checked here is that what they write is what `Trajectory` reads. So the two commands run from two different repositories — clone the Node SDK **beside** the Python one:
+
 ```bash
+# the plugins' own suite, in their repo
+cd /path/to/percepteye-agent-flywheel/..
 git clone https://github.com/percepteye-ai/agent-flywheel-node
-cd agent-flywheel-node && npm test                 # 152 tests, zero skips
-./scripts/cross_language_abi_check.sh               # the JS writers, the Python reader
+(cd agent-flywheel-node && npm test)                # zero skips
+
+# the JS writers against the Python reader, in THIS repo
+cd percepteye-agent-flywheel && pip install -e .
+./scripts/cross_language_abi_check.sh
 ```
+
+The script resolves the Node SDK from `PERCEPTEYE_NODE_SDK`, and otherwise from a sibling checkout named `percepteye-agent-flywheel-node` or `agent-flywheel-node` — which is why the clone goes beside this repo rather than inside it. With none of those present it **skips rather than fails**: a developer who checked out only the Python repo has nothing to check against, and a red suite for that would teach everyone to ignore the failure.
 
 The check drives both plugins' writers into a temp directory, reads the file with `Trajectory`, and asserts `malformed == 0` plus the exact outcome sequence — including that `exec` with `status: "completed"` and exit 3 comes back `failed`, that a backgrounded dsh command comes back `unknown` / `StillRunning`, and that `entity_ids` survives the boundary on an `unknown` call.
 
-The `node-plugins` CI job runs all three steps on Node 22 and 24, the ends of OpenClaw's supported engine range. `test/host-fixtures.test.js` holds payloads dumped verbatim from OpenClaw 2026.7.1-2 executing a shell command end to end: if a future OpenClaw changes the shape, those fail and someone re-reads the payload instead of discovering it months later from bad training data. The Python suite is 509 tests and is a separate job.
+The `node-plugins` CI job runs that one step on Node 22 and 24, the ends of OpenClaw's supported engine range. It checks the Node SDK out into the workspace and **names** it to the script through `PERCEPTEYE_NODE_SDK`, so a path that is not there is an error rather than a skip. `npm test` and the zero-dependency assertion run in the Node repo's own workflow, and the Python suite is separate jobs again. `test/host-fixtures.test.js` — in the Node repo — holds payloads dumped verbatim from OpenClaw 2026.7.1-2 executing a shell command end to end: if a future OpenClaw changes the shape, those fail and someone re-reads the payload instead of discovering it months later from bad training data.

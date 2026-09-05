@@ -270,8 +270,10 @@ prompt = fw.current_prompt(agent_id="my-coding-agent")   # the approved prompt, 
 ```python
 px = fw.attach(agent_id="support-agent", trajectory_root="/var/lib/percepteye")
 
-with px.turn(conversation_id=conv_id) as turn_id:
+with px.turn(conversation_id=conv_id, input_text=user_text) as turn_id:
     reply = agent.invoke(user_text)       # your agent, unmodified
+
+px.record_answer(turn_id, reply)          # after the scope closes — the answer exists now
 ```
 
 > [!IMPORTANT]
@@ -281,7 +283,9 @@ with px.turn(conversation_id=conv_id) as turn_id:
 >
 > When capture is on, uploading is automatic and you do not have to call anything. Every 32 turns the SDK sends the ones that have an answer, on a short-lived daemon thread so the network is never on your request path; at process exit an `atexit` hook sends the rest, including turns that never recorded an answer. `flush()` and `close()` remain available for explicit control, and are serialized against the automatic one so a turn cannot be sent twice.
 >
-> **Turns with an answer are held back until the periodic flush, not sent at turn-scope exit.** `record_answer()` is callable after the `with` block closes — the example below does exactly that — so uploading on exit would ship every turn before its answer existed. Uploads never raise into your process and never block a turn on the network.
+> **`input_text=` and `record_answer()` are the two lines that carry the text, and both are yours to pass.** The adapters observe tool calls, not turn content, so the user's message and the agent's reply are facts only your own code holds. Leave them out and a turn records its tool calls and nothing else — and, having no answer, it is skipped by every periodic flush and waits for `close()` or the `atexit` hook.
+>
+> **Turns with an answer are held back until the periodic flush, not sent at turn-scope exit.** `record_answer()` is callable after the `with` block closes — the example above does exactly that — so uploading on exit would ship every turn before its answer existed. Uploads never raise into your process and never block a turn on the network.
 >
 > Both halves of that matter, and until recently only the first existed: `flush()` was reachable but nothing called it unless you exited a scope on the `Attachment` itself, which the usage above never does. A server following this page captured turns forever and uploaded none.
 >

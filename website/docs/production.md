@@ -166,8 +166,10 @@ The contract is a **pair**: this prompt was approved against that checkpoint, an
 ```python
 px = fw.attach(agent_id="support-agent", trajectory_root="/var/lib/percepteye")
 
-with px.turn(conversation_id=conv_id) as turn_id:
+with px.turn(conversation_id=conv_id, input_text=user_text) as turn_id:
     reply = agent.invoke(user_text)       # your agent, unmodified
+
+px.record_answer(turn_id, reply)          # after the scope closes — the answer exists now
 ```
 
 **It captures. It never reroutes.** That is a property of how the adapters are bound, not a promise about the code: `attach()` binds them with `llm_url=""` and `api_key=""`, and both built-ins treat "no endpoint" as "do not touch routing". Bound by name, `LangChainAdapter` holds no chat model and its `_route()` returns at once; the ADK adapter never reads the URL at all. Attaching cannot re-point a single byte of production traffic.
@@ -188,8 +190,10 @@ With `register=True` the call makes exactly two outbound requests, once, at star
 
 | on the `Attachment` | |
 |:--|:--|
-| `.turn(turn_id=None, conversation_id=None)` | context manager; yields the turn id |
+| `.turn(turn_id=None, conversation_id=None, input_text=None)` | context manager; yields the turn id |
+| `.record_answer(turn_id, text)` | what the agent finally answered; callable **after** the scope closes |
 | `.read(turn_id)` | that turn's `list[ToolCallOutcome]`, or `None` if nothing was recorded |
+| `.read_turn(turn_id)` | the `task` / `answer` text recorded for that turn, or `None` |
 | `.policy` | what the control plane said to run — **informational here**; `attach()` does not act on it |
 | `.adapters_bound` | e.g. `("adk", "langchain")`; `()` is a real answer, not a failure |
 | `.close()` | unbinds the adapters; idempotent, never raises. Also a context manager |
@@ -197,6 +201,10 @@ With `register=True` the call makes exactly two outbound requests, once, at star
 **A turn boundary is declared, not inferred.** Guessing where one request ends and the next begins is the same class of guess this SDK refuses everywhere else, and getting it wrong silently merges two users' tool calls into one record. Keep the yielded id: it is the join key for any outcome that arrives later than the turn does — the draft kept an hour afterwards, the pull request merged the next morning. Absent a `turn_id=` you get `t_` plus 16 hex characters; `conversation_id=` is written to a `conversation_id` file beside `tool_calls.jsonl` in the turn's directory.
 
 **Nothing in `turn()` can fail the turn.** If the directory cannot be created, capture is skipped and the body still runs.
+
+**The turn's text is opt-in, and both halves are yours to pass.** `input_text=` records what the user asked and `record_answer()` records what the agent finally said. Nothing here can see either one: the adapters declare `reports_outcomes=True` and observe tool calls, not turn content, so a prompt and a completion are facts only your own code holds. That is what keeps tool outcomes zero-instrumentation while turn text stays a decision you make.
+
+They are separate calls because the answer does not exist yet when the turn opens — `record_answer()` is callable after the scope has closed, for the same reason `turn()` yields its id. **Omit them and the periodic flush sends nothing**: a turn with no recorded answer is held back on every 32-turn flush and leaves only at `close()` or the `atexit` hook, carrying no text at all.
 
 `record_tool_call()` works inside a turn exactly as it does inside a rollout. With the `otel` extra installed, a turn's span carries `percepteye.turn.id` rather than `percepteye.rollout.id`, so your own telemetry can tell the two apart too.
 

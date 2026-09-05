@@ -1,10 +1,38 @@
 """Render captured production turns into the shape the control plane ingests.
 
-WHY THIS IS THE WHOLE MISSING PIECE. Everything downstream of a production turn
-already exists: the control plane has a post-hoc pipeline that ingests recorded
-trajectories, compiles a reward suite against them, scores them WITHOUT an
-environment to re-execute against, and emits training rows. What it had no way
-to receive was a turn -- because nothing rendered one into a record it accepts.
+AN OFFLINE PROJECTION, AND NOT THE UPLOAD PATH. Read that first, because the
+two are easy to confuse and only one of them ships anything anywhere.
+
+``POST /turns`` sends :meth:`Attachment._turn_wire`, which is TURN-NATIVE: the
+user's message, the answer and the calls exactly as they were observed, with
+the projection into any training-row format happening on the far side, where it
+can change without a customer redeploying. Nothing in this package imports this
+module, and none of its names is re-exported from ``percepteye_agent_flywheel``
+-- so an ``attach()`` that is uploading turns is not running a line of it.
+
+This module is for the OTHER caller: somebody who wants their captured turns as
+a LOCAL CORPUS, without a control plane in the loop at all. It is reached by
+importing it, which is supported and is the whole interface::
+
+    from percepteye_agent_flywheel.export import write_records
+
+    write_records("/var/lib/percepteye", "turns.jsonl")
+
+TWO RENDERINGS OF ONE TURN, DELIBERATELY. They answer different questions --
+this one is corpus-shaped and stamps ``step_index`` so a conversation's calls
+attach to the right assistant turn; ``_turn_wire`` is turn-native and has no
+step concept because the far side does that chunking. What they must never
+disagree on is the EVIDENCE: the same turn id, the same text, the same calls,
+and above all the same tri-state, which neither may round ``unknown`` up into a
+success. ``tests/test_export_matches_the_upload_path.py`` is what holds them to
+that; without it the drift would be silent, because no shipped code path runs
+both.
+
+WHY THE PIPELINE ACCEPTS THIS SHAPE. The control plane has a post-hoc pipeline
+that ingests recorded trajectories, compiles a reward suite against them, scores
+them WITHOUT an environment to re-execute against, and emits training rows. The
+record built here is what that pipeline reads, which is why a corpus produced
+offline is worth anything at all.
 
 WHY NOTHING NEW IS INVENTED HERE. The ingest side already accepts a "unified
 messages log": one record per rollout carrying an OpenAI-style ``messages`` list
@@ -33,7 +61,16 @@ from typing import Any
 
 from .outcomes import Trajectory, read_conversation_id, read_turn_text
 
-__all__ = ["iter_records", "turn_to_record", "write_records"]
+#: Every public name here, including ``conversation_to_record`` -- it is the
+#: one that carries a turn's observed next state, and leaving it out made the
+#: headline capability of this module invisible to ``from ... import *`` and
+#: to every tool that reads ``__all__`` as the supported surface.
+__all__ = [
+    "conversation_to_record",
+    "iter_records",
+    "turn_to_record",
+    "write_records",
+]
 
 
 def turn_to_record(

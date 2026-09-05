@@ -49,6 +49,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      # THE CROSS-SDK PARITY TEST NEEDS THE NODE SDK, and "everything present"
+      # is this job's whole premise -- so the SDK is part of everything.
+      # Without this checkout tests/test_report_turns_wire.py skips, and the
+      # zero-skip step below then fails the build on every push: red for a
+      # reason unrelated to the change, while the parity it exists to prove
+      # goes unchecked. Node is installed here for the same reason: that test
+      # runs the Node SDK's own transport.
+      - uses: actions/checkout@v4
+        with:
+          repository: percepteye-ai/agent-flywheel-node
+          path: agent-flywheel-node
+          token: ${{ secrets.NODE_SDK_READ_TOKEN }}
       - run: pip install -e ".[dev,adapters-test,otel,otel-test]"
       - name: every optional framework is genuinely importable
         # Checked BEFORE pytest, so a framework that failed to install is a
@@ -63,6 +78,13 @@ jobs:
               print("ok", mod)
           PY
       - run: pytest -q --junitxml=report.xml
+        env:
+          # NAMED, not guessed. scripts/cross_language_abi_check.sh is the one
+          # resolver both the script and the parity test ask, and a path it
+          # was GIVEN that is not there is a hard error there -- so moving
+          # this checkout turns the parity test red rather than silently
+          # skipping it.
+          PERCEPTEYE_NODE_SDK: ${{ github.workspace }}/agent-flywheel-node
       - name: nothing was skipped -- a skipped suite is an untested claim
         # Deliberately not a hardcoded test count: that has to be bumped with
         # every new test and gets rubber-stamped. "Zero skips" is the invariant
@@ -154,15 +176,17 @@ jobs:
         with:
           python-version: "3.12"
       # The Node SDK is its own repo now (percepteye-ai/agent-flywheel-node).
-      # Checked out BESIDE this one, which is the layout
-      # cross_language_abi_check.sh looks for by default -- so CI and a
-      # developer's laptop resolve it the same way rather than CI knowing a
-      # path nobody else has.
+      # Checked out INSIDE the workspace and NAMED to the script through
+      # PERCEPTEYE_NODE_SDK below; a developer with it cloned beside this repo
+      # gets the same answer from the script's auto-discovery. One resolver,
+      # two ways in.
       #
       # It is a private repo, so this needs a token with read access to it.
       # Without one the checkout fails loudly here rather than the ABI check
       # silently skipping, which is the right order: a missing credential is a
-      # CI defect, not a reason to stop checking the contract.
+      # CI defect, not a reason to stop checking the contract. And if the path
+      # it lands at ever changes, the ABI check fails too -- a NAMED path that
+      # is not there is an error there, not a skip.
       - uses: actions/checkout@v4
         with:
           repository: percepteye-ai/agent-flywheel-node

@@ -65,8 +65,9 @@ from typing import TYPE_CHECKING, Any
 # forced it anyway.
 if TYPE_CHECKING:
     from ._http import ControlPlaneClient
-from .errors import ConfigurationError
+from .errors import ConfigurationError, TransportError
 from .outcomes import (
+    CONVERSATION_ID_FILENAME,
     Trajectory,
     _release,
     _RolloutScope,
@@ -120,6 +121,86 @@ _FLUSH_EVERY = 32
 #: it prevents, because a turn that is not sent now is still on disk and the
 #: next process to attach uploads it.
 _CLOSE_FLUSH_GRACE_S = 5.0
+
+
+def _started_at(d: Path) -> float:
+    """When this turn STARTED, for ordering a conversation.
+
+    THE ``conversation_id`` FILE'S mtime, NOT THE DIRECTORY'S -- and that
+    distinction is the whole point. A directory's mtime advances every time a
+    file is CREATED inside it, which this module already knows and already
+    designed around once: see ``_UPLOADED_INDEX``, which is one file at the
+    root rather than a marker in each turn for exactly this reason. But a
+    turn's own capture creates files inside its directory long after the turn
+    began -- ``record_answer`` creates ``turns.jsonl`` whenever ``input_text``
+    was not passed to :meth:`Attachment.turn` (both are documented optional),
+    and the first ``record_tool_call`` creates the trajectory file. So the
+    directory's mtime says "last written to", and ordering a conversation by
+    it puts a turn whose answer arrived late AFTER the turn that followed it:
+    the conversation is uploaded in the wrong order and MC stores the wrong
+    ``turn_index`` verbatim.
+
+    The ``conversation_id`` file is written once, at scope entry, and never
+    touched again. It exists for exactly the turns that have an index at all,
+    so nothing new has to be written to get this -- and a turn that predates
+    this ordering, or whose file cannot be read, still falls back to the
+    directory mtime rather than losing its place entirely.
+    """
+    try:
+        return (d / CONVERSATION_ID_FILENAME).stat().st_mtime
+    except OSError:
+        pass
+    try:
+        return d.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+#: How ``_http.ControlPlaneClient.request`` spells a terminal 403. It formats
+#: every 4xx that is not 408/429 as ``"{method} {path} -> HTTP {code}: {detail}"``
+#: and raises ``TransportError``; the status is not carried structurally, so
+#: this is the seam between the two. If that format ever changes, the failure
+#: is a refusal read as a blip again -- which is what
+#: ``test_a_revoked_agent_stops_uploading`` is there to catch.
+_REFUSED_MARKER = "-> HTTP 403"
+
+
+def _capture_refusal(exc: BaseException) -> str | None:
+    """The intake's sentence when it REFUSED these turns, else ``None``.
+
+    A 403 is a DECISION -- an operator turned capture off, or the key lost the
+    ``turn.report`` scope -- and will not become a 2xx by being sent again.
+    ``_flush_locked`` used to swallow it into the same ``failed += len(chunk)``
+    as a timeout, which is one wrong cause named for every failure: the process
+    re-POSTed the same batch of end-user prompts and answers every cadence
+    forever, with nothing in the customer's logs and ``upload_refusal`` still
+    reading whatever startup said.
+
+    Anything else -- a timeout, a 5xx, a 429 that outlasted the retry ladder --
+    is a blip and stays retryable. Failing to recognise a refusal costs a
+    pointless retry; mistaking a blip for a refusal would stop a consenting
+    customer's uploads, so this matches narrowly and errs towards retrying.
+    """
+    if not isinstance(exc, TransportError):
+        return None
+    text = str(exc)
+    if _REFUSED_MARKER not in text:
+        return None
+    detail = text.partition(_REFUSED_MARKER)[2].lstrip(": ").strip()
+    return detail or "the control plane refused this agent's turns (HTTP 403)."
+
+
+def _recorded_anything(text: dict[str, str], calls: Any) -> bool:
+    """Did this turn capture anything at all?
+
+    ONE ANSWER, TWO ASKERS. ``_turn_wire`` returns ``None`` when this is False
+    -- there is nothing to upload -- and ``prune`` uses it to tell a deleted
+    directory that held DATA nobody sent from one that could never have been
+    sent at all. Asked twice with two spellings, the second asker charges an
+    empty directory as lost end-user data and sends the operator hunting for a
+    broken upload path.
+    """
+    return bool(text.get("task") or text.get("answer") or calls)
 
 
 class Attachment:
@@ -182,6 +263,10 @@ class Attachment:
         self.may_upload = may_upload
         #: Why not, in a sentence, when it is False and the control plane said.
         self.upload_refusal = upload_refusal
+        #: Whether the shutdown drain is already registered. Consent can arrive
+        #: at startup OR later, and can be taken away and re-granted, so the
+        #: hook is claimed once rather than once per grant.
+        self._exit_flush_registered = False
 
     @contextmanager
     def turn(self, *, turn_id: str | None = None,
@@ -364,14 +449,32 @@ class Attachment:
             doomed.extend(entries[max(0, keep_last):])
         if older_than_s is not None:
             cutoff = time.time() - older_than_s
-            doomed.extend(e for e in entries[:max(0, keep_last or 0)]
-                          if mtime(e) < cutoff)
+            # THE ONES ``keep_last`` KEPT, and every turn when it was not
+            # given. This was ``entries[:max(0, keep_last or 0)]``, which for
+            # the documented standalone use -- ``prune(older_than_s=...)`` with
+            # no ``keep_last`` -- is ``entries[:0]``: nothing was ever
+            # considered, so a time-based retention window deleted nothing and
+            # returned 0, reading as "nothing was old enough". The tail is
+            # already doomed by the branch above, and ``dict.fromkeys`` below
+            # dedupes the overlap.
+            head = entries if keep_last is None else entries[:max(0, keep_last)]
+            doomed.extend(e for e in head if mtime(e) < cutoff)
 
         removed = 0
         unsent = 0
         pending = self._uploaded_ids() if self.may_upload else None
         for e in dict.fromkeys(doomed):
-            if pending is not None and e.name not in pending:
+            # NOT "absent from the index" -- that is half the question. A turn
+            # that recorded NOTHING never enters the index because
+            # ``_turn_wire`` returns None for it and every flush skips it, so
+            # counting it here charged an empty directory as lost end-user
+            # data. ``turn(conversation_id=...)`` creates one such directory
+            # per turn for an agent that answers from context without calling
+            # a tool and passes neither ``input_text`` nor an answer -- both
+            # documented optional -- which is a steady drip of a warning whose
+            # two remedies are both wrong.
+            if (pending is not None and e.name not in pending
+                    and self._holds_a_record(e)):
                 unsent += 1
             # Release any handle we still hold on it first, or on a platform
             # that refuses to unlink an open file this would silently no-op.
@@ -389,9 +492,11 @@ class Attachment:
             # is not told will look for those turns upstream.
             warnings.warn(
                 f"percepteye: retention deleted {unsent} captured turn(s) "
-                f"that had not been uploaded. They are gone. Raise "
-                f"retention_turns, or check why uploads are not succeeding "
-                f"(Attachment.upload_refusal says if consent is the reason).",
+                f"that had not been uploaded -- including any still waiting "
+                f"on an answer, which the periodic flush holds back. They are "
+                f"gone. Raise retention_turns, or check why uploads are not "
+                f"succeeding (Attachment.upload_refusal says if consent is "
+                f"the reason).",
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -466,6 +571,25 @@ class Attachment:
         except OSError:
             pass
 
+    def _holds_a_record(self, d: Path) -> bool:
+        """Whether this turn directory holds anything an upload could carry.
+
+        THE SAME QUESTION :meth:`_turn_wire` ANSWERS WITH ``None``, asked
+        without building the wire -- ``_turn_wire`` also computes
+        ``turn_index``, which scans the whole root, and ``prune`` asks this
+        once per deleted directory.
+
+        Unreadable counts as HELD. A turn we cannot parse may well be a real
+        turn, and the warning this feeds is about data that is about to be
+        destroyed: the honest direction to fail is towards telling the
+        operator.
+        """
+        try:
+            return _recorded_anything(read_turn_text(d) or {},
+                                      Trajectory(d).read())
+        except Exception:
+            return True
+
     def _turn_wire(self, d: Path) -> dict[str, Any] | None:
         """One captured turn in the intake's wire shape, or None if empty.
 
@@ -478,7 +602,7 @@ class Attachment:
         traj = Trajectory(d)
         calls = traj.read()
         answer = text.get("answer")
-        if not text.get("task") and not answer and not calls:
+        if not _recorded_anything(text, calls):
             return None
         # THE TRI-STATE, asked of the trajectory FILE rather than inferred.
         # ``[] if self.adapters_bound else None`` answered a different
@@ -512,10 +636,9 @@ class Attachment:
     def _turn_index(self, turn_dir: Path, conversation_id: str) -> int:
         """This turn's position within its conversation.
 
-        DERIVED FROM THE SAME ORDERING ``export.iter_records`` USES -- the
-        directory mtime -- rather than from a counter. A counter held in the
-        Attachment would restart at zero on every process restart and on every
-        flush, and the control plane indexes on
+        DERIVED FROM WHEN THE TURN STARTED rather than from a counter. A
+        counter held in the Attachment would restart at zero on every process
+        restart and on every flush, and the control plane indexes on
         ``(org, agent, conversation_id, turn_index)``: every turn landing at 0
         makes a conversation unorderable, which is the one thing the index
         exists to prevent.
@@ -536,10 +659,7 @@ class Attachment:
                 continue
             if read_conversation_id(d) != conversation_id:
                 continue
-            try:
-                siblings.append((d.stat().st_mtime, d.name))
-            except OSError:
-                continue
+            siblings.append((_started_at(d), d.name))
         siblings.sort()
         for i, (_, name) in enumerate(siblings):
             if name == turn_dir.name:
@@ -582,19 +702,10 @@ class Attachment:
             if not self._flush_lock.acquire(blocking=False):
                 return
             try:
-                if not self.may_upload:
-                    # AN OPERATOR MAY HAVE SAID YES SINCE STARTUP. Consent is a
-                    # human decision made in Mission Control, on their clock,
-                    # not ours -- and before the verdict was readable this cost
-                    # a restart to notice, so a customer who enabled capture
-                    # watched nothing arrive until they bounced the process.
-                    #
-                    # Asked only while the answer is NO, and only on the flush
-                    # cadence, so it is one request per 32 turns at most and
-                    # stops entirely once permission is granted.
-                    self._recheck_capture()
-                    if not self.may_upload:
-                        return
+                # The consent re-check lives in `_flush_locked`, which every
+                # path goes through -- it used to live here, so a manual
+                # `flush()` or `close()` after an operator granted consent
+                # still refused while only the 32-turn cadence noticed.
                 self._flush_locked(include_unanswered=False, batch_size=64)
             except Exception:
                 # `_flush_locked` already swallows everything; this is the
@@ -614,6 +725,54 @@ class Attachment:
             # The atexit hook is the flush that matters at this point.
             pass
 
+    def _grant_upload(self) -> None:
+        """Consent has landed. THE ONE PLACE ``may_upload`` turns True.
+
+        THE SHUTDOWN FLUSH IS REGISTERED HERE, not at the end of :func:`attach`
+        where the startup verdict was read, because consent granted after
+        startup is a first-class case -- it is the entire reason the verdict is
+        a re-readable GET. Registering only on the startup answer meant a
+        late-consent process had NO exit hook, and ``close()`` is the only
+        caller that passes ``include_unanswered=True``: the periodic cadence
+        deliberately holds unanswered turns back, so every turn still waiting
+        on its answer, plus the whole sub-cadence tail, never left that
+        process at all.
+
+        Registered ONCE. The hook is idempotent through ``close()``, but a
+        second registration would still be a second entry pinning a second
+        weakref for the life of the interpreter, and consent can be granted
+        more than once now that a terminal refusal takes it away.
+        """
+        self.may_upload = True
+        self.upload_refusal = None
+        if not self._exit_flush_registered:
+            self._exit_flush_registered = True
+            _flush_at_exit(self)
+
+    def _refuse_upload(self, reason: str) -> None:
+        """The intake terminally refused these turns. Stop sending, say why.
+
+        THE ONE PLACE ``may_upload`` turns False after it was True, and it says
+        so out loud because nothing else would: ``upload_refusal`` would
+        otherwise still read whatever startup said, the operator would see
+        repeated 403s in the control plane's logs with nothing in the
+        customer's, and the customer would see a serving process making an
+        outbound request every cadence that can never succeed.
+        """
+        self.may_upload = False
+        self.upload_refusal = reason
+        try:
+            warnings.warn(
+                f"percepteye: the control plane refused this agent's captured "
+                f"turns and uploading has stopped: {reason} The turns stay on "
+                f"disk (Attachment.upload_refusal repeats this), and uploading "
+                f"resumes on its own if capture is enabled again.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        except Exception:  # -W error turns the line above into a raise
+            pass
+
     def _recheck_capture(self) -> None:
         """Re-read the capture verdict. Never raises; fails closed.
 
@@ -626,7 +785,10 @@ class Attachment:
         ONLY EVER TURNS CAPTURE ON, never off. A control plane that cannot
         answer returns ``{}``, and reading that as a revocation would stop a
         consenting customer's uploads on a network blip. Revocation is enforced
-        where it belongs: the intake refuses, and those turns stay on disk.
+        where it belongs: the intake refuses. ``_flush_locked`` reads that
+        refusal -- a 403 is a decision, not a blip -- stops sending, and leaves
+        the turns on disk; this method is then how consent is picked back up if
+        it is re-granted.
         """
         if not self._cp_url or not self._api_key:
             return
@@ -639,8 +801,7 @@ class Attachment:
             cap = (AttachTransport(client, self.agent_id)
                    .capture_current(self.agent_id).get("capture") or {})
             if cap.get("turns") is True:
-                self.may_upload = True
-                self.upload_refusal = None
+                self._grant_upload()
             elif cap.get("reason"):
                 # Keep the reason current even while the answer stays no: an
                 # operator who fixes consent but not the key's scope should see
@@ -662,6 +823,11 @@ class Attachment:
 
         Serialized against the automatic background flush, so a manual call
         cannot race it into sending the same turn twice.
+
+        RE-ASKS FOR CONSENT while the answer is still no, exactly as the
+        background cadence does -- this is the documented escape hatch for
+        "an operator just enabled capture, push the backlog now", and it used
+        to answer ``not_permitted`` because only the 32-turn cadence asked.
         """
         with self._flush_lock:
             return self._flush_locked(
@@ -689,8 +855,27 @@ class Attachment:
         flush retries them.
         """
         sent = skipped = failed = 0
-        if not self.may_upload or not self._cp_url or not self._api_key:
+        refused = False
+        if not self._cp_url or not self._api_key:
             return {"sent": 0, "skipped": 0, "failed": 0, "not_permitted": 1}
+        if not self.may_upload:
+            # AN OPERATOR MAY HAVE SAID YES SINCE STARTUP. Consent is a human
+            # decision made in Mission Control, on their clock, not ours -- and
+            # before the verdict was readable this cost a restart to notice.
+            #
+            # ASKED HERE, not in the background cadence, because this is the
+            # seam every path goes through: the cadence, a manual `flush()`,
+            # `close()` and the atexit drain. It lived in `_flush_soon` alone,
+            # so a customer told "push the backlog now" called `flush()`, got
+            # `not_permitted` and sent nothing -- while the docs offer both as
+            # the explicit escape hatch.
+            #
+            # Asked only while the answer is NO, so it stops entirely once
+            # permission is granted.
+            self._recheck_capture()
+            if not self.may_upload:
+                return {"sent": 0, "skipped": 0, "failed": 0,
+                        "not_permitted": 1}
 
         root = Path(self.trajectory_root)
         if not root.is_dir():
@@ -737,7 +922,20 @@ class Attachment:
                 chunk = pending[i:i + max(1, batch_size)]
                 try:
                     tr.report_turns(self.agent_id, [w for _, w in chunk])
-                except Exception:
+                except Exception as exc:
+                    refusal = _capture_refusal(exc)
+                    if refusal is not None:
+                        # NOT A TRANSPORT FAILURE, and treating it as one is
+                        # what made this loop re-POST the same end-user message
+                        # bodies to a control plane that had been told not to
+                        # accept them, every cadence, for the life of the
+                        # process. Stop, say why in the words the intake used,
+                        # and leave the turns on disk. `_recheck_capture` picks
+                        # consent back up if it is re-granted.
+                        self._refuse_upload(refusal)
+                        refused = True
+                        failed += len(pending) - sent
+                        break
                     # Whole chunk unacknowledged. Leave every marker unwritten
                     # so the next flush retries it: the intake dedupes on
                     # turn_id, so a retry of a batch that DID land is answered
@@ -754,7 +952,10 @@ class Attachment:
                     client.close()
                 except Exception:
                     pass
-        return {"sent": sent, "skipped": skipped, "failed": failed}
+        counts = {"sent": sent, "skipped": skipped, "failed": failed}
+        if refused:
+            counts["not_permitted"] = 1
+        return counts
 
     def close(self) -> None:
         """Unbind the adapters. Idempotent, and never raises.
@@ -781,6 +982,11 @@ class Attachment:
         # LAST CHANCE, and the only place unanswered turns are sent: nothing
         # more is coming after this. Before unbinding, so a turn completed
         # during shutdown is still on disk to find.
+        #
+        # It goes through `_flush_locked`, so it re-asks for consent while the
+        # answer is still no -- for a low-traffic agent that never reached the
+        # cadence, this shutdown is the only chance a grant made an hour ago
+        # ever gets to be noticed.
         #
         # BOUNDED, because this also runs from the ``atexit`` hook. A periodic
         # flush may be in flight holding ``_flush_lock``, and each of its
@@ -1004,7 +1210,9 @@ def attach(
         upload_refusal=upload_refusal,
     )
     if may_upload:
-        _flush_at_exit(px)
+        # Through the same seam late consent goes through, so the hook is
+        # registered by exactly one rule: "may_upload just became True".
+        px._grant_upload()
     return px
 
 
@@ -1025,10 +1233,14 @@ def _flush_at_exit(attachment: Attachment) -> None:
     gone, so is anything it would have sent -- and its turns are still on disk
     for the next process to pick up.
 
-    Registered only when the control plane has said this agent may upload. An
-    agent without consent would do nothing here but cost a hook, and would
-    make every process that merely imported the SDK look like one that talks
-    to us at exit.
+    Registered only when the control plane has said this agent may upload --
+    AT STARTUP OR LATER, from :meth:`Attachment._grant_upload`, which is the
+    single place that answer turns True. An agent without consent would do
+    nothing here but cost a hook, and would make every process that merely
+    imported the SDK look like one that talks to us at exit; an agent granted
+    consent an hour in needs this hook exactly as much as one granted it at
+    startup, and registering only on the startup verdict left that process
+    with no shutdown flush at all.
 
     ``close()`` is idempotent, so a caller who closes explicitly, uses the
     context manager, AND gets this hook flushes exactly once.

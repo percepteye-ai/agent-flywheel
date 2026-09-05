@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import atexit
 import gc
+import os
 import threading
 import time
 import weakref
 from contextlib import contextmanager
 
 import percepteye_agent_flywheel as fw
+from percepteye_agent_flywheel.errors import TransportError
 from percepteye_agent_flywheel.outcomes import record_tool_call
 from percepteye_agent_flywheel.production import _FLUSH_EVERY
 
@@ -473,3 +475,229 @@ def test_a_blip_does_not_revoke_consent_already_granted(monkeypatch, tmp_path):
         assert px.may_upload is True, (
             "a later 'no' silently stopped a consenting customer's uploads"
         )
+
+
+# ── retention: the age cutoff, and what "unsent" actually means ───────────
+
+
+def test_prune_by_age_alone_actually_deletes(monkeypatch, tmp_path):
+    """``prune(older_than_s=...)`` with no ``keep_last`` deleted NOTHING.
+
+    The slice was ``entries[:max(0, keep_last or 0)]``, which for the
+    documented standalone use is ``entries[:0]`` -- so an operator running a
+    nightly ``prune(older_than_s=7*86400)`` for a retention window got 0 back
+    every time and read it as "nothing was old enough", while the trajectory
+    root grew without bound.
+    """
+    tr = _Transport()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _serve(px, 3)
+        old = time.time() - 10_000
+        for d in tmp_path.iterdir():
+            if d.is_dir():
+                os.utime(d, (old, old))
+        assert px.prune(older_than_s=60) == 3, (
+            "a time-based retention window deleted nothing and said 0"
+        )
+        assert _dirs(tmp_path) == []
+
+
+def test_prune_by_age_still_respects_keep_last(monkeypatch, tmp_path):
+    """Both may be given; a turn goes if EITHER says so -- and the newest are
+    still the ones kept when only ``keep_last`` applies."""
+    tr = _Transport()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _serve(px, 3)
+        assert px.prune(older_than_s=10_000, keep_last=2) == 1, (
+            "nothing was old enough, so only keep_last should have bitten"
+        )
+        assert len(_dirs(tmp_path)) == 2
+
+
+def test_empty_turn_directories_are_not_charged_as_lost_data(
+        monkeypatch, tmp_path):
+    """An empty directory is not an unsent turn.
+
+    ``turn(conversation_id=...)`` creates a directory whether or not anything
+    is ever recorded in it, and ``_turn_wire`` returns None for such a
+    directory -- so it is skipped by every flush and can never enter the
+    upload index. Counting "not in the index" as "captured but never uploaded"
+    charged those directories as lost end-user data and offered two remedies
+    that are both wrong: raise retention_turns, and go hunting for a broken
+    upload path.
+    """
+    import warnings as _w
+
+    tr = _Transport()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        for i in range(3):
+            # Answered from context: no tool call, no input_text, no answer.
+            with px.turn(turn_id=f"e{i}", conversation_id="c1"):
+                pass
+        assert len(_dirs(tmp_path)) == 3
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter("always")
+            px.prune(keep_last=1)
+        assert not [c for c in caught if "had not been uploaded" in str(c.message)], (
+            "retention warned about losing turns that held nothing and could "
+            "never have been uploaded"
+        )
+
+
+# ── consent that arrives late reaches EVERY path, not just the cadence ────
+
+
+def test_late_consent_registers_the_shutdown_flush(monkeypatch, tmp_path):
+    """The hook was registered only on the verdict read at REGISTRATION time.
+
+    ``close()`` is the only caller that passes ``include_unanswered=True`` --
+    the periodic cadence deliberately holds a turn with no answer back -- and
+    for a long-lived attachment the atexit hook is the only caller of
+    ``close()`` at all. So a process granted consent an hour in had no
+    shutdown flush: every turn still waiting on its answer, plus the whole
+    sub-cadence tail, never left it.
+    """
+    hooks: list = []
+    monkeypatch.setattr(atexit, "register", lambda fn, *a, **k: hooks.append(fn) or fn)
+
+    tr = _LateConsent()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _serve(px, _FLUSH_EVERY)
+        assert not _until(lambda: tr.sent, timeout=0.5)
+        assert hooks == [], "an exit hook was registered before any consent"
+
+        tr.enabled = True                       # an operator says yes
+        _serve(px, _FLUSH_EVERY, start=100)
+        assert _until(lambda: tr.sent)
+        assert len(hooks) == 1, (
+            "consent granted after startup registered no shutdown flush; the "
+            "unanswered turns of this process can never leave it"
+        )
+
+        # The tail no cadence will ever send: turns with no answer yet.
+        _serve(px, 3, answer=False, start=900)
+        assert not _until(
+            lambda: any(t["turn_id"] == "t900" for t in tr.sent), timeout=0.5)
+
+        for fn in hooks:
+            fn()
+        got = {t["turn_id"] for t in tr.sent}
+        assert {"t900", "t901", "t902"} <= got, (
+            f"the shutdown flush did not send the unanswered turns: {sorted(got)}"
+        )
+
+
+def test_an_explicit_flush_re_asks_for_consent(monkeypatch, tmp_path):
+    """The recheck lived in the background cadence alone.
+
+    A low-traffic agent never reaches the 32-turn cadence, and the docs offer
+    ``flush()`` as the explicit escape hatch -- so a customer told "push the
+    backlog now" got ``{'sent': 0, ..., 'not_permitted': 1}`` and sent
+    nothing, with nothing in the answer saying "re-ask the control plane".
+    """
+    tr = _LateConsent()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _serve(px, 3)                            # well under the cadence
+        assert px.flush()["sent"] == 0
+        assert px.may_upload is False
+
+        tr.enabled = True                        # an operator says yes
+        counts = px.flush()
+        assert counts["sent"] == 3, counts
+        assert px.may_upload is True
+
+
+def test_close_re_asks_for_consent_too(monkeypatch, tmp_path):
+    """Same seam, and it is the only chance a low-traffic agent gets."""
+    tr = _LateConsent()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _serve(px, 2, answer=False)
+        tr.enabled = True
+        px.close()
+    assert {t["turn_id"] for t in tr.sent} == {"t0", "t1"}, (
+        f"close() refused after consent was granted: {tr.sent}"
+    )
+
+
+# ── a terminal refusal is a decision, not a blip ──────────────────────────
+
+
+class _Revoked(_Transport):
+    """Consenting at registration; the intake then refuses.
+
+    What an operator turning capture off mid-process, or a key losing its
+    ``turn.report`` scope, actually looks like from in here.
+    """
+
+    def __init__(self):
+        super().__init__(capture=True)
+        self.attempts = 0
+
+    def report_turns(self, agent_id, turns):
+        self.attempts += 1
+        raise TransportError(
+            "POST /agents/support/turns -> HTTP 403: production capture is "
+            "not enabled for this agent.")
+
+    def capture_current(self, agent_id):
+        return {"agent_id": agent_id,
+                "capture": {"turns": False, "reason": "disabled by an operator"}}
+
+
+def test_a_revoked_agent_stops_uploading_and_says_why(monkeypatch, tmp_path):
+    """The 403 was swallowed into the same counter as a timeout.
+
+    So the process re-POSTed the same batch of END USERS' prompts and answers
+    every cadence for its whole life, to a control plane that had been told
+    not to accept them -- with nothing in the customer's logs and
+    ``upload_refusal`` still reading whatever startup said.
+    """
+    import warnings as _w
+
+    tr = _Revoked()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _serve(px, 2)
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter("always")
+            counts = px.flush()
+
+        assert tr.attempts == 1
+        assert px.may_upload is False, (
+            "a terminal refusal was read as a transport blip; this batch will "
+            "be re-sent every cadence forever"
+        )
+        assert "not enabled for this agent" in (px.upload_refusal or ""), (
+            f"the refusal did not carry the intake's own sentence: "
+            f"{px.upload_refusal!r}"
+        )
+        assert counts.get("not_permitted") == 1, counts
+        assert any("uploading has stopped" in str(c.message) for c in caught), (
+            "the process stopped uploading and told nobody"
+        )
+
+        px.flush()
+        assert tr.attempts == 1, "the refused batch was POSTed again"
+
+
+def test_a_transport_blip_does_not_stop_uploading(monkeypatch, tmp_path):
+    """Errs towards retrying. Mistaking a 5xx for a revocation would stop a
+    consenting customer's uploads for the life of the process."""
+
+    class _Blip(_Transport):
+        def __init__(self):
+            super().__init__(capture=True)
+            self.attempts = 0
+
+        def report_turns(self, agent_id, turns):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise TransportError(
+                    "POST /agents/support/turns -> HTTP 503: upstream")
+            return super().report_turns(agent_id, turns)
+
+    tr = _Blip()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _serve(px, 2)
+        px.flush()
+        assert px.may_upload is True, "a 5xx was read as a revocation"
+        assert px.flush()["sent"] == 2

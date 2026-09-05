@@ -21,28 +21,70 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# `--print-node-sdk` resolves the SDK, prints its root directory on stdout and
+# stops without running the check.
+#
+# THE RESOLVER BELOW IS THE ONLY ONE. tests/test_report_turns_wire.py asks for
+# the path through this flag instead of keeping a second copy of the rule. The
+# copy it used to have looked two directories up for a fixed sibling name,
+# which is nowhere near where CI puts the checkout, so the cross-SDK parity
+# test skipped on every CI run while looking green on a laptop.
+PRINT_ONLY=""
+if [ "${1:-}" = "--print-node-sdk" ]; then
+  PRINT_ONLY=1
+  shift
+fi
+
 # WHERE THE NODE SDK IS, now that it is a separate repo
 # (percepteye-ai/agent-flywheel-node). It used to be a subdirectory here, and
 # this line was a relative path into it.
 #
-# Resolved rather than assumed, and SKIPPED rather than failed when it is
-# absent. A developer checking out only this repo has no Node SDK to check
-# against, and turning that into a red suite would teach everyone to ignore
-# the failure -- which costs more than the check is worth. CI checks the
-# sibling out explicitly, so there it always runs.
+# Resolved rather than assumed, and the two cases are NOT the same case:
+#
+#   - AUTO-DISCOVERY skips. A developer who checked out only this repo has no
+#     Node SDK to check against, and turning that into a red suite would teach
+#     everyone to ignore the failure -- which costs more than the check.
+#   - AN EXPLICIT PERCEPTEYE_NODE_SDK IS A PROMISE. Somebody said the SDK is
+#     there. If it is not, that is a broken environment and this fails. CI
+#     always sets the variable, so CI can no longer turn this check into a
+#     green no-op by moving the checkout or by the Node repo renaming src/.
+EXPLICIT=""
 if [ -n "${PERCEPTEYE_NODE_SDK:-}" ]; then
-  PKG="${PERCEPTEYE_NODE_SDK%/}/src"
+  SDK="${PERCEPTEYE_NODE_SDK%/}"
+  EXPLICIT=1
 else
   for cand in \
     "$ROOT/../percepteye-agent-flywheel-node" \
     "$ROOT/../agent-flywheel-node"; do
-    if [ -d "$cand/src" ]; then PKG="$cand/src"; break; fi
+    if [ -d "$cand/src" ]; then SDK="$cand"; break; fi
   done
 fi
-if [ -z "${PKG:-}" ] || [ ! -d "$PKG" ]; then
+
+if [ -n "$EXPLICIT" ] && [ ! -d "$SDK/src" ]; then
+  {
+    echo "cross-language ABI check FAILED: PERCEPTEYE_NODE_SDK points at"
+    echo "  $SDK"
+    echo "  but there is no src/ directory there. The variable was set"
+    echo "  deliberately, so this is a broken checkout -- not a reason to stop"
+    echo "  checking the contract."
+  } >&2
+  exit 1
+fi
+
+if [ -z "${SDK:-}" ]; then
+  # In --print-node-sdk mode stdout carries the resolved path and nothing
+  # else, so the caller sees it empty and skips; the explanation goes to
+  # stderr there rather than being mistaken for a path.
+  if [ -n "$PRINT_ONLY" ]; then exec 1>&2; fi
   echo "cross-language ABI check SKIPPED: the Node SDK is not checked out."
   echo "  It lives at github.com/percepteye-ai/agent-flywheel-node."
   echo "  Clone it beside this repo, or set PERCEPTEYE_NODE_SDK=/path/to/it."
+  exit 0
+fi
+
+PKG="$SDK/src"
+if [ -n "$PRINT_ONLY" ]; then
+  echo "$SDK"
   exit 0
 fi
 echo "cross-language ABI check: reading the Node SDK at $PKG"

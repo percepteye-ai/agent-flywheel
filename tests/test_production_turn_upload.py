@@ -19,6 +19,7 @@ wrong order when the thing being asked about is whether to send.
 from __future__ import annotations
 
 import json
+import time
 from contextlib import contextmanager
 
 import pytest
@@ -443,3 +444,33 @@ def test_a_turn_sent_in_a_later_flush_keeps_its_position(monkeypatch, tmp_path):
         px.flush()
     idx = {t["turn_id"]: t["turn_index"] for t in tr.sent}
     assert idx == {"t0": 0, "t1": 1, "t2": 2}, idx
+
+
+def test_a_late_answer_does_not_reorder_the_conversation(monkeypatch, tmp_path):
+    """THE DEFECT: the position came from the turn DIRECTORY's mtime.
+
+    A directory's mtime advances every time a file is CREATED inside it, and
+    ``record_answer`` creates ``turns.jsonl`` whenever ``input_text`` was not
+    passed -- both are documented optional. So answering turn 0 after turn 1
+    had already happened re-dated turn 0's directory to a time AFTER turn 1's,
+    and the conversation was uploaded in reverse: MC stores ``turn_index``
+    verbatim, ``_body_of`` excludes it from the dedupe body, and the wrong
+    index therefore sticks even if the turn is sent again.
+
+    The two existing ordering tests never saw it because both record the
+    answer immediately, in the same order the turns happened.
+    """
+    tr = _Transport()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        with px.turn(turn_id="t0", conversation_id="c1"):
+            pass
+        time.sleep(0.02)          # two turns that really did happen apart
+        with px.turn(turn_id="t1", conversation_id="c1"):
+            pass
+        px.record_answer("t1", "second")
+        px.record_answer("t0", "first")     # the late answer
+        px.flush()
+    idx = {t["turn_id"]: t["turn_index"] for t in tr.sent}
+    assert idx == {"t0": 0, "t1": 1}, (
+        f"a late answer inverted the conversation: {idx}"
+    )

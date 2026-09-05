@@ -10,12 +10,13 @@ zero coverage, in a package whose whole job is getting that data across.
 
 The route and body are also half of a cross-SDK contract. The Node package
 sends the same batch to the same route and derives the same idempotency key,
-and the last test here proves the two derivations AGREE rather than asserting
-it in a comment.
+and ``test_both_sdks_derive_the_same_idempotency_key`` below proves the two
+derivations AGREE rather than asserting it in a comment.
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -105,10 +106,66 @@ def test_ambiguous_retries_stay_enabled():
 
 # ── the cross-SDK half ────────────────────────────────────────────────────
 
-_NODE = Path(__file__).resolve().parents[2] / "percepteye-agent-flywheel-node"
+#: The ONE resolver that knows where the Node SDK is. It honours
+#: ``PERCEPTEYE_NODE_SDK`` and the sibling checkout names, and it lives in the
+#: shell script because that script needs it too -- asking it here is what
+#: stops the two from drifting.
+_ABI_CHECK = Path(__file__).resolve().parents[1] / "scripts" / "cross_language_abi_check.sh"
 
 
-@pytest.mark.skipif(not _NODE.is_dir(), reason="the Node package is not checked out here")
+def _node_sdk() -> tuple[Path | None, bool]:
+    """Where the Node SDK is, and whether somebody NAMED it.
+
+    This used to be ``Path(__file__).resolve().parents[2] /
+    "percepteye-agent-flywheel-node"`` -- a second copy of the rule, and a
+    wrong one. CI checks the SDK out inside the workspace and points at it
+    with ``PERCEPTEYE_NODE_SDK``; two directories up from the tests is the
+    runner's work root, where nothing ever is. So the parity test below
+    skipped on every CI run -- and ``test-full`` fails the build on any skip,
+    which made the whole matrix red for a reason unrelated to the change under
+    test while the parity it exists to prove went unchecked.
+
+    A NAMED path that is not there is an error, not a skip: the script exits
+    non-zero and this fails. Only auto-discovery skips.
+    """
+    named = bool(os.environ.get("PERCEPTEYE_NODE_SDK"))
+    res = subprocess.run(
+        [str(_ABI_CHECK), "--print-node-sdk"], capture_output=True, text=True)
+    if res.returncode != 0:
+        pytest.fail(f"resolving the Node SDK failed:\n{res.stdout}{res.stderr}")
+    out = res.stdout.strip()
+    return (Path(out) if out else None), named
+
+
+def test_the_node_sdk_is_resolved_where_it_was_NAMED(tmp_path, monkeypatch):
+    """The regression that made the parity test below a no-op in CI.
+
+    The resolver has to find an SDK that is neither a fixed sibling name nor
+    two directories up -- which describes every CI checkout. Asserted against
+    a directory that is in neither place.
+    """
+    fake = tmp_path / "agent-flywheel-node"
+    (fake / "src").mkdir(parents=True)
+    monkeypatch.setenv("PERCEPTEYE_NODE_SDK", str(fake))
+    assert _node_sdk() == (fake, True)
+
+
+def test_a_NAMED_node_sdk_that_is_not_there_fails_the_check(tmp_path):
+    """The ABI check's skip is for a developer who has only this repo. Once
+    somebody names a path, an absent SDK is a broken environment: exiting 0
+    would turn the only cross-language contract check into a green no-op the
+    day the Node repo moves its modules or CI lands the checkout elsewhere.
+    """
+    missing = str(tmp_path / "not-checked-out")
+    res = subprocess.run(
+        [str(_ABI_CHECK)], capture_output=True, text=True,
+        env={**os.environ, "PERCEPTEYE_NODE_SDK": missing})
+    both = res.stdout + res.stderr
+    assert res.returncode == 1, f"exited {res.returncode}:\n{both}"
+    assert missing in both, both
+    assert "SKIPPED" not in both, both
+
+
 def test_both_sdks_derive_the_same_idempotency_key():
     """A customer runs one package or the other, and may MIGRATE between them
     with turns still on disk. If the two hash the same batch differently, each
@@ -119,6 +176,11 @@ def test_both_sdks_derive_the_same_idempotency_key():
     depth to match. This asserts the two agree on a real payload rather than
     trusting that they do.
     """
+    sdk, named = _node_sdk()
+    if sdk is None:
+        # Auto-discovery only: a named path that is missing already failed.
+        pytest.skip("the Node package is not checked out here")
+
     node = None
     for candidate in ("/opt/homebrew/opt/node@24/bin/node", "node"):
         try:
@@ -128,6 +190,10 @@ def test_both_sdks_derive_the_same_idempotency_key():
         except (OSError, subprocess.CalledProcessError):
             continue
     if node is None:
+        if named:
+            pytest.fail(
+                "PERCEPTEYE_NODE_SDK names a Node SDK but there is no usable "
+                "node binary to run it with")
         pytest.skip("no usable node binary")
 
     script = (
@@ -140,7 +206,7 @@ def test_both_sdks_derive_the_same_idempotency_key():
     )
     res = subprocess.run(
         [node, "--input-type=module", "-e", script],
-        cwd=_NODE, capture_output=True, text=True,
+        cwd=sdk, capture_output=True, text=True,
     )
     assert res.returncode == 0, res.stderr
     node_key = res.stdout.strip()
