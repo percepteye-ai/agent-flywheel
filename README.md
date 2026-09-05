@@ -370,7 +370,7 @@ Counts are not a quality judgement — but inside a live production process, an 
 | you call | you contribute | outbound |
 |:--|:--|:--|
 | `fw.serve(...)` | **capacity** — control-plane tasks run on your credentials | `/health`, `POST /agents`, `GET /policy/current`, then claim in a loop |
-| `fw.attach(...)` | **evidence** — outcomes from turns you already serve | `POST /agents` + `GET /policy/current`, once |
+| `fw.attach(...)` | **evidence** — outcomes from turns you already serve | `POST /agents` + `GET /policy/current`, once; then `POST /turns` — **only with capture consent**, every 32 turns and at exit |
 | `fw.apply_current_policy(...)` | **nothing** | one `GET /policy/current` |
 
 **Contribute nothing, still get the trained model.** No `serve()`, no `attach()`, no registration:

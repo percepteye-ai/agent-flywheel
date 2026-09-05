@@ -297,3 +297,80 @@ def test_close_does_not_hang_on_an_unresponsive_control_plane(
         f"close() took {elapsed:.1f}s waiting on an in-flight upload; a hung "
         f"control plane would hold the customer's process open at exit"
     )
+
+
+# ── retention must not silently delete what was going to be uploaded ──────
+
+
+def _dirs(root):
+    return sorted(p.name for p in root.iterdir() if p.is_dir())
+
+
+def test_retention_deletes_UPLOADED_turns_before_pending_ones(
+        monkeypatch, tmp_path):
+    """The defect: retention ordered by mtime alone, upload state ignored.
+
+    The periodic flush deliberately holds back a turn with no answer, because
+    one may still be coming. Retention deleted by age regardless -- so on an
+    agent with `retention_turns` set, a turn whose answer was still coming
+    could be removed before it was ever sent. Silently and permanently.
+
+    The same NUMBER is still deleted; only which ones.
+    """
+    tr = _Transport()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        # THE PENDING TURNS ARE THE OLDEST ONES, which is what forces the
+        # choice -- and is the real shape: a turn still waiting on its answer
+        # while newer traffic flows through and uploads cleanly. An earlier
+        # version of this test made the pending turns the NEWEST, so mtime
+        # alone already kept them and the assertion held with the fix deleted.
+        _serve(px, 2, answer=False, start=100)          # t100, t101: oldest
+        _serve(px, 4, answer=True)                       # t0..t3: newer
+        px.flush()
+        assert len(tr.sent) == 4, "only the answered turns should have gone"
+        assert len(_dirs(tmp_path)) == 6
+
+        # Room for two. By mtime that is t3 and t2 -- both already uploaded --
+        # and the two pending turns would be destroyed.
+        px.prune(keep_last=2)
+        kept = set(_dirs(tmp_path))
+        assert {"t100", "t101"} == kept, (
+            f"retention deleted turns that had never been uploaded while "
+            f"already-uploaded ones remained: kept {sorted(kept)}"
+        )
+        assert len(kept) == 2, "retention must still bound the directory"
+
+
+def test_it_warns_when_retention_really_does_lose_an_unsent_turn(
+        monkeypatch, tmp_path):
+    """Legitimate -- the customer asked for a bounded directory -- but not silent.
+
+    An operator who is not told will go looking for those turns upstream.
+    """
+    import warnings as _w
+
+    tr = _Transport()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _serve(px, 3, answer=False)
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter("always")
+            px.prune(keep_last=1)
+        assert any("had not been uploaded" in str(c.message) for c in caught), (
+            "retention destroyed unsent turns and said nothing"
+        )
+
+
+def test_no_warning_when_everything_deleted_was_already_sent(
+        monkeypatch, tmp_path):
+    """The ordinary case must stay quiet, or the warning means nothing."""
+    import warnings as _w
+
+    tr = _Transport()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _serve(px, 3, answer=True)
+        px.flush()
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter("always")
+            px.prune(keep_last=1)
+        assert not [c for c in caught
+                    if "had not been uploaded" in str(c.message)]

@@ -286,7 +286,7 @@ Lane ⓪ opens once, and lane ④ once from `attach()`. The rest repeat, and **e
 | **① claim** | `POST /rollouts/claim` | in a loop, long-polled |
 | **② return the rollout** | `POST /rollouts/{id}/heartbeat` · `/artifacts` · `/result` · `/abandon` | per rollout |
 | **③ policy back** | `GET /policy/current` · `GET /prompt/current` | at startup, or on a TTL |
-| **④ live evidence** | `POST /agents` · `GET /policy/current`, then capture to disk | once, from `attach()` |
+| **④ live evidence** | `POST /agents` · `GET /policy/current` · capture to disk · `POST /turns` **with consent only** | at startup, then every 32 turns and at exit |
 
 !!! note "There is no listening socket in this package"
 

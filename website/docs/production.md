@@ -180,7 +180,7 @@ with px.turn(conversation_id=conv_id) as turn_id:
 | `register` | `True` | `False` skips the control-plane call entirely |
 | `control_plane_url` · `api_key` | env | `PERCEPTEYE_CONTROL_PLANE_URL` / `PERCEPTEYE_API_KEY` |
 
-**`trajectory_root` is required and that is deliberate.** Turns accumulate there as directories and nothing removes them, because until the contract carries a production turn there is nowhere to ship them and deleting a customer's only copy would be the worse failure. Naming the directory is how **retention becomes a decision somebody made** rather than a surprise. It is yours.
+**`trajectory_root` is required and that is deliberate.** Every captured turn lands there as a directory, and it is your copy: uploading does not delete it, and without `retention_turns` nothing does. Naming the directory is how **retention becomes a decision somebody made** rather than a surprise. It is yours.
 
 With `register=True` the call makes exactly two outbound requests, once, at startup: `POST /agents` then `GET /policy/current`. It registers as `mode: "production"` — `serve()` sends `"rollout"`, and a training donor versus a production reader is the one distinction a `mode` on a registration exists to draw. `register=False` skips both, for a process that should make no outbound connection at all.
 

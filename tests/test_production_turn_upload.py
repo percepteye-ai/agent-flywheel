@@ -291,18 +291,34 @@ def test_flushing_does_not_reorder_a_conversation(monkeypatch, tmp_path):
     is the ordering key ``export.iter_records`` sorts by — so marking a turn
     uploaded floated it to the end of its own conversation, and the record
     handed to the ingest had its turns out of order.
+
+    THE IDS BELOW ARE DELIBERATELY OUT OF ALPHABETICAL ORDER, and that is what
+    makes this test able to fail. It used to create ``t0..t3``, whose NAME
+    order is also their creation order -- and ``flush`` scans the root sorted
+    by name, so it touched the directories in exactly the order they were
+    already in. Restoring the original bug (a marker file inside each turn
+    directory, bumping its mtime) left this GREEN: the mutation reordered
+    nothing, because the two orders were the same. A test whose fixture cannot
+    distinguish the defect from correct behaviour certifies nothing.
+
+    Real turn ids are ``t_<uuid>``, which do not sort in creation order, so
+    the shape below is the ordinary case and ``t0..t3`` was the special one.
     """
     from percepteye_agent_flywheel.export import iter_records
 
+    # Created oldest-first; NAME order is the reverse.
+    ids = ["zz_first", "mm_second", "bb_third", "aa_fourth"]
     tr = _Transport()
     with _attached(monkeypatch, tmp_path, tr) as px:
-        for i in range(4):
-            _turn(px, f"t{i}", ask=f"ask {i}", answer=f"ans {i}")
+        for i, tid in enumerate(ids):
+            _turn(px, tid, ask=f"ask {i}", answer=f"ans {i}")
         before = [r for r in iter_records(str(tmp_path), group_conversations=False)]
         px.flush()
         after = [r for r in iter_records(str(tmp_path), group_conversations=False)]
 
-    assert [r["rollout_id"] for r in before] == [f"t{i}" for i in range(4)]
+    assert [r["rollout_id"] for r in before] == ids, (
+        f"the fixture itself is not in creation order: {before}"
+    )
     assert [r["rollout_id"] for r in after] == [r["rollout_id"] for r in before], (
         "flushing reordered the conversation"
     )

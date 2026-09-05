@@ -337,6 +337,28 @@ class Attachment:
 
         # Newest first, so "keep_last" is a slice rather than a sort per turn.
         entries.sort(key=mtime, reverse=True)
+
+        # UPLOADED TURNS ARE DELETED FIRST, and this is a correctness fix, not
+        # a nicety. Retention deletes by mtime and knows nothing about upload
+        # state, while the periodic flush deliberately HOLDS BACK turns that
+        # have no answer yet -- so on an agent with `retention_turns` set, a
+        # turn whose answer was still coming could be deleted before it was
+        # ever sent. Silent, permanent, and invisible: the turn simply never
+        # existed as far as the control plane is concerned.
+        #
+        # The same NUMBER of turns is still removed, so the disk guarantee the
+        # customer asked for is unchanged; only the CHOICE of victims moves.
+        # Among equally-doomed turns, one already at the control plane costs
+        # nothing to delete and one still pending costs the observation.
+        #
+        # Asked only when uploading is actually on. With no consent there is no
+        # such thing as a pending turn, and reading the index would be work in
+        # service of a distinction that does not exist.
+        if self.may_upload:
+            already = self._uploaded_ids()
+            entries.sort(key=lambda e: (e.name not in already, mtime(e)),
+                         reverse=True)
+
         doomed: list[Path] = []
         if keep_last is not None:
             doomed.extend(entries[max(0, keep_last):])
@@ -346,7 +368,11 @@ class Attachment:
                           if mtime(e) < cutoff)
 
         removed = 0
+        unsent = 0
+        pending = self._uploaded_ids() if self.may_upload else None
         for e in dict.fromkeys(doomed):
+            if pending is not None and e.name not in pending:
+                unsent += 1
             # Release any handle we still hold on it first, or on a platform
             # that refuses to unlink an open file this would silently no-op.
             _release(str(e))
@@ -355,6 +381,20 @@ class Attachment:
                 removed += 1
             except OSError:
                 continue
+        if unsent:
+            # SAID OUT LOUD, once per prune that does it. Retention winning
+            # over an unsent turn is a legitimate outcome -- the customer
+            # asked for a bounded directory and we are honouring it -- but it
+            # is data the control plane will never see, and an operator who
+            # is not told will look for those turns upstream.
+            warnings.warn(
+                f"percepteye: retention deleted {unsent} captured turn(s) "
+                f"that had not been uploaded. They are gone. Raise "
+                f"retention_turns, or check why uploads are not succeeding "
+                f"(Attachment.upload_refusal says if consent is the reason).",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         if removed:
             # The upload index describes this tree, so it is bounded by this
             # tree. Left alone it would grow for the life of the process while
@@ -734,11 +774,19 @@ def attach(
         with px.turn() as turn_id:
             reply = agent.invoke(user_text)      # your agent, unmodified
 
-    ``trajectory_root`` is REQUIRED and that is deliberate. Turns accumulate
-    there as directories and nothing removes them, because until the contract
-    carries a production turn there is nowhere to ship them and deleting a
-    customer's only copy would be the worse failure. Naming the directory is
-    how retention becomes a decision somebody made rather than a surprise.
+    ``trajectory_root`` is REQUIRED and that is deliberate. Every captured turn
+    lands there as a directory, and it is the customer's copy: uploading does
+    not delete it, and without ``retention_turns`` nothing does. Naming the
+    directory is how retention becomes a decision somebody made rather than a
+    surprise.
+
+    UPLOADING IS AUTOMATIC AND CONSENTED. When the control plane says this
+    agent may capture -- opt-in per agent, because these are the customer's END
+    USERS' messages -- answered turns are sent every ``_FLUSH_EVERY`` turns on
+    a background thread, and an ``atexit`` hook sends the rest at shutdown.
+    Until consent is given, and whenever the control plane cannot be reached,
+    they simply accumulate. :attr:`Attachment.may_upload` is the live answer
+    and :attr:`Attachment.upload_refusal` is the sentence explaining a False.
 
     ``retention_turns=N`` keeps only the N most recently written turns, pruning
     on an interval so it costs one directory scan per 256 turns rather than one
