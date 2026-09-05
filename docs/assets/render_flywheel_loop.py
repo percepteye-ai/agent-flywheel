@@ -77,21 +77,100 @@ SS = 2  # supersample factor for crisp edges
 OUT = os.environ["FRAMES"]
 
 # ── palette ──────────────────────────────────────────────────────────────────
-BG        = (13, 17, 23)        # #0d1117 -- GitHub dark canvas
-CARD      = (22, 27, 34)        # #161b22
-CARD_HI   = (27, 33, 42)
-LINE      = (48, 54, 61)        # #30363d
-LINE_SOFT = (33, 38, 45)
-TXT       = (230, 237, 243)     # #e6edf3
-MUTED     = (125, 133, 144)
-DIM       = (88, 96, 105)
+#: WHICH GROUND THIS FIGURE IS DRAWN ON. ``THEME=light`` (the default) is what
+#: both READMEs ship: the dark original looked handsome in isolation and was
+#: genuinely hard to READ inline in a README -- pale text on near-black, at
+#: whatever size the page gives it, next to white page chrome. A diagram whose
+#: job is to be grasped in three seconds loses that argument.
+#:
+#: Every accent below is DARKENED rather than merely inverted. A colour tuned to
+#: glow on #0d1117 is washed out on white -- #58a6ff blue and #a371f7 purple both
+#: drop under 3:1 against white -- so the light set uses deep, saturated stops
+#: that stay distinguishable from each other at small sizes.
+THEME = os.environ.get("THEME", "light")
 
-BLUE      = (88, 166, 255)      # #58a6ff  request / your side
-PURPLE    = (163, 113, 247)     # #a371f7  platform
-GREEN     = (63, 185, 80)       # ok
-RED       = (248, 81, 73)       # failed
-AMBER     = (210, 153, 34)      # unknown  <- deliberately NOT green
-CYAN      = (57, 197, 207)
+_DARK = dict(
+    BG=(13, 17, 23), CARD=(22, 27, 34), CARD_HI=(27, 33, 42),
+    LINE=(48, 54, 61), LINE_SOFT=(33, 38, 45),
+    TXT=(230, 237, 243), MUTED=(125, 133, 144), DIM=(88, 96, 105),
+    BLUE=(88, 166, 255), PURPLE=(163, 113, 247), GREEN=(63, 185, 80),
+    RED=(248, 81, 73), AMBER=(210, 153, 34), CYAN=(57, 197, 207),
+    DOT_BASE=(44, 50, 58),
+    ZL_FILL=(16, 20, 27), ZL_LABEL=(122, 132, 145),
+    ZR_FILL=(18, 18, 28), ZR_EDGE=(58, 46, 84), ZR_LABEL=(150, 118, 214),
+    BD_DASH=(72, 60, 96), BD_FILL=(28, 24, 40), BD_EDGE=(78, 64, 104),
+    BD_TXT=(168, 142, 224),
+    TERM=((72, 78, 88), (60, 66, 76), (52, 58, 68)),
+    CODE=(126, 176, 226), OKTXT=(94, 160, 110), LBL=(102, 110, 122),
+    CHIP_ON=(214, 196, 248),
+    PF_FILL=(26, 24, 40), PF_EDGE=(96, 76, 132), PF_TITLE=(186, 156, 240),
+    PF_RULE=(66, 56, 88), PF_SUB=(108, 92, 140),
+    PF_ROW=(56, 50, 74), PF_ROWTX=(96, 92, 112), PF_CHIPBG=(26, 24, 40),
+    RAIL=(60, 66, 75), FOOT=(128, 110, 160), HRULE=(26, 31, 38),
+)
+
+_LIGHT = dict(
+    BG=(255, 255, 255), CARD=(252, 253, 254), CARD_HI=(246, 248, 251),
+    LINE=(196, 205, 214), LINE_SOFT=(226, 232, 238),
+    TXT=(9, 14, 20), MUTED=(74, 84, 96), DIM=(114, 124, 137),
+    BLUE=(0, 82, 204), PURPLE=(88, 36, 190), GREEN=(2, 112, 48),
+    RED=(186, 24, 24), AMBER=(148, 86, 0), CYAN=(0, 112, 124),
+    DOT_BASE=(205, 212, 220),
+    ZL_FILL=(248, 250, 252), ZL_LABEL=(88, 98, 110),
+    ZR_FILL=(250, 248, 255), ZR_EDGE=(206, 192, 234), ZR_LABEL=(88, 36, 190),
+    BD_DASH=(168, 148, 206), BD_FILL=(243, 238, 253), BD_EDGE=(190, 170, 224),
+    BD_TXT=(88, 36, 190),
+    TERM=((188, 196, 206), (202, 209, 217), (216, 222, 229)),
+    CODE=(0, 82, 204), OKTXT=(2, 112, 48), LBL=(96, 105, 116),
+    CHIP_ON=(88, 36, 190),
+    PF_FILL=(250, 248, 255), PF_EDGE=(196, 180, 226), PF_TITLE=(80, 30, 180),
+    PF_RULE=(214, 202, 236), PF_SUB=(118, 102, 152),
+    PF_ROW=(226, 216, 244), PF_ROWTX=(112, 120, 132), PF_CHIPBG=(246, 242, 254),
+    RAIL=(176, 184, 194), FOOT=(112, 96, 148), HRULE=(222, 227, 233),
+)
+
+_T = _LIGHT if THEME == "light" else _DARK
+
+BG = _T['BG']
+CARD = _T['CARD']
+CARD_HI = _T['CARD_HI']
+LINE = _T['LINE']
+LINE_SOFT = _T['LINE_SOFT']
+TXT = _T['TXT']
+MUTED = _T['MUTED']
+DIM = _T['DIM']
+BLUE = _T['BLUE']
+PURPLE = _T['PURPLE']
+GREEN = _T['GREEN']
+RED = _T['RED']
+AMBER = _T['AMBER']
+CYAN = _T['CYAN']
+DOT_BASE = _T['DOT_BASE']
+ZL_FILL = _T['ZL_FILL']
+ZL_LABEL = _T['ZL_LABEL']
+ZR_FILL = _T['ZR_FILL']
+ZR_EDGE = _T['ZR_EDGE']
+ZR_LABEL = _T['ZR_LABEL']
+BD_DASH = _T['BD_DASH']
+BD_FILL = _T['BD_FILL']
+BD_EDGE = _T['BD_EDGE']
+BD_TXT = _T['BD_TXT']
+TERM = _T['TERM']
+CODE = _T['CODE']
+OKTXT = _T['OKTXT']
+LBL = _T['LBL']
+CHIP_ON = _T['CHIP_ON']
+PF_FILL = _T['PF_FILL']
+PF_EDGE = _T['PF_EDGE']
+PF_TITLE = _T['PF_TITLE']
+PF_RULE = _T['PF_RULE']
+PF_SUB = _T['PF_SUB']
+PF_ROW = _T['PF_ROW']
+PF_ROWTX = _T['PF_ROWTX']
+PF_CHIPBG = _T['PF_CHIPBG']
+RAIL = _T['RAIL']
+FOOT = _T['FOOT']
+HRULE = _T['HRULE']
 
 FONT_PATH = "/System/Library/Fonts/SFNS.ttf"
 MONO_PATH = "/System/Library/Fonts/SFNSMono.ttf"
@@ -370,7 +449,7 @@ def draw_frame(i: int) -> Image.Image:
     for k, st in enumerate(STAGES):
         live = st[0] == name
         done = st[2] <= t
-        base = mix((44, 50, 58), BLUE, 0.42) if done else (44, 50, 58)
+        base = mix(DOT_BASE, BLUE, 0.42) if done else DOT_BASE
         c = mix(base, BLUE, 1.0 if live else 0.0)
         cx = dx0 + k * 17
         if live:
@@ -384,31 +463,31 @@ def draw_frame(i: int) -> Image.Image:
 
     # ── zones ────────────────────────────────────────────────────────────────
     if a_zl > 0.01:
-        rrect(d, LZ, 14, fill=mix(BG, (16, 20, 27), a_zl),
+        rrect(d, LZ, 14, fill=mix(BG, ZL_FILL, a_zl),
               outline=mix(BG, LINE, a_zl), width=1)
         text(d, (LZ[0] + 20, LZ[1] + 17), "YOUR INFRASTRUCTURE", F_ZONE,
-             mix(BG, (122, 132, 145), a_zl))
+             mix(BG, ZL_LABEL, a_zl))
         text(d, (LZ[0] + 20 + tw("YOUR INFRASTRUCTURE", F_ZONE) + 12, LZ[1] + 18),
              "your process  ·  your credentials  ·  your firewall", F_TINY,
              mix(BG, DIM, a_zl))
 
     if a_zr > 0.01:
-        rrect(d, RZ, 14, fill=mix(BG, (18, 18, 28), a_zr),
-              outline=mix(BG, (58, 46, 84), a_zr), width=1)
+        rrect(d, RZ, 14, fill=mix(BG, ZR_FILL, a_zr),
+              outline=mix(BG, ZR_EDGE, a_zr), width=1)
         text(d, (RZ[0] + 20, RZ[1] + 17), "PERCEPTEYE", F_ZONE,
-             mix(BG, (150, 118, 214), a_zr))
+             mix(BG, ZR_LABEL, a_zr))
 
     # ── trust boundary ───────────────────────────────────────────────────────
     if a_bd > 0.01:
         grow = prog(t, REVEAL["boundary"][0], REVEAL["boundary"][1] + 0.35)
         dashed_v(d, BOUND_X, 70, 70 + (642 - 70) * ease(grow),
-                 mix(BG, (72, 60, 96), a_bd), dash=8, gap=7, width=2)
+                 mix(BG, BD_DASH, a_bd), dash=8, gap=7, width=2)
         bl = "TRUST BOUNDARY"
         bw = tw(bl, F_ZONE) + 22
         rrect(d, (BOUND_X - bw / 2, 40, BOUND_X + bw / 2, 62), 11,
-              fill=mix(BG, (28, 24, 40), a_bd),
-              outline=mix(BG, (78, 64, 104), a_bd), width=1)
-        text(d, (BOUND_X, 52), bl, F_ZONE, mix(BG, (168, 142, 224), a_bd), anchor="mm")
+              fill=mix(BG, BD_FILL, a_bd),
+              outline=mix(BG, BD_EDGE, a_bd), width=1)
+        text(d, (BOUND_X, 52), bl, F_ZONE, mix(BG, BD_TXT, a_bd), anchor="mm")
 
     # ── 1 · install ──────────────────────────────────────────────────────────
     if a_in > 0.01:
@@ -417,7 +496,7 @@ def draw_frame(i: int) -> Image.Image:
         if live_in:
             glow(d, INSTALL, BLUE, p * 0.8)
         # three window dots, because a terminal reads as a terminal
-        for k, cc in enumerate(((72, 78, 88), (60, 66, 76), (52, 58, 68))):
+        for k, cc in enumerate(TERM):
             d.ellipse(S((INSTALL[0] + 16 + k * 12, INSTALL[1] + 15,
                          INSTALL[0] + 22 + k * 12, INSTALL[1] + 21)),
                       fill=mix(BG, cc, a_in))
@@ -451,9 +530,9 @@ def draw_frame(i: int) -> Image.Image:
         p1 = prog(t, 4.85, 5.75) if live_hn else 1.0
         p2 = prog(t, 5.80, 6.45) if live_hn else 1.0
         text(d, (HARNESS[0] + 18, HARNESS[1] + 56), typed(l1, p1), F_CODE,
-             mix(BG, (126, 176, 226), a_hn), anchor="lm")
+             mix(BG, CODE, a_hn), anchor="lm")
         text(d, (HARNESS[0] + 18, HARNESS[1] + 80), typed(l2, p2), F_CODE,
-             mix(BG, (126, 176, 226), a_hn), anchor="lm")
+             mix(BG, CODE, a_hn), anchor="lm")
         text(d, (HARNESS[0] + 18, HARNESS[1] + 99),
              _F["foot"], F_TINY, mix(BG, DIM, a_hn), anchor="lm")
 
@@ -477,7 +556,7 @@ def draw_frame(i: int) -> Image.Image:
     unch = ease(prog(t, 6.55, 7.20)) * seam
     if unch > 0.01:
         text(d, (AGENT[0] + 18 + tw("your agent", F_BOX) + 10, AGENT[1] + 29),
-             "unchanged  ·  0 lines", F_TINY, mix(BG, (94, 160, 110), unch),
+             "unchanged  ·  0 lines", F_TINY, mix(BG, OKTXT, unch),
              anchor="lm")
     # Two labels never crossfade in place -- one leaves before the other
     # arrives, because overlapping glyphs read as a rendering fault.
@@ -497,7 +576,7 @@ def draw_frame(i: int) -> Image.Image:
     pre = (1.0 - ease(prog(t, 7.00, 7.35))) * a_ag * seam
     if pre > 0.01:
         text(d, (AGENT[0] + 18, AGENT[1] + 86), "tool outcomes", F_ZONE,
-             mix(BG, (102, 110, 122), pre), anchor="lm")
+             mix(BG, LBL, pre), anchor="lm")
         text(d, (AGENT[0] + 18, AGENT[1] + 110), "unobserved", F_SUB,
              mix(BG, DIM, pre), anchor="lm")
 
@@ -505,7 +584,7 @@ def draw_frame(i: int) -> Image.Image:
     traj = ease(prog(t, 7.45, 8.05)) * seam
     if traj > 0.01:
         text(d, (AGENT[0] + 18, AGENT[1] + 86), "TRAJECTORY", F_ZONE,
-             mix(BG, (102, 110, 122), traj), anchor="lm")
+             mix(BG, LBL, traj), anchor="lm")
         CHIPS = [("ok", GREEN, 15.15), ("ok", GREEN, 15.55),
                  ("unknown", AMBER, 15.95), ("failed", RED, 16.45),
                  ("ok", GREEN, 16.85)]
@@ -528,7 +607,7 @@ def draw_frame(i: int) -> Image.Image:
         text(d, (PROD[0] + 18, PROD[1] + 25), "your production agent", F_BOX,
              mix(BG, TXT, a_pr), anchor="lm")
         text(d, (PROD[0] + 18, PROD[1] + 50), _F["prod"], F_CODE,
-             mix(BG, (126, 176, 226), a_pr), anchor="lm")
+             mix(BG, CODE, a_pr), anchor="lm")
         ver_on = ease(prog(t, 24.15, 24.85)) * seam
         vlabel = "policy v2" if ver_on > 0.5 else "policy v1"
         vcol = PURPLE if ver_on > 0.5 else DIM
@@ -538,22 +617,22 @@ def draw_frame(i: int) -> Image.Image:
               fill=mix(BG, mix(CARD, mix(BG, vcol, 0.22), ver_on), a_pr),
               outline=mix(BG, mix(LINE, vcol, ver_on), a_pr), width=1)
         text(d, (vx + vw / 2, PROD[1] + 25), vlabel, F_CHIP,
-             mix(BG, mix(MUTED, (214, 196, 248), ver_on), a_pr), anchor="mm")
+             mix(BG, mix(MUTED, CHIP_ON, ver_on), a_pr), anchor="mm")
         if ver_on > 0.4:
             glow(d, PROD, PURPLE, (ver_on - 0.4) / 0.6 * 0.9)
 
     # ── the platform: ONE box, no internal names ─────────────────────────────
     if a_pf > 0.01:
-        rrect(d, PLATFORM, 12, fill=mix(BG, (26, 24, 40), a_pf),
-              outline=mix(BG, (96, 76, 132), a_pf), width=1)
+        rrect(d, PLATFORM, 12, fill=mix(BG, PF_FILL, a_pf),
+              outline=mix(BG, PF_EDGE, a_pf), width=1)
         text(d, (PLATFORM[0] + 24, PLATFORM[1] + 34), "Percepteye", F_BOX,
              mix(BG, TXT, a_pf), anchor="lm")
         text(d, (PLATFORM[0] + 24, PLATFORM[1] + 58), "control plane", F_BOX,
-             mix(BG, (186, 156, 240), a_pf), anchor="lm")
+             mix(BG, PF_TITLE, a_pf), anchor="lm")
         dashed_h(d, PLATFORM[1] + 84, PLATFORM[0] + 24, PLATFORM[2] - 24,
-                 mix(BG, (66, 56, 88), a_pf), width=1)
+                 mix(BG, PF_RULE, a_pf), width=1)
         text(d, (PLATFORM[2] - 24, PLATFORM[1] + 46), "visible in the dashboard",
-             F_TINY, mix(BG, (108, 92, 140), a_pf), anchor="rm")
+             F_TINY, mix(BG, PF_SUB, a_pf), anchor="rm")
 
         rows = [
             (PLATFORM[1] + 130, "generates the tasks", 10.05),
@@ -564,19 +643,19 @@ def draw_frame(i: int) -> Image.Image:
             on = ease(prog(t, at, at + 0.55)) * a_pf * seam
             # once lit, a row stays lit -- the platform is doing all three
             rrect(d, (PLATFORM[0] + 16, ry - 17, PLATFORM[2] - 20, ry + 17), 8,
-                  fill=mix(mix(BG, (26, 24, 40), a_pf),
+                  fill=mix(mix(BG, PF_FILL, a_pf),
                            mix(BG, PURPLE, 0.10), on),
-                  outline=mix(mix(BG, (26, 24, 40), a_pf),
+                  outline=mix(mix(BG, PF_FILL, a_pf),
                               mix(BG, PURPLE, 0.55), on), width=1)
             d.ellipse(S((PLATFORM[0] + 32, ry - 3, PLATFORM[0] + 39, ry + 4)),
-                      fill=mix(mix(BG, (56, 50, 74), a_pf), PURPLE, on))
+                      fill=mix(mix(BG, PF_ROW, a_pf), PURPLE, on))
             text(d, (PLATFORM[0] + 50, ry + 1), label, F_SUB,
-                 mix(mix(BG, (96, 92, 112), a_pf), TXT, on), anchor="lm")
+                 mix(mix(BG, PF_ROWTX, a_pf), TXT, on), anchor="lm")
 
         cand = ease(prog(t, 21.60, 22.25)) * a_pf * seam
         if cand > 0.01:
             pill(d, PLATFORM[0] + 16, PLATFORM[1] + 302, "candidate policy ready",
-                 F_CHIP, PURPLE, cand, base=(26, 24, 40))
+                 F_CHIP, PURPLE, cand, base=PF_CHIPBG)
 
     # ── lanes ────────────────────────────────────────────────────────────────
     if a_rl > 0.01:
@@ -594,7 +673,7 @@ def draw_frame(i: int) -> Image.Image:
         text(d, (LANE_MID, y - 17), a, F_LANE,
              mix(BG, mix(DIM, TXT, 0.78 * active), a_rl), anchor="mm")
         text(d, (LANE_MID, y + 17), b, F_TINY,
-             mix(BG, mix((60, 66, 75), MUTED, active), a_rl), anchor="mm")
+             mix(BG, mix(RAIL, MUTED, active), a_rl), anchor="mm")
 
     def rail(ln, color, upto=1.0, width=1):
         y = LANES[ln]
@@ -686,10 +765,10 @@ def draw_frame(i: int) -> Image.Image:
     if a_ft > 0.01:
         text(d, (W - 44, 674),
              "outbound only  ·  no inbound port  ·  no public DNS", F_TINY,
-             mix(BG, (128, 110, 160), a_ft * seam), anchor="rm")
+             mix(BG, FOOT, a_ft * seam), anchor="rm")
 
     # ── caption strip ────────────────────────────────────────────────────────
-    d.line([S(40), S(646), S(W - 40), S(646)], fill=mix(BG, (26, 31, 38), seam),
+    d.line([S(40), S(646), S(W - 40), S(646)], fill=mix(BG, HRULE, seam),
            width=max(1, int(1 * SS)))
     cnx = 44
     intro = ease(prog(t, t0, t0 + 0.22))
