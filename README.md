@@ -24,7 +24,7 @@ Ship one line. Your agent keeps running in your process, behind your firewall, o
 
 ---
 
-## 🎡 A continual-learning loop around the agent you already have
+## <img src="docs/assets/flywheel-spinner.gif" height="26" alt="" align="middle"> A continual-learning loop around the agent you already have
 
 Your agent already does real work. **This turns that work into training data, and delivers what it learns back as an endpoint your agent already calls.**
 
