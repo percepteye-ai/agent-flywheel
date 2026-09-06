@@ -148,7 +148,7 @@ The first is informational only. A `serve()` rollout samples through the per-rol
 
     In `production`, `serve()` returns **before opening any connection**, so that deployment needs no control-plane URL and no key — turning training off never requires being configured for it. It returns rather than raising, because a switch that crashes the service it was meant to quiet is not a switch, and it prints the line above, because a silent no-op is the failure mode this package refuses everywhere else. An unrecognized value raises instead of guessing. Full table of accepted spellings and precedence in [configuration](configuration.md).
 
-The switch gates `serve()` — the surface that contributes capacity. It does not gate `attach()`, which is the production capture surface.
+The switch gates `serve()` — the call that does training work. It does not gate `attach()`, which is the production capture surface.
 
 ## Next
 

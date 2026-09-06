@@ -1,6 +1,6 @@
 """``attach()`` — capture in the process that serves users.
 
-``serve()`` contributes capacity. ``attach()`` contributes evidence, from turns the
+``serve()`` does training work. ``attach()`` records what your agent already did, from turns the
 customer's agent is already serving. Same adapters, same tri-state, same
 trajectory file — and, critically, NO rerouting: pointing production traffic at
 a new endpoint is ``apply_current_policy``'s job and the customer's decision.

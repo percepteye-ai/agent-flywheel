@@ -1,6 +1,6 @@
 # Production
 
-Your production agent is a **different process** from the one that contributes capacity. [`serve()`](quickstart.md) claims rollouts and runs them in child processes. This page is about the process that serves your users, and it does three things: picks up the model training produced, picks up the prompt training produced, and — optionally — contributes evidence from the turns it is already serving.
+Your production agent is a **different process** from the one that does training work. [`serve()`](quickstart.md) claims rollouts and runs them in child processes. This page is about the process that serves your users, and it does three things: picks up the model training produced, picks up the prompt training produced, and — optionally — contributes evidence from the turns it is already serving.
 
 None of it requires a redeploy of your agent's code, and none of it opens an inbound port.
 
@@ -175,7 +175,7 @@ The contract is a **pair**: this prompt was approved against that checkpoint, an
 
 ## `attach()` — evidence from live turns
 
-`serve()` contributes capacity. `attach()` contributes evidence, from turns you are already serving — same [adapters](python.md), same tri-state [outcomes](outcomes.md), same trajectory format, same absence contract, scoped around a live user turn instead of a claimed rollout.
+`serve()` does training work. `attach()` records what your agent already did, from turns you are already serving — same [adapters](python.md), same tri-state [outcomes](outcomes.md), same trajectory format, same absence contract, scoped around a live user turn instead of a claimed rollout.
 
 ```python
 px = fw.attach(agent_id="support-agent", trajectory_root="/var/lib/percepteye")
@@ -222,7 +222,7 @@ They are separate calls because the answer does not exist yet when the turn open
 
 `record_tool_call()` works inside a turn exactly as it does inside a rollout. With the `otel` extra installed, a turn's span carries `percepteye.turn.id` rather than `percepteye.rollout.id`, so your own telemetry can tell the two apart too.
 
-**`PERCEPTEYE_AGENT_MODE` does not gate `attach()`.** That switch gates `serve()`, the surface that contributes capacity. `attach()` *is* the production surface, and gating it on the same variable would mean the correct setting for a production agent was `PERCEPTEYE_AGENT_MODE=training`. To stop capture, don't call `attach()`, or pass `register=False` to keep it entirely local. See [Configuration](configuration.md).
+**`PERCEPTEYE_AGENT_MODE` does not gate `attach()`.** That switch gates `serve()`, the call that does training work. `attach()` *is* the production surface, and gating it on the same variable would mean the correct setting for a production agent was `PERCEPTEYE_AGENT_MODE=training`. To stop capture, don't call `attach()`, or pass `register=False` to keep it entirely local. See [Configuration](configuration.md).
 
 **What it ships, and when.** `flywheel/1` gained `POST /turns`, so captured turns
 are uploaded — subject to one gate and one cadence.

@@ -202,7 +202,7 @@ def _mode_from(raw: Any, *, source: str) -> str:
     if key not in _MODE_ALIASES:
         raise ConfigurationError(
             f"{source}{raw!r} is not a mode. Use 'training' (this process "
-            f"contributes capacity: it claims rollouts and runs them) or "
+            f"does training work: it claims rollouts and runs them) or "
             f"'production' (it does not). Recognised spellings: "
             f"{', '.join(sorted(_MODE_ALIASES))}."
         )

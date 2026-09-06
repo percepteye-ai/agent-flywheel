@@ -4,7 +4,7 @@ Every knob is a keyword argument on `serve()` or one of seven environment variab
 
 ## The mode switch
 
-`PERCEPTEYE_AGENT_MODE` decides whether this process contributes capacity. It is the one knob that turns the flywheel off.
+`PERCEPTEYE_AGENT_MODE` decides whether this process does training work. It is the one knob that turns the flywheel off.
 
 ```bash
 PERCEPTEYE_AGENT_MODE=training      # claim rollouts and run them (the default when unset)
@@ -43,7 +43,7 @@ Case-insensitive, surrounding whitespace stripped.
 
 ```text
 ConfigurationError: PERCEPTEYE_AGENT_MODE='staging' is not a mode. Use 'training'
-(this process contributes capacity: it claims rollouts and runs them) or 'production'
+(this process does training work: it claims rollouts and runs them) or 'production'
 (it does not). Recognised spellings: fine-tuning, finetuning, improving, prod,
 production, rollout, rollouts, serving, train, training.
 ```

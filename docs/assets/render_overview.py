@@ -122,6 +122,7 @@ _DARK = dict(
     PF_TITLE=(186, 156, 240),
     PF_RULE=(66, 56, 88),
     PF_SUB=(108, 92, 140),
+    FRAME_EDGE=(56, 63, 72),
     PF_ROW=(56, 50, 74),
     PF_ROWTX=(96, 92, 112),
     CHIP_ON=(214, 196, 248),
@@ -162,6 +163,7 @@ _LIGHT = dict(
     PF_TITLE=(80, 30, 180),
     PF_RULE=(214, 202, 236),
     PF_SUB=(118, 102, 152),
+    FRAME_EDGE=(154, 165, 177),
     PF_ROW=(226, 216, 244),
     PF_ROWTX=(112, 120, 132),
     CHIP_ON=(88, 36, 190),
@@ -210,6 +212,7 @@ PF_EDGE = _T['PF_EDGE']
 PF_TITLE = _T['PF_TITLE']
 PF_RULE = _T['PF_RULE']
 PF_SUB = _T['PF_SUB']
+FRAME_EDGE = _T['FRAME_EDGE']
 PF_ROW = _T['PF_ROW']
 PF_ROWTX = _T['PF_ROWTX']
 CHIP_ON = _T['CHIP_ON']
@@ -388,16 +391,36 @@ def packet(d, x, y, c, w=18, h=7, a=1.0, trail=3):
 
 
 def wheel(d, cx, cy, r, ang, c, spokes=6):
-    d.ellipse(S((cx - r, cy - r, cx + r, cy + r)), outline=c, width=max(1, int(1.6 * SS)))
-    for i in range(spokes):
-        a = ang + i * (2 * math.pi / spokes)
-        d.line([S(cx + math.cos(a) * r * .30), S(cy + math.sin(a) * r * .30),
-                S(cx + math.cos(a) * r * .82), S(cy + math.sin(a) * r * .82)],
-               fill=c, width=max(1, int(1.4 * SS)))
-    d.ellipse(S((cx - r * .2, cy - r * .2, cx + r * .2, cy + r * .2)), fill=c)
+    """THE PRODUCT'S MARK, and it must be the SAME mark as the README title.
 
+    This used to be a spoked cartwheel. The title beside it carries an
+    asymmetric infinity inside a turning wheel, so the page showed two different
+    flywheels and the figure quietly disowned the wordmark above it.
 
-# ── the frame ────────────────────────────────────────────────────────────────
+    Same geometry as docs/assets/render_spinner.py: a Bernoulli lemniscate whose
+    lobes are UNIFORMLY scaled, small lobe first. Uniform per-lobe scaling is
+    what keeps the crossing tangents intact -- two ovals rotated about a shared
+    point cannot make an infinity, they make two kissing circles. The `spokes`
+    argument is kept so the call sites do not change; it is unused.
+    """
+    ratio, yscale = 0.52, 1.60
+    # the wheel: an arc with a gap, so rotation is visible at all
+    deg = math.degrees(ang) % 360.0
+    d.arc(S((cx - r, cy - r, cx + r, cy + r)), deg, deg + 268.0,
+          fill=c, width=max(1, int(1.7 * SS)))
+    # the loop, drawn as overlapping discs -- round joins for free at this size
+    a = r * 0.60
+    off = (1.0 - ratio) / 2.0 * a
+    rr = r * 0.085
+    for i in range(180):
+        s = i / 180.0
+        tt = s * 2.0 * math.pi + math.pi          # start on the SMALL lobe
+        dd = 1.0 + math.sin(tt) ** 2
+        x, y = math.cos(tt) / dd, math.sin(tt) * math.cos(tt) / dd
+        k = 1.0 if x >= 0 else ratio
+        px, py = cx + x * k * a - off, cy + y * k * yscale * a
+        d.ellipse(S((px - rr, py - rr, px + rr, py + rr)), fill=c)
+
 def draw_frame(i):
     t = i / FPS
     img = Image.new("RGB", (W * SS, H * SS), BG)
@@ -621,6 +644,13 @@ def draw_frame(i):
         text(d, (W - 44, 658), "outbound only  ·  no inbound port  ·  no GPU",
              F_TINY, fade(FOOT, a_bd), anchor="rm")
 
+    # A BORDER, because these sit inline on a white README page and a
+    # white-grounded figure with no edge reads as floating text rather than as a
+    # figure. Drawn on the SUPERSAMPLED canvas before the resize so it lands as
+    # a crisp hairline instead of a soft grey smear, and in a token so the dark
+    # theme gets an edge that suits its own ground.
+    d.rectangle(S((0, 0, W - 1, H - 1)), outline=FRAME_EDGE,
+                width=max(1, int(1.0 * SS)))
     return img.resize((W, H), Image.LANCZOS)
 
 

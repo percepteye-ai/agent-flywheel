@@ -114,7 +114,7 @@ _DARK = dict(
     CODE=(126, 176, 226), OKTXT=(94, 160, 110), LBL=(102, 110, 122),
     CHIP_ON=(214, 196, 248),
     PF_FILL=(26, 24, 40), PF_EDGE=(96, 76, 132), PF_TITLE=(186, 156, 240),
-    PF_RULE=(66, 56, 88), PF_SUB=(108, 92, 140),
+    PF_RULE=(66, 56, 88), PF_SUB=(108, 92, 140), FRAME_EDGE=(56, 63, 72),
     PF_ROW=(56, 50, 74), PF_ROWTX=(96, 92, 112), PF_CHIPBG=(26, 24, 40),
     RAIL=(60, 66, 75), FOOT=(128, 110, 160), HRULE=(26, 31, 38),
 )
@@ -134,7 +134,7 @@ _LIGHT = dict(
     CODE=(0, 82, 204), OKTXT=(2, 112, 48), LBL=(96, 105, 116),
     CHIP_ON=(88, 36, 190),
     PF_FILL=(250, 248, 255), PF_EDGE=(196, 180, 226), PF_TITLE=(80, 30, 180),
-    PF_RULE=(214, 202, 236), PF_SUB=(118, 102, 152),
+    PF_RULE=(214, 202, 236), PF_SUB=(118, 102, 152), FRAME_EDGE=(154, 165, 177),
     PF_ROW=(226, 216, 244), PF_ROWTX=(112, 120, 132), PF_CHIPBG=(246, 242, 254),
     RAIL=(176, 184, 194), FOOT=(112, 96, 148), HRULE=(222, 227, 233),
 )
@@ -175,6 +175,7 @@ PF_EDGE = _T['PF_EDGE']
 PF_TITLE = _T['PF_TITLE']
 PF_RULE = _T['PF_RULE']
 PF_SUB = _T['PF_SUB']
+FRAME_EDGE = _T['FRAME_EDGE']
 PF_ROW = _T['PF_ROW']
 PF_ROWTX = _T['PF_ROWTX']
 PF_CHIPBG = _T['PF_CHIPBG']
@@ -380,16 +381,35 @@ def pill(d, x, y, label, f, color, on: float, base=CARD, pad=11, hgt=22, dot=Tru
 
 
 def flywheel_icon(d, cx, cy, r, angle, color, spokes=6):
-    d.ellipse(S((cx - r, cy - r, cx + r, cy + r)), outline=color,
-              width=max(1, int(1.6 * SS)))
-    for i in range(spokes):
-        a = angle + i * (2 * math.pi / spokes)
-        d.line([S(cx + math.cos(a) * r * 0.30), S(cy + math.sin(a) * r * 0.30),
-                S(cx + math.cos(a) * r * 0.82), S(cy + math.sin(a) * r * 0.82)],
-               fill=color, width=max(1, int(1.4 * SS)))
-    d.ellipse(S((cx - r * 0.20, cy - r * 0.20, cx + r * 0.20, cy + r * 0.20)),
-              fill=color)
+    """THE PRODUCT'S MARK, and it must be the SAME mark as the README title.
 
+    This used to be a spoked cartwheel. The title beside it carries an
+    asymmetric infinity inside a turning wheel, so the page showed two different
+    flywheels and the figure quietly disowned the wordmark above it.
+
+    Same geometry as docs/assets/render_spinner.py: a Bernoulli lemniscate whose
+    lobes are UNIFORMLY scaled, small lobe first. Uniform per-lobe scaling is
+    what keeps the crossing tangents intact -- two ovals rotated about a shared
+    point cannot make an infinity, they make two kissing circles. The `spokes`
+    argument is kept so the call sites do not change; it is unused.
+    """
+    ratio, yscale = 0.52, 1.60
+    # the wheel: an arc with a gap, so rotation is visible at all
+    deg = math.degrees(angle) % 360.0
+    d.arc(S((cx - r, cy - r, cx + r, cy + r)), deg, deg + 268.0,
+          fill=color, width=max(1, int(1.7 * SS)))
+    # the loop, drawn as overlapping discs -- round joins for free at this size
+    a = r * 0.60
+    off = (1.0 - ratio) / 2.0 * a
+    rr = r * 0.085
+    for i in range(180):
+        s = i / 180.0
+        tt = s * 2.0 * math.pi + math.pi          # start on the SMALL lobe
+        dd = 1.0 + math.sin(tt) ** 2
+        x, y = math.cos(tt) / dd, math.sin(tt) * math.cos(tt) / dd
+        k = 1.0 if x >= 0 else ratio
+        px, py = cx + x * k * a - off, cy + y * k * yscale * a
+        d.ellipse(S((px - rr, py - rr, px + rr, py + rr)), fill=color)
 
 def glow(d, box, color, a, radius=12, rings=3):
     """A soft focus ring around a card. Cheap, and reads as attention."""
@@ -790,6 +810,13 @@ def draw_frame(i: int) -> Image.Image:
     text(d, (cnx + 34 + tw(verb, F_CAP) + 16, 674), cap, F_CAPSUB,
          mix(BG, MUTED, seam * intro), anchor="lm")
 
+    # A BORDER, because these sit inline on a white README page and a
+    # white-grounded figure with no edge reads as floating text rather than as a
+    # figure. Drawn on the SUPERSAMPLED canvas before the resize so it lands as
+    # a crisp hairline instead of a soft grey smear, and in a token so the dark
+    # theme gets an edge that suits its own ground.
+    d.rectangle(S((0, 0, W - 1, H - 1)), outline=FRAME_EDGE,
+                width=max(1, int(1.0 * SS)))
     return img.resize((W, H), Image.LANCZOS)
 
 

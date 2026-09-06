@@ -104,7 +104,7 @@ Beat ⓪ is why you never write a task list. Tasks come from **the tool surface 
 
 ## 🎚 Two modes, one image
 
-One variable decides whether a deployment contributes capacity. The same container does either, with no code edit.
+One variable decides whether a deployment does training work. The same container does either, with no code edit.
 
 ```bash
 PERCEPTEYE_AGENT_MODE=training      # the default when unset
@@ -121,7 +121,7 @@ PERCEPTEYE_AGENT_MODE=production
 `production` restores the endpoint value *you* had, not a default we picked — read once, before we ever write to your config, and kept across upgrades. An unrecognised value **raises** rather than guessing: a typo that silently picked `training` would keep spending your credentials with nothing printed. (`train`, `rollout`, `fine-tuning` also mean contribute; `prod` and `serving` mean don't. `mode=` in code beats the variable, and the printed line says when that happened.)
 
 > [!IMPORTANT]
-> The switch gates **`serve()`**, the surface that contributes capacity. It does not gate `attach()` — that *is* the production surface. Gating both would mean the correct setting for a production agent was `training`.
+> The switch gates **`serve()`** — the call that does training work. It does not gate `attach()` — that *is* the production surface. Gating both would mean the correct setting for a production agent was `training`.
 
 **Contribute nothing, still get the trained model.** No `serve()`, no `attach()`, no registration:
 
