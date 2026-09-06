@@ -17,8 +17,9 @@
 # its source the first time someone edits one without the other. Run this after
 # touching either renderer.
 #
-#   ./render.sh            # all three
-#   ./render.sh overview   # just one
+#   ./render.sh            # every figure, BOTH flavours
+#   ./render.sh overview   # just one (Python flavour)
+#   ./render.sh node       # just the Node flavour
 #
 # Needs: python with Pillow, and ffmpeg -- EXCEPT for the architecture figure,
 # which is an SVG and needs neither. It is static, so it does not need a frame
@@ -90,6 +91,17 @@ case "${1:-all}" in
     render flywheel-loop render_flywheel_loop.py 224 f0466.png
     spinner
     architecture
+    # BOTH FLAVOURS, always. `all` used to mean "everything except the Node
+    # figures", so the ordinary way to rebuild after editing a renderer left
+    # the Node README advertising the previous version of the same diagram --
+    # and `_ROWS` in render_overview.py encodes a CLAIM about which halves each
+    # package applies, so a stale copy is wrong even when it looks right.
+    FLAVOUR=node render flywheel-overview-node render_overview.py 128 f0455.png
+    FLAVOUR=node render flywheel-loop-node render_flywheel_loop.py 224 f0466.png
+    echo
+    echo "Now copy the four *-node.{gif,png} files into the Node repo as its"
+    echo "plain-named docs/assets/flywheel-{overview,loop}.{gif,png}."
+    echo "tests/test_node_figures_match.py fails until you do."
     ;;
   *) echo "usage: $0 [all|overview|loop|spinner|architecture|node]" >&2; exit 2 ;;
 esac

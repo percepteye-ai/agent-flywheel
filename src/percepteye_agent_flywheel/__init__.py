@@ -6,7 +6,7 @@
         "my_package.agent:build",       # importable, so a child can rebuild it
         agent_id="my-coding-agent",
         input_shape="text",
-        control_plane_url="https://api.percepteye.ai/api/flywheel/v1",
+        control_plane_url="https://launch.percepteye.ai/api/flywheel/v1",
     )
 
 Outbound only. The flywheel dials out, claims a rollout, runs it, reports back.
@@ -44,6 +44,7 @@ believe it.
 """
 from __future__ import annotations
 
+import logging
 import os
 import warnings
 from collections.abc import Callable, Mapping
@@ -85,8 +86,15 @@ from .outcomes import (
     current_rollout_id,
     record_tool_call,
 )
-from .policy import PolicySnapshot, PolicySource, policy_source
-from .production import Attachment, attach
+from .policy import (
+    ARCHIVE_REF_PREFIXES,
+    PolicySnapshot,
+    PolicySource,
+    is_archive_ref,
+    missing_credentials_cause,
+    policy_source,
+)
+from .production import Attachment, CaptureVerdict, attach, capture_verdict
 from .prompt import (
     SERVABLE_PROMPT_STATUSES,
     PromptDecision,
@@ -97,13 +105,24 @@ from .transport import AttachTransport, FlywheelTransport
 
 __version__ = "0.1.0"
 
+#: This package's logger. It has no handler and never installs one -- it
+#: emits into whatever logging the customer's process already configured,
+#: exactly as the OpenTelemetry extra emits into their TracerProvider.
+#: Used for the answers a caller CANNOT see in the return value: `{}` from
+#: `endpoint_kwargs` and `current_prompt` is the same value for "nothing is
+#: deployed" and "you never told me where the control plane is", and only
+#: one of those is a thing an operator can fix.
+_log = logging.getLogger(__name__)
+
 __all__ = [
+    "ARCHIVE_REF_PREFIXES",
     "CONTRACT_VERSION",
     "SERVABLE_PROMPT_STATUSES",
     "TASK",
     "AttachTransport",
     "Attachment",
     "CaptureScope",
+    "CaptureVerdict",
     "ConfigurationError",
     "ContractViolation",
     "DiscoveredAgent",
@@ -129,6 +148,7 @@ __all__ = [
     "__version__",
     "apply_current_policy",
     "attach",
+    "capture_verdict",
     "current_capture",
     "current_mode",
     "current_policy",
@@ -136,6 +156,7 @@ __all__ = [
     "current_rollout_id",
     "endpoint_kwargs",
     "introspect_agent",
+    "is_archive_ref",
     "policy_source",
     "prompt_decision",
     "record_tool_call",
@@ -302,9 +323,15 @@ def current_policy(
     hand you — keep your current configuration, do not fall back to
     something you guessed.
     """
-    url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL)
-    key = api_key or os.environ.get(ENV_API_KEY)
-    if not url or not key:
+    url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL) or ""
+    key = api_key or os.environ.get(ENV_API_KEY) or ""
+    cause = missing_credentials_cause(url, key)
+    if cause:
+        _log.warning(
+            "percepteye: not reading the served policy for agent_id=%r: %s, so "
+            "the control plane was never asked. This agent keeps the model it "
+            "is on.", agent_id, cause,
+        )
         return {}
     from ._http import ControlPlaneClient
 
@@ -367,9 +394,19 @@ def current_prompt(
     the same bundles for the same stated reason. See
     :mod:`percepteye_agent_flywheel.prompt`.
     """
-    url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL)
-    key = api_key or os.environ.get(ENV_API_KEY)
-    if not url or not key:
+    url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL) or ""
+    key = api_key or os.environ.get(ENV_API_KEY) or ""
+    cause = missing_credentials_cause(url, key)
+    if cause:
+        # SAID, because `prompt_decision({})` blames the control plane for
+        # serving no approved prompt -- true of the empty answer and wrong
+        # about why, which sends an operator to the dashboard to look for an
+        # approval that was never the problem.
+        _log.warning(
+            "percepteye: not reading the served prompt for agent_id=%r: %s, so "
+            "the control plane was never asked. This agent keeps the prompt it "
+            "assembles itself.", agent_id, cause,
+        )
         return {}
     from ._http import ControlPlaneClient
 
@@ -435,10 +472,32 @@ def endpoint_kwargs(
     )
     if not key:
         return {}
+    model = str(ep.get("model") or "")
+    # AN ARCHIVE URI IS NOT A MODEL NAME, and this is the model half of the
+    # pair rule `prompt_decision` enforces for the prompt half. The control
+    # plane already refuses to serve one; re-asserted here on the same argument
+    # as `SERVABLE_PROMPT_STATUSES`, because a candidate whose checkpoint has
+    # been uploaded but not yet deployed behind a serving endpoint would
+    # otherwise be handed to `OpenAI(model="gs://...")` and 404 on every
+    # completion. Refusing keeps the champion, which is what every other gate
+    # on this path fails closed to.
+    #
+    # SAID OUT LOUD, because silence here is indistinguishable from "nothing is
+    # deployed": `{}` is this function's ordinary answer and the caller is
+    # documented to read it as "keep your current configuration". An operator
+    # whose promotion never arrives needs the sentence, not the empty dict.
+    if is_archive_ref(model):
+        _log.warning(
+            "percepteye: NOT applying the served policy for this agent: the "
+            "served model %r is a stored-artifact reference, not a name an "
+            "endpoint can serve; that address would 404 on every completion. "
+            "Keeping the model you are on.", model,
+        )
+        return {}
     return {
         "base_url": str(ep["base_url"]),
         "api_key": str(key),
-        "model": str(ep.get("model") or ""),
+        "model": model,
     }
 
 

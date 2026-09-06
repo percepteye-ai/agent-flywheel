@@ -56,6 +56,7 @@ WHAT IT WILL NOT DO
 """
 from __future__ import annotations
 
+import logging
 import random
 import threading
 import time
@@ -63,7 +64,68 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
-__all__ = ["PolicySnapshot", "PolicySource", "policy_source"]
+__all__ = [
+    "ARCHIVE_REF_PREFIXES",
+    "PolicySnapshot",
+    "PolicySource",
+    "is_archive_ref",
+    "missing_credentials_cause",
+    "policy_source",
+]
+
+
+def missing_credentials_cause(url: str | None, key: str | None) -> str | None:
+    """WHICH control-plane variable is unset. ``None`` when neither is.
+
+    ONE answer to a question asked wherever the control plane is dialled:
+    ``current_policy``, ``current_prompt`` (and ``apply_current_policy``
+    through the first), :meth:`PolicySource._fetch`,
+    :func:`~percepteye_agent_flywheel.attach`, and ``percepteye status``. All
+    resolve the same pair, and all used to fail the same way: ``if not url or
+    not key: return {}``, with nothing said. That empty answer is
+    indistinguishable from the control plane's own "nothing is deployed for
+    this agent", which is the answer
+    callers are documented to read as "keep your current configuration" -- so a
+    production agent with an unset variable ran the untrained model forever
+    while every health signal the SDK offers said fine.
+
+    Returns the CAUSE only, never the consequence: each call site knows what it
+    could not do and says so itself. A refusal that names the wrong subsystem
+    costs more than one that says nothing.
+    """
+    from . import ENV_API_KEY, ENV_CONTROL_PLANE_URL
+
+    if not url and not key:
+        return f"neither {ENV_CONTROL_PLANE_URL} nor {ENV_API_KEY} is set"
+    if not url:
+        return f"{ENV_CONTROL_PLANE_URL} is not set"
+    if not key:
+        return f"{ENV_API_KEY} is not set"
+    return None
+
+
+#: Prefixes that mean STORED ARTIFACT, not sampling address.
+#:
+#: The control plane already refuses to hand one of these out as a ``model``,
+#: for exactly the reason this refuses to use one: ``model="gs://bucket/run/
+#: iter_0"`` is a bucket path, and it 404s on every completion. Re-asserting it
+#: here is not a duplicate gate -- it is the same argument
+#: :data:`~percepteye_agent_flywheel.prompt.SERVABLE_PROMPT_STATUSES` is
+#: re-asserted on, applied to the other half of the pair: the only thing
+#: standing between a control plane that one day widens the filter and a
+#: customer's agent pointed at an address that answers nothing.
+#:
+#: THE SAME SET THE NODE SDK REFUSES ON (``ARCHIVE_REF_PREFIXES`` in
+#: ``src/policy.js``). Both halves of an improvement are approved together and
+#: both SDKs are supposed to refuse the same bundles; this half was enforced in
+#: Node and absent here, while the Python README stated it as a live guarantee.
+ARCHIVE_REF_PREFIXES = ("gs://", "s3://", "file://", "/")
+
+
+def is_archive_ref(model: str) -> bool:
+    """Is this ``model`` a stored artifact rather than a servable name?"""
+    return model.startswith(ARCHIVE_REF_PREFIXES)
+
 
 #: Never poll faster than this, whatever the caller asks for or the server
 #: hints. A misconfigured ``ttl_s=1`` across a fleet is a denial of service
@@ -82,6 +144,10 @@ REFRESH_TIMEOUT_S = 1.0
 #: delivering a synchronised spike to /policy/current every TTL. Decided once
 #: per handle at construction so a handle's cadence is stable.
 JITTER_FRACTION = 0.10
+
+#: Emits into whatever logging the customer already configured; installs
+#: nothing. See the note on the package logger in ``__init__``.
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -105,12 +171,22 @@ class PolicySnapshot:
     #: sharing a handle will not both see the edge, by construction.
     changed: bool = False
 
-    #: 0.0 while refreshes are succeeding; grows while they are failing. This
-    #: is the number to alert on — it is the only outward sign that an agent
-    #: is running a policy the control plane may have moved on from.
+    #: 0.0 while refreshes are succeeding; grows while they are failing.
+    #:
+    #: MEASURED FROM THE LAST SUCCESS, OR FROM WHEN THE HANDLE WAS BUILT if
+    #: there has never been one. Both cases are the same fact — "this long
+    #: since the control plane last told us anything" — and reporting 0.0 for
+    #: the second one made the whole-fleet outage the quietest state there is:
+    #: a firewall rule that blocked the control plane from first boot left
+    #: every replica reporting a perfectly fresh policy it had never received.
+    #:
+    #: Alert on this together with ``last_refresh_ok``, not instead of it: this
+    #: one says how long, that one says whether the last attempt worked.
     stale_for_s: float = 0.0
 
-    #: False after a failed refresh attempt. The snapshot still stands.
+    #: Whether the LAST refresh attempt succeeded. False after a failed one --
+    #: including one that never reached the network because no control-plane
+    #: URL or key is configured. The snapshot still stands either way.
     last_refresh_ok: bool = True
 
     #: The control plane's own answer to "is what I booted with still
@@ -204,6 +280,13 @@ class PolicySource:
         self._state_lock = threading.Lock()
         self._snap = PolicySnapshot()
         self._last_ok_at: float | None = None
+        #: When this handle was built, so `stale_for_s` can be measured
+        #: from something even when no refresh has ever succeeded.
+        self._created_at = _now()
+        #: Said once per handle, not once per TTL: a missing variable does
+        #: not fix itself, and a line per request would be the noisiest
+        #: possible way to report the quietest possible failure.
+        self._warned_no_credentials = False
         self._next_refresh_at: float = -1.0     # -1 => never fetched
         self._last_identity: tuple[str, str, str] | None = None
         self._fetch_override = _fetch
@@ -252,9 +335,13 @@ class PolicySource:
     # ── internals ─────────────────────────────────────────────────────────
 
     def _stale_for(self, now: float) -> float:
-        if self._last_ok_at is None:
-            return 0.0
-        overdue = now - self._last_ok_at - self.ttl_s
+        # NEVER-SUCCEEDED IS THE STALEST STATE THERE IS, not the freshest. This
+        # returned 0.0 whenever `_last_ok_at` was None, which is the state after
+        # any number of failed refreshes if none has ever landed -- so a fleet
+        # that could not reach the control plane from its first boot reported
+        # `stale_for_s = 0.0` forever and the documented alert never fired.
+        since = self._last_ok_at if self._last_ok_at is not None else self._created_at
+        overdue = now - since - self.ttl_s
         return overdue if overdue > 0.0 else 0.0
 
     def _maybe_refresh(self, now: float) -> None:
@@ -351,11 +438,29 @@ class PolicySource:
 
             from . import ENV_API_KEY, ENV_CONTROL_PLANE_URL
             from ._http import ControlPlaneClient
+            from .errors import ConfigurationError
 
-            url = self._url_arg or os.environ.get(ENV_CONTROL_PLANE_URL)
-            key = self._api_key_arg or os.environ.get(ENV_API_KEY)
-            if not url or not key:
-                return {}
+            url = self._url_arg or os.environ.get(ENV_CONTROL_PLANE_URL) or ""
+            key = self._api_key_arg or os.environ.get(ENV_API_KEY) or ""
+            cause = missing_credentials_cause(url, key)
+            if cause:
+                if not self._warned_no_credentials:
+                    self._warned_no_credentials = True
+                    _log.warning(
+                        "percepteye: policy_source(agent_id=%r) will never "
+                        "refresh: %s, so the control plane is never asked. "
+                        "This agent keeps the model it is on, and no "
+                        "promotion -- or rollback -- can reach it.",
+                        self.agent_id, cause,
+                    )
+                # RAISED, not returned as `{}`. An empty body is absorbed as a
+                # SUCCESSFUL refresh that found nothing deployed, so this path
+                # used to set `last_refresh_ok=True` having never opened a
+                # socket -- the one health signal the SDK offers, reporting
+                # fine about a handle that cannot work.
+                raise ConfigurationError(
+                    f"percepteye: {cause}, so the control plane cannot be "
+                    f"asked for a policy")
             # max_attempts=1: see REFRESH_TIMEOUT_S. The budget has to be a
             # TOTAL, and a retry ladder inside a "bounded" refresh is how a
             # 1s promise becomes 3s plus backoff.

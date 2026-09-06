@@ -37,6 +37,34 @@ def _package_files():
     return sorted(p for p in SRC.rglob("*.py"))
 
 
+#: Directories that are never published, whichever way the file list is built.
+#: Only consulted on the unpacked-sdist path — a git checkout answers this
+#: itself, and these are the things pytest and pip leave behind when the suite
+#: is run inside a tarball.
+_NEVER_PUBLISHED = {".git", ".venv", "__pycache__", ".pytest_cache",
+                    ".mypy_cache", ".ruff_cache", "build", "dist", ".eggs",
+                    ".tox", ".nox", "node_modules"}
+
+
+def _virtualenv_roots(root):
+    """Every virtualenv inside ``root``, found by its OWN marker file.
+
+    ASKED AS "does this directory carry ``pyvenv.cfg``", NOT "is it called
+    ``.venv``". The name is a convention; the marker is the definition, and
+    the name list above answers only the half of the question that the
+    README's own Development block happens to spell. An auditor who unpacks
+    the sdist and builds the environment beside the suite under any other
+    name -- ``venv``, ``env``, ``.direnv``, a bare ``py312`` -- otherwise has
+    every installed third-party package scanned as though this project
+    published it. Measured, with the environment named ``.fresh``: three of
+    these tests fail, naming Google ADK and two dependency licence files as
+    leaks of ``vllm`` and ``doctrine``. That is a false report of the exact
+    property this file exists to certify, produced by the exact downstream
+    audit the sdist fallback below was written to serve.
+    """
+    return {cfg.parent for cfg in root.rglob("pyvenv.cfg")}
+
+
 def _published_files():
     """Every file git tracks, which is exactly what the public repo shows.
 
@@ -48,19 +76,39 @@ def _published_files():
 
     This file is excluded because it has to name the internals in order to
     forbid them.
+
+    OUTSIDE A GIT CHECKOUT THE TREE ITSELF IS THE ANSWER, and that case is not
+    hypothetical: this suite ships in the sdist, so the standard downstream
+    audit -- ``pip download --no-binary :all:``, unpack, run the tests -- runs
+    it in a directory git has never heard of. ``git ls-files`` exited 128 there
+    and ``check=True`` turned it into an error before the vacuous-scan
+    assertion below could say anything useful. Every file in an unpacked sdist
+    is by definition published, so the fallback scans the tree rather than
+    skipping: a boundary test that quietly does nothing in the one artifact a
+    stranger inspects is the shape this file exists to refuse.
     """
-    out = subprocess.run(
-        ["git", "ls-files", "-z"], cwd=ROOT,
-        capture_output=True, text=True, check=True,
-    ).stdout
+    proc = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, text=True,
+    )
     here = pathlib.Path(__file__).resolve()
+    if proc.returncode == 0:
+        candidates = ((ROOT / rel) for rel in filter(None, proc.stdout.split("\0")))
+        source = "git ls-files"
+    else:
+        venvs = _virtualenv_roots(ROOT)
+        candidates = (
+            p for p in ROOT.rglob("*")
+            if not _NEVER_PUBLISHED & set(p.relative_to(ROOT).parts)
+            and not any(v in p.parents for v in venvs)
+        )
+        source = f"the unpacked tree at {ROOT} (not a git checkout)"
     paths = []
-    for rel in filter(None, out.split("\0")):
-        p = (ROOT / rel).resolve()
+    for p in candidates:
+        p = p.resolve()
         if p == here or not p.is_file():
             continue
         paths.append(p)
-    assert paths, "git ls-files returned nothing — the scan would pass vacuously"
+    assert paths, f"{source} returned nothing — the scan would pass vacuously"
     return sorted(paths)
 
 

@@ -7,10 +7,32 @@ agent is a binary and who may never call :func:`serve` at all.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Sequence
 
 from .errors import ConfigurationError
+
+
+def _contribution_line() -> str:
+    """Whether this install will claim rollouts, and if not WHICH variable.
+
+    Both variables are required and neither has a default, so the message that
+    named only ``PERCEPTEYE_API_KEY`` was wrong for the customer who had
+    already exported it: they were told to set the thing they had set, while
+    the thing that was actually missing went unnamed. Asked through the same
+    predicate the library asks, so the CLI and the SDK cannot disagree about
+    what "configured" means.
+    """
+    from .policy import missing_credentials_cause
+
+    cause = missing_credentials_cause(
+        os.environ.get("PERCEPTEYE_CONTROL_PLANE_URL"),
+        os.environ.get("PERCEPTEYE_API_KEY"),
+    )
+    if cause is None:
+        return "rollouts  claimed — the control plane URL and key are both set"
+    return f"rollouts  NOT claimed — {cause}"
 
 
 def _cmd_install_hooks(args: argparse.Namespace) -> int:
@@ -31,11 +53,70 @@ def _cmd_install_hooks(args: argparse.Namespace) -> int:
     if out["replaced_foreign"]:
         print("            (replaced a plugin this command did not install)")
     _print_endpoint(out["endpoint"])
+    print(f"            {_contribution_line()}")
     print()
     print("goose will load it on its next run. Nothing else is required for tool")
-    print("outcomes; set PERCEPTEYE_API_KEY to contribute rollouts.")
+    print("outcomes; `percepteye report` prints what it recorded.")
     _ = goose_plugins_dir  # imported for the error path's message symmetry
     return 0
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    """Print the tool-failure rate the plugin recorded. The day-one payoff.
+
+    THE CONSUMER THIS SCRIPT NEVER HAD. ``percepteye_report.py`` shipped in
+    every wheel and was named by exactly one line of code -- the constant
+    binding it -- so the number the README leads with was reachable only by
+    finding the file inside site-packages and running it by hand.
+
+    Loaded from the same path the wheel installs rather than reimplemented: the
+    script is standard-library-only on purpose and is the one place that knows
+    how to read the file the recorder writes.
+    """
+    import importlib.util
+
+    from .hosts import RECORDER, REPORTER
+
+    def _load(path, name):
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:      # pragma: no cover
+            raise ImportError(f"cannot load {path}")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    try:
+        reporter = _load(REPORTER, "_percepteye_report")
+        recorder = _load(RECORDER, "_percepteye_record")
+    except (OSError, ImportError) as exc:
+        print(f"percepteye: this install is missing its reporter: {exc}",
+              file=sys.stderr)
+        return 1
+
+    target = args.directory
+    if target is None:
+        # THE MOST RECENT SESSION, because that is the one a customer who just
+        # ran their agent means. The recorder writes one directory per session
+        # under a root only it knew; asking it for that root rather than
+        # rebuilding the join here is what keeps the reader pointed at the
+        # same place the writer writes.
+        root = recorder.turns_root()
+        try:
+            sessions = [
+                os.path.join(root, d) for d in os.listdir(root)
+                if os.path.isfile(
+                    os.path.join(root, d, reporter.TOOL_CALLS_FILENAME))
+            ]
+        except OSError:
+            sessions = []
+        if sessions:
+            target = max(sessions, key=os.path.getmtime)
+            print(f"percepteye: the most recent session under {root}\n")
+        else:
+            # The reporter's own empty-state help, which names the directory
+            # and how to record one, is better than anything said here.
+            target = root
+    return int(reporter.main(["percepteye report", target]))
 
 
 def _print_endpoint(ep: dict) -> None:
@@ -86,6 +167,10 @@ def _cmd_status(args: argparse.Namespace) -> int:
         _print_endpoint(reconcile_endpoint())
     except OSError as exc:
         print(f"            endpoint  UNREADABLE — {exc}")
+    # Printed on STATUS as well as install, because "where does my traffic go"
+    # and "am I contributing" are the two questions this command exists to
+    # answer and only the first one was answered.
+    print(f"            {_contribution_line()}")
     if st.get("stale"):
         # Said loudly: the rendered command is a snapshot of two paths, so a
         # moved virtualenv or a contract bump leaves a plugin that loads and
@@ -116,6 +201,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_status = sub.add_parser(
         "status", help="report whether the host plugin is installed and current")
     p_status.set_defaults(func=_cmd_status)
+
+    p_report = sub.add_parser(
+        "report",
+        help="print your agent's real tool-failure rate from what was recorded")
+    p_report.add_argument(
+        "directory", nargs="?", default=None,
+        help="a trajectory directory; defaults to the most recent session")
+    p_report.set_defaults(func=_cmd_report)
 
     args = parser.parse_args(argv)
     try:

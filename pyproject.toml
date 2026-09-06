@@ -43,7 +43,7 @@ dependencies = ["httpx>=0.27"]
 
 [project.urls]
 Homepage = "https://github.com/percepteye-ai/agent-flywheel"
-Documentation = "https://docs.percepteye.ai/flywheel"
+Documentation = "https://github.com/percepteye-ai/agent-flywheel/tree/main/website/docs"
 Source = "https://github.com/percepteye-ai/agent-flywheel"
 Issues = "https://github.com/percepteye-ai/agent-flywheel/issues"
 
@@ -55,7 +55,14 @@ Issues = "https://github.com/percepteye-ai/agent-flywheel/issues"
 # Lint is a moving target by design; a pin makes moving it a deliberate commit
 # that lands the fixes alongside it, rather than an ambient event. Everything
 # else here stays a floor: pytest and mypy are not gating the badge.
-dev = ["pytest>=7.4", "pytest-asyncio>=0.23", "ruff==0.16.2", "mypy>=1.8"]
+# `hatchling` is here for `tests/test_packaging.py`, which builds a real
+# sdist and wheel to assert what actually ships. It is the build backend
+# this project already declares, so this pins nothing new -- it just makes
+# it importable in the test environment rather than only in pip's isolated
+# build env. Build-time and test-time only; the one-runtime-dependency
+# invariant is about [project.dependencies] and is untouched.
+dev = ["pytest>=7.4", "pytest-asyncio>=0.23", "ruff==0.16.2", "mypy>=1.8",
+       "hatchling>=1.24"]
 # Frameworks the built-in adapters bind to. NOT runtime dependencies -- no
 # adapter imports its framework at module scope, so an absent framework just
 # fails that adapter's probe. These exist so CI actually exercises the
@@ -104,7 +111,26 @@ percepteye = "percepteye_agent_flywheel.cli:main"
 packages = ["src/percepteye_agent_flywheel"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/", "schema/", "tests/", "README.md", "LICENSE"]
+# EVERY ENTRY IS ANCHORED WITH A LEADING SLASH, and that is not decoration.
+# Hatchling matches these as gitignore-style patterns, so an entry with no
+# slash in it matches that BASENAME AT EVERY DEPTH: bare `README.md` was
+# shipping `website/README.md` and both `examples/*/README.md` -- files outside
+# the five paths this list appears to name -- and the standing rule that
+# `docs/assets/` must never reach a package held only because no asset happened
+# to be called `README.md`. The sibling Node repo keeps exactly such a file.
+#
+# `examples/` and `scripts/` are here because `tests/` is: the shipped suite
+# reads `examples/prime_agent/serve_prime.py` and the goose example, and
+# `tests/node_sdk.py` resolves the sibling Node SDK by running
+# `scripts/cross_language_abi_check.sh`. Without them the artifact shipped the
+# suite that certifies it and that suite was red in the artifact -- 51 failures
+# and errors out of 670 -- for anyone who did the standard
+# `pip download --no-binary :all:` and ran it. `tests/test_packaging.py` now
+# asserts what these patterns actually select, against a real build.
+include = [
+  "/src/", "/schema/", "/tests/", "/examples/", "/scripts/",
+  "/README.md", "/LICENSE",
+]
 
 [tool.ruff]
 line-length = 100

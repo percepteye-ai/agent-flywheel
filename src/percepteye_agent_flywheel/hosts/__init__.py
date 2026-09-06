@@ -27,7 +27,8 @@ from pathlib import Path
 HOSTS_DIR = Path(__file__).resolve().parent
 
 #: The shared recorder. One file, two host vocabularies (goose's
-#: PostToolUse/PostToolUseFailure split, Gemini's inline ``tool_response.error``).
+#: PostToolUse/PostToolUseFailure split, Gemini's inline ``tool_response.error``)
+#: -- but only goose has an installer here; see the note at the bottom.
 RECORDER = HOSTS_DIR / "scripts" / "percepteye_record.py"
 
 #: The human-facing report — "your agent's real tool failure rate", no account
@@ -36,4 +37,17 @@ RECORDER = HOSTS_DIR / "scripts" / "percepteye_record.py"
 REPORTER = HOSTS_DIR / "scripts" / "percepteye_report.py"
 
 GOOSE_MANIFEST = HOSTS_DIR / "goose" / "plugin.json"
-GEMINI_MANIFEST = HOSTS_DIR / "gemini" / "gemini-extension.json"
+
+# GEMINI CLI IS HALF-BUILT, AND NO LONGER SHIPS A MANIFEST. `percepteye_record`
+# speaks Gemini's `AfterTool` / `tool_response.error` vocabulary and is correct;
+# what does not exist is the other half -- hook wiring in an extension manifest,
+# and an `install_gemini` to place it. `hosts/gemini/gemini-extension.json` used
+# to ship in every wheel carrying a name, a version and a description and no
+# wiring of any kind, so a Gemini user who found it, believed the description
+# ("records ok/failed/unknown per tool call") and copied it into their
+# extensions directory registered nothing and captured nothing, with no command
+# that would have installed it and no error saying so. `install_hooks` installs
+# goose and only goose, and the README's harness table lists no Gemini row.
+#
+# Whoever finishes this needs Gemini CLI's own hook schema in front of them --
+# not a manifest reconstructed from what the goose one happens to contain.

@@ -52,8 +52,9 @@ import time
 import uuid
 import warnings
 import weakref
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -75,11 +76,86 @@ from .outcomes import (
     read_turn_text,
     record_turn_text,
 )
+from .policy import missing_credentials_cause
 
-__all__ = ["Attachment", "attach"]
+__all__ = ["Attachment", "CaptureVerdict", "attach", "capture_verdict"]
 
 ENV_CONTROL_PLANE_URL = "PERCEPTEYE_CONTROL_PLANE_URL"
 ENV_API_KEY = "PERCEPTEYE_API_KEY"
+
+
+@dataclass(frozen=True)
+class CaptureVerdict:
+    """May captured turns be uploaded, and if not, WHY NOT."""
+
+    #: Whether the control plane said yes, exactly.
+    may_upload: bool
+    #: The sentence explaining a ``False``. ``None`` when and only when
+    #: ``may_upload`` is true -- so a caller that shows this to an operator
+    #: always has something to show.
+    reason: str | None
+    #: Whether the control plane ANSWERED the question at all, as opposed to
+    #: sending a body with no ``capture`` block in it. Both are ``may_upload
+    #: = False``, and they are different facts: the re-poll on the flush
+    #: cadence must not overwrite a specific refusal the server gave at
+    #: startup ("this key lacks the scope") with the generic one, just because
+    #: one poll came back empty during a blip.
+    answered: bool = True
+
+
+def capture_verdict(body: Any) -> CaptureVerdict:
+    """THE consent predicate. Ask this, never one field of it.
+
+    :param body: a registration response, or a ``GET /agents/{id}/capture``
+        body -- both carry the answer under ``capture``. Anything else is
+        treated as "the control plane did not answer".
+
+    THE SERVER DECIDES; this only reads the verdict. ``capture.turns`` is
+    computed in the control plane from BOTH the per-agent consent flag (opt-in;
+    unset is not consent) AND whether this flywheel key carries the scope that
+    permits reporting turns. Re-deriving either half here would be a second
+    answer to a settled question.
+
+    ``turns is True``, NOT TRUTHINESS, and the difference is the whole point:
+    this gate protects an end user's own message and the answer we gave them,
+    and a consent question is answered by the exact value. ``{"turns":
+    "false"}`` -- a JSON string, which an older intake or a proxy can produce
+    -- is truthy in Python, so ``bool(cap.get("turns"))`` read a refusal as
+    consent and began uploading. The Node SDK's ``captureVerdict`` has always
+    asked ``=== true`` and has a regression test for that exact payload;
+    ``tests/test_capture_verdict_parity.py`` now drives the same table through
+    both, so the two packages cannot answer this differently again.
+
+    ABSENCE IS NOT CONSENT, and it is not a silent refusal either. A
+    registration that failed, or a control plane too old to send ``capture`` at
+    all, yields ``False`` with a sentence saying so -- ``upload_refusal`` is
+    documented as "the sentence explaining a False", and a ``None`` there names
+    no cause for the two commonest refusals there are.
+    """
+    cap = body.get("capture") if isinstance(body, Mapping) else None
+    if not isinstance(cap, Mapping):
+        return CaptureVerdict(
+            may_upload=False,
+            reason=(
+                "the control plane did not answer whether this agent may "
+                "upload production turns, so nothing is uploaded. Turns are "
+                "still captured locally."
+            ),
+            answered=False,
+        )
+    if cap.get("turns") is True:
+        return CaptureVerdict(may_upload=True, reason=None)
+    served = cap.get("reason")
+    return CaptureVerdict(
+        may_upload=False,
+        # The server's own sentence when it sent one -- it names the switch and
+        # who can flip it, which anything written here could only paraphrase.
+        reason=(
+            served.strip()
+            if isinstance(served, str) and served.strip()
+            else "production capture is not enabled for this agent."
+        ),
+    )
 
 
 #: How many turns pass between automatic prunes when `retention_turns` is set.
@@ -798,15 +874,21 @@ class Attachment:
             from .transport import AttachTransport
 
             client = ControlPlaneClient(self._cp_url, self._api_key)
-            cap = (AttachTransport(client, self.agent_id)
-                   .capture_current(self.agent_id).get("capture") or {})
-            if cap.get("turns") is True:
+            verdict = capture_verdict(
+                AttachTransport(client, self.agent_id).capture_current(self.agent_id))
+            if verdict.may_upload:
                 self._grant_upload()
-            elif cap.get("reason"):
+            elif verdict.answered:
                 # Keep the reason current even while the answer stays no: an
                 # operator who fixes consent but not the key's scope should see
                 # the second sentence, not the first one from startup.
-                self.upload_refusal = cap["reason"]
+                #
+                # ONLY WHEN IT ANSWERED. A poll that came back with no capture
+                # block is a blip, and overwriting a specific refusal with the
+                # generic one would lose the sentence the operator needs --
+                # the same argument that stops an empty answer revoking
+                # consent two lines up.
+                self.upload_refusal = verdict.reason
         except Exception:
             # A capture bug costs the observation, never the turn.
             pass
@@ -1112,7 +1194,32 @@ def attach(
     url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL)
     key = api_key or os.environ.get(ENV_API_KEY)
     may_upload = False
-    upload_refusal: str | None = None
+    # NAMED, not None. `upload_refusal` is documented as "the sentence
+    # explaining a False", and the ways to get here without ever asking the
+    # control plane are distinct problems with distinct remedies. One message
+    # covering all of them -- or, as it was, no message at all -- sends an
+    # operator to check the wrong thing.
+    #
+    # WHICH VARIABLE is asked through the same helper `policy_source` and the
+    # CLI ask, so "configured" means one thing across the package.
+    cause = missing_credentials_cause(url, key)
+    if not register:
+        upload_refusal: str | None = (
+            "attach(register=False) was asked for, so the control plane was "
+            "never asked whether this agent may upload production turns. "
+            "Turns are still captured locally."
+        )
+    elif cause:
+        upload_refusal = (
+            f"{cause}, so the control plane was never asked whether this agent "
+            f"may upload production turns. Turns are still captured locally."
+        )
+    else:
+        # A control plane we are ABOUT to ask. Anything that stops us reaching
+        # its answer -- a refused registration, an unreachable host, a client
+        # that would not build -- leaves this sentence standing, which is the
+        # true one for every such path. The successful path overwrites it.
+        upload_refusal = capture_verdict(None).reason
     if register and url and key:
         client: ControlPlaneClient | None = None
         try:
@@ -1141,13 +1248,15 @@ def attach(
                     "input_shape": "text",
                     "entrypoint": "attach",
                 })
-                # WHAT THE SERVER SAID, not what we assume. Capture is opt-in
-                # per agent, so the default is "no" and the only way to learn
-                # otherwise is to be told -- finding out by uploading would
-                # mean sending the data whose permission is in question.
-                cap = (reg or {}).get("capture") or {}
-                may_upload = bool(cap.get("turns"))
-                upload_refusal = cap.get("reason")
+                # WHAT THE SERVER SAID, not what we assume, and asked through
+                # the ONE predicate `_recheck_capture` asks -- see
+                # :func:`capture_verdict`. This site used to ask
+                # `bool(cap.get("turns"))` while the late-consent path three
+                # hundred lines up asked `is True`, so the same registration
+                # payload could grant consent here and refuse it there.
+                verdict = capture_verdict(reg)
+                may_upload = verdict.may_upload
+                upload_refusal = verdict.reason
             except Exception as exc:
                 # A REFUSED registration must not cost the last mile.
                 #

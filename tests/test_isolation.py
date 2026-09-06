@@ -8,7 +8,7 @@ PARENT = {
     "HOME": "/home/dev",
     # Ours. The long-lived, org-scoped control-plane credential.
     "PERCEPTEYE_API_KEY": "pehk_live_do_not_leak",
-    "PERCEPTEYE_CONTROL_PLANE_URL": "https://api.percepteye.ai/api/flywheel/v1",
+    "PERCEPTEYE_CONTROL_PLANE_URL": "https://launch.percepteye.ai/api/flywheel/v1",
     # Theirs. Their agent legitimately needs these -- that is the premise of
     # running it in their own process.
     "JIRA_API_TOKEN": "customer-token",

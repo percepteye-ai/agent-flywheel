@@ -63,11 +63,14 @@ _F = {
         "l1": "export PERCEPTEYE_AGENT_MODE=training",
         "l2": "openclaw session          # unchanged",
         "foot": "0 deps  \u00b7  0 lines changed  \u00b7  MIT",
-        # NOT an apply_current_policy() equivalent. `policyCurrent()` exists on
-        # the Node transport and NOTHING CALLS IT, so the plugin does not fetch
-        # a trained policy -- the customer points their harness at the served
-        # endpoint. Drawing a call the package does not make would be inventing
-        # a capability in the one figure people trust to be literal.
+        # A SNAPSHOT OF A FIXED BUG USED TO LIVE HERE, saying `policyCurrent()`
+        # "exists on the Node transport and NOTHING CALLS IT". It has a caller
+        # -- `src/policy.js:553`, inside `resolve(transport)`, with
+        # `promptCurrent()` beside it at :614 -- and the Node README documents
+        # the pair as beat 6. The comment also contradicted the two strings
+        # four lines below it in this same dict, which is how a stale comment
+        # gets acted on: the next editor believes the prose and "corrects" the
+        # strings, deleting the one place this figure states the capability.
         "prod": "PERCEPTEYE_AGENT_MODE=production",
         # The plugin applies BOTH halves itself -- prompt via before_prompt_build,
         # model via before_model_resolve + its own registered provider -- so the

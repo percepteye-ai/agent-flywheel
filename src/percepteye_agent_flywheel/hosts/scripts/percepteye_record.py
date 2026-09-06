@@ -240,6 +240,20 @@ def _record(event: dict) -> dict | None:
     return record
 
 
+def turns_root():
+    """Where per-session captures live when nothing names a directory.
+
+    ONE definition, because there are two consumers now: this writer, and
+    ``percepteye report``, which had nothing to point at. A second copy of this
+    join in the CLI would be a second answer to "where did my captures go" --
+    and the reader is the half that gets it wrong silently, by reporting an
+    empty directory rather than the one with the data in it.
+    """
+    home = os.environ.get(HOME_ENV) or os.path.join(
+        os.path.expanduser("~"), ".percepteye")
+    return os.path.join(home, "turns")
+
+
 def _capture_dir(event):
     """Where this event's records belong, or None to record nothing.
 
@@ -262,9 +276,7 @@ def _capture_dir(event):
     safe = "".join(c for c in session if c.isalnum() or c in "-_")[:120]
     if not safe:
         return None
-    home = os.environ.get(HOME_ENV) or os.path.join(
-        os.path.expanduser("~"), ".percepteye")
-    return os.path.join(home, "turns", safe)
+    return os.path.join(turns_root(), safe)
 
 
 #: The claim's own record, written beside the captured files and keyed by the
@@ -290,8 +302,12 @@ def _contributing():
     day-one promise. A marketplace install with no SDK at all lands in the same
     branch through the ImportError.
     """
-    url = os.environ.get("CONTROL_PLANE_ENV_URL") or os.environ.get(
-        "PERCEPTEYE_CONTROL_PLANE_URL")
+    # PERCEPTEYE_CONTROL_PLANE_URL, and nothing else. This used to read an
+    # un-prefixed ``CONTROL_PLANE_ENV_URL`` FIRST -- a name no library module
+    # in this package reads, and which the Node SDK ranks LAST -- so the same
+    # two variables sent the goose recorder and the SDK in one process to two
+    # different control planes, with nothing logged either way. One spelling.
+    url = os.environ.get("PERCEPTEYE_CONTROL_PLANE_URL")
     key = os.environ.get("PERCEPTEYE_API_KEY")
     if not url or not key:
         return None
