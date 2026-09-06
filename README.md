@@ -6,13 +6,31 @@
 
 Ship one line. Your agent keeps running in your process, behind your firewall, on your credentials — **unchanged** — and the model it calls keeps improving.
 
-[![ci](https://img.shields.io/github/actions/workflow/status/percepteye-ai/agent-flywheel/ci.yml?branch=main&label=ci&style=for-the-badge&logo=githubactions&logoColor=white&color=22c55e)](https://github.com/percepteye-ai/agent-flywheel/actions)
-[![pypi](https://img.shields.io/pypi/v/percepteye-agent-flywheel?style=for-the-badge&logo=pypi&logoColor=white&label=pypi&color=3b82f6)](https://pypi.org/project/percepteye-agent-flywheel/)
-[![python](https://img.shields.io/badge/python-3.10%20→%203.13-3b82f6?style=for-the-badge&logo=python&logoColor=white)](https://pypi.org/project/percepteye-agent-flywheel/)
+<!-- BADGES — `ci` and `pypi` were live shields.io badges and both rendered as red
+     error images, because shields.io queries these services anonymously and
+     neither can answer: this repo is PRIVATE, so GitHub's API 404s for an
+     anonymous caller whatever .github/workflows/ci.yml — which does exist, and
+     is pushed — actually did, and the package is not on PyPI. Both verified
+     against the live services 2026-09-06.
+
+     ON PUBLISH restore these two verbatim: `pypi` once the package is on PyPI,
+     `ci` only once the repo is public. Do not hand-write a version, or a
+     "passing", into a static badge to fill the gap — that asserts a state
+     nothing checks.
+       [![ci](https://img.shields.io/github/actions/workflow/status/percepteye-ai/agent-flywheel/ci.yml?branch=main&label=ci&style=for-the-badge&logo=githubactions&logoColor=white&color=22c55e)](https://github.com/percepteye-ai/agent-flywheel/actions)
+       [![pypi](https://img.shields.io/pypi/v/percepteye-agent-flywheel?style=for-the-badge&logo=pypi&logoColor=white&label=pypi&color=3b82f6)](https://pypi.org/project/percepteye-agent-flywheel/)
+     `ci` gets no static stand-in: the hardcoded `tests` badge below already
+     carries what a reader wanted from it, and a README cannot assert its own
+     pipeline state. That badge is hardcoded and nothing checks it — it read 695
+     while the suite was 749. Re-derive before trusting it:
+       .venv/bin/python -m pytest tests/ --collect-only -q -p no:warnings \
+         | awk -F': ' '/^tests\/.*: [0-9]+$/{n+=$2} END{print n}'   # -> 749 -->
+[![pypi](https://img.shields.io/badge/pypi-not_yet_published-64748b?style=for-the-badge&logo=pypi&logoColor=white)](#-development)
+[![python](https://img.shields.io/badge/python-3.10%20→%203.13-3b82f6?style=for-the-badge&logo=python&logoColor=white)](pyproject.toml)
 <br/>
 [![runtime dependencies](https://img.shields.io/badge/runtime_deps-1-f59e0b?style=for-the-badge)](pyproject.toml)
 [![lines changed in your agent](https://img.shields.io/badge/lines_changed_in_your_agent-0-ec4899?style=for-the-badge)](#-zero-instrumentation-concretely)
-[![tests](https://img.shields.io/badge/tests-695_·_0_skips-22c55e?style=for-the-badge)](#-development)
+[![tests](https://img.shields.io/badge/tests-749_·_0_skips-22c55e?style=for-the-badge)](#-development)
 [![license](https://img.shields.io/badge/license-MIT-14b8a6?style=for-the-badge)](LICENSE)
 
 <img src="docs/assets/flywheel-overview.gif" width="1040"
