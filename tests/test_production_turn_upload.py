@@ -21,7 +21,15 @@ from __future__ import annotations
 import time
 from contextlib import contextmanager
 
+import pytest
+
 import percepteye_agent_flywheel as fw
+from percepteye_agent_flywheel.errors import ConfigurationError
+from percepteye_agent_flywheel.introspection import (
+    DiscoveredAgent,
+    ModelConfig,
+    ToolDefinition,
+)
 from percepteye_agent_flywheel.outcomes import record_tool_call
 
 
@@ -60,7 +68,7 @@ class _Transport:
 
 
 @contextmanager
-def _attached(monkeypatch, tmp_path, transport):
+def _attached(monkeypatch, tmp_path, transport, **attach_kwargs):
     monkeypatch.setenv("PERCEPTEYE_CONTROL_PLANE_URL", "https://cp.invalid")
     monkeypatch.setenv("PERCEPTEYE_API_KEY", "pek_x")
     monkeypatch.setattr(
@@ -71,7 +79,9 @@ def _attached(monkeypatch, tmp_path, transport):
         "percepteye_agent_flywheel._http.ControlPlaneClient.close",
         lambda self: None,
     )
-    px = fw.attach(agent_id="support", trajectory_root=str(tmp_path))
+    px = fw.attach(
+        agent_id="support", trajectory_root=str(tmp_path), **attach_kwargs,
+    )
     try:
         yield px
     finally:
@@ -88,6 +98,21 @@ def _turn(px, tid, *, ask, answer=None, calls=()):
 
 OK = {"name": "lookup", "arguments": {"id": "1"}, "outcome": "ok",
       "status_code": 200}
+
+
+class _IdentityAgent:
+    def invoke(self, task: str) -> str:
+        return task
+
+
+def _exact_description() -> DiscoveredAgent:
+    return DiscoveredAgent(
+        agent_name="customer-agent",
+        framework="customer-framework",
+        system_prompt="Use tools and answer the user.",
+        tool_definitions=[ToolDefinition(name="lookup", input_schema={})],
+        discovered_model_config=ModelConfig(provider="gateway", model_name="policy"),
+    )
 
 
 # ── consent ───────────────────────────────────────────────────────────────
@@ -196,6 +221,110 @@ def test_the_wire_shape_is_turn_native(monkeypatch, tmp_path):
     # Not the corpus projection.
     assert "messages" not in t
     assert "success" not in t["tool_calls"][0]
+
+
+def test_exact_attached_execution_identity_reaches_every_production_turn(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(
+        "percepteye_agent_flywheel.introspection.introspect",
+        lambda _entrypoint: _exact_description(),
+    )
+    tr = _Transport()
+    with _attached(
+        monkeypatch,
+        tmp_path,
+        tr,
+        execution_entrypoint=_IdentityAgent(),
+        execution_input_shape="messages",
+        attested_execution_components={"customer.release": "a" * 64},
+        adapters=[],
+    ) as px:
+        assert px.agent_fingerprint is not None
+        _turn(px, "t1", ask="refund 4417", answer="Refunded.", calls=[OK])
+        px.flush()
+
+    assert tr.sent[0]["agent_fingerprint"] == px.agent_fingerprint
+    assert set(tr.sent[0]["agent_fingerprint"]) == {"execution_sha256"}
+    assert tr.registered["input_shape"] == "messages"
+    assert tr.registered["discovered_agent"] == _exact_description().to_wire()
+
+
+def test_incomplete_attached_discovery_withholds_identity(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "percepteye_agent_flywheel.introspection.introspect",
+        lambda _entrypoint: DiscoveredAgent(
+            agent_name="unknown",
+            framework="customer-framework",
+            system_prompt="Observed prompt",
+            tool_definitions=[],
+            discovered_model_config=None,
+            incomplete=["discovered_model_config"],
+        ),
+    )
+    tr = _Transport()
+    with _attached(
+        monkeypatch,
+        tmp_path,
+        tr,
+        execution_entrypoint=_IdentityAgent(),
+        attested_execution_components={"customer.release": "a" * 64},
+        adapters=[],
+    ) as px:
+        assert px.agent_fingerprint is None
+        _turn(px, "t1", ask="a", answer="A")
+        px.flush()
+
+    assert "agent_fingerprint" not in tr.sent[0]
+
+
+def test_reused_turn_id_with_conflicting_execution_identity_fails_closed(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(
+        "percepteye_agent_flywheel.introspection.introspect",
+        lambda _entrypoint: _exact_description(),
+    )
+    first = fw.attach(
+        agent_id="support",
+        trajectory_root=str(tmp_path),
+        register=False,
+        adapters=[],
+        execution_entrypoint=_IdentityAgent(),
+        attested_execution_components={"customer.release": "a" * 64},
+    )
+    try:
+        with first.turn(turn_id="same", input_text="first"):
+            pass
+    finally:
+        first.close()
+
+    second = fw.attach(
+        agent_id="support",
+        trajectory_root=str(tmp_path),
+        register=False,
+        adapters=[],
+        execution_entrypoint=_IdentityAgent(),
+        attested_execution_components={"customer.release": "b" * 64},
+    )
+    try:
+        with second.turn(turn_id="same", input_text="second"):
+            pass
+        wire = second._turn_wire(tmp_path / "same")
+        assert wire is not None
+        assert "agent_fingerprint" not in wire
+    finally:
+        second.close()
+
+    with pytest.raises(ConfigurationError, match="must not author execution_sha256"):
+        fw.attach(
+            agent_id="support",
+            trajectory_root=str(tmp_path / "reserved"),
+            register=False,
+            adapters=[],
+            execution_entrypoint=_IdentityAgent(),
+            attested_execution_components={"execution_sha256": "c" * 64},
+        )
 
 
 def test_an_unobserved_outcome_survives_as_unknown(monkeypatch, tmp_path):

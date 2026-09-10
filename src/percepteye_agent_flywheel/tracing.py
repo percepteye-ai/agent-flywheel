@@ -95,6 +95,7 @@ def record_tool_call_span(
     turn_id: str | None = None,
     conversation_id: str | None = None,
     tool_call_id: str | None = None,
+    execution_sha256: str | None = None,
 ) -> None:
     """Project one recorded tool call into the customer's traces.
 
@@ -146,6 +147,10 @@ def record_tool_call_span(
                 # sampled by the collector may not.
                 span.set_attribute(
                     "percepteye.conversation.id", str(conversation_id))
+            if execution_sha256:
+                span.set_attribute(
+                    "percepteye.agent.execution_sha256", str(execution_sha256)
+                )
             if agent_name:
                 span.set_attribute("gen_ai.agent.name", str(agent_name))
             if latency_ms is not None:
@@ -199,6 +204,7 @@ def record_turn_span(
     agent_name: str | None = None,
     model: str | None = None,
     rollout_id: str | None = None,
+    execution_sha256: str | None = None,
 ) -> None:
     """Emit one span carrying what the agent was ASKED and what it ANSWERED.
 
@@ -256,5 +262,9 @@ def record_turn_span(
             if conversation_id:
                 span.set_attribute(
                     "percepteye.conversation.id", str(conversation_id))
+            if execution_sha256:
+                span.set_attribute(
+                    "percepteye.agent.execution_sha256", str(execution_sha256)
+                )
     except Exception:
         return

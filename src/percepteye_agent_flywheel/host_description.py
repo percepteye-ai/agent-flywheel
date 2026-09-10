@@ -66,10 +66,14 @@ import os
 import subprocess
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from .errors import ConfigurationError
+from .execution_identity import canonical_observation_sha256
 from .introspection import _MAX_PROMPT_CHARS, DiscoveredAgent, ModelConfig, ToolDefinition
+from .isolation import build_child_env
 
 #: The file the companion plugin writes. One end of an ABI -- do not rename
 #: without renaming ``DISCOVERED_AGENT_FILENAME`` on the plugin side.
@@ -151,14 +155,15 @@ def _tool_from_wire(raw: Any) -> ToolDefinition | None:
     )
 
 
-def parse_discovered_agent(payload: Any) -> DiscoveredAgent | None:
-    """Build a ``DiscoveredAgent`` from the host's JSON, or None if unusable.
+def _parse_discovered_agent(
+    payload: Any, depth: int,
+) -> tuple[DiscoveredAgent, dict[str, Any]] | None:
+    """Parse one agent and retain an exact behavior-bearing observation.
 
-    Tolerant of missing optional fields and strict about the one distinction
-    that carries meaning: ``tool_definitions`` is ``None`` when the host could
-    not observe a catalogue and ``[]`` when it observed one that is empty. The
-    consumer grades on that difference, so it must survive the parse rather
-    than being flattened into a confident empty list.
+    Unknown host telemetry is intentionally not identity: adding a timestamp
+    or debug field cannot change the execution digest. The normalized private
+    observation does retain the full prompt (before the 20k wire projection),
+    tools, model config, capabilities, and recursively parsed sub-agents.
     """
     if not isinstance(payload, dict):
         return None
@@ -168,45 +173,180 @@ def parse_discovered_agent(payload: Any) -> DiscoveredAgent | None:
         return None
 
     raw_tools = payload.get("tool_definitions")
+    tool_observation_incomplete = False
     tools: list[ToolDefinition] | None
     if raw_tools is None:
         tools = None
     elif isinstance(raw_tools, list):
-        tools = [t for t in (_tool_from_wire(r) for r in raw_tools) if t is not None]
+        tools = []
+        for raw_tool in raw_tools:
+            tool = _tool_from_wire(raw_tool)
+            if tool is None:
+                tool_observation_incomplete = True
+            else:
+                tools.append(tool)
     else:
         tools = None
 
     model = None
     raw_model = payload.get("discovered_model_config")
+    model_observation_incomplete = False
     if isinstance(raw_model, dict):
+        raw_provider = raw_model.get("provider")
+        raw_model_name = raw_model.get("model_name")
+        raw_temperature = raw_model.get("temperature")
+        temperature = (
+            float(raw_temperature)
+            if isinstance(raw_temperature, (int, float))
+            and not isinstance(raw_temperature, bool)
+            else None
+        )
+        raw_max_tokens = raw_model.get("max_tokens")
+        max_tokens = (
+            raw_max_tokens
+            if isinstance(raw_max_tokens, int) and not isinstance(raw_max_tokens, bool)
+            else None
+        )
         model = ModelConfig(
-            provider=str(raw_model.get("provider") or "unknown"),
-            model_name=str(raw_model.get("model_name") or "unknown"),
+            provider=str(raw_provider or "unknown"),
+            model_name=str(raw_model_name or "unknown"),
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        model_observation_incomplete = (
+            not isinstance(raw_provider, str)
+            or not raw_provider.strip()
+            or not isinstance(raw_model_name, str)
+            or not raw_model_name.strip()
+            or (
+                "temperature" in raw_model
+                and not (
+                    isinstance(raw_temperature, (int, float))
+                    and not isinstance(raw_temperature, bool)
+                )
+            )
+            or (
+                "max_tokens" in raw_model
+                and not (
+                    isinstance(raw_max_tokens, int)
+                    and not isinstance(raw_max_tokens, bool)
+                )
+            )
         )
 
-    prompt = payload.get("system_prompt")
-    if isinstance(prompt, str) and prompt:
+    full_prompt = payload.get("system_prompt")
+    if isinstance(full_prompt, str) and full_prompt:
         # The same bound the reflection probes apply. A host-assembled prompt
         # can be very large -- hundreds of kilobytes, concatenated from many
         # files -- and the cap belongs in one place for both sources, or the
         # two paths would report different sizes for the same agent.
-        prompt = prompt[:_MAX_PROMPT_CHARS]
+        prompt = full_prompt[:_MAX_PROMPT_CHARS]
     else:
+        full_prompt = None
         prompt = None
 
     incomplete = payload.get("incomplete")
-    return DiscoveredAgent(
+    incomplete_values = (
+        [str(x) for x in incomplete] if isinstance(incomplete, list) else []
+    )
+    if incomplete is not None and not isinstance(incomplete, list):
+        incomplete_values.append("incomplete")
+    if tool_observation_incomplete and "tool" not in incomplete_values:
+        incomplete_values.append("tool")
+    if (
+        model_observation_incomplete
+        and "discovered_model_config" not in incomplete_values
+    ):
+        incomplete_values.append("discovered_model_config")
+    raw_capabilities = payload.get("capabilities")
+    capabilities = (
+        [str(value) for value in raw_capabilities]
+        if isinstance(raw_capabilities, list) else []
+    )
+    if (
+        raw_capabilities is not None
+        and not isinstance(raw_capabilities, list)
+        and "capabilities" not in incomplete_values
+    ):
+        incomplete_values.append("capabilities")
+    children: list[DiscoveredAgent] = []
+    exact_children: list[dict[str, Any]] = []
+    raw_children = payload.get("sub_agents")
+    child_observation_incomplete = False
+    if isinstance(raw_children, list):
+        if depth < 4:
+            for raw_child in raw_children:
+                parsed = _parse_discovered_agent(raw_child, depth + 1)
+                if parsed is None:
+                    child_observation_incomplete = True
+                    continue
+                child, exact_child = parsed
+                children.append(child)
+                exact_children.append(exact_child)
+        elif raw_children:
+            child_observation_incomplete = True
+    elif raw_children is not None:
+        child_observation_incomplete = True
+    if child_observation_incomplete and "sub_agents" not in incomplete_values:
+        incomplete_values.append("sub_agents")
+
+    source_type = str(payload.get("source_type") or "sdk_runtime")
+    role = str(payload.get("role") or "standalone")
+    exact_projection: dict[str, Any] = {
+        "agent_name": name,
+        "framework": framework,
+        "source_type": source_type,
+        "role": role,
+        "tool_definitions": (
+            None if tools is None else [tool.to_wire() for tool in tools]
+        ),
+    }
+    if full_prompt is not None:
+        exact_projection["system_prompt"] = full_prompt
+    if model is not None:
+        exact_projection["discovered_model_config"] = model.to_wire()
+    if capabilities:
+        exact_projection["capabilities"] = capabilities
+    if exact_children:
+        exact_projection["sub_agents"] = exact_children
+    if incomplete_values:
+        exact_projection["incomplete"] = incomplete_values
+
+    try:
+        exact_observation = canonical_observation_sha256(exact_projection)
+    except ConfigurationError:
+        # Discovery remains advisory. The projected catalogue can still be
+        # registered, but an ambiguous value cannot support exact identity.
+        exact_observation = None
+    agent = DiscoveredAgent(
         agent_name=name,
         framework=framework,
         # Trusted from the host, not overwritten: it is a PROVENANCE claim, and
         # this description did not come from reflecting on a Python object.
-        source_type=str(payload.get("source_type") or "sdk_runtime"),
+        source_type=source_type,
         system_prompt=prompt,
         tool_definitions=tools,
         discovered_model_config=model,
-        role=str(payload.get("role") or "standalone"),
-        incomplete=[str(x) for x in incomplete] if isinstance(incomplete, list) else [],
+        capabilities=capabilities,
+        sub_agents=children,
+        role=role,
+        incomplete=incomplete_values,
+        exact_observation_sha256=exact_observation,
     )
+    return agent, exact_projection
+
+
+def parse_discovered_agent(payload: Any) -> DiscoveredAgent | None:
+    """Build a ``DiscoveredAgent`` from the host's JSON, or None if unusable.
+
+    Tolerant of missing optional fields and strict about the one distinction
+    that carries meaning: ``tool_definitions`` is ``None`` when the host could
+    not observe a catalogue and ``[]`` when it observed one that is empty. The
+    consumer grades on that difference, so it must survive the parse rather
+    than being flattened into a confident empty list.
+    """
+    parsed = _parse_discovered_agent(payload, 0)
+    return parsed[0] if parsed is not None else None
 
 
 def read_discovered_agent(trajectory_dir: str | os.PathLike[str]) -> DiscoveredAgent | None:
@@ -447,9 +587,25 @@ class _CatalogueObserver:
         with self._lock:
             if not self._tools:
                 return None
-            tools = [_tool_from_wire(t) for t in self._tools.values()]
+            raw_tools = list(self._tools.values())
+            tools = [_tool_from_wire(t) for t in raw_tools]
             prompt = self._system
             model = self._model
+        normalized_tools = [tool.to_wire() for tool in tools if tool is not None]
+        try:
+            exact_observation = canonical_observation_sha256({
+                "agent_name": agent_name,
+                "framework": framework,
+                "source_type": "host_wire",
+                "system_prompt": prompt,
+                "tool_definitions": normalized_tools,
+                "discovered_model_config": {
+                    "provider": "openai_compatible",
+                    "model_name": model,
+                } if model else None,
+            })
+        except ConfigurationError:
+            exact_observation = None
         return DiscoveredAgent(
             agent_name=agent_name,
             framework=framework,
@@ -469,6 +625,7 @@ class _CatalogueObserver:
             #: which is the safe direction, and a False here would have
             #: asserted it.
             incomplete=["tool_annotations"],
+            exact_observation_sha256=exact_observation,
         )
 
     def close(self) -> None:
@@ -536,17 +693,20 @@ def warm_up_command(
     cwd: str | None = None,
     agent_name: str | None = None,
     observe_wire: bool = True,
+    endpoint_env: tuple[str, str] | None = None,
+    isolation_environment: Mapping[str, str] | None = None,
 ) -> DiscoveredAgent | None:
     """Run the agent once, only far enough for the host to describe it.
 
     Returns the description, or ``None`` if the child never produced one.
 
     The child is killed as soon as the file appears -- we want the host's
-    assembly of prompt and tools, not the agent's answer. It is spawned with
-    the AMBIENT environment and no gateway routing on purpose: there is no
-    rollout here, so there is no per-rollout endpoint or single-use key to
-    route to, and ``llm_input`` fires before the model request is dispatched
-    anyway. A warm-up that cannot reach a provider still describes the agent.
+    assembly of prompt and tools, not the agent's answer. It is spawned through
+    the same credential scrub as a rollout child, with every supported model
+    route forced to a loopback observer and an inert key. There is no rollout
+    here, so there is no per-rollout credential to use, and no request is ever
+    forwarded to a provider. A warm-up that cannot reach a live provider still
+    describes the agent.
 
     Nothing this child does is captured, graded, or trained on. It is not a
     rollout and is never reported as one.
@@ -566,29 +726,6 @@ def warm_up_command(
     except OSError:
         pass
 
-    child_env = dict(os.environ if env is None else env)
-    # The SAME namespace scrub `build_child_env` does, for the same two
-    # reasons, and this path is not exempt from either.
-    #
-    # A rollout id inherited from the serving process would make every tool
-    # call this child records land under a rollout that never ran it, against
-    # the promise above that this "is not a rollout and is never reported as
-    # one". And the long-lived control-plane key has no business in a child
-    # process at all -- that key is what `build_child_env` keeps in the parent
-    # so it never reaches code the model can influence, and a describe child
-    # runs the customer's agent exactly as a rollout child does.
-    #
-    # An earlier version of this dropped only the rollout id, on the grounds
-    # that the warm-up "needs the ambient credentials". It does not: the
-    # docstring above says it needs "no working completion, no gateway, and no
-    # API key", the credentials a CLI actually needs are the PROVIDER
-    # variables, and those are overwritten with a loopback URL and a dummy key
-    # a few lines below. The only PERCEPTEYE_ variable the child has ever read
-    # is the trajectory directory, which is set immediately after this.
-    for _name in [k for k in child_env if k.startswith("PERCEPTEYE_")]:
-        del child_env[_name]
-    child_env["PERCEPTEYE_TRAJECTORY_DIR"] = str(target)
-
     # A DELIBERATELY UNREACHABLE PROVIDER, forced rather than defaulted.
     #
     # Two things are true at once. Many agent CLIs refuse to start at all
@@ -607,10 +744,38 @@ def warm_up_command(
     # private-network guards some hosts apply to LAN endpoints.
     observer = _CatalogueObserver() if observe_wire else None
     endpoint = observer.base_url if observer is not None else "http://127.0.0.1:1/v1"
-    for name in ("OPENAI_BASE_URL", "OPENAI_API_BASE", "ANTHROPIC_BASE_URL"):
-        child_env[name] = endpoint
-    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
-        child_env[name] = "percepteye-warmup-no-sampling"
+    # Use the rollout environment boundary itself, rather than maintaining a
+    # nearly-identical warm-up scrub. This removes the long-lived Percepteye
+    # credential and every known off-gateway provider credential, preserves
+    # only explicit adapter-owned layout fields, and overwrites all supported
+    # model routes with our loopback observer and inert key. The temporary
+    # rollout id is removed immediately: discovery is not a rollout and must
+    # never attribute its tool calls to one.
+    parent_environment = dict(os.environ if env is None else env)
+    parent_environment.update(isolation_environment or {})
+    child_env = build_child_env(
+        rollout_id="percepteye-discovery-not-a-rollout",
+        llm_url=endpoint,
+        api_key="percepteye-warmup-no-sampling",
+        trajectory_dir=str(target),
+        parent_env=parent_environment,
+        # Discovery assembles a catalogue; it does not execute a customer's
+        # task and has no reason to receive Jira, AWS, database, or arbitrary
+        # application credentials. Keep only locations the explicit execution
+        # adapter prepared. build_child_env adds its small process baseline
+        # (PATH, HOME, locale, TLS roots, etc.) independently.
+        allowlist={
+            "USERPROFILE",
+            "XDG_CACHE_HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "PYTHONDONTWRITEBYTECODE",
+            *(isolation_environment or {}).keys(),
+        },
+        endpoint_env=endpoint_env,
+    )
+    child_env.pop("PERCEPTEYE_ROLLOUT_ID", None)
 
     try:
         proc = subprocess.Popen(

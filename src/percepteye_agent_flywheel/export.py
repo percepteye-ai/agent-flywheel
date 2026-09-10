@@ -59,7 +59,12 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from .outcomes import Trajectory, read_conversation_id, read_turn_text
+from .outcomes import (
+    Trajectory,
+    _read_execution_fingerprint,
+    read_conversation_id,
+    read_turn_text,
+)
 
 #: Every public name here, including ``conversation_to_record`` -- it is the
 #: one that carries a turn's observed next state, and leaving it out made the
@@ -116,6 +121,9 @@ def turn_to_record(
     conv = _conversation_id(path)
     if conv:
         record["conversation_id"] = conv
+    fingerprint = _read_execution_fingerprint(path)
+    if fingerprint is not None:
+        record["agent_fingerprint"] = fingerprint
     return record
 
 
@@ -189,6 +197,7 @@ def conversation_to_record(
     tool_calls: list[dict[str, Any]] = []
     omitted = 0
     first_id: str | None = None
+    fingerprints: list[dict[str, str] | None] = []
     # WHICH ASSISTANT TURN A CALL BELONGS TO. The ingest side chunks the
     # messages list into one transition per assistant message, and matches the
     # top-level tool_calls list by ``step_index`` -- treating a MISSING
@@ -206,6 +215,8 @@ def conversation_to_record(
         text = read_turn_text(d) or {}
         traj = Trajectory(d)
         calls = traj.read()
+        if text or calls:
+            fingerprints.append(_read_execution_fingerprint(d))
         omitted += traj.malformed
         if text.get("task"):
             messages.append({"role": "user", "content": text["task"]})
@@ -250,6 +261,12 @@ def conversation_to_record(
         record["tool_calls_omitted_count"] = omitted
     if cid:
         record["conversation_id"] = cid
+    if (
+        fingerprints
+        and fingerprints[0] is not None
+        and all(value == fingerprints[0] for value in fingerprints)
+    ):
+        record["agent_fingerprint"] = fingerprints[0]
     return record
 
 

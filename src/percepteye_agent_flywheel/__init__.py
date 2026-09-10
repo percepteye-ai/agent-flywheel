@@ -69,6 +69,8 @@ from .errors import (
     RoutingNotInstallable,
     TransportError,
 )
+from .event_stream import CommandOutputAdapter
+from .execution_identity import ExecutionChild, ExecutionSnapshot
 from .host_description import WARMUP_PROMPT, warm_up_command
 
 # Re-exported, not used in this module. The redundant alias is the
@@ -123,11 +125,14 @@ __all__ = [
     "Attachment",
     "CaptureScope",
     "CaptureVerdict",
+    "CommandOutputAdapter",
     "ConfigurationError",
     "ContractViolation",
     "DiscoveredAgent",
     "EntrypointError",
     "ExclusionReason",
+    "ExecutionChild",
+    "ExecutionSnapshot",
     "FlywheelError",
     "FlywheelTransport",
     "InputShape",
@@ -136,6 +141,7 @@ __all__ = [
     "Outcome",
     "PolicySnapshot",
     "PolicySource",
+    "PrimeHarnessSnapshot",
     "PromptDecision",
     "RolloutOutput",
     "RolloutRequest",
@@ -164,6 +170,21 @@ __all__ = [
     "resolve_mode",
     "serve",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    """Lazy compatibility for the preview Prime adapter export."""
+    if name != "PrimeHarnessSnapshot":
+        raise AttributeError(name)
+    warnings.warn(
+        "fw.PrimeHarnessSnapshot is deprecated; import PrimeHarnessSnapshot "
+        "from percepteye_agent_flywheel.adapters.prime_agent",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    from .adapters.prime_agent import PrimeHarnessSnapshot
+
+    return PrimeHarnessSnapshot
 
 #: Every environment variable this package reads. Two of them select
 #: behaviour -- PERCEPTEYE_AGENT_MODE and PERCEPTEYE_INTROSPECT -- and the rest are
@@ -551,7 +572,9 @@ def apply_current_policy(
 
 
 def _describe_via_host(
-    command: list[Any], *, artifacts_dir: str, agent_id: str
+    command: list[Any], *, artifacts_dir: str, agent_id: str,
+    execution_snapshot: ExecutionSnapshot | None = None,
+    endpoint_env: tuple[str, str] | None = None,
 ) -> DiscoveredAgent | None:
     """Have the host describe a command agent, by running it once.
 
@@ -566,7 +589,78 @@ def _describe_via_host(
     argv = [WARMUP_PROMPT if a is TASK else str(a) for a in command]
     warm_dir = os.path.join(artifacts_dir, "_describe")
 
-    described = warm_up_command(argv, trajectory_dir=warm_dir, agent_name=agent_id)
+    snapshot = execution_snapshot
+    snapshot_child: ExecutionChild | None = None
+    try:
+        env = None
+        cwd = None
+        if snapshot is not None:
+            # Registration must describe the same scaffold the rollouts use.
+            # Letting this one preflight read ambient HOME would register a
+            # prompt/tool identity that no trainable child actually ran.
+            try:
+                snapshot_child = snapshot.prepare_child("describe")
+            except Exception as exc:
+                raise ConfigurationError(
+                    "execution snapshot could not prepare the discovery child: "
+                    f"{type(exc).__name__}"
+                ) from exc
+            env = dict(os.environ)
+            cwd = warm_dir
+            try:
+                rollout_environment = dict(snapshot_child.environment)
+                discovery_environment = dict(
+                    snapshot_child.discovery_environment
+                )
+            except Exception as exc:
+                raise ConfigurationError(
+                    f"{snapshot.adapter_name} execution child environments "
+                    "must be string mappings"
+                ) from exc
+            if any(
+                not isinstance(name, str) or not isinstance(value, str)
+                for mapping in (rollout_environment, discovery_environment)
+                for name, value in mapping.items()
+            ):
+                raise ConfigurationError(
+                    f"{snapshot.adapter_name} execution child environments "
+                    "must contain only string names and values"
+                )
+            if any(
+                rollout_environment.get(name) != value
+                for name, value in discovery_environment.items()
+            ):
+                raise ConfigurationError(
+                    f"{snapshot.adapter_name} discovery environment must be a "
+                    "non-secret subset of its rollout environment"
+                )
+        else:
+            discovery_environment = None
+        described = warm_up_command(
+            argv, trajectory_dir=warm_dir, agent_name=agent_id, env=env, cwd=cwd,
+            endpoint_env=endpoint_env,
+            isolation_environment=(
+                discovery_environment
+            ),
+        )
+    finally:
+        if snapshot_child is not None:
+            lifecycle_failure: Exception | None = None
+            try:
+                assert snapshot is not None
+                snapshot.attest_child(snapshot_child)
+            except Exception as exc:
+                lifecycle_failure = exc
+            try:
+                snapshot.release_child(snapshot_child)
+            except Exception as exc:
+                lifecycle_failure = lifecycle_failure or exc
+            if lifecycle_failure is not None:
+                raise ConfigurationError(
+                    "execution snapshot lifecycle failed during command-agent "
+                    f"discovery ({type(lifecycle_failure).__name__}); "
+                    "registration was refused"
+                ) from lifecycle_failure
     if described is not None:
         n = described.tool_definitions
         print(
@@ -634,6 +728,10 @@ def serve(
     #: to one that is correctly routed, right up until the completions arrive
     #: at the live provider instead of the gateway.
     endpoint_env: tuple[str, str] | None = None,
+    command_output_adapter: CommandOutputAdapter | None = None,
+    execution_snapshot: ExecutionSnapshot | None = None,
+    harness_snapshot: ExecutionSnapshot | None = None,
+    attested_execution_components: Mapping[str, str] | None = None,
     reports_tool_calls: bool = False,
     method: str | None = None,
     adapters: list[str] | str | None = "auto",
@@ -676,6 +774,33 @@ def serve(
             surface available to your rollouts is materially smaller, because
             the verifiers that grade "did this call land" have nothing to
             read and correctly abstain.
+        execution_snapshot: framework-neutral execution-adapter lifecycle.
+            The adapter supplies opaque exact component digests, prepares an
+            isolated child view, and attests/releases it after every rollout.
+            Command and import-spec children receive its environment mapping;
+            an in-process object requires an empty mapping because process-wide
+            environment mutation is not isolated. An incomplete adapter never
+            yields an OPSD-eligible execution identity.
+        harness_snapshot: deprecated compatibility alias for
+            ``execution_snapshot``. Prime-specific construction lives in the
+            optional ``adapters.prime_agent`` module; core treats it like any
+            other execution adapter.
+        command_output_adapter: optional command-specific stdout projection.
+            Core never guesses a host vocabulary. An adapter may project final
+            text, independently observed model-call count, tool outcomes, and
+            explicit exclusion evidence.
+        attested_execution_components: framework-neutral opaque evidence from
+            an execution adapter, as stable names mapped to lowercase 64-hex
+            SHA-256 values. The SDK interprets none of the names: it validates,
+            sorts, and folds them into ``agent_fingerprint.execution_sha256``
+            with the discovered prompt/tools/sub-agents/model and serve config.
+            An adapter supplying a digest is asserting it covers mutable state
+            discovery cannot observe; do not put secrets or free-form values in
+            this mapping. Without at least one adapter-owned component (or a
+            component-providing ``execution_snapshot``/``harness_snapshot``),
+            the SDK withholds the
+            OPSD digest rather than claiming discovery identifies unobserved
+            implementation code.
         max_rollouts: stop after this many rollouts COMPLETE, and return. The
             only clean exit this function has: nothing in this package handles
             SIGINT or SIGTERM, so otherwise it runs until the process is
@@ -764,6 +889,20 @@ def serve(
     adir = artifacts_dir or os.path.join(os.getcwd(), ".percepteye-artifacts")
     os.makedirs(adir, exist_ok=True)
 
+    if execution_snapshot is not None and harness_snapshot is not None:
+        raise ConfigurationError(
+            "pass execution_snapshot or the deprecated harness_snapshot alias, not both"
+        )
+    if harness_snapshot is not None:
+        warnings.warn(
+            "serve(harness_snapshot=...) is deprecated; use execution_snapshot=...",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    resolved_execution_snapshot = (
+        execution_snapshot if execution_snapshot is not None else harness_snapshot
+    )
+
     from ._http import ControlPlaneClient
 
     client = ControlPlaneClient(url, key)
@@ -809,9 +948,13 @@ def serve(
         rollout_timeout_s=rollout_timeout_s,
         gate_flag=gate_flag,
         endpoint_env=endpoint_env,
+        command_output_adapter=command_output_adapter,
+        execution_snapshot=resolved_execution_snapshot,
         method=method,
         adapters=adapters,
         on_event=on_event,
+        reports_tool_calls=reports_tool_calls,
+        attested_execution_components=attested_execution_components,
     )
 
     # A command entrypoint has no resolved object -- ``resolved`` is None by
@@ -858,7 +1001,9 @@ def serve(
     # Omitting the key would make "not introspected" indistinguishable from
     # "introspected, found nothing" -- the same absence-as-zero collapse the
     # tool-outcome contract exists to prevent, one layer up.
-    if introspect and _env_true("PERCEPTEYE_INTROSPECT", default=True):
+    discovery_enabled = introspect and _env_true("PERCEPTEYE_INTROSPECT", default=True)
+    described = None
+    if discovery_enabled:
         described = introspect_agent(
             runner.resolved.fn if runner.resolved is not None else None
         )
@@ -873,8 +1018,22 @@ def serve(
         if described is None and getattr(runner, "_command", None):
             described = _describe_via_host(
                 runner._command, artifacts_dir=adir, agent_id=agent_id,
+                execution_snapshot=runner.execution_snapshot,
+                endpoint_env=endpoint_env,
             )
         payload["discovered_agent"] = described.to_wire() if described else None
+
+    # The rollout fingerprint is authored here, after discovery, from the same
+    # framework-neutral facts registration sends plus exact pre-projection
+    # discovery evidence and any adapter-attested opaque components. A disabled,
+    # unreadable, or lossy description deliberately yields no digest, so an OPSD
+    # consumer cannot mistake an unknown scaffold for an exact identity.
+    runner.configure_execution_identity(
+        described,
+        discovery_enabled=discovery_enabled,
+        sdk=payload["sdk"],
+        contract_version=CONTRACT_VERSION,
+    )
 
     tr.register(payload)
 

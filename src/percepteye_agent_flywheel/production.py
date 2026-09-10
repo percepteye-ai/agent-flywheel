@@ -66,12 +66,17 @@ from typing import TYPE_CHECKING, Any
 # forced it anyway.
 if TYPE_CHECKING:
     from ._http import ControlPlaneClient
+from .entrypoint import InputShape
 from .errors import ConfigurationError, TransportError
+from .execution_identity import normalize_attested_components
 from .outcomes import (
+    AGENT_FINGERPRINT_FILENAME,
     CONVERSATION_ID_FILENAME,
     Trajectory,
+    _read_execution_fingerprint,
     _release,
     _RolloutScope,
+    _write_execution_fingerprint,
     read_conversation_id,
     read_turn_text,
     record_turn_text,
@@ -299,6 +304,7 @@ class Attachment:
         api_key: str | None = None,
         may_upload: bool = False,
         upload_refusal: str | None = None,
+        agent_fingerprint: Mapping[str, str] | None = None,
     ) -> None:
         self.agent_id = agent_id
         self.trajectory_root = trajectory_root
@@ -339,6 +345,14 @@ class Attachment:
         self.may_upload = may_upload
         #: Why not, in a sentence, when it is False and the control plane said.
         self.upload_refusal = upload_refusal
+        #: Exact SDK-reconciled execution identity, when attach() was given
+        #: enough behavior observation and opaque adapter evidence to prove
+        #: one. It is persisted per turn; absent stays absent.
+        self.agent_fingerprint = dict(agent_fingerprint or {}) or None
+        self._execution_sha256 = (
+            self.agent_fingerprint.get("execution_sha256")
+            if self.agent_fingerprint is not None else None
+        )
         #: Whether the shutdown drain is already registered. Consent can arrive
         #: at startup OR later, and can be taken away and re-granted, so the
         #: hook is claimed once rather than once per grant.
@@ -387,11 +401,13 @@ class Attachment:
                 path.mkdir(parents=True, exist_ok=True)
                 (path / "conversation_id").write_text(
                     str(conversation_id), encoding="utf-8")
+                _write_execution_fingerprint(path, self._execution_sha256)
             except OSError:
                 pass
         if input_text:
             record_turn_text(path, "task", input_text,
-                             turn_id=tid, conversation_id=conversation_id or "")
+                             turn_id=tid, conversation_id=conversation_id or "",
+                             execution_sha256=self._execution_sha256 or "")
         # ONE counter block for both cadences, because they are the same
         # question -- "is periodic maintenance due?" -- asked twice. They were
         # split while only pruning existed and the flush counter was added
@@ -413,7 +429,8 @@ class Attachment:
             self._flush_soon()
 
         with _RolloutScope(tid, str(path), kind="turn",
-                           conversation_id=conversation_id):
+                           conversation_id=conversation_id,
+                           execution_sha256=self._execution_sha256):
             yield tid
 
     def record_answer(self, turn_id: str, text: str) -> bool:
@@ -427,9 +444,21 @@ class Attachment:
         Returns whether anything was written, and never raises -- a capture bug
         costs the observation and never the turn.
         """
+        path = Path(self.trajectory_root) / turn_id
+        sidecar = path / AGENT_FINGERPRINT_FILENAME
+        # A pre-existing turn with no identity may have been captured by an
+        # older process. Never relabel it as this process merely because its
+        # delayed answer arrived now. A turn created by this attachment has a
+        # sidecar on its first task/call/conversation write; an answer-only
+        # turn has no directory yet and can be labelled safely.
+        execution_sha256 = (
+            self._execution_sha256
+            if not path.exists() or sidecar.exists()
+            else None
+        )
         return record_turn_text(
-            Path(self.trajectory_root) / turn_id, "answer", text,
-            turn_id=turn_id,
+            path, "answer", text, turn_id=turn_id,
+            execution_sha256=execution_sha256 or "",
         )
 
     def read_turn(self, turn_id: str) -> dict[str, str] | None:
@@ -707,6 +736,9 @@ class Attachment:
         if cid:
             wire["conversation_id"] = cid
             wire["turn_index"] = self._turn_index(d, cid)
+        fingerprint = _read_execution_fingerprint(d)
+        if fingerprint is not None:
+            wire["agent_fingerprint"] = fingerprint
         return wire
 
     def _turn_index(self, turn_dir: Path, conversation_id: str) -> int:
@@ -1101,6 +1133,51 @@ class Attachment:
         self.close()
 
 
+def _reconcile_attached_execution(
+    entrypoint: Any,
+    *,
+    input_shape: InputShape,
+    method: str | None,
+    adapters_bound: tuple[str, ...],
+    trajectory_root: str,
+    attested_execution_components: Mapping[str, str],
+) -> tuple[Any, dict[str, str] | None]:
+    """Use the rollout reconciler without claiming it owns production calls."""
+    if isinstance(entrypoint, (list, tuple)):
+        raise ConfigurationError(
+            "attach(execution_entrypoint=) requires an import spec or the live "
+            "Python agent object; attach does not launch or observe a command process"
+        )
+
+    # Imports stay local: attachment-only users who do not request execution
+    # identity should not pay for discovery/runner modules on their hot path.
+    from . import __version__
+    from .contract import CONTRACT_VERSION
+    from .introspection import introspect
+    from .runner import RolloutRunner
+
+    runner = RolloutRunner(
+        entrypoint,
+        transport=None,  # type: ignore[arg-type]  # identity-only; never runs
+        input_shape=input_shape,
+        artifacts_dir=trajectory_root,
+        isolation="inprocess",
+        concurrency=1,
+        method=method,
+        adapters=list(adapters_bound),
+        reports_tool_calls=bool(adapters_bound),
+        attested_execution_components=attested_execution_components,
+    )
+    described = introspect(runner.resolved.fn)
+    digest = runner.configure_execution_identity(
+        described,
+        discovery_enabled=True,
+        sdk=f"percepteye-agent-flywheel-python/{__version__}",
+        contract_version=CONTRACT_VERSION,
+    )
+    return described, ({"execution_sha256": digest} if digest is not None else None)
+
+
 def attach(
     *,
     agent_id: str,
@@ -1110,6 +1187,10 @@ def attach(
     adapters: list[str] | str | None = "auto",
     register: bool = True,
     retention_turns: int | None = None,
+    execution_entrypoint: Any | None = None,
+    execution_input_shape: InputShape = "text",
+    execution_method: str | None = None,
+    attested_execution_components: Mapping[str, str] | None = None,
 ) -> Attachment:
     """Bind capture in THIS process, for an agent already serving users.
 
@@ -1147,6 +1228,17 @@ def attach(
     ``register=False`` skips the control-plane call entirely, for a process
     that should make no outbound connection at all.
 
+    ``execution_entrypoint`` optionally names the exact Python agent this
+    attachment observes. Together with ``attested_execution_components`` it
+    lets the SDK run the same fail-closed discovery and canonical reconciliation
+    used for rollouts, then persist ``agent_fingerprint.execution_sha256`` on
+    each production turn and its OpenTelemetry spans. Components are opaque
+    lowercase SHA-256 attestations of implementation/state discovery cannot
+    observe. A missing, incomplete, or lossy description emits no identity;
+    components alone never do. Command processes are refused because attach()
+    neither launches nor encloses their execution. The agent keeps serving in
+    every case except an invalid explicit identity configuration.
+
     Nothing here raises on a control-plane failure. ``agent_id`` missing or
     ``trajectory_root`` missing raise -- those are configuration mistakes in
     front of the person making them -- but an unreachable control plane yields
@@ -1160,6 +1252,18 @@ def attach(
             "attach() requires trajectory_root -- the directory captured turns "
             "accumulate in. It is not defaulted because nothing deletes them "
             "yet, and where a customer's data lands is not ours to assume."
+        )
+    normalized_components = normalize_attested_components(
+        attested_execution_components
+    )
+    if "execution_sha256" in normalized_components:
+        raise ConfigurationError(
+            "attested execution components must not author execution_sha256"
+        )
+    if execution_entrypoint is None and normalized_components:
+        raise ConfigurationError(
+            "attested_execution_components requires execution_entrypoint so the "
+            "SDK can reconcile evidence with the observed agent"
         )
     try:
         os.makedirs(trajectory_root, exist_ok=True)
@@ -1187,6 +1291,29 @@ def attach(
         # rollout with no capture is a wasted rollout, while a production turn
         # with no capture is still a served user.
         unbinds, bound = [], ()
+
+    described = None
+    agent_fingerprint: dict[str, str] | None = None
+    if execution_entrypoint is not None:
+        try:
+            described, agent_fingerprint = _reconcile_attached_execution(
+                execution_entrypoint,
+                input_shape=execution_input_shape,
+                method=execution_method,
+                adapters_bound=bound,
+                trajectory_root=trajectory_root,
+                attested_execution_components=normalized_components,
+            )
+        except Exception:
+            # Unlike observation failures inside introspect(), invalid entrypoint
+            # or attestation configuration is a caller mistake. Undo the global
+            # adapter binding before surfacing it.
+            for unbind in unbinds:
+                try:
+                    unbind()
+                except Exception:
+                    pass
+            raise
 
     # ── the control plane, entirely optional ────────────────────────────────
     policy: dict[str, Any] = {}
@@ -1231,7 +1358,7 @@ def attach(
             client = ControlPlaneClient(url, key)
             tr = AttachTransport(client, agent_id)
             try:
-                reg = tr.register({
+                registration = {
                     "agent_id": agent_id,
                     # This process serves users; it does not contribute capacity.
                     # `serve()` sends "rollout". Sending the same value from
@@ -1245,9 +1372,18 @@ def attach(
                     "reports_tool_calls": bool(bound),
                     "isolation": "inprocess",
                     "concurrency": 1,
-                    "input_shape": "text",
+                    "input_shape": (
+                        execution_input_shape
+                        if execution_entrypoint is not None
+                        else "text"
+                    ),
                     "entrypoint": "attach",
-                })
+                }
+                if execution_entrypoint is not None:
+                    registration["discovered_agent"] = (
+                        described.to_wire() if described is not None else None
+                    )
+                reg = tr.register(registration)
                 # WHAT THE SERVER SAID, not what we assume, and asked through
                 # the ONE predicate `_recheck_capture` asks -- see
                 # :func:`capture_verdict`. This site used to ask
@@ -1317,6 +1453,7 @@ def attach(
         api_key=key,
         may_upload=may_upload,
         upload_refusal=upload_refusal,
+        agent_fingerprint=agent_fingerprint,
     )
     if may_upload:
         # Through the same seam late consent goes through, so the hook is

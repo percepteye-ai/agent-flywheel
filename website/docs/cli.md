@@ -35,7 +35,10 @@ argv is handed to `Popen` as a list, never through a shell, so a task containing
 
 ## What comes back
 
-**stdout, trimmed, is the final text.** That is the whole return contract.
+**For an ordinary command, stdout trimmed is final text.** For a recognised
+structured stream, the runner projects its terminal assistant message instead.
+Prime's `--mode json`, for example, emits JSONL lifecycle events only; reporting
+those bytes as the answer would fabricate a response the agent never made.
 
 | what happened | `exclusion_reason` | reported? |
 |:--|:--|:--|
@@ -106,16 +109,16 @@ The group, not the process, and that is load-bearing. A real CLI agent spawns fr
 
 Two routes in. Neither requires a line of code inside the agent.
 
-### 1. The event stream your CLI already prints
+### 1. An explicit adapter for the event stream your CLI already prints
 
-A modern CLI agent emits structured events because it needs them for its own UI. **stdout is parsed for them after every run.** A stream is identified by the event types it actually carries, never by an agent name — a name is a claim, an event type is evidence.
+A modern CLI agent emits structured events because it needs them for its own UI. Pass a `command_output_adapter` to interpret that stream after every run. With no adapter, core treats stdout as final text and asserts no tool or model-call evidence. A stream adapter identifies events by their actual types, never by an agent name.
 
-| vocabulary | start / end | id · name · args · result · error |
+| adapter/helper | start / end | id · name · args · result · error |
 |:--|:--|:--|
-| `prime-agent` | `tool_execution_start` / `tool_execution_end` | `toolCallId` · `toolName` · `args` · `result` · `isError` |
-| `otel-genai` | `gen_ai.tool.start` / `gen_ai.tool.end` | `gen_ai.tool.call.id` · `gen_ai.tool.name` · `gen_ai.tool.input` · `gen_ai.tool.output` · `error.type` |
+| optional Prime example adapter | `tool_execution_start` / `tool_execution_end` | `toolCallId` · `toolName` · `args` · `result` · `isError` |
+| generic `OTEL_GENAI` format helper | `gen_ai.tool.start` / `gen_ai.tool.end` | `gen_ai.tool.call.id` · `gen_ai.tool.name` · `gen_ai.tool.input` · `gen_ai.tool.output` · `error.type` |
 
-The second row is the one that matters: it belongs to no vendor, so an agent already logging OpenTelemetry GenAI spans as JSON lines gets outcome capture with **no work at all**. Field names are candidate tuples tried in order, because emitters disagree about camelCase versus snake_case far more often than they disagree about meaning. Adding the next CLI is a `StreamFormat` entry — a vocabulary, not a parser.
+The second row belongs to no vendor and can be reused by a small customer adapter. Field names are candidate tuples tried in order, because emitters disagree about camelCase versus snake_case far more often than they disagree about meaning. Adding the next CLI is an adapter-owned `StreamFormat` entry — a vocabulary, not a core branch.
 
 **The verdict is tri-state by omission.**
 
@@ -139,7 +142,7 @@ The rest of the extraction rules:
 - `latency_ms` comes from `result.details.durationMs`; `entity_ids` are lifted from the **structured** result, never from rendered prose
 - **only stdout is read.** A CLI that logs its events to stderr reports nothing.
 
-**Capture survives every exit path.** Non-zero exit and timeout kill are finalised exactly like a clean exit — a rollout that died is precisely the one you need the tool calls from. This was learned the hard way: on one run every rollout exited non-zero, so `tool_calls` came back `null` even though the parser worked.
+**Configured adapter capture survives every exit path.** Non-zero exit and timeout kill are finalised exactly like a clean exit — a rollout that died is precisely the one you need the tool calls from.
 
 ### 2. Append to the trajectory from a shell
 
@@ -170,20 +173,25 @@ Only a host running the companion Node plugin writes that file — the hook fire
 
 | piece | why |
 |:--|:--|
-| `--mode json` | emits `tool_execution_*`, so outcomes come off stdout |
+| `--mode json` + `PrimeAgentOutputAdapter()` | the optional example adapter projects Prime's tool, assistant, and call-lifecycle evidence from stdout |
+| `PrimeHarnessSnapshot(...)` | optional Prime-only execution isolation/attestation; passed through generic `execution_snapshot=` |
 | `-e route.ts` | prime-agent has no env var for a base URL; an extension reads `OPENAI_BASE_URL` and registers a provider |
 | `--provider percepteye --model …` | registering a provider does not select it; without both flags every completion goes somewhere we never see |
+| `--no-session` | prevents one rollout's continual-harness refinement from changing later replicas |
 | `gate_flag="--autonomous-gate"` | with no gate registered, a *limit* is the only exit that exists, and every rollout ends excluded |
 | `artifacts_dir=` outside any checkout | the agent has a shell; a sweep launched from a checkout removed tracked files from it |
 
 ??? note "prime-agent's `isError` is not the whole truth"
-    In `--mode json`, `tool_execution_end.isError` is hardcoded `false` whenever the tool call returns without throwing — a raising IPython cell still reports `false`, with the real verdict in `result.details.status == "error"`. **The parser reads the error flag and does not consult `details.status`**, so such a call is recorded `ok`. This is a known gap, not a feature: `details.status` is a prime-agent-specific field and the extraction is deliberately vocabulary-driven rather than per-agent. If you need those failures graded, have the agent append them to `$PERCEPTEYE_TRAJECTORY_DIR/tool_calls.jsonl` — the trajectory wins over the stream.
+    In `--mode json`, `tool_execution_end.isError` is hardcoded `false` whenever the tool call returns without throwing — a raising IPython cell still reports `false`, with the real verdict in `result.details.status == "error"`. The Prime vocabulary declares that structured status, and the parser checks explicit failure evidence before accepting either false flag as success.
+
+??? warning "JSON mode stdout is not the answer"
+    Prime writes JSONL lifecycle events and does not print the prose response separately. `PrimeAgentOutputAdapter` projects `final_text` from the terminal assistant `message_end`/`agent_end`; a stream killed before either has an honestly empty answer rather than raw event JSON. Refinement or compaction markers make the trace non-trainable, because those operations add policy-external model calls or rewrite its history.
 
 ## What argv does not give you
 
 Stated plainly, because guessing here is expensive:
 
-- **No adapters.** `adapters=` binds to a Python object. A process has none; the event stream and the trajectory file are the two routes.
+- **No Python object adapters.** `adapters=` binds to a Python object, which a process does not have. The separate `command_output_adapter=` seam interprets stdout explicitly; the trajectory file is the other route.
 - **No `method=`, no `input_shape` shaping.** Neither is even validated on this path — there is no object to resolve them against — and a command always receives the raw task text on stdin, in the environment, and at `fw.TASK`.
 - **No `record_tool_call()`.** That is an in-process call. Append JSONL instead.
 - **No filesystem sandbox.** `isolation` is a process boundary and an environment scrub. Run untrusted agents accordingly.

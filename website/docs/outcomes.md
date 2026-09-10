@@ -214,6 +214,6 @@ And **absence is abstention.** Empty `entity_ids` means no identity evidence, so
 |:--|:--|
 | **LangChain · LangGraph** | `ok` on `ToolMessage(status="success")` · `failed` on a raise or `status="error"` · `unknown` otherwise |
 | **Google ADK** | `failed` on a raise **and** on `{"error": ...}` · `unknown` otherwise |
-| **OTel-GenAI / prime-agent event streams** | error flag `false` → `ok` · `true` or a non-empty string → `failed` · absent, or an empty string, → `unknown` |
+| **Explicit command-output adapters** | the generic `StreamFormat` parser preserves tri-state flags; the optional Prime example additionally treats `result.details.status="error"` as failure |
 
 Every one of them reports `unknown` rather than guessing, because that is the adapter bar. See [Python agents](python.md) and [CLI and other languages](cli.md); the wire types are on [The contract](contract.md).

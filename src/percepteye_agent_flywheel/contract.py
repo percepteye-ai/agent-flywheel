@@ -325,6 +325,12 @@ class RolloutOutput:
     agent_fingerprint: dict[str, Any] | None = None
 
     def to_wire(self) -> dict[str, Any]:
+        if self.llm_call_count is not None and (
+            type(self.llm_call_count) is not int or self.llm_call_count < 0
+        ):
+            raise ContractViolation(
+                "llm_call_count must be a nonnegative integer or None"
+            )
         d: dict[str, Any] = {
             "final_text": self.final_text,
             "tool_calls": (

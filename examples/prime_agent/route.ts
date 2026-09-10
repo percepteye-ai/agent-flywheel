@@ -14,6 +14,15 @@
  * `~/.prime/agent/extensions/` where it would also affect the developer's own
  * interactive sessions.
  */
+function positiveInteger(name: string): number {
+  const raw = process.env[name];
+  const value = Number(raw);
+  if (!raw || !Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${name} must be an explicit positive integer; got ${raw ?? "<unset>"}`);
+  }
+  return value;
+}
+
 export default function (pi: any) {
   const baseUrl = process.env.OPENAI_BASE_URL;
   if (!baseUrl) {
@@ -26,6 +35,31 @@ export default function (pi: any) {
     );
   }
 
+  // These values are selected in the parent and cross the rollout boundary on
+  // a closed, non-secret allowlist. Requiring them here makes a future scrub
+  // regression loud: the route cannot silently register "policy" while the
+  // parent asks Prime to run a different --model.
+  const modelId = process.env.PRIME_AGENT_FLYWHEEL_MODEL_ID;
+  if (!modelId?.trim()) {
+    throw new Error(
+      "PRIME_AGENT_FLYWHEEL_MODEL_ID is unset. Parent/route model identity cannot be verified.",
+    );
+  }
+  const contextWindow = positiveInteger("PRIME_AGENT_FLYWHEEL_CONTEXT_WINDOW");
+  const maxTokens = positiveInteger("PRIME_AGENT_FLYWHEEL_MAX_TOKENS");
+  if (maxTokens > contextWindow) {
+    throw new Error(
+      "PRIME_AGENT_FLYWHEEL_MAX_TOKENS cannot exceed " +
+        "PRIME_AGENT_FLYWHEEL_CONTEXT_WINDOW",
+    );
+  }
+
+  // Compaction makes a separate summarizer completion and replaces the
+  // transcript whose token/logprob chain the rollout update needs.  Refuse it
+  // here even if a user's ambient Prime settings enable it.  The Python runner
+  // also excludes a trace if the event appears despite this hook.
+  pi.on("session_before_compact", () => ({ cancel: true }));
+
   pi.registerProvider("percepteye", {
     baseUrl,
     // The NAME of the variable, not the value: prime-agent reads it itself.
@@ -33,7 +67,7 @@ export default function (pi: any) {
     api: "openai-completions",
     models: [
       {
-        id: process.env.PERCEPTEYE_MODEL_ID || "policy",
+        id: modelId,
         name: "Policy under training",
         reasoning: false,
         input: ["text"],
@@ -48,8 +82,8 @@ export default function (pi: any) {
         // consume, and a captured sequence longer than the training window is
         // truncated at tokenize time — silently masking generated tokens out
         // of the objective. Raise this only alongside the trainer's window.
-        contextWindow: Number(process.env.PERCEPTEYE_CONTEXT_WINDOW || 65536),
-        maxTokens: Number(process.env.PERCEPTEYE_MAX_TOKENS || 4096),
+        contextWindow,
+        maxTokens,
         cost: { input: 0, output: 0 },
       },
     ],

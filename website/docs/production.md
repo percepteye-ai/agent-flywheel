@@ -195,6 +195,9 @@ px.record_answer(turn_id, reply)          # after the scope closes — the answe
 | `adapters` | `"auto"` | binds every built-in whose framework is installed |
 | `register` | `True` | `False` skips the control-plane call entirely |
 | `control_plane_url` · `api_key` | env | `PERCEPTEYE_CONTROL_PLANE_URL` / `PERCEPTEYE_API_KEY` |
+| `execution_entrypoint` | `None` | the live Python agent/import spec to describe for exact execution identity |
+| `execution_input_shape` · `execution_method` | `"text"` · `None` | the declared call surface of `execution_entrypoint` |
+| `attested_execution_components` | `None` | opaque exact adapter evidence for implementation/state discovery cannot observe |
 
 **`trajectory_root` is required and that is deliberate.** Every captured turn lands there as a directory, and it is your copy: uploading does not delete it, and without `retention_turns` nothing does. Naming the directory is how **retention becomes a decision somebody made** rather than a surprise. It is yours.
 
@@ -209,6 +212,7 @@ With `register=True` the call makes exactly two outbound requests, once, at star
 | `.read(turn_id)` | that turn's `list[ToolCallOutcome]`, or `None` if nothing was recorded |
 | `.read_turn(turn_id)` | the `task` / `answer` text recorded for that turn, or `None` |
 | `.policy` | what the control plane said to run — **informational here**; `attach()` does not act on it |
+| `.agent_fingerprint` | `{"execution_sha256": ...}` only when SDK reconciliation was exact; otherwise `None` |
 | `.adapters_bound` | e.g. `("adk", "langchain")`; `()` is a real answer, not a failure |
 | `.close()` | unbinds the adapters; idempotent, never raises. Also a context manager |
 
@@ -221,6 +225,25 @@ With `register=True` the call makes exactly two outbound requests, once, at star
 They are separate calls because the answer does not exist yet when the turn opens — `record_answer()` is callable after the scope has closed, for the same reason `turn()` yields its id. **Omit them and the periodic flush sends nothing**: a turn with no recorded answer is held back on every 32-turn flush and leaves only at `close()` or the `atexit` hook, carrying no text at all.
 
 `record_tool_call()` works inside a turn exactly as it does inside a rollout. With the `otel` extra installed, a turn's span carries `percepteye.turn.id` rather than `percepteye.rollout.id`, so your own telemetry can tell the two apart too.
+
+**Execution identity is optional and fail-closed.** `attach()` cannot infer the
+agent whose call your surrounding application makes. Pass that same live Python
+agent as `execution_entrypoint=`, plus adapter-authored SHA-256 components that
+attest its otherwise-unobserved implementation and state, to enable canonical
+reconciliation. The SDK reuses the rollout identity algorithm: prompt, tools,
+model, sub-agents, entrypoint, binding configuration, SDK/contract, and sorted
+opaque components all enter one domain-separated digest. Missing components,
+lossy discovery, a long truncated prompt without full-observation proof, or a
+conflicting turn id leaves `agent_fingerprint` absent. A persisted per-turn
+sidecar prevents a pending turn from an older process being relabelled with the
+new process's identity. The same exact digest appears on turn/tool OTel spans as
+`percepteye.agent.execution_sha256`; no policy identity is emitted because
+`attach().policy` is informational and does not prove what the application ran.
+
+An argv command is deliberately refused for `execution_entrypoint`: attachment
+does not launch or enclose that process, so claiming a prepared child was the
+live agent would be false. Use `serve(execution_snapshot=...)` when the SDK owns
+the isolated command lifecycle.
 
 **`PERCEPTEYE_AGENT_MODE` does not gate `attach()`.** That switch gates `serve()`, the call that does training work. `attach()` *is* the production surface, and gating it on the same variable would mean the correct setting for a production agent was `PERCEPTEYE_AGENT_MODE=training`. To stop capture, don't call `attach()`, or pass `register=False` to keep it entirely local. See [Configuration](configuration.md).
 

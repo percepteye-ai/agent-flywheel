@@ -46,7 +46,7 @@ Hand-written means drift is possible, so the suite asserts agreement. Three test
 | `artifacts` | `dict[str, str \| dict]` | `{}` | always |
 | `events` | `list[dict]` | `[]` | always |
 | `timing` | `dict` | `{}` | always |
-| `llm_call_count` | `int \| None` | `None` | only when set |
+| `llm_call_count` | `int \| None` | `None` | only when set; pinned/on-policy use requires an exact nonnegative count matching the gateway |
 | `reward` | `float \| None` | `None` | only when set; **advisory only** |
 | `success` | `bool \| None` | `None` | only when set |
 | `agent_fingerprint` | `dict \| None` | `None` | only when set |
@@ -60,9 +60,9 @@ The last row is the one place the Python shape and the wire shape differ on purp
 |:--|:--|
 | the grade | computed by the compiled suite after the report; it comes back on the report ack |
 | the gateway's completion count | counted at the gateway. `llm_call_count` is what the agent *believes* it issued, and a mismatch means traffic escaped the wire |
-| rendered-prompt sha, tool-schema digest, sampling params, tokenizer | observed at the gateway. `agent_fingerprint` carries only the customer-declared half — SDK version, declared memory/skills/subagent digests |
+| rendered-prompt sha, tool-schema digest, sampling params, tokenizer | observed at the gateway. For OPSD, `agent_fingerprint.execution_sha256` is SDK-authored from canonical registration/discovery facts plus opaque adapter-attested components; unreadable or lossy discovery yields no affirmative digest |
 
-The two halves of the fingerprint are recorded separately and never conflated: it is an attestation, not an authenticated identity. `to_wire()` also raises `ContractViolation` if it would ever emit a key outside `WIRE_KEYS` — a guard against a future edit, not a runtime filter.
+Gateway policy identity and the SDK execution identity are recorded separately and never conflated. The latter is still client-side attestation, not an authenticated host identity. `to_wire()` also raises `ContractViolation` if it would ever emit a key outside `WIRE_KEYS` — a guard against a future edit, not a runtime filter.
 
 !!! warning "A client-side check binds only honest clients"
     Every rule on this page is enforced in the SDK *and* independently at intake. The dataclass makes the dangerous shape hard to build by accident; it is the server that makes it impossible to submit.

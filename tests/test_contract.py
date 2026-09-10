@@ -95,6 +95,12 @@ def test_observed_zero_is_distinguishable_from_not_reported():
     assert RolloutOutput(final_text="hi", tool_calls=[]).to_wire()["tool_calls"] == []
 
 
+@pytest.mark.parametrize("value", [-1, True, False, 1.5, "1"])
+def test_llm_call_count_must_be_a_nonnegative_integer(value):
+    with pytest.raises(ContractViolation, match="nonnegative integer"):
+        RolloutOutput(final_text="hi", llm_call_count=value).to_wire()
+
+
 # ── server-authored fields are unrepresentable ──────────────────────────────
 
 def test_output_emits_only_declared_contract_keys():

@@ -28,8 +28,10 @@ from typing import Any, Literal
 from .contract import Outcome, ToolCallOutcome
 from .errors import ContractViolation
 from .evidence import extract_entity_ids
+from .execution_identity import is_lower_sha256
 
 __all__ = [
+    "AGENT_FINGERPRINT_FILENAME",
     "CONVERSATION_ID_FILENAME",
     "TOOL_CALLS_FILENAME",
     "CaptureScope",
@@ -66,6 +68,16 @@ TURNS_FILENAME = "turns.jsonl"
 #: Where a turn directory records which conversation it belongs to.
 CONVERSATION_ID_FILENAME = "conversation_id"
 
+#: SDK-authored execution identity captured beside one production turn. It is
+#: a sidecar rather than Attachment state so an old, pending turn flushed by a
+#: newer process can never be stamped with that process's execution identity.
+AGENT_FINGERPRINT_FILENAME = "agent_fingerprint.json"
+
+#: Monotonic fail-closed marker.  It is separate from the digest sidecar so a
+#: concurrent first writer cannot overwrite a conflict after another process
+#: observed its just-created, not-yet-written file.
+_AGENT_FINGERPRINT_CONFLICT_FILENAME = "agent_fingerprint.conflict"
+
 #: The two halves of a turn. ``task`` is what was asked, ``answer`` is what the
 #: agent finally said -- the same two kinds the CLI recorder emits from
 #: ``UserPromptSubmit`` and ``Stop``.
@@ -101,6 +113,9 @@ _current_scope_kind: ContextVar[str | None] = ContextVar(
 #: for a value the scope already knew when it opened.
 _current_conversation: ContextVar[str | None] = ContextVar(
     "percepteye_current_conversation", default=None
+)
+_current_execution_sha256: ContextVar[str | None] = ContextVar(
+    "percepteye_current_execution_sha256", default=None
 )
 _warned_no_destination = False
 
@@ -286,7 +301,7 @@ class _Sink:
         self._fh: Any = None
         self._broken = False
 
-    def write(self, line: str) -> None:
+    def write(self, line: str) -> bool:
         """Append one record. NEVER raises into the caller.
 
         Creating the directory moved from turn-entry to here, which moved the
@@ -297,9 +312,10 @@ class _Sink:
         sink disables itself, says so once, and the turn carries on.
         """
         if self._broken:
-            return
+            return False
         try:
             self._write(line)
+            return True
         except OSError as exc:
             self._broken = True
             warnings.warn(
@@ -310,6 +326,7 @@ class _Sink:
                 RuntimeWarning,
                 stacklevel=4,
             )
+            return False
 
     def _write(self, line: str) -> None:
         with self._lock:
@@ -382,7 +399,66 @@ def _sink_for(path: Path) -> _Sink:
 
 
 def _append(path: Path, line: str) -> None:
-    _sink_for(path).write(line)
+    if _sink_for(path).write(line):
+        _write_execution_fingerprint(path.parent, _current_execution_sha256.get())
+
+
+def _write_execution_fingerprint(path: Path, execution_sha256: str | None) -> None:
+    """Persist one exact SDK identity, invalidating a conflicting claim.
+
+    Never raises. Capture cannot fail a customer turn. A second process may
+    reuse a caller-chosen turn id; if it carries a different identity, leaving
+    either digest in place would falsely bind half the turn, so a monotonic
+    conflict marker makes readers refuse the identity.  Keeping that marker in
+    a separate file also closes the create/write race between two processes.
+    """
+    if not is_lower_sha256(execution_sha256):
+        return
+    sidecar = path / AGENT_FINGERPRINT_FILENAME
+    conflict = path / _AGENT_FINGERPRINT_CONFLICT_FILENAME
+    expected = {"execution_sha256": execution_sha256}
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        if conflict.exists():
+            return
+        try:
+            with sidecar.open("x", encoding="utf-8") as output:
+                output.write(json.dumps(expected, sort_keys=True))
+            return
+        except FileExistsError:
+            pass
+        try:
+            current = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError):
+            current = None
+        if current == expected:
+            return
+        # Never remove this marker.  A later process cannot turn a mixed turn
+        # back into a single-identity turn merely by writing last.
+        try:
+            conflict.open("x", encoding="utf-8").close()
+        except FileExistsError:
+            pass
+    except OSError:
+        return
+
+
+def _read_execution_fingerprint(path: Path) -> dict[str, str] | None:
+    """Read only the exact sidecar shape authored by this SDK."""
+    if (path / _AGENT_FINGERPRINT_CONFLICT_FILENAME).exists():
+        return None
+    try:
+        value = json.loads(
+            (path / AGENT_FINGERPRINT_FILENAME).read_text(encoding="utf-8")
+        )
+    except (OSError, TypeError, ValueError):
+        return None
+    if not isinstance(value, dict) or set(value) != {"execution_sha256"}:
+        return None
+    digest = value.get("execution_sha256")
+    if (path / _AGENT_FINGERPRINT_CONFLICT_FILENAME).exists():
+        return None
+    return {"execution_sha256": digest} if is_lower_sha256(digest) else None
 
 
 def _release(path_str: str | None) -> None:
@@ -431,6 +507,7 @@ def _emit_span(rec: ToolCallOutcome, scope_id: str, kind: CaptureScope) -> None:
             turn_id=scope_id if kind == "turn" else None,
             conversation_id=_current_conversation.get(),
             tool_call_id=rec.tool_call_id,
+            execution_sha256=_current_execution_sha256.get(),
         )
     except Exception:
         return
@@ -460,6 +537,8 @@ def record_turn_text(
         return False
     record: dict[str, Any] = {"kind": kind, "text": text.strip()[:max_chars]}
     for key, value in ids.items():
+        if key == "execution_sha256":
+            continue
         if isinstance(value, str) and value:
             record[key] = value
     try:
@@ -469,6 +548,7 @@ def record_turn_text(
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
     except (OSError, TypeError, ValueError):
         return False
+    _write_execution_fingerprint(path, ids.get("execution_sha256"))
 
     # The OTel projection rides the SAME call that writes the file, for the
     # same reason the tool-call path does: two call sites for one fact drift,
@@ -486,6 +566,7 @@ def record_turn_text(
             turn_id=ids.get("turn_id"),
             conversation_id=ids.get("conversation_id"),
             rollout_id=ids.get("rollout_id"),
+            execution_sha256=ids.get("execution_sha256"),
         )
     except Exception:
         # A capture bug costs the observation and never the turn -- and the
@@ -630,11 +711,15 @@ class _RolloutScope:
 
     def __init__(self, rollout_id: str, trajectory_dir: str, *,
                  conversation_id: str | None = None,
+                 execution_sha256: str | None = None,
                  kind: CaptureScope = "rollout") -> None:
         self._rid = rollout_id
         self._trajectory_dir = str(trajectory_dir)
         self._kind = kind
         self._conversation_id = conversation_id or None
+        self._execution_sha256 = (
+            execution_sha256 if is_lower_sha256(execution_sha256) else None
+        )
         self._tokens: list[Any] = []
 
     def __enter__(self) -> str:
@@ -643,6 +728,7 @@ class _RolloutScope:
             _current_trajectory_dir.set(self._trajectory_dir),
             _current_scope_kind.set(self._kind),
             _current_conversation.set(self._conversation_id),
+            _current_execution_sha256.set(self._execution_sha256),
         ]
         return self._rid
 
@@ -652,6 +738,7 @@ class _RolloutScope:
             _current_trajectory_dir.reset(self._tokens[1])
             _current_scope_kind.reset(self._tokens[2])
             _current_conversation.reset(self._tokens[3])
+            _current_execution_sha256.reset(self._tokens[4])
             self._tokens = []
         # The handle lives exactly as long as the scope that writes through it.
         # Without this the sink registry would grow one entry per turn for the

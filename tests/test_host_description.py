@@ -8,7 +8,9 @@ at startup to make it do so.
 """
 from __future__ import annotations
 
+import ast
 import json
+import os
 import stat
 import sys
 
@@ -97,6 +99,26 @@ def test_a_huge_prompt_is_bounded_the_same_way_reflection_bounds_one():
 
     d = parse_discovered_agent({**HOST_RECORD, "system_prompt": "x" * 500_000})
     assert len(d.system_prompt) == _MAX_PROMPT_CHARS
+
+
+def test_exact_observation_ignores_unknown_telemetry_but_keeps_full_prompt():
+    first = parse_discovered_agent({
+        **HOST_RECORD,
+        "system_prompt": "x" * 20_000 + "A",
+        "debug_timestamp": 1,
+    })
+    telemetry_only = parse_discovered_agent({
+        **HOST_RECORD,
+        "system_prompt": "x" * 20_000 + "A",
+        "debug_timestamp": 999,
+    })
+    behavior_change = parse_discovered_agent({
+        **HOST_RECORD,
+        "system_prompt": "x" * 20_000 + "B",
+        "debug_timestamp": 1,
+    })
+    assert first.exact_observation_sha256 == telemetry_only.exact_observation_sha256
+    assert first.exact_observation_sha256 != behavior_change.exact_observation_sha256
 
 
 # ── reading ────────────────────────────────────────────────────────────────
@@ -348,3 +370,134 @@ def test_the_warm_up_child_does_not_inherit_an_ambient_rollout_id(
     assert "PERCEPTEYE_API_KEY" not in seen
     # the one variable it does need survives, or the plugin stays inert
     assert "PERCEPTEYE_TRAJECTORY_DIR" in seen
+
+
+def test_warm_up_scrubs_ambient_customer_route_configuration(tmp_path):
+    """Core knows no customer route vocabulary; an adapter must opt values in."""
+    argv = _fake_cli(
+        tmp_path,
+        "import os\n"
+        "open(os.environ['PERCEPTEYE_TRAJECTORY_DIR'] + '/route-env', 'w').write(\n"
+        "    repr({k: v for k, v in os.environ.items() if k.startswith('PERCEPTEYE_')}))\n",
+    )
+    out = tmp_path / "traj"
+    warm_up_command(
+        argv,
+        trajectory_dir=out,
+        timeout_s=30,
+        observe_wire=False,
+        env={
+            "PATH": os.environ["PATH"],
+            "PERCEPTEYE_MODEL_ID": "candidate",
+            "PERCEPTEYE_CONTEXT_WINDOW": "32768",
+            "PERCEPTEYE_MAX_TOKENS": "2048",
+            "PERCEPTEYE_API_KEY": "must-not-cross",
+            "PERCEPTEYE_AGENT_MODE": "training",
+        },
+    )
+    seen = ast.literal_eval((out / "route-env").read_text())
+    assert seen == {"PERCEPTEYE_TRAJECTORY_DIR": str(out)}
+
+
+def test_warm_up_scrubs_control_plane_and_live_provider_credentials(tmp_path):
+    """Discovery runs untrusted agent code but is not a rollout. It may see
+    neither the durable control-plane key nor a route to any live model."""
+    names = [
+        "HOME",
+        "USERPROFILE",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "PRIME_AGENT_CODING_AGENT_DIR",
+        "PRIME_AGENT_SESSION_DIR",
+        "PRIME_AGENT_CODING_AGENT_SESSION_DIR",
+        "PRIME_AGENT_KERNEL_VENV",
+        "PRIME_AGENT_KERNEL_PYTHON",
+        "PYTHONDONTWRITEBYTECODE",
+        "CUSTOMER_AGENT_HOME",
+        "CUSTOMER_AGENT_SECRET",
+        "ARBITRARY_SECRET",
+        "JIRA_TOKEN",
+        "AWS_ACCESS_KEY_ID",
+        "PERCEPTEYE_API_KEY",
+        "GEMINI_API_KEY",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "OPENROUTER_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
+        "DEEPSEEK_BASE_URL",
+        "DEEPSEEK_API_KEY",
+    ]
+    argv = _fake_cli(
+        tmp_path,
+        "import json, os\n"
+        f"names = {names!r}\n"
+        "open(os.environ['PERCEPTEYE_TRAJECTORY_DIR'] + '/credentials', 'w').write(\n"
+        "    json.dumps({name: os.environ.get(name) for name in names}))\n",
+    )
+    out = tmp_path / "traj"
+    warm_up_command(
+        argv,
+        trajectory_dir=out,
+        timeout_s=30,
+        observe_wire=False,
+        endpoint_env=("DEEPSEEK_BASE_URL", "DEEPSEEK_API_KEY"),
+        env={
+            "PATH": os.environ["PATH"],
+            "HOME": "/isolated-root",
+            "USERPROFILE": "/isolated-root",
+            "XDG_CACHE_HOME": "/isolated-root/.cache",
+            "XDG_CONFIG_HOME": "/isolated-root/.config",
+            "XDG_DATA_HOME": "/isolated-root/.local/share",
+            "XDG_STATE_HOME": "/isolated-root/.local/state",
+            "PRIME_AGENT_CODING_AGENT_DIR": "/isolated-root/.prime/agent",
+            "PRIME_AGENT_SESSION_DIR": "/isolated-root/.prime/agent/sessions",
+            "PRIME_AGENT_CODING_AGENT_SESSION_DIR": (
+                "/isolated-root/.prime/agent/sessions"
+            ),
+            "PRIME_AGENT_KERNEL_VENV": "/fixed/kernel",
+            "PRIME_AGENT_KERNEL_PYTHON": "",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "CUSTOMER_AGENT_HOME": "/ambient-customer-home",
+            "CUSTOMER_AGENT_SECRET": "must-not-cross",
+            "ARBITRARY_SECRET": "must-not-cross",
+            "JIRA_TOKEN": "must-not-cross",
+            "AWS_ACCESS_KEY_ID": "must-not-cross",
+            "PERCEPTEYE_API_KEY": "long-lived-control-plane-key",
+            "GEMINI_API_KEY": "live-gemini-key",
+            "AWS_BEARER_TOKEN_BEDROCK": "live-bedrock-key",
+            "OPENROUTER_API_KEY": "live-openrouter-key",
+            "OPENAI_BASE_URL": "https://live-provider.invalid/v1",
+            "OPENAI_API_KEY": "live-openai-key",
+            "DEEPSEEK_BASE_URL": "https://live-deepseek.invalid/v1",
+            "DEEPSEEK_API_KEY": "live-deepseek-key",
+        },
+        isolation_environment={"CUSTOMER_AGENT_HOME": "/isolated-customer-home"},
+    )
+    seen = json.loads((out / "credentials").read_text())
+    assert seen["HOME"] == "/isolated-root"
+    assert seen["USERPROFILE"] == "/isolated-root"
+    assert seen["XDG_CACHE_HOME"] == "/isolated-root/.cache"
+    assert seen["XDG_CONFIG_HOME"] == "/isolated-root/.config"
+    assert seen["XDG_DATA_HOME"] == "/isolated-root/.local/share"
+    assert seen["XDG_STATE_HOME"] == "/isolated-root/.local/state"
+    assert seen["PRIME_AGENT_CODING_AGENT_DIR"] is None
+    assert seen["PRIME_AGENT_SESSION_DIR"] is None
+    assert seen["PRIME_AGENT_CODING_AGENT_SESSION_DIR"] is None
+    assert seen["PRIME_AGENT_KERNEL_VENV"] is None
+    assert seen["PRIME_AGENT_KERNEL_PYTHON"] is None
+    assert seen["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert seen["CUSTOMER_AGENT_HOME"] == "/isolated-customer-home"
+    assert seen["CUSTOMER_AGENT_SECRET"] is None
+    assert seen["ARBITRARY_SECRET"] is None
+    assert seen["JIRA_TOKEN"] is None
+    assert seen["AWS_ACCESS_KEY_ID"] is None
+    assert seen["PERCEPTEYE_API_KEY"] is None
+    assert seen["GEMINI_API_KEY"] is None
+    assert seen["AWS_BEARER_TOKEN_BEDROCK"] is None
+    assert seen["OPENROUTER_API_KEY"] is None
+    assert seen["OPENAI_BASE_URL"] == "http://127.0.0.1:1/v1"
+    assert seen["OPENAI_API_KEY"] == "percepteye-warmup-no-sampling"
+    assert seen["DEEPSEEK_BASE_URL"] == "http://127.0.0.1:1/v1"
+    assert seen["DEEPSEEK_API_KEY"] == "percepteye-warmup-no-sampling"

@@ -18,8 +18,14 @@ import inspect
 
 import pytest
 
+import percepteye_agent_flywheel.introspection as introspection_module
 from percepteye_agent_flywheel import export
 from percepteye_agent_flywheel.export import turn_to_record
+from percepteye_agent_flywheel.introspection import (
+    DiscoveredAgent,
+    ModelConfig,
+    ToolDefinition,
+)
 from percepteye_agent_flywheel.outcomes import record_tool_call
 from percepteye_agent_flywheel.production import attach
 
@@ -87,6 +93,44 @@ def test_the_tri_state_survives_identically_on_both_paths(px, tmp_path):
     # failure nobody saw.
     assert [c.get("success") for c in rec["tool_calls"]] == [True, False, None]
     assert "success" not in rec["tool_calls"][2]
+
+
+def test_both_renderers_preserve_the_same_exact_execution_identity(
+    tmp_path, monkeypatch,
+):
+    class _Agent:
+        def invoke(self, task: str) -> str:
+            return task
+
+    monkeypatch.setattr(
+        introspection_module,
+        "introspect",
+        lambda _entrypoint: DiscoveredAgent(
+            agent_name="customer-agent",
+            framework="customer-framework",
+            system_prompt="Use tools and answer the user.",
+            tool_definitions=[ToolDefinition(name="lookup", input_schema={})],
+            discovered_model_config=ModelConfig(
+                provider="gateway", model_name="policy",
+            ),
+        ),
+    )
+    attachment = attach(
+        agent_id="a",
+        trajectory_root=str(tmp_path),
+        register=False,
+        adapters=[],
+        execution_entrypoint=_Agent(),
+        attested_execution_components={"customer.release": "a" * 64},
+    )
+    try:
+        tid = _captured(attachment)
+        record = turn_to_record(tmp_path / tid, turn_id=tid)
+        wire = attachment._turn_wire(tmp_path / tid)
+        assert record is not None and wire is not None
+        assert record["agent_fingerprint"] == wire["agent_fingerprint"]
+    finally:
+        attachment.close()
 
 
 def test_a_turn_that_recorded_nothing_is_nothing_to_both(px, tmp_path):

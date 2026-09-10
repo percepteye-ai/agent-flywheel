@@ -7,15 +7,35 @@ retry signal, and every bit of traceability a customer would debug a rollout
 from. An observability stack that cannot say which tools ran and whether they
 worked is not one.
 
-A modern CLI agent already emits that stream for its own UI. These events are
-verbatim from prime-agent ``--mode json``.
+A modern CLI agent already emits that stream for its own UI. These fixtures are
+verbatim from prime-agent ``--mode json`` and are interpreted only through the
+explicit optional Prime adapter.
 """
 from __future__ import annotations
 
 import json
 import os
 
-from percepteye_agent_flywheel.event_stream import parse_tool_calls
+from percepteye_agent_flywheel.adapters.prime_agent import (
+    PRIME_TOOL_FORMAT,
+    PrimeAgentOutputAdapter,
+)
+from percepteye_agent_flywheel.event_stream import (
+    parse_tool_calls,
+    parse_tool_calls_with_omissions,
+)
+
+_PRIME = PrimeAgentOutputAdapter()
+
+
+def _prime_calls(stdout: str):
+    return parse_tool_calls(stdout, formats=(PRIME_TOOL_FORMAT,))
+
+
+def _prime_calls_with_omissions(stdout: str):
+    return parse_tool_calls_with_omissions(
+        stdout, formats=(PRIME_TOOL_FORMAT,)
+    )
 
 _START = {
     "type": "tool_execution_start",
@@ -44,7 +64,7 @@ def _stream(*events) -> str:
 
 
 def test_a_successful_call_is_recovered_from_the_stream():
-    calls = parse_tool_calls(_stream(_START, _END_OK))
+    calls = _prime_calls(_stream(_START, _END_OK))
     assert calls is not None and len(calls) == 1
     c = calls[0]
     assert c.name == "ipython"
@@ -59,23 +79,77 @@ def test_a_failed_call_carries_its_error_body():
     end = {**_END_OK, "isError": True,
            "result": {**_END_OK["result"], "isError": True,
                       "content": [{"type": "text", "text": "NameError: x"}]}}
-    calls = parse_tool_calls(_stream(_START, end))
+    calls = _prime_calls(_stream(_START, end))
     assert calls[0].outcome == "failed"
     assert "NameError" in calls[0].error
+
+
+def test_prime_details_error_overrides_both_false_error_flags():
+    """The live Prime shape: execute() returned, so both generic flags are
+    false, but the IPython cell itself raised and details carries the truth."""
+    end = {
+        **_END_OK,
+        "isError": False,
+        "result": {
+            **_END_OK["result"],
+            "isError": False,
+            "content": [{"type": "text", "text": "NameError: missing"}],
+            "details": {
+                "durationMs": 7,
+                "status": "error",
+                "stdout": "NameError: name 'missing' is not defined",
+            },
+        },
+    }
+    calls = _prime_calls(_stream(_START, end))
+    assert calls[0].outcome == "failed"
+    assert "NameError" in (calls[0].error or "")
+
+
+def test_prime_details_aborted_overrides_both_false_error_flags():
+    """Prime's IPython executor uses ``aborted`` for an interrupted cell;
+    its own adapter treats that as an error even when generic flags are false.
+    """
+    end = {
+        **_END_OK,
+        "isError": False,
+        "result": {
+            **_END_OK["result"],
+            "isError": False,
+            "content": [{"type": "text", "text": "Execution aborted"}],
+            "details": {
+                "durationMs": 7,
+                "status": "aborted",
+                "stdout": "Execution aborted",
+            },
+        },
+    }
+    calls = _prime_calls(_stream(_START, end))
+    assert calls[0].outcome == "failed"
+    assert "aborted" in (calls[0].error or "").lower()
+
+
+def test_nested_true_error_flag_also_overrides_an_outer_false_flag():
+    end = {
+        **_END_OK,
+        "isError": False,
+        "result": {**_END_OK["result"], "isError": True},
+    }
+    assert _prime_calls(_stream(_START, end))[0].outcome == "failed"
 
 
 def test_arguments_come_from_the_start_event_when_the_end_omits_them():
     """The pair is joined on toolCallId — the arguments are what retry
     detection keys on, so losing them loses the signal."""
     end = {k: v for k, v in _END_OK.items() if k != "args"}
-    calls = parse_tool_calls(_stream(_START, end))
+    calls = _prime_calls(_stream(_START, end))
     assert calls[0].arguments["code"].startswith("open('hi.txt'")
 
 
 def test_multiple_calls_are_recovered_in_order():
     s2 = {**_START, "toolCallId": "t2", "toolName": "bash", "args": {"cmd": "ls"}}
     e2 = {**_END_OK, "toolCallId": "t2", "toolName": "bash"}
-    calls = parse_tool_calls(_stream(_START, _END_OK, s2, e2))
+    calls = _prime_calls(_stream(_START, _END_OK, s2, e2))
     assert [c.name for c in calls] == ["ipython", "bash"]
 
 
@@ -85,9 +159,9 @@ def test_multiple_calls_are_recovered_in_order():
 def test_a_stream_with_no_tool_events_returns_None_not_empty():
     """``None`` is "we observed nothing"; ``[]`` would positively assert the
     agent made zero calls. A stream we cannot read must never become a claim."""
-    assert parse_tool_calls('{"type":"text","text":"hi"}') is None
-    assert parse_tool_calls("") is None
-    assert parse_tool_calls("not json at all\nplain log line") is None
+    assert _prime_calls('{"type":"text","text":"hi"}') is None
+    assert _prime_calls("") is None
+    assert _prime_calls("not json at all\nplain log line") is None
 
 
 def test_a_call_that_never_says_whether_it_worked_is_unknown():
@@ -95,7 +169,7 @@ def test_a_call_that_never_says_whether_it_worked_is_unknown():
     whole outcome contract exists to prevent."""
     end = {k: v for k, v in _END_OK.items() if k != "isError"}
     end["result"] = {"content": [{"type": "text", "text": "done"}]}
-    calls = parse_tool_calls(_stream(_START, end))
+    calls = _prime_calls(_stream(_START, end))
     assert calls[0].outcome == "unknown"
     # The contract discards status when the outcome is unknown; we never
     # manufacture one for a local tool anyway.
@@ -106,7 +180,27 @@ def test_an_unnameable_call_is_dropped_rather_than_invented():
     """Retry detection joins on name + arguments. A fabricated name would
     corrupt every such join; losing one outcome is the cheaper error."""
     end = {"type": "tool_execution_end", "toolCallId": "zz", "isError": False}
-    assert parse_tool_calls(_stream(end)) == []
+    assert _prime_calls(_stream(end)) == []
+
+
+def test_an_unnameable_call_is_reported_as_omitted_to_the_runner():
+    end = {"type": "tool_execution_end", "toolCallId": "zz", "isError": False}
+    parsed = _prime_calls_with_omissions(_stream(end))
+    assert parsed.calls == []
+    assert parsed.omitted_count == 1
+
+
+def test_an_incomplete_start_is_reported_as_omitted_alongside_survivors():
+    incomplete = {
+        **_START,
+        "toolCallId": "never-ended",
+        "toolName": "write_file",
+    }
+    parsed = _prime_calls_with_omissions(
+        _stream(_START, _END_OK, incomplete)
+    )
+    assert [call.name for call in (parsed.calls or [])] == ["ipython"]
+    assert parsed.omitted_count == 1
 
 
 def test_interleaved_noise_does_not_discard_the_outcomes():
@@ -115,7 +209,7 @@ def test_interleaved_noise_does_not_discard_the_outcomes():
         "starting up…", json.dumps(_START), "{ not valid json",
         json.dumps(_END_OK), "done.",
     ])
-    calls = parse_tool_calls(noisy)
+    calls = _prime_calls(noisy)
     assert len(calls) == 1 and calls[0].outcome == "ok"
 
 
@@ -126,22 +220,22 @@ def test_the_trajectory_is_not_overwritten_by_the_stream():
     """An agent that called record_tool_call asserted something deliberate
     about itself; a parse must never overwrite it."""
     from percepteye_agent_flywheel.contract import RolloutOutput, ToolCallOutcome
-    from percepteye_agent_flywheel.runner import _attach_stream_tool_calls
+    from percepteye_agent_flywheel.runner import _attach_command_projection
 
     recorded = [ToolCallOutcome(
         name="from_trajectory", arguments={}, outcome="ok", status_code=None)]
     out = RolloutOutput(final_text="", tool_calls=list(recorded))
-    _attach_stream_tool_calls(out, _stream(_START, _END_OK))
+    _attach_command_projection(out, _stream(_START, _END_OK), _PRIME)
     assert [c.name for c in out.tool_calls] == ["from_trajectory"]
 
 
 def test_the_stream_fills_in_when_the_trajectory_recorded_nothing():
     from percepteye_agent_flywheel.contract import RolloutOutput
-    from percepteye_agent_flywheel.runner import _attach_stream_tool_calls
+    from percepteye_agent_flywheel.runner import _attach_command_projection
 
     out = RolloutOutput(final_text="")
     assert out.tool_calls is None
-    _attach_stream_tool_calls(out, _stream(_START, _END_OK))
+    _attach_command_projection(out, _stream(_START, _END_OK), _PRIME)
     assert out.tool_calls is not None
     assert [c.name for c in out.tool_calls] == ["ipython"]
 
@@ -149,10 +243,10 @@ def test_the_stream_fills_in_when_the_trajectory_recorded_nothing():
 def test_an_empty_assertion_of_zero_calls_is_preserved():
     """``[]`` from the trajectory is a positive claim and must survive."""
     from percepteye_agent_flywheel.contract import RolloutOutput
-    from percepteye_agent_flywheel.runner import _attach_stream_tool_calls
+    from percepteye_agent_flywheel.runner import _attach_command_projection
 
     out = RolloutOutput(final_text="", tool_calls=[])
-    _attach_stream_tool_calls(out, _stream(_START, _END_OK))
+    _attach_command_projection(out, _stream(_START, _END_OK), _PRIME)
     assert out.tool_calls == []
 
 
@@ -201,14 +295,143 @@ def test_a_stream_is_matched_by_its_events_not_by_a_declared_name():
     agent's self-description."""
     from percepteye_agent_flywheel.event_stream import FORMATS
 
-    assert {f.name for f in FORMATS} >= {"prime-agent", "otel-genai"}
+    assert {f.name for f in FORMATS} == {"otel-genai"}
     # Two vocabularies in one stream: the first seen wins and the other's
     # events are ignored rather than silently merged under one call id.
     mixed = _stream(_START, _END_OK,
                     {"type": "gen_ai.tool.end", "gen_ai.tool.call.id": "z",
                      "gen_ai.tool.name": "other"})
-    names = [c.name for c in parse_tool_calls(mixed)]
+    names = [c.name for c in _prime_calls(mixed)]
     assert names == ["ipython"]
+
+
+# ── Prime JSONL is telemetry, not final prose ───────────────────────────────
+
+
+def _assistant_message(text: str):
+    return {
+        "role": "assistant",
+        "content": [{"type": "text", "text": text}],
+        "stopReason": "stop",
+    }
+
+
+def test_final_text_comes_from_the_terminal_assistant_event():
+    first = _assistant_message("working")
+    final = {
+        **_assistant_message("Shipped the fix."),
+        "content": [
+            {"type": "thinking", "thinking": "private"},
+            {"type": "text", "text": "Shipped"},
+            {"type": "text", "text": "the fix."},
+        ],
+    }
+    stdout = _stream(
+        {"type": "session", "version": 3},
+        {"type": "agent_start"},
+        {"type": "message_end", "message": first},
+        {"type": "message_end", "message": final},
+        {"type": "agent_end", "messages": [first, final]},
+    )
+    projected = _PRIME.project(stdout)
+    assert projected.final_text == "Shipped\nthe fix."
+    assert projected.llm_call_count == 2
+
+
+def test_agent_end_snapshot_does_not_double_count_model_calls():
+    first = _assistant_message("working")
+    final = _assistant_message("done")
+    stdout = _stream(
+        {"type": "agent_start"},
+        {"type": "message_end", "message": first},
+        {"type": "message_end", "message": final},
+        {"type": "agent_end", "messages": [first, final]},
+    )
+    assert _PRIME.project(stdout).llm_call_count == 2
+
+
+def test_recognised_incomplete_stream_abstains_instead_of_asserting_zero():
+    projected = _PRIME.project(_stream({"type": "agent_start"}))
+    assert projected.llm_call_count is None
+    assert projected.exclusion_reason == "cancelled"
+    assert _PRIME.project('{"final_text":"ordinary JSON"}').llm_call_count is None
+
+
+def test_command_projection_carries_the_independent_model_call_count():
+    from percepteye_agent_flywheel.contract import RolloutOutput
+    from percepteye_agent_flywheel.runner import _attach_command_projection
+
+    stdout = _stream(
+        {"type": "agent_start"},
+        {"type": "message_end", "message": _assistant_message("working")},
+        {"type": "message_end", "message": _assistant_message("done")},
+        {"type": "agent_end", "messages": [_assistant_message("done")]},
+    )
+    out = RolloutOutput(final_text="raw telemetry")
+    _attach_command_projection(out, stdout, _PRIME)
+    assert out.final_text == "done"
+    assert out.llm_call_count == 2
+
+
+def test_prime_stream_without_a_terminal_message_is_honestly_empty():
+    assert _PRIME.project(_stream(_START, _END_OK)).final_text == ""
+
+
+def test_agent_end_without_an_assistant_clears_an_earlier_partial_message():
+    stdout = _stream(
+        {"type": "message_end", "message": _assistant_message("not terminal")},
+        {"type": "agent_end", "messages": [{"role": "user", "content": "task"}]},
+    )
+    assert _PRIME.project(stdout).final_text == ""
+
+
+def test_ordinary_json_stdout_is_not_mistaken_for_prime_jsonl():
+    stdout = '{"final_text":"an ordinary command result"}'
+    assert _PRIME.project(stdout).final_text is None
+
+
+def test_refinement_and_compaction_events_are_reported_as_contamination():
+    stdout = _stream(
+        {"type": "compaction_start", "reason": "threshold"},
+        {"type": "compaction_end", "reason": "threshold"},
+        {"type": "refine_complete", "id": "r1"},
+        {"type": "refine_failed", "error": "cancelled"},
+        {"type": "compaction_start", "reason": "overflow"},
+    )
+    detail = _PRIME.project(stdout).exclusion_detail or ""
+    for kind in (
+        "compaction_start", "compaction_end", "refine_complete", "refine_failed",
+    ):
+        assert kind in detail
+    single = _PRIME.project(
+        _stream({"type": "compaction_start", "reason": "overflow"})
+    )
+    assert single.exclusion_reason == "cancelled"
+    assert "compaction_start" in (single.exclusion_detail or "")
+
+
+def test_terminal_assistant_failure_uses_agent_end_as_authority():
+    errored = {**_assistant_message("partial"), "stopReason": "error",
+               "errorMessage": "secret=/customer/path"}
+    recovered = _assistant_message("recovered")
+    stdout = _stream(
+        {"type": "message_end", "message": recovered},
+        {"type": "agent_end", "messages": [recovered, errored]},
+    )
+    projected = _PRIME.project(stdout)
+    assert projected.exclusion_reason == "cancelled"
+    assert "stopReason=error" in (projected.exclusion_detail or "")
+
+
+def test_a_nonterminal_error_does_not_override_a_terminal_success():
+    errored = {**_assistant_message("partial"), "stopReason": "aborted"}
+    recovered = _assistant_message("recovered")
+    stdout = _stream(
+        {"type": "agent_start"},
+        {"type": "message_end", "message": errored},
+        {"type": "agent_end", "messages": [errored, recovered]},
+    )
+    assert _PRIME.project(stdout).exclusion_reason is None
 
 
 # ── every exit path captures, not just the clean one ────────────────────────
@@ -220,14 +443,16 @@ def _agent_that_emits_then(exit_code: int, tmp_path):
     p = tmp_path / "agent.sh"
     p.write_text(
         "#!/bin/sh\n"
-        f"cat <<'JSON'\n{json.dumps(_START)}\n{json.dumps(_END_OK)}\nJSON\n"
+        f"cat <<'JSON'\n{json.dumps({'type': 'agent_start'})}\n"
+        f"{json.dumps(_START)}\n{json.dumps(_END_OK)}\n"
+        f"{json.dumps({'type': 'agent_end', 'messages': []})}\nJSON\n"
         f"exit {exit_code}\n"
     )
     p.chmod(p.stat().st_mode | _stat.S_IEXEC)
     return str(p)
 
 
-def _run_command(tmp_path, script, timeout_s=30.0):
+def _run_command(tmp_path, script, timeout_s=30.0, *, output_adapter=_PRIME):
     import time as _t
 
     from percepteye_agent_flywheel.contract import RolloutRequest
@@ -241,7 +466,15 @@ def _run_command(tmp_path, script, timeout_s=30.0):
     )
     return run_rollout_as_command(
         ["sh", script], req, trajectory_dir=str(tmp_path), timeout_s=timeout_s,
-        env=dict(os.environ), cwd=str(tmp_path))
+        env=dict(os.environ), cwd=str(tmp_path), output_adapter=output_adapter)
+
+
+def test_core_does_not_guess_prime_semantics_without_the_optional_adapter(tmp_path):
+    script = _agent_that_emits_then(0, tmp_path)
+    out = _run_command(tmp_path, script, output_adapter=None)
+    assert out.tool_calls is None
+    assert out.llm_call_count is None
+    assert out.final_text.startswith('{"type": "agent_start"')
 
 
 def test_a_nonzero_exit_still_captures_its_tool_calls(tmp_path):
@@ -261,6 +494,79 @@ def test_a_clean_exit_captures_its_tool_calls(tmp_path):
     out = _run_command(tmp_path, _agent_that_emits_then(0, tmp_path))
     assert out.exclusion_reason is None
     assert [c.name for c in out.tool_calls] == ["ipython"]
+
+
+def test_command_runner_marks_an_incomplete_stream_as_omitted(tmp_path):
+    import stat as _stat
+
+    incomplete = {**_START, "toolCallId": "never-ended"}
+    p = tmp_path / "incomplete-agent.sh"
+    p.write_text(
+        "#!/bin/sh\n"
+        f"cat <<'JSON'\n{json.dumps(_START)}\n{json.dumps(_END_OK)}\n"
+        f"{json.dumps(incomplete)}\nJSON\n"
+    )
+    p.chmod(p.stat().st_mode | _stat.S_IEXEC)
+    out = _run_command(tmp_path, str(p))
+    assert [call.name for call in (out.tool_calls or [])] == ["ipython"]
+    assert out.tool_calls_omitted_count == 1
+
+
+def test_command_runner_reports_assistant_text_not_the_jsonl_stream(tmp_path):
+    import stat as _stat
+
+    final = _assistant_message("The actual answer")
+    p = tmp_path / "json-agent.sh"
+    p.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' '{json.dumps({'type': 'session', 'version': 3})}'\n"
+        f"printf '%s\\n' '{json.dumps({'type': 'agent_start'})}'\n"
+        f"printf '%s\\n' '{json.dumps({'type': 'message_end', 'message': final})}'\n"
+        f"printf '%s\\n' '{json.dumps({'type': 'agent_end', 'messages': [final]})}'\n"
+    )
+    p.chmod(p.stat().st_mode | _stat.S_IEXEC)
+    out = _run_command(tmp_path, str(p))
+    assert out.final_text == "The actual answer"
+    assert out.llm_call_count == 1
+
+
+def test_command_runner_excludes_a_control_contaminated_trace(tmp_path):
+    import stat as _stat
+
+    final = _assistant_message("looks successful")
+    p = tmp_path / "compacted-agent.sh"
+    p.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' '{json.dumps({'type': 'compaction_start', 'reason': 'threshold'})}'\n"
+        f"printf '%s\\n' '{json.dumps({'type': 'message_end', 'message': final})}'\n"
+    )
+    p.chmod(p.stat().st_mode | _stat.S_IEXEC)
+    out = _run_command(tmp_path, str(p))
+    assert out.final_text == "looks successful"
+    assert out.exclusion_reason == "cancelled"
+    assert "compaction_start" in (out.exclusion_detail or "")
+
+
+def test_json_mode_terminal_error_is_excluded_even_when_process_exits_zero(tmp_path):
+    import stat as _stat
+
+    failed = {
+        **_assistant_message("a misleading partial answer"),
+        "stopReason": "error",
+        "errorMessage": "Authorization: Bearer must-not-leak /customer/path",
+    }
+    p = tmp_path / "failed-json-agent.sh"
+    p.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' '{json.dumps({'type': 'message_end', 'message': failed})}'\n"
+        f"printf '%s\\n' '{json.dumps({'type': 'agent_end', 'messages': [failed]})}'\n"
+    )
+    p.chmod(p.stat().st_mode | _stat.S_IEXEC)
+    out = _run_command(tmp_path, str(p))
+    assert out.exclusion_reason == "cancelled"
+    assert "stopReason=error" in (out.exclusion_detail or "")
+    assert "must-not-leak" not in (out.exclusion_detail or "")
+    assert "/customer/path" not in (out.exclusion_detail or "")
 
 
 def test_a_timeout_kill_still_captures_what_ran(tmp_path):

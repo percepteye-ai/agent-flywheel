@@ -239,8 +239,8 @@ def test_a_wire_record_without_identity_is_still_readable():
 
 
 def test_a_cli_agents_event_stream_yields_identity():
-    """The other capture path: a non-Python agent emitting JSON events. It has
-    the structured result in hand, so it resolves identity the same way."""
+    """An explicit Prime example format resolves identity from structured output."""
+    from percepteye_agent_flywheel.adapters.prime_agent import PRIME_TOOL_FORMAT
     from percepteye_agent_flywheel.event_stream import parse_tool_calls
 
     calls = parse_tool_calls("\n".join([
@@ -249,7 +249,7 @@ def test_a_cli_agents_event_stream_yields_identity():
         json.dumps({"type": "tool_execution_end", "toolCallId": "c1",
                     "toolName": "POST /issue", "isError": False,
                     "result": {"id": "10001", "key": "ENG-7"}}),
-    ]))
+    ]), formats=(PRIME_TOOL_FORMAT,))
     assert calls is not None
     assert calls[0].entity_ids == {"id": "10001", "key": "ENG-7"}
 

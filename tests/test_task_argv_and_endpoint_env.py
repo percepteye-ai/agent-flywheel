@@ -116,8 +116,8 @@ def test_omitting_it_changes_nothing():
 
 
 def test_the_named_key_is_still_a_percepteye_secret_free_zone():
-    """The PERCEPTEYE_ namespace never crosses by inheritance, and naming an
-    endpoint variable must not become a way to smuggle one across."""
+    """Percepteye secrets never cross by inheritance, and naming an endpoint
+    variable must not become a way to smuggle one across."""
     env = build_child_env(
         rollout_id="rl_t", llm_url="https://gw/v1", api_key="sk-1",
         trajectory_dir="/tmp/t",

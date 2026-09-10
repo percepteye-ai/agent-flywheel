@@ -1,6 +1,7 @@
 """Importable agent fixtures for serve() registration tests."""
 from __future__ import annotations
 
+import os
 from typing import ClassVar
 
 
@@ -11,6 +12,15 @@ class _Plain:
 
 def build():
     return _Plain()
+
+
+class _EnvironmentProbe:
+    def invoke(self, task: str) -> str:
+        return f"{task}|{os.environ.get('FAKE_EXECUTION_MARKER', '<absent>')}"
+
+
+def build_environment_probe():
+    return _EnvironmentProbe()
 
 
 def build_langchain():

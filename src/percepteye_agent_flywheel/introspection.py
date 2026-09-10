@@ -127,6 +127,13 @@ class DiscoveredAgent:
     role: str = "standalone"
     #: Names of the parts we could not read, e.g. ``["system_prompt"]``.
     incomplete: list[str] = field(default_factory=list)
+    #: Canonical digest of a complete observation *before* the public wire
+    #: projection truncates a long prompt or drops host-specific fields. This
+    #: is SDK-internal identity evidence and is intentionally omitted by
+    #: :meth:`to_wire`; the registration schema remains framework-neutral.
+    exact_observation_sha256: str | None = field(
+        default=None, repr=False, compare=False,
+    )
 
     def to_wire(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -215,11 +222,19 @@ def _probe_adk(obj: Any, depth: int) -> DiscoveredAgent | None:
     model = _safe(_adk_model, obj)
 
     subs: list[DiscoveredAgent] = []
+    raw_sub_agents = getattr(obj, "sub_agents", None) or []
     if depth < _MAX_DEPTH:
-        for child in (getattr(obj, "sub_agents", None) or []):
+        for child in raw_sub_agents:
             got = _introspect_obj(child, depth + 1)
             if got is not None:
                 subs.append(dataclasses.replace(got, role="sub_agent"))
+            elif "sub_agents" not in incomplete:
+                incomplete.append("sub_agents")
+    elif raw_sub_agents:
+        # The hierarchy continues beyond the bounded reflection walk.  Empty
+        # would mean "none" and is exact; silently dropping a real descendant
+        # would let two different agent graphs share an execution digest.
+        incomplete.append("sub_agents")
 
     desc = _safe(lambda: str(getattr(obj, "description", "") or ""))
     return DiscoveredAgent(

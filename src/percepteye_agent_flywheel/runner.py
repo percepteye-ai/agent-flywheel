@@ -27,13 +27,23 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
 from .contract import RolloutOutput, RolloutRequest, ToolCallOutcome
 from .entrypoint import TASK, InputShape, ResolvedEntrypoint, resolve_entrypoint
 from .errors import ConfigurationError, LeaseLost, TransportError
+from .event_stream import CommandOutputAdapter, CommandOutputProjection
+from .execution_identity import (
+    ExecutionChild,
+    ExecutionSnapshot,
+    canonical_observation_sha256,
+    execution_descriptor_sha256,
+    is_lower_sha256,
+    normalize_attested_components,
+)
+from .introspection import _MAX_PROMPT_CHARS, DiscoveredAgent
 from .isolation import build_child_env
 from .outcomes import TOOL_CALLS_FILENAME, Trajectory, _RolloutScope
 from .transport import AttachTransport, sleep_ms
@@ -323,6 +333,7 @@ def run_rollout_as_command(
     env: dict[str, str],
     cwd: str | None = None,
     gate_flag: str | None = None,
+    output_adapter: CommandOutputAdapter | None = None,
 ) -> RolloutOutput:
     """Run the customer's agent as a process and read what it left behind.
 
@@ -330,9 +341,9 @@ def run_rollout_as_command(
     guessing wrongly is silent: on stdin, and as PERCEPTEYE_TURN_INPUT. A CLI
     that takes the task as a positional argument gets a third: put ``fw.TASK``
     in the argv and it is substituted there, and stdin is then left empty so
-    the task is not delivered twice. The final text
-    is the process's stdout, trimmed -- there is no protocol to implement, so
-    an existing CLI needs no changes to be served.
+    the task is not delivered twice. For an ordinary command, final text is
+    stdout trimmed. Structured stdout is interpreted only when the caller
+    supplies an explicit adapter; core has no customer-agent vocabulary.
     """
     started = time.time()
     resolved_argv, task_in_argv = _argv_with_task(list(argv), rollout.turn_input)
@@ -357,7 +368,7 @@ def run_rollout_as_command(
     def _finalise(out: RolloutOutput, stdout_text: str) -> RolloutOutput:
         out.timing.setdefault("elapsed_s", time.time() - started)
         _attach_trajectory(out, trajectory_dir)
-        _attach_stream_tool_calls(out, stdout_text or "")
+        _attach_command_projection(out, stdout_text or "", output_adapter)
         return out
 
     try:
@@ -390,35 +401,69 @@ def run_rollout_as_command(
     return _finalise(RolloutOutput(final_text=(stdout or "").strip()), stdout or "")
 
 
-def _attach_stream_tool_calls(out: RolloutOutput, stdout: str) -> None:
-    """Recover tool outcomes from a command agent's own event stream.
-
-    Only when the trajectory recorded NOTHING. An agent that called
-    ``record_tool_call`` made a deliberate assertion about its own behaviour
-    and a stream parse must never overwrite it — the trajectory is the record the
-    control plane grades.
-
-    This is what lets a process agent report tool calls at all. A framework
-    adapter binds to a Python object; a Node CLI or a compiled binary has no
-    object to bind to, so its calls were unobservable and the honest setting
-    was ``reports_tool_calls=False``. Without per-call outcomes there is no
-    verdict to grade, no retry to detect, and nothing a customer can debug a
-    rollout from.
-
-    ``None`` stays ``None``: a stream carrying no tool-execution events leaves
-    the field unset rather than asserting the agent made zero calls.
-    """
-    if out.tool_calls is not None:
+def _attach_command_projection(
+    out: RolloutOutput,
+    stdout: str,
+    adapter: CommandOutputAdapter | None,
+) -> None:
+    """Merge one explicit adapter projection without trusting malformed claims."""
+    if adapter is None:
         return
     try:
-        from .event_stream import parse_tool_calls
-
-        parsed = parse_tool_calls(stdout)
-    except Exception:  # never fail a rollout over telemetry
+        projected = adapter.project(stdout)
+        if not isinstance(projected, CommandOutputProjection):
+            raise TypeError("adapter returned the wrong projection type")
+    except Exception:
+        # The process ran, but the configured interpretation boundary failed.
+        # Raw lifecycle JSON is not an assistant answer and must not be graded
+        # as one. Preserve excluded evidence without letting an observer
+        # failure interrupt the customer process.
+        out.final_text = ""
+        detail = "command output adapter failed; structured evidence was withheld"
+        if out.exclusion_reason is None:
+            out.exclusion_reason = "cancelled"
+            out.exclusion_detail = detail
+        else:
+            out.exclusion_detail = "; ".join(
+                filter(None, (out.exclusion_detail, detail))
+            )
         return
-    if parsed:
-        out.tool_calls = parsed
+    if not projected.recognized:
+        return
 
+    if projected.final_text is not None:
+        out.final_text = projected.final_text
+    if projected.llm_call_count is not None and out.llm_call_count is None:
+        count = projected.llm_call_count
+        if type(count) is int and count >= 0:
+            out.llm_call_count = count
+        else:
+            detail = "command output adapter returned an invalid model-call count"
+            if out.exclusion_reason is None:
+                out.exclusion_reason = "cancelled"
+                out.exclusion_detail = detail
+            else:
+                out.exclusion_detail = "; ".join(
+                    filter(None, (out.exclusion_detail, detail))
+                )
+    omitted = projected.tool_calls_omitted_count
+    if type(omitted) is int and omitted >= 0:
+        out.tool_calls_omitted_count += omitted
+    else:
+        out.tool_calls_omitted_count += 1
+    # A trajectory is an explicit assertion and wins over stream projection.
+    if out.tool_calls is None and projected.tool_calls is not None:
+        out.tool_calls = projected.tool_calls
+
+    if projected.exclusion_reason is not None:
+        detail = projected.exclusion_detail or "command output adapter excluded trace"
+        if out.exclusion_reason is None:
+            out.exclusion_reason = projected.exclusion_reason
+            out.exclusion_detail = detail
+        else:
+            out.exclusion_detail = "; ".join(
+                filter(None, (out.exclusion_detail, detail))
+            )
 
 class _InFlight:
     """One rollout being served right now, as the heartbeat thread sees it."""
@@ -475,6 +520,95 @@ def _mark_substrate_unavailable(out: RolloutOutput) -> None:
     )
 
 
+def _exclude_for_execution_identity(out: RolloutOutput, detail: str) -> None:
+    """Make identity failure untrainable without hiding prior evidence."""
+    if out.exclusion_reason is None:
+        out.exclusion_reason = "cancelled"
+        out.exclusion_detail = detail
+        return
+    out.exclusion_detail = "; ".join(filter(None, (out.exclusion_detail, detail)))
+
+
+def _adapter_config_identity(adapters: Any) -> Any:
+    """Stable adapter registration facts, without address-bearing reprs."""
+    if adapters is None or isinstance(adapters, str):
+        return adapters
+    values = adapters if isinstance(adapters, (list, tuple)) else [adapters]
+    return [
+        item if isinstance(item, str) else {
+            "adapter_type": f"{type(item).__module__}.{type(item).__qualname__}",
+            "configuration_unobserved": True,
+        }
+        for item in values
+    ]
+
+
+def _description_is_exact(described: DiscoveredAgent) -> bool:
+    """Every behavior-bearing node must survive discovery without ambiguity."""
+    if (
+        described.system_prompt is None
+        or described.tool_definitions is None
+        or described.discovered_model_config is None
+    ):
+        return False
+    if any(item != "tool_annotations" for item in described.incomplete):
+        return False
+    if (
+        len(described.system_prompt) >= _MAX_PROMPT_CHARS
+        and described.exact_observation_sha256 is None
+    ):
+        return False
+    if (
+        described.exact_observation_sha256 is not None
+        and not is_lower_sha256(described.exact_observation_sha256)
+    ):
+        return False
+    return all(_description_is_exact(child) for child in described.sub_agents)
+
+
+def _bind_execution_fingerprint(
+    out: RolloutOutput,
+    execution_expected: str | None,
+    diagnostics_expected: Mapping[str, str] | None = None,
+) -> None:
+    """Stamp SDK-reconciled identity, refusing agent-authored claims."""
+    fingerprint = out.agent_fingerprint
+    if fingerprint is None:
+        merged: dict[str, Any] = {}
+    elif isinstance(fingerprint, dict):
+        merged = dict(fingerprint)
+    else:
+        merged = {}
+        _exclude_for_execution_identity(out, "agent_fingerprint was not an object")
+
+    execution_claimed = merged.get("execution_sha256")
+    if execution_expected is None:
+        if execution_claimed is not None:
+            _exclude_for_execution_identity(
+                out,
+                "agent claimed execution_sha256 without an exact SDK-reconciled identity",
+            )
+            merged.pop("execution_sha256", None)
+    else:
+        if execution_claimed is not None and execution_claimed != execution_expected:
+            _exclude_for_execution_identity(
+                out,
+                "agent claimed an execution_sha256 different from the SDK-reconciled identity",
+            )
+        merged["execution_sha256"] = execution_expected
+
+    diagnostics = dict(diagnostics_expected or {})
+    for name, expected in diagnostics.items():
+        claimed = merged.get(name)
+        if claimed is not None and claimed != expected:
+            _exclude_for_execution_identity(
+                out,
+                f"agent claimed {name} different from the SDK-attested evidence",
+            )
+        merged[name] = expected
+    out.agent_fingerprint = merged or None
+
+
 class RolloutRunner:
     """Claim work, run it, report it. One rollout at a time per slot."""
 
@@ -499,6 +633,10 @@ class RolloutRunner:
         #: required before anything is appended.
         gate_flag: str | None = None,
         endpoint_env: tuple[str, str] | None = None,
+        command_output_adapter: CommandOutputAdapter | None = None,
+        execution_snapshot: ExecutionSnapshot | None = None,
+        reports_tool_calls: bool = False,
+        attested_execution_components: Mapping[str, str] | None = None,
     ) -> None:
         if isolation not in ("subprocess", "inprocess"):
             raise ConfigurationError(
@@ -514,6 +652,63 @@ class RolloutRunner:
             )
         self._spec: str | None = None
         self._command: list[str] | None = None
+        self._entrypoint_object_type: str | None = None
+        self._execution_sha256: str | None = None
+        self._execution_descriptor: dict[str, Any] | None = None
+        self._reports_tool_calls = bool(reports_tool_calls)
+        self._attested_execution_components = normalize_attested_components(
+            attested_execution_components
+        )
+        if "execution_sha256" in self._attested_execution_components:
+            raise ConfigurationError(
+                "attested execution components must not author execution_sha256"
+            )
+        self._configured_input_shape = input_shape
+        self._configured_method = method
+        self._configured_adapters = _adapter_config_identity(adapters)
+        self._configured_gate_flag = gate_flag
+        self._configured_endpoint_env = list(endpoint_env) if endpoint_env is not None else None
+        self._command_output_adapter = command_output_adapter
+        if command_output_adapter is not None:
+            adapter_name = getattr(command_output_adapter, "adapter_name", None)
+            if not isinstance(adapter_name, str) or not adapter_name.strip():
+                raise ConfigurationError(
+                    "command_output_adapter.adapter_name must be a non-empty string"
+                )
+            if not callable(getattr(command_output_adapter, "project", None)):
+                raise ConfigurationError(
+                    "command_output_adapter must provide project(stdout)"
+                )
+        self.execution_snapshot = execution_snapshot
+        self._execution_snapshot_name: str | None = None
+        self._snapshot_components: dict[str, str] = {}
+        self._snapshot_diagnostics: dict[str, str] = {}
+        self._snapshot_complete = False
+        if self.execution_snapshot is not None:
+            raw_name = self.execution_snapshot.adapter_name
+            if not isinstance(raw_name, str) or not raw_name.strip():
+                raise ConfigurationError("execution snapshot adapter_name must be non-empty")
+            self._execution_snapshot_name = raw_name.strip()
+            self._snapshot_components = normalize_attested_components(
+                self.execution_snapshot.execution_components
+            )
+            if "execution_sha256" in self._snapshot_components:
+                raise ConfigurationError(
+                    "execution snapshot components must not author execution_sha256"
+                )
+            self._snapshot_diagnostics = normalize_attested_components(
+                self.execution_snapshot.diagnostic_fingerprint
+            )
+            if "execution_sha256" in self._snapshot_diagnostics:
+                raise ConfigurationError(
+                    "execution snapshot diagnostics must not author execution_sha256"
+                )
+            raw_complete = self.execution_snapshot.execution_identity_complete
+            if not isinstance(raw_complete, bool):
+                raise ConfigurationError(
+                    "execution snapshot execution_identity_complete must be a bool"
+                )
+            self._snapshot_complete = raw_complete
         if _is_command(entrypoint):
             # A process, not an object. Nothing to resolve and nothing to
             # import; isolation is inherent because it is already its own
@@ -538,11 +733,18 @@ class RolloutRunner:
             self._inflight_lock = threading.Lock()
             self._beat_stop = threading.Event()
             return
+        if command_output_adapter is not None:
+            raise ConfigurationError(
+                "command_output_adapter is supported only for command entrypoints"
+            )
         if _is_import_spec(entrypoint):
             self._spec = entrypoint
             obj = build_agent(entrypoint)
         else:
             obj = entrypoint
+            self._entrypoint_object_type = (
+                f"{type(obj).__module__}.{type(obj).__qualname__}"
+            )
             if isolation == "subprocess":
                 raise ConfigurationError(
                     "isolation='subprocess' needs an importable entrypoint so the "
@@ -578,6 +780,108 @@ class RolloutRunner:
         self._inflight_lock = threading.Lock()
         self._beat_stop = threading.Event()
 
+    @property
+    def execution_sha256(self) -> str | None:
+        """SDK-authored opaque identity, or ``None`` when discovery was lossy."""
+        return self._execution_sha256
+
+    def configure_execution_identity(
+        self,
+        described: DiscoveredAgent | None,
+        *,
+        discovery_enabled: bool,
+        sdk: str,
+        contract_version: str,
+    ) -> str | None:
+        """Reconcile generic registration facts into one exact execution digest.
+
+        No digest is emitted when discovery is disabled, unreadable, loses a
+        behavior-bearing field, or lacks adapter-attested implementation/state
+        evidence. In particular, a prompt projected at the public 20,000-character
+        cap needs a pre-projection observation digest; hashing the truncated prefix
+        would let distinct agents collide.
+        """
+        self._execution_sha256 = None
+        self._execution_descriptor = None
+        if not discovery_enabled or described is None:
+            return None
+        if not _description_is_exact(described):
+            return None
+        exact_observation = described.exact_observation_sha256
+        projected = described.to_wire()
+        try:
+            observation_sha256 = exact_observation or canonical_observation_sha256(projected)
+        except ConfigurationError:
+            return None
+
+        components = dict(self._attested_execution_components)
+        for name, digest in self._snapshot_components.items():
+            prior = components.get(name)
+            if prior is not None and prior != digest:
+                raise ConfigurationError(
+                    f"attested execution component {name!r} conflicts with "
+                    f"{self._execution_snapshot_name} adapter evidence"
+                )
+            components[name] = digest
+        components = dict(sorted(components.items()))
+        if self.execution_snapshot is not None and not self._snapshot_complete:
+            return None
+        # A completeness flag does not itself identify a single byte of
+        # implementation/state.  At least one canonical component digest must
+        # exist; otherwise every empty adapter would collapse to the same
+        # affirmative execution identity.
+        adapter_evidence_complete = bool(components)
+        if not adapter_evidence_complete:
+            # Prompt/tool discovery does not observe the orchestration code or
+            # mutable object state. A caller that wants an OPSD-eligible exact
+            # identity must use an execution adapter to attest those bytes.
+            return None
+
+        if self._command is not None:
+            entrypoint: dict[str, Any] = {
+                "kind": "command",
+                "argv": [
+                    {"task_input": True} if item is TASK else {"literal": str(item)}
+                    for item in self._command
+                ],
+            }
+        elif self._spec is not None:
+            entrypoint = {
+                "kind": "import_spec",
+                "spec": self._spec,
+                "resolved_method": self.resolved.name,
+            }
+        else:
+            entrypoint = {
+                "kind": "constructed_object",
+                "object_type": self._entrypoint_object_type,
+                "resolved_method": self.resolved.name,
+            }
+
+        descriptor: dict[str, Any] = {
+            "schema": "percepteye.agent_execution/v1",
+            "sdk": sdk,
+            "contract_version": contract_version,
+            "entrypoint": entrypoint,
+            "configuration": {
+                "input_shape": self._configured_input_shape,
+                "isolation": self.isolation,
+                "concurrency": self.concurrency,
+                "method": self._configured_method,
+                "adapters": self._configured_adapters,
+                "gate_flag": self._configured_gate_flag,
+                "endpoint_env": self._configured_endpoint_env,
+                "reports_tool_calls": self._reports_tool_calls,
+            },
+            "discovered_agent": projected,
+            "discovery_observation_sha256": observation_sha256,
+            "attested_components": components,
+        }
+        digest = execution_descriptor_sha256(descriptor)
+        self._execution_descriptor = descriptor
+        self._execution_sha256 = digest
+        return digest
+
     # ── one rollout ────────────────────────────────────────────────────────
     def run_one(self, rollout: RolloutRequest) -> RolloutOutput:
         budget = rollout.seconds_remaining(time.time())
@@ -587,12 +891,14 @@ class RolloutRunner:
             # local timeout on work the server had already given up on, and
             # then reported into a lease that no longer existed. Hand it back
             # immediately instead.
-            return RolloutOutput(
+            out = RolloutOutput(
                 final_text="",
                 exclusion_reason="deadline_exceeded",
                 exclusion_detail="deadline had already passed when claimed",
                 timing={"elapsed_s": 0.0},
             )
+            _bind_execution_fingerprint(out, None)
+            return out
         # Stop the agent SHORT of the deadline, so there is time left to
         # collect its artifacts and get the report in while the lease is still
         # good. Running to the deadline exactly meant the kill and the expiry
@@ -605,14 +911,110 @@ class RolloutRunner:
         Path(trajectory_dir).mkdir(parents=True, exist_ok=True)
 
         if self._command is not None:
-            return run_rollout_as_command(
+            return self._run_command_with_execution_snapshot(
+                rollout, trajectory_dir=trajectory_dir, timeout_s=timeout_s,
+            )
+        return self._run_python_with_execution_snapshot(
+            rollout, trajectory_dir=trajectory_dir, timeout_s=timeout_s,
+        )
+
+    def _snapshot_prepare_failure(self) -> RolloutOutput:
+        return RolloutOutput(
+            final_text="",
+            exclusion_reason="cancelled",
+            exclusion_detail=(
+                f"{self._execution_snapshot_name} execution snapshot could not "
+                "prepare an attested child; the rollout was not run"
+            ),
+        )
+
+    def _prepared_child_environment(self, child: ExecutionChild) -> dict[str, str]:
+        try:
+            environment = dict(child.environment)
+        except Exception as exc:
+            raise ConfigurationError(
+                f"{self._execution_snapshot_name} execution child environment "
+                "must be a string mapping"
+            ) from exc
+        if any(
+            not isinstance(name, str) or not isinstance(value, str)
+            for name, value in environment.items()
+        ):
+            raise ConfigurationError(
+                f"{self._execution_snapshot_name} execution child environment "
+                "must contain only string names and values"
+            )
+        return environment
+
+    def _release_unrun_snapshot_child(self, child: ExecutionChild) -> None:
+        snapshot = self.execution_snapshot
+        assert snapshot is not None
+        try:
+            snapshot.attest_child(child)
+        except Exception:
+            pass
+        finally:
+            try:
+                snapshot.release_child(child)
+            except Exception:
+                pass
+
+    def _attest_and_release_snapshot_child(
+        self, out: RolloutOutput, child: ExecutionChild,
+    ) -> bool:
+        snapshot = self.execution_snapshot
+        assert snapshot is not None
+        try:
+            snapshot.attest_child(child)
+        except Exception as exc:
+            _exclude_for_execution_identity(
+                out,
+                f"{self._execution_snapshot_name} execution state drifted during "
+                f"the rollout: {type(exc).__name__}",
+            )
+            attested = False
+        else:
+            attested = True
+        finally:
+            try:
+                snapshot.release_child(child)
+            except Exception as exc:
+                _exclude_for_execution_identity(
+                    out,
+                    f"{self._execution_snapshot_name} execution child release "
+                    f"failed: {type(exc).__name__}",
+                )
+                attested = False
+        return attested
+
+    def _run_command_with_execution_snapshot(
+        self, rollout: RolloutRequest, *, trajectory_dir: str, timeout_s: float
+    ) -> RolloutOutput:
+        """Run one command child, binding and then attesting adapter state."""
+        assert self._command is not None
+        snapshot = self.execution_snapshot
+        child: ExecutionChild | None = None
+        extra = {"PERCEPTEYE_TURN_INPUT": rollout.turn_input}
+        if snapshot is not None:
+            try:
+                child = snapshot.prepare_child(rollout.rollout_id)
+                extra.update(self._prepared_child_environment(child))
+            except Exception:
+                if child is not None:
+                    self._release_unrun_snapshot_child(child)
+                out = self._snapshot_prepare_failure()
+                _bind_execution_fingerprint(out, None)
+                return out
+
+        try:
+            out = run_rollout_as_command(
                 self._command, rollout, trajectory_dir=trajectory_dir,
                 timeout_s=timeout_s, gate_flag=self.gate_flag,
+                output_adapter=self._command_output_adapter,
                 env=build_child_env(
                     rollout_id=rollout.rollout_id, llm_url=rollout.llm_url,
                     api_key=rollout.api_key, trajectory_dir=trajectory_dir,
-                    endpoint_env=self.endpoint_env,
-                    extra={"PERCEPTEYE_TURN_INPUT": rollout.turn_input},
+                    endpoint_env=self.endpoint_env, extra=extra,
                 ),
                 # The per-rollout directory is the child's working directory,
                 # so the files a CLI agent leaves behind ARE its artifacts —
@@ -623,18 +1025,109 @@ class RolloutRunner:
                 # agent never caused.
                 cwd=str(trajectory_dir),
             )
-        if self.isolation == "inprocess":
-            return run_rollout_in_process(
-                self.resolved, rollout, trajectory_dir=trajectory_dir, timeout_s=timeout_s,
-                adapters=self._adapters,
-            )
-        return self._run_in_subprocess(rollout, trajectory_dir=trajectory_dir, timeout_s=timeout_s)
+        except BaseException:
+            # Popen and pre-result failures retain their existing exception
+            # semantics, but must not strand an active private copy. There is
+            # no result to train, so a failed post-attestation cannot create a
+            # false success and must not mask the original launcher failure.
+            if snapshot is not None and child is not None:
+                try:
+                    snapshot.attest_child(child)
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        snapshot.release_child(child)
+                    except Exception:
+                        pass
+            raise
+
+        if snapshot is None:
+            _bind_execution_fingerprint(out, self.execution_sha256)
+            return out
+        assert child is not None
+
+        attested = self._attest_and_release_snapshot_child(out, child)
+        _bind_execution_fingerprint(
+            out,
+            self.execution_sha256 if attested else None,
+            self._snapshot_diagnostics if attested else None,
+        )
+        return out
+
+    def _run_python_with_execution_snapshot(
+        self, rollout: RolloutRequest, *, trajectory_dir: str, timeout_s: float,
+    ) -> RolloutOutput:
+        snapshot = self.execution_snapshot
+        child: ExecutionChild | None = None
+        child_environment: dict[str, str] = {}
+        ran = False
+        if snapshot is not None:
+            try:
+                child = snapshot.prepare_child(rollout.rollout_id)
+                child_environment = self._prepared_child_environment(child)
+            except Exception:
+                if child is not None:
+                    self._release_unrun_snapshot_child(child)
+                out = self._snapshot_prepare_failure()
+                _bind_execution_fingerprint(out, None)
+                return out
+
+        try:
+            if self.isolation == "inprocess":
+                if child_environment:
+                    out = RolloutOutput(
+                        final_text="",
+                        exclusion_reason="cancelled",
+                        exclusion_detail=(
+                            f"{self._execution_snapshot_name} execution snapshot prepared "
+                            "environment overrides for an in-process entrypoint; the rollout "
+                            "was not run because process-global environment is not isolated"
+                        ),
+                    )
+                else:
+                    ran = True
+                    out = run_rollout_in_process(
+                        self.resolved, rollout, trajectory_dir=trajectory_dir,
+                        timeout_s=timeout_s, adapters=self._adapters,
+                    )
+            else:
+                ran = True
+                out = self._run_in_subprocess(
+                    rollout, trajectory_dir=trajectory_dir, timeout_s=timeout_s,
+                    extra_env=child_environment,
+                )
+        except BaseException:
+            if snapshot is not None and child is not None:
+                try:
+                    snapshot.attest_child(child)
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        snapshot.release_child(child)
+                    except Exception:
+                        pass
+            raise
+
+        if snapshot is not None:
+            assert child is not None
+            attested = self._attest_and_release_snapshot_child(out, child)
+        else:
+            attested = True
+        _bind_execution_fingerprint(
+            out,
+            self.execution_sha256 if ran and attested else None,
+            self._snapshot_diagnostics if ran and attested else None,
+        )
+        return out
 
     def _trajectory_dir(self, rollout_id: str) -> str:
         return str(Path(self.artifacts_dir) / "_percepteye" / rollout_id)
 
     def _run_in_subprocess(
-        self, rollout: RolloutRequest, *, trajectory_dir: str, timeout_s: float
+        self, rollout: RolloutRequest, *, trajectory_dir: str, timeout_s: float,
+        extra_env: Mapping[str, str] | None = None,
     ) -> RolloutOutput:
         assert self._spec is not None
         payload = {
@@ -660,6 +1153,7 @@ class RolloutRunner:
             api_key=rollout.api_key,
             trajectory_dir=trajectory_dir,
             endpoint_env=self.endpoint_env,
+            extra=dict(extra_env or {}),
         )
         started = time.time()
         # Popen rather than subprocess.run: the heartbeat thread must be able

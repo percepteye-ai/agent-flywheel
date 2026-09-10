@@ -52,13 +52,13 @@ Ship one line. Your agent keeps running in your process, behind your firewall, o
      requires every published copy to match it, here and on the docs site, so
      editing one copy alone turns the suite red. Re-derive by hand with:
        .venv/bin/python -m pytest tests/ --collect-only -q -p no:warnings \
-         | awk -F': ' '/^tests\/.*: [0-9]+$/{n+=$2} END{print n}'   # -> 846 -->
+         | awk -F': ' '/^tests\/.*: [0-9]+$/{n+=$2} END{print n}'   # -> 914 -->
 [![pypi](https://img.shields.io/badge/pypi-not_yet_published-64748b?style=for-the-badge&logo=pypi&logoColor=white)](#-development)
 [![python](https://img.shields.io/badge/python-3.10%20→%203.13-3b82f6?style=for-the-badge&logo=python&logoColor=white)](pyproject.toml)
 <br/>
 [![runtime dependencies](https://img.shields.io/badge/runtime_deps-1-f59e0b?style=for-the-badge)](pyproject.toml)
 [![lines changed in your agent](https://img.shields.io/badge/lines_changed_in_your_agent-0-ec4899?style=for-the-badge)](#-zero-instrumentation-concretely)
-[![tests](https://img.shields.io/badge/tests-846_·_0_skips-22c55e?style=for-the-badge)](#-development)
+[![tests](https://img.shields.io/badge/tests-914_·_0_skips-22c55e?style=for-the-badge)](#-development)
 [![license](https://img.shields.io/badge/license-MIT-14b8a6?style=for-the-badge)](LICENSE)
 
 <img src="docs/assets/flywheel-overview.gif" width="1040"
@@ -160,7 +160,7 @@ Any other CLI is an argv list — no protocol to implement, no change to the bin
 fw.serve(["opencode", "run"], agent_id="coding-agent", input_shape="text")
 ```
 
-The task arrives on **stdin** and as `PERCEPTEYE_TURN_INPUT`; **stdout** is the final text. Mark an argv position with `fw.TASK` if your CLI takes the task as an argument. `percepteye status` prints where traffic will actually go on the next run.
+The task arrives on **stdin** and as `PERCEPTEYE_TURN_INPUT`; ordinary **stdout** is the final text. Structured JSONL is interpreted only when you pass an explicit `command_output_adapter`, so core never guesses a customer's event vocabulary. Mark an argv position with `fw.TASK` if your CLI takes the task as an argument. `percepteye status` prints where traffic will actually go on the next run.
 
 ## 🧩 Harnesses supported
 
@@ -169,12 +169,12 @@ The task arrives on **stdin** and as `PERCEPTEYE_TURN_INPUT`; **stdout** is the 
 | **LangChain** · **LangGraph** · **Google ADK** | 🐍 Python | adapter auto-binds — **zero code in your agent** |
 | **goose** | ⌘ CLI | `percepteye install-hooks` — no worker, no sidecar |
 | **opencode** | ⌘ CLI | `fw.serve(["opencode", "run"], ...)` — nothing added to the binary |
-| **prime-agent** | ⌘ CLI | argv + `--mode json` event stream — **[worked example →](examples/prime_agent/)** |
-| **any CLI emitting OpenTelemetry GenAI events** | ⌘ CLI | outcomes for free, off the stream it already prints |
+| **prime-agent** *(optional example)* | ⌘ CLI | argv + explicit `PrimeAgentOutputAdapter` — **[worked example →](examples/prime_agent/)** |
+| **any structured CLI** | ⌘ CLI | provide a `CommandOutputAdapter`; the generic `StreamFormat` parser can reconcile tool lifecycles |
 
 Adapters are on by default (`adapters="auto"`) and bind every built-in whose framework is installed. No adapter imports its framework until you bind it, so they add **zero dependencies**. Shipping your own is one entry-point factory in the `percepteye_agent_flywheel.adapters` group.
 
-The `otel-genai` row is the one that matters: it belongs to no vendor, so an agent already instrumented for observability gets outcome capture with **no work at all**. Capture survives clean exits, non-zero exits and timeout kills — a rollout that died is exactly the one you need the tool calls from.
+The command adapter is explicit and optional. Capture from it survives clean exits, non-zero exits and timeout kills — a rollout that died is exactly the one you need the tool calls from. With no adapter, structured stdout remains ordinary stdout and makes no telemetry or model-call-count claim.
 
 *Running OpenClaw or DeepSeek Harness?* Those are the Node plugin → [`percepteye-ai/agent-flywheel-node`](https://github.com/percepteye-ai/agent-flywheel-node).
 
@@ -273,6 +273,15 @@ px.record_answer(turn_id, reply)         # after the scope closes — the answer
 
 **It captures. It never reroutes.** Adapters bind with no endpoint at all, so attaching cannot re-point a single byte of production traffic. Everything fails open: an unreachable control plane costs you the observation and nothing else.
 
+For identity-bound production analysis, pass the same live Python agent as
+`execution_entrypoint=` together with adapter-authored
+`attested_execution_components`. The SDK emits
+`agent_fingerprint.execution_sha256` only when its prompt/tools/model/sub-agent
+discovery is exact and the opaque component evidence is valid; otherwise the
+field stays absent. It is persisted per turn and projected to OTel as
+`percepteye.agent.execution_sha256`. `attach()` does not claim a policy identity:
+the policy it reads is informational and does not prove what your application ran.
+
 > [!IMPORTANT]
 > **Upload is opt-in per agent and off by default.** A production turn is your end user's message and the answer you gave them, so nothing is sent until an operator enables capture for that agent. Until then turns accumulate as trajectory directories under the `trajectory_root` you named and go nowhere.
 >
@@ -334,7 +343,7 @@ record_tool_call("charge_card", {"amount": 4200}, outcome="ok", status_code=201)
 | `PERCEPTEYE_AGENT_ID` | the agent the goose plugin reports as (default `goose`) |
 | `PERCEPTEYE_TRAJECTORY_DIR` | one explicit trajectory directory, for a single run |
 
-Three of them change behaviour; the rest are addresses, credentials and locations, and the first two are overridable in code as `control_plane_url=` and `api_key=`. `serve()` also takes `isolation` (`"subprocess"` is the default and the only mode with a real timeout), `concurrency`, `method`, `rollout_timeout_s`, and `on_event` for a synchronous event callback — `claim_empty` versus `claim_failed` is how you tell an empty queue from a broken route.
+Three of them change behaviour; the rest are addresses, credentials and locations, and the first two are overridable in code as `control_plane_url=` and `api_key=`. `serve()` also takes `isolation` (`"subprocess"` is the default and the only mode with a real timeout), `concurrency`, `method`, `rollout_timeout_s`, `execution_snapshot` (a generic adapter-owned prepare/attest/release lifecycle), `attested_execution_components` (opaque adapter-owned SHA-256 evidence for exact OPSD execution identity), and `on_event` for a synchronous event callback — `claim_empty` versus `claim_failed` is how you tell an empty queue from a broken route.
 
 **Your agent must sample through an OpenAI-compatible client**, because the per-rollout gateway speaks that API. Provider variables we cannot point at it are stripped from the child, and `serve()` warns at startup if it finds any.
 
@@ -343,7 +352,7 @@ Three of them change behaviour; the rest are addresses, credentials and location
 
 <br/>
 
-Once at startup the SDK reads the *shape* of the agent you handed `serve()`: system prompt (truncated at 20k, callables never invoked), tool names/descriptions/JSON Schemas, provider and model name, sub-agents to depth 4, and the framework matched. **Never sent:** your tools' source or return values, your credentials, your data, or anything observed during a rollout. Turn it off with `fw.serve(..., introspect=False)` or `PERCEPTEYE_INTROSPECT=0` — and only a deliberate value (`0`, `false`, `no`, `off`) disables it, so a typo leaves it on.
+Once at startup the SDK reads the *shape* of the agent you handed `serve()`: system prompt (the registration projection is truncated at 20k, while an available full observation is hashed before projection), tool names/descriptions/JSON Schemas, provider and model name, sub-agents to depth 4, and the framework matched. **Never sent:** your tools' source or return values, your credentials, your data, or anything observed during a rollout. Turn it off with `fw.serve(..., introspect=False)` or `PERCEPTEYE_INTROSPECT=0` — and only a deliberate value (`0`, `false`, `no`, `off`) disables it, so a typo leaves it on. Disabled, unreadable, or lossy discovery produces no affirmative `agent_fingerprint.execution_sha256`, so an OPSD consumer fails closed.
 </details>
 
 <details>
@@ -365,7 +374,7 @@ python -m venv .venv
 
 The last one is **not** the Node package's own suite — that lives in the [Node repository](https://github.com/percepteye-ai/agent-flywheel-node) and runs there with `npm test`. This drives records through the Node writer and asserts the Python `Trajectory` reads them back with the same meaning, which is the half only this repo can check. **It needs a Node checkout**: point `PERCEPTEYE_NODE_SDK` at one, or keep it as a sibling directory. Without one it prints `SKIPPED` and exits 0, and the cross-language tests in the suite above skip with it.
 
-846 tests, and CI permits **zero skips** — a skipped test and a passing test look identical in a green check mark. CI names `PERCEPTEYE_NODE_SDK`, so the cross-language half cannot go green by skipping there. Other jobs assert that a bare install still works on Python 3.10→3.13, that the runtime dependency list never grows past `httpx`, and that the Node plugins never drift from the Python reader.
+914 tests, and CI permits **zero skips** — a skipped test and a passing test look identical in a green check mark. CI names `PERCEPTEYE_NODE_SDK`, so the cross-language half cannot go green by skipping there. Other jobs assert that a bare install still works on Python 3.10→3.13, that the runtime dependency list never grows past `httpx`, and that the Node plugins never drift from the Python reader.
 
 [`schema/flywheel-1.json`](schema/flywheel-1.json) is the wire contract and this repository owns it. Absence is never collapsed into zero: `tool_calls=None` means "I did not report tool calls"; `[]` means "I observed zero", a positive claim. The animations above are generated, not drawn — [`docs/assets/render.sh`](docs/assets/render.sh) rebuilds them.
 

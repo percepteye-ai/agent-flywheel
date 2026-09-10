@@ -36,8 +36,6 @@ PERCEPTEYE_NAMESPACE = "PERCEPTEYE_"
 #: Everything else in it is ours and must not be forgeable from outside --
 #: the control-plane credential lives in this namespace.
 _SETTABLE_BY_CALLER = (
-    "PERCEPTEYE_ROLLOUT_ID",
-    "PERCEPTEYE_TRAJECTORY_DIR",
     # The turn input, for a command entrypoint that reads it from the
     # environment rather than stdin.
     "PERCEPTEYE_TURN_INPUT",
@@ -125,8 +123,8 @@ _BASELINE_PASSTHROUGH = (
 )
 
 
-def _is_our_secret(name: str) -> bool:
-    """Names that belong to Percepteye and must never reach customer code."""
+def _is_our_namespace(name: str) -> bool:
+    """Names owned by Percepteye and therefore subject to our scrub policy."""
     return name.startswith(PERCEPTEYE_NAMESPACE)
 
 
@@ -156,13 +154,15 @@ def build_child_env(
 
     1. No variable in the Percepteye namespace is inherited from the parent.
        The control-plane key lives there and stays in the parent.
-    2. Exactly two Percepteye variables are then SET, scoped to this rollout:
-       the rollout id and the trajectory directory.
-    3. The per-rollout LLM endpoint and its single-use key are set last, so
-       they win over anything inherited.
+    2. Adapter-owned ``extra`` values are overlaid, except for our protected
+       namespace. They can supply process layout such as a private HOME but
+       cannot override rollout identity or routing.
+    3. Two Percepteye variables are then SET, scoped to this rollout: the
+       rollout id and the trajectory directory.
+    4. The per-rollout LLM endpoint and its single-use key are set last, so
+       they win over anything inherited or adapter-supplied.
     """
     src = dict(os.environ if parent_env is None else parent_env)
-
     if allowlist is not None:
         keep = set(allowlist) | set(_BASELINE_PASSTHROUGH)
         env = {k: v for k, v in src.items() if k in keep}
@@ -170,21 +170,30 @@ def build_child_env(
         env = dict(src)
 
     # (1) Our namespace never crosses the boundary by inheritance.
-    for name in [k for k in env if _is_our_secret(k)]:
+    for name in [k for k in env if _is_our_namespace(k)]:
         env.pop(name, None)
 
-    # (2) Rollout-scoped, and nothing else from our side.
-    env["PERCEPTEYE_ROLLOUT_ID"] = rollout_id
-    env["PERCEPTEYE_TRAJECTORY_DIR"] = trajectory_dir
-
-    # (2b) Provider configuration we cannot point at our gateway. Left in
+    # (2) Provider configuration we cannot point at our gateway. Left in
     # place, an agent built on one of these routes straight past us and
     # samples from the live provider -- producing a trajectory that cannot
     # back an on-policy objective while looking exactly like one that can.
     for name in UNROUTABLE_PROVIDER_VARS:
         env.pop(name, None)
 
-    # (3) Routing last so it beats anything inherited. Note this only wins over
+    # (2b) Adapter-owned execution layout. Do this before rollout identity and
+    # routing so no adapter can replace the SDK's scoped identifiers or send a
+    # completion around the gateway with an ambient/provider credential.
+    if extra:
+        for k, v in extra.items():
+            if _is_our_namespace(k) and k not in _SETTABLE_BY_CALLER:
+                continue
+            env[k] = v
+
+    # (3) Rollout-scoped, and nothing else from our side.
+    env["PERCEPTEYE_ROLLOUT_ID"] = rollout_id
+    env["PERCEPTEYE_TRAJECTORY_DIR"] = trajectory_dir
+
+    # (4) Routing last so it beats anything inherited. Note this only wins over
     # ENVIRONMENT: a client constructed with an explicit base_url argument in
     # the customer's own code beats every one of these, silently, and lands at
     # a live third party. Detecting that is what binding is for.
@@ -194,25 +203,13 @@ def build_child_env(
     env["ANTHROPIC_BASE_URL"] = llm_url
     env["ANTHROPIC_API_KEY"] = api_key
 
-    # (3b) Names this agent actually reads, when they are not the ones above.
-    # DeepSeek Harness reads DEEPSEEK_BASE_URL and nothing else -- grep its
-    # source for OPENAI_BASE_URL and there are zero hits -- so an unmodified
-    # integration would look correct while every completion went to the live
-    # provider unobserved. That is the exact silent-capture failure this module
-    # exists to prevent, and it cannot be detected from here, so it is
-    # DECLARED by the caller rather than sniffed. Additive: the defaults above
-    # stay, because an agent may read a mixture and removing them buys
-    # nothing.
+    # (4b) Optional adapter-declared endpoint names. Some clients read neither
+    # default above; the mapping is explicit rather than guessed. Additive:
+    # defaults stay because a process may use more than one compatible client.
     if endpoint_env:
         url_var, key_var = endpoint_env
         env[str(url_var)] = llm_url
         env[str(key_var)] = api_key
-
-    if extra:
-        for k, v in extra.items():
-            if _is_our_secret(k) and k not in _SETTABLE_BY_CALLER:
-                continue
-            env[k] = v
 
     return env
 

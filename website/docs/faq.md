@@ -39,7 +39,7 @@ Pass an **argv list** instead of an import path. There is no protocol to impleme
 fw.serve(["opencode", "run"], agent_id="coding-agent", input_shape="text")
 ```
 
-The task arrives on **stdin** and as `PERCEPTEYE_TURN_INPUT`; **stdout** is the final text. Mark an argv position with `fw.TASK` if your CLI takes the task as an argument. → [CLI and other languages](cli.md)
+The task arrives on **stdin** and as `PERCEPTEYE_TURN_INPUT`; ordinary **stdout** is final text, while a recognised JSONL stream yields its terminal assistant message. Mark an argv position with `fw.TASK` if your CLI takes the task as an argument. → [CLI and other languages](cli.md)
 
 ### Can a CLI report per-tool outcomes?
 

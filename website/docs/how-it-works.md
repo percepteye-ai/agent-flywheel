@@ -180,8 +180,8 @@ The constraint is checked at construction, not discovered at rollout time. Under
 
 Three rules govern the child's environment, and none is configurable:
 
-1. **No `PERCEPTEYE_` variable is inherited.** The long-lived control-plane key lives in that namespace and stays in the parent, which frequently runs model-authored code with a shell.
-2. **Exactly two are set:** `PERCEPTEYE_ROLLOUT_ID` and `PERCEPTEYE_TRAJECTORY_DIR`.
+1. **No `PERCEPTEYE_` variable is inherited.** The long-lived control-plane key and every customer- or harness-specific setting stay in the parent. An explicit execution adapter can add its own non-Percepteye child variables; core does not recognize any customer's route vocabulary.
+2. **Two rollout-scoped values are set:** `PERCEPTEYE_ROLLOUT_ID` and `PERCEPTEYE_TRAJECTORY_DIR`.
 3. **The per-rollout endpoint and its single-use key are set last**, so they beat anything inherited: `OPENAI_BASE_URL`, `OPENAI_API_BASE`, `OPENAI_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`.
 
 Everything else of yours passes through — your agent needs your credentials; that is the premise of running it in your process — **except** provider configuration the gateway cannot serve. `AZURE_OPENAI_*`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `NVIDIA_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, `GROQ_API_KEY` and the rest of [`UNROUTABLE_PROVIDER_VARS`](https://github.com/percepteye-ai/agent-flywheel/blob/main/src/percepteye_agent_flywheel/isolation.py) are removed, and `serve()` warns at startup if it finds any. An agent that finds no provider configured raises in front of the person who configured it. **Silent off-gateway sampling is the outcome that must not happen**: a trajectory from an unobserved completion cannot back an on-policy objective while looking exactly like one that can.

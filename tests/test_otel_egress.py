@@ -370,6 +370,59 @@ def test_a_turn_writes_one_span_per_turn_text_not_one_per_turn(spans, tmp_path):
     assert first.start_time <= tool[0].start_time <= second.start_time
 
 
+def test_exact_attached_execution_identity_reaches_turn_and_tool_spans(
+    spans, tmp_path, monkeypatch,
+):
+    import percepteye_agent_flywheel as fw
+    from percepteye_agent_flywheel.introspection import (
+        DiscoveredAgent,
+        ModelConfig,
+        ToolDefinition,
+    )
+
+    class _Agent:
+        def invoke(self, task: str) -> str:
+            return task
+
+    monkeypatch.setattr(
+        "percepteye_agent_flywheel.introspection.introspect",
+        lambda _entrypoint: DiscoveredAgent(
+            agent_name="customer-agent",
+            framework="customer-framework",
+            system_prompt="Use tools and answer the user.",
+            tool_definitions=[ToolDefinition(name="book", input_schema={})],
+            discovered_model_config=ModelConfig(
+                provider="gateway", model_name="policy",
+            ),
+        ),
+    )
+    px = fw.attach(
+        agent_id="a",
+        trajectory_root=str(tmp_path),
+        register=False,
+        adapters=[],
+        execution_entrypoint=_Agent(),
+        attested_execution_components={"customer.release": "a" * 64},
+    )
+    try:
+        assert px.agent_fingerprint is not None
+        digest = px.agent_fingerprint["execution_sha256"]
+        with px.turn(turn_id="t1", input_text="book a flight"):
+            record_tool_call(
+                name="book", arguments={}, outcome="ok", status_code=201,
+            )
+        px.record_answer("t1", "Booked.")
+    finally:
+        px.close()
+
+    got = spans.get_finished_spans()
+    assert len(got) == 3
+    assert {
+        span.attributes.get("percepteye.agent.execution_sha256")
+        for span in got
+    } == {digest}
+
+
 def test_the_tool_span_carries_the_conversation_too(spans, tmp_path):
     """A consumer grouping an export into conversations must put a tool call in
     the same bucket as the turn that made it.

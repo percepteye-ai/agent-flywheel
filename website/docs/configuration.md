@@ -133,6 +133,10 @@ fw.serve(..., on_event=lambda kind, ev: print(kind, ev))
 | `rollout_timeout_s` | `900.0` | the local ceiling on one rollout |
 | `gate_flag` | `None` | how *this* binary spells its completion-gate option, e.g. `"--autonomous-gate"` |
 | `endpoint_env` | `None` | `(url_var, key_var)` this agent reads its endpoint from, when they are not the OpenAI/Anthropic names |
+| `execution_snapshot` | `None` | generic adapter lifecycle: opaque exact components plus prepare/attest/release for each isolated child |
+| `harness_snapshot` | `None` | deprecated compatibility alias for `execution_snapshot`; no harness behavior exists in core |
+| `command_output_adapter` | `None` | explicit command stdout projection; without one, stdout is final text and no structured evidence is inferred |
+| `attested_execution_components` | `None` | opaque `{stable_name: lowercase_sha256}` evidence from an execution adapter; folded into the generic OPSD execution identity |
 | `reports_tool_calls` | `False` | assert that this flywheel reports a per-call outcome for every call it makes |
 | `method` | `None` | name the entrypoint method instead of probing |
 | `adapters` | `"auto"` | `"auto"`, `[]`, or names: `"langchain"`, `"adk"` |
@@ -143,6 +147,16 @@ fw.serve(..., on_event=lambda kind, ev: print(kind, ev))
 **Everything that can be misconfigured is checked before the first rollout**, in this order: the mode resolves, the transport is one this contract speaks, a URL and a key exist, `/health` answers and its `contract_versions_supported` includes `flywheel/1`, unroutable provider variables are reported, the entrypoint resolves, and the isolation mode is compatible with the entrypoint you passed. Each raises there, never mid-run.
 
 `adapters="auto"` probes without committing: a framework that is absent is simply not bound. **A named adapter that cannot bind raises**, because naming it asserts that it is how your calls are captured. LangGraph is covered by the `langchain` adapter, which reads `langgraph_node` off call metadata to attribute each call to its node.
+
+When discovery exactly observes the behavior-bearing prompt, tools, model config,
+and recursive sub-agent tree **and** an execution adapter supplies at least one
+attested component for otherwise-unobserved implementation/state, `serve()` stamps each rollout with
+`agent_fingerprint.execution_sha256`. Its canonical descriptor includes those
+facts, the entrypoint and serve configuration, the SDK/contract version, and
+any `attested_execution_components`. Discovery disabled, unreadable, lossy, or
+unbacked by attested implementation evidence means the key is absent, so OPSD refuses instead of training on a universal
+"unknown agent" identity. Adapter evidence must hash mutable state discovery
+cannot see; it is a digest map, never a place for raw configuration or secrets.
 
 The claim long-poll (`wait_ms`, 25s), the requested lease (`lease_ms`, 30 min) and the HTTP timeout (30s) live on the transport and are **not exposed through `serve()`**.
 
@@ -164,7 +178,7 @@ The claim long-poll (`wait_ms`, 25s), the requested lease (`lease_ms`, 30 min) a
 | rule | effect |
 |:--|:--|
 | Your environment passes through | your agent needs your credentials. That is the premise of running it in your process. |
-| The `PERCEPTEYE_` namespace never is | inherited names in it are dropped, `PERCEPTEYE_AGENT_MODE` included — a child does not call `serve()` |
+| The inherited `PERCEPTEYE_` namespace is scrubbed completely | no customer- or harness-specific setting crosses implicitly; an execution adapter may supply its own non-Percepteye variables through its child environment |
 | Two are then set | `PERCEPTEYE_ROLLOUT_ID` and `PERCEPTEYE_TRAJECTORY_DIR`, scoped to this rollout |
 | Routing is set last | `OPENAI_BASE_URL`, `OPENAI_API_BASE`, `OPENAI_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, so they beat anything inherited |
 | Unroutable provider config is removed | see below |
@@ -208,7 +222,7 @@ Probed in order — `invoke`, `run`, `execute`, `chat`, `__call__` — first mat
 | you pass | you get |
 |:--|:--|
 | `"my_package.agent:build"` | imported per rollout in a fresh child. A class is instantiated; a factory is called; an already-agent-shaped object is used as-is |
-| `["opencode", "run"]` | a process. Task on **stdin** and in `PERCEPTEYE_TURN_INPUT`; stdout is the final text |
+| `["opencode", "run"]` | a process. Task on **stdin** and in `PERCEPTEYE_TURN_INPUT`; ordinary stdout is final text, while recognised JSONL yields its terminal assistant text |
 | `["dsh", "--profile", "headless", fw.TASK]` | `fw.TASK` marks the argv position for the task — and stdin is then left **empty**, so the task is not delivered twice |
 | a constructed object | `isolation="inprocess"`, `concurrency=1` |
 
@@ -236,6 +250,7 @@ from percepteye_agent_flywheel import RolloutOutput
 def invoke(task: str) -> RolloutOutput:
     return RolloutOutput(
         final_text="done",
+        llm_call_count=3,       # total model calls this harness observed
         artifacts={},          # usually left empty — files are collected for you
         reward=1.0,
         success=True,
@@ -247,7 +262,7 @@ def invoke(task: str) -> RolloutOutput:
 | `final_text` | required | what the agent said |
 | `tool_calls` | `None` | **`None` is "not reported"; `[]` is "I observed zero"**, which is a positive claim. Merged with what the trajectory recorded |
 | `tool_calls_omitted_count` | `0` | calls you saw but did not report |
-| `llm_call_count` | `None` | |
+| `llm_call_count` | `None` | independently observed total model calls. A pinned/on-policy rollout is ineligible unless this is a nonnegative integer equal to the gateway count. Prime JSON mode is counted by its built-in adapter; other harnesses set it explicitly |
 | `artifacts` | `{}` | name → digest string, or an inline `{"sha256", "size_bytes", "content"}` body |
 | `reward` | `None` | |
 | `success` | `None` | |
@@ -284,7 +299,7 @@ Symlinks are **never** followed — one dropped in the agent's own directory wou
 | `PERCEPTEYE_HOME` | Where the plugin records when nothing names a directory. Default `~/.percepteye`; captures land in `turns/<session>/` under it, which is what `percepteye report` reads. |
 | `PERCEPTEYE_AGENT_ID` | The agent the goose plugin reports as. Default `goose`. |
 
-Only `PERCEPTEYE_AGENT_MODE`, `PERCEPTEYE_INTROSPECT` and `PERCEPTEYE_CAPTURE` change behavior. `PERCEPTEYE_INTROSPECT` and `introspect=` are ANDed — either one off disables discovery — and **only a deliberate value disables it**: a typo leaves it on rather than silently switching capture off while you believe it is running.
+Only `PERCEPTEYE_AGENT_MODE`, `PERCEPTEYE_INTROSPECT` and `PERCEPTEYE_CAPTURE` change behavior. The optional Prime example also reads its own documented route settings in `examples/prime_agent`; those are example inputs, not SDK child-environment policy. `PERCEPTEYE_INTROSPECT` and `introspect=` are ANDed — either one off disables discovery — and **only a deliberate value disables it**: a typo leaves it on rather than silently switching capture off while you believe it is running.
 
 The one variable this SDK will *write* is under your control: `apply_current_policy(set_env=True)` exports `OPENAI_BASE_URL` and `OPENAI_API_KEY`. It is off by default, because mutating the process environment is a side effect a caller should ask for.
 
@@ -310,6 +325,7 @@ Every recorded outcome is additionally emitted as a span named `execute_tool <to
 | `percepteye.tool.latency_ms` | when measured |
 | `percepteye.rollout.id` | set inside a `serve()` rollout |
 | `percepteye.turn.id` | set inside `attach().turn()` — never stamped as a rollout id, or your own telemetry could not answer "how much of my traffic was training" |
+| `percepteye.agent.execution_sha256` | exact SDK-reconciled execution identity, only when discovery and adapter evidence were complete |
 
 **Only a reported failure sets the span status to error. An `unknown` leaves the span status unset** — marking it OK would assert a success nobody observed, and marking it ERROR would assert a failure nobody observed. The GenAI conventions have no attribute for "the result of this call was never observed", which is why the tri-state lives under `percepteye.*` rather than being bent into a standard attribute that means something else to every other consumer.
 

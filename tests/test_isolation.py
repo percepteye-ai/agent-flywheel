@@ -36,10 +36,54 @@ def test_control_plane_key_never_reaches_the_child():
     assert "pehk_live_do_not_leak" not in "".join(env.values())
 
 
-def test_no_percepteye_variable_is_inherited():
+def test_no_unapproved_percepteye_variable_is_inherited():
     env = _env()
     inherited = {k for k in env if k.startswith("PERCEPTEYE_")}
     assert inherited == {"PERCEPTEYE_ROLLOUT_ID", "PERCEPTEYE_TRAJECTORY_DIR"}
+
+
+def test_customer_specific_model_identity_never_crosses_the_namespace_scrub():
+    parent = {
+        **PARENT,
+        "PERCEPTEYE_MODEL_ID": "tinker://run-7/final",
+        "PERCEPTEYE_CONTEXT_WINDOW": "32768",
+        "PERCEPTEYE_MAX_TOKENS": "2048",
+        "PERCEPTEYE_AGENT_MODE": "training",
+        "PERCEPTEYE_INTROSPECT": "1",
+    }
+    env = _env(parent_env=parent)
+    for name in (
+        "PERCEPTEYE_MODEL_ID",
+        "PERCEPTEYE_CONTEXT_WINDOW",
+        "PERCEPTEYE_MAX_TOKENS",
+    ):
+        assert name not in env
+    assert "PERCEPTEYE_API_KEY" not in env
+    assert "PERCEPTEYE_AGENT_MODE" not in env
+    assert "PERCEPTEYE_INTROSPECT" not in env
+
+
+def test_customer_specific_route_configuration_is_scrubbed_in_allowlist_mode():
+    env = _env(
+        parent_env={
+            **PARENT,
+            "PERCEPTEYE_MODEL_ID": "candidate",
+            "PERCEPTEYE_CONTEXT_WINDOW": "65536",
+            "PERCEPTEYE_MAX_TOKENS": "4096",
+        },
+        allowlist=["JIRA_API_TOKEN"],
+    )
+    assert "PERCEPTEYE_MODEL_ID" not in env
+    assert "PERCEPTEYE_CONTEXT_WINDOW" not in env
+    assert "PERCEPTEYE_MAX_TOKENS" not in env
+
+
+def test_extra_cannot_forge_customer_specific_route_configuration():
+    env = _env(
+        parent_env={**PARENT, "PERCEPTEYE_MODEL_ID": "parent-selected"},
+        extra={"PERCEPTEYE_MODEL_ID": "forged-in-extra"},
+    )
+    assert "PERCEPTEYE_MODEL_ID" not in env
 
 
 def test_rollout_scoped_variables_are_set():
@@ -78,6 +122,25 @@ def test_extra_cannot_smuggle_our_namespace_back_in():
     env = _env(extra={"PERCEPTEYE_API_KEY": "pehk_sneaky", "MY_VAR": "1"})
     assert "PERCEPTEYE_API_KEY" not in env
     assert env["MY_VAR"] == "1"
+
+
+def test_extra_cannot_replace_rollout_identity_or_gateway_routing():
+    env = _env(
+        extra={
+            "PERCEPTEYE_ROLLOUT_ID": "forged-rollout",
+            "PERCEPTEYE_TRAJECTORY_DIR": "/forged/trajectory",
+            "OPENAI_BASE_URL": "https://live-provider.invalid/v1",
+            "OPENAI_API_KEY": "live-provider-key",
+            "ANTHROPIC_BASE_URL": "https://live-provider.invalid/v1",
+            "ANTHROPIC_API_KEY": "live-provider-key",
+        }
+    )
+    assert env["PERCEPTEYE_ROLLOUT_ID"] == "rl_abc"
+    assert env["PERCEPTEYE_TRAJECTORY_DIR"] == "/tmp/led"
+    assert env["OPENAI_BASE_URL"].endswith("/rollouts/rl_abc")
+    assert env["OPENAI_API_KEY"] == "perk_single_use"
+    assert env["ANTHROPIC_BASE_URL"] == env["OPENAI_BASE_URL"]
+    assert env["ANTHROPIC_API_KEY"] == "perk_single_use"
 
 
 # ── providers we cannot route ──────────────────────────────────────────────
