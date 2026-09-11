@@ -19,7 +19,19 @@ import json
 import os
 import re
 import subprocess
+from pathlib import Path
 
+import pytest
+from jsonschema import Draft202012Validator, FormatChecker
+
+from percepteye_agent_flywheel.contract import (
+    _PRODUCTION_AGENT_IDENTIFIER_PATTERN,
+    _PRODUCTION_IDENTIFIER_MAX_CHARS,
+    _PRODUCTION_IDENTIFIER_PATTERN,
+    _PRODUCTION_TURN_BATCH_MAX_ITEMS,
+    _PRODUCTION_TURN_IDENTIFIER_PATTERN,
+)
+from percepteye_agent_flywheel.errors import ContractViolation
 from percepteye_agent_flywheel.transport import AttachTransport
 
 from .node_sdk import ABI_CHECK, node_sdk, require_node_sdk, run_node
@@ -43,6 +55,8 @@ class _Client:
 #: certified a parity that did not exist.
 TURNS = [
     {"turn_id": "t1", "input_text": "\u00bfd\u00f3nde est\u00e1 mi pedido?",
+     "task_id": "case-1",
+     "occurred_at": "2026-09-10T17:30:00Z",
      "final_text": "Ships ma\u00f1ana \u2014 gracias! \U0001f4e6",
      "tool_calls": None, "tool_calls_omitted_count": 0},
     {"turn_id": "t2", "input_text": "again", "final_text": None,
@@ -75,11 +89,143 @@ def test_the_body_is_what_the_intake_model_declares():
     assert body["turns"] == TURNS
 
 
+def test_the_published_schema_declares_the_exact_turn_upload_shape():
+    schema = json.loads(
+        (Path(__file__).resolve().parents[1] / "schema" / "flywheel-1.json")
+        .read_text(encoding="utf-8")
+    )
+    turn = schema["$defs"]["ProductionTurn"]
+    batch = schema["$defs"]["ProductionTurnBatch"]
+    assert turn["additionalProperties"] is False
+    assert turn["properties"]["task_id"]["maxLength"] == (
+        _PRODUCTION_IDENTIFIER_MAX_CHARS
+    )
+    assert turn["properties"]["turn_id"]["maxLength"] == (
+        _PRODUCTION_IDENTIFIER_MAX_CHARS
+    )
+    assert turn["properties"]["conversation_id"]["maxLength"] == (
+        _PRODUCTION_IDENTIFIER_MAX_CHARS
+    )
+    assert turn["properties"]["turn_id"]["pattern"] == (
+        _PRODUCTION_TURN_IDENTIFIER_PATTERN
+    )
+    assert turn["properties"]["task_id"]["pattern"] == (
+        _PRODUCTION_IDENTIFIER_PATTERN
+    )
+    assert turn["properties"]["conversation_id"]["pattern"] == (
+        _PRODUCTION_IDENTIFIER_PATTERN
+    )
+    assert batch["properties"]["agent_id"]["pattern"] == (
+        _PRODUCTION_AGENT_IDENTIFIER_PATTERN
+    )
+    assert "task_id" not in turn["required"]
+    assert batch["properties"]["turns"]["items"]["$ref"] == (
+        "#/$defs/ProductionTurn"
+    )
+    assert batch["properties"]["turns"]["maxItems"] == (
+        _PRODUCTION_TURN_BATCH_MAX_ITEMS
+    )
+    closed_batch = {
+        "$schema": schema["$schema"],
+        "$defs": schema["$defs"],
+        "$ref": "#/$defs/ProductionTurnBatch",
+    }
+    Draft202012Validator(
+        closed_batch, format_checker=FormatChecker(),
+    ).validate(_sent()["json_body"])
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("task_id", " padded"),
+        ("task_id", "padded "),
+        ("task_id", "line\nbreak"),
+        ("task_id", "tab\tinside"),
+        ("task_id", "x" * 256),
+        ("turn_id", "../escape"),
+        ("turn_id", r"..\escape"),
+        ("turn_id", "."),
+        ("turn_id", ".."),
+        ("turn_id", " padded"),
+        ("conversation_id", " padded"),
+        ("conversation_id", "line\nbreak"),
+        ("conversation_id", "x" * 256),
+    ],
+)
+def test_the_published_schema_rejects_identifiers_the_sdk_refuses_or_omits(
+    field, value,
+):
+    schema = json.loads(
+        (Path(__file__).resolve().parents[1] / "schema" / "flywheel-1.json")
+        .read_text(encoding="utf-8")
+    )
+    body = {
+        **TURNS[0],
+        field: value,
+    }
+    validator = Draft202012Validator({
+        "$schema": schema["$schema"],
+        "$defs": schema["$defs"],
+        "$ref": "#/$defs/ProductionTurn",
+    })
+    assert list(validator.iter_errors(body))
+
+
 def test_the_batch_carries_an_idempotency_key():
     """A network-level replay of the same bytes must collapse BEFORE the
     per-turn rule is reached."""
     key = _sent()["idempotency_key"]
     assert re.fullmatch(r"turns-agent-1-[0-9a-f]{32}", key), key
+
+
+@pytest.mark.parametrize(
+    ("agent_id", "turns", "problem"),
+    [
+        ("a" * 256, TURNS, "agent_id"),
+        ("customer/team", TURNS, "agent_id"),
+        ("..", TURNS, "agent_id"),
+        ("agent-1", [{**TURNS[0], "turn_id": "t" * 256}], "turn_id"),
+        ("agent-1", [{**TURNS[0], "turn_id": "../escape"}], "turn_id"),
+        ("agent-1", [{**TURNS[0], "turn_id": r"..\escape"}], "turn_id"),
+        ("agent-1", [{**TURNS[0], "turn_id": "."}], "turn_id"),
+        ("agent-1", [{**TURNS[0], "turn_id": " padded"}], "turn_id"),
+        (
+            "agent-1",
+            [{**TURNS[0], "conversation_id": "c" * 256}],
+            "conversation_id",
+        ),
+        (
+            "agent-1",
+            [{**TURNS[0], "conversation_id": "line\nbreak"}],
+            "conversation_id",
+        ),
+        ("agent-1", [TURNS[0]] * 65, "between 1 and 64"),
+    ],
+)
+def test_transport_refuses_identifier_or_batch_shapes_its_schema_forbids(
+    agent_id, turns, problem,
+):
+    client = _Client()
+    with pytest.raises(ContractViolation, match=problem):
+        AttachTransport(client, agent_id).report_turns(agent_id, turns)
+    assert client.calls == []
+
+
+def test_opaque_agent_ids_are_escaped_at_url_and_header_transport_seams():
+    agent_id = "customer team-über"
+    client = _Client()
+    transport = AttachTransport(client, agent_id)
+
+    transport.capture_current(agent_id)
+    transport.report_turns(agent_id, TURNS)
+
+    assert client.calls[0]["path"] == (
+        "/agents/customer%20team-%C3%BCber/capture"
+    )
+    assert client.calls[1]["idempotency_key"].startswith(
+        "turns-customer%20team-%C3%BCber-"
+    )
 
 
 def test_the_key_is_stable_for_the_same_turns_and_differs_otherwise():

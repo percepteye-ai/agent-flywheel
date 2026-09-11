@@ -180,7 +180,8 @@ The contract is a **pair**: this prompt was approved against that checkpoint, an
 ```python
 px = fw.attach(agent_id="support-agent", trajectory_root="/var/lib/percepteye")
 
-with px.turn(conversation_id=conv_id, input_text=user_text) as turn_id:
+with px.turn(task_id=case_id, conversation_id=conv_id,
+             input_text=user_text) as turn_id:
     reply = agent.invoke(user_text)       # your agent, unmodified
 
 px.record_answer(turn_id, reply)          # after the scope closes — the answer exists now
@@ -190,7 +191,7 @@ px.record_answer(turn_id, reply)          # after the scope closes — the answe
 
 | parameter | default | notes |
 |:--|:--|:--|
-| `agent_id` | required | empty raises `ConfigurationError` |
+| `agent_id` | required | exact 1–255-character production identifier; because it is a URL segment, path separators and `.` / `..` are forbidden; invalid values raise `ConfigurationError` before capture starts |
 | `trajectory_root` | **required** | see below |
 | `adapters` | `"auto"` | binds every built-in whose framework is installed |
 | `register` | `True` | `False` skips the control-plane call entirely |
@@ -207,16 +208,27 @@ With `register=True` the call makes exactly two outbound requests, once, at star
 
 | on the `Attachment` | |
 |:--|:--|
-| `.turn(turn_id=None, conversation_id=None, input_text=None)` | context manager; yields the turn id |
+| `.turn(turn_id=None, conversation_id=None, task_id=None, input_text=None)` | context manager; yields the turn id |
 | `.record_answer(turn_id, text)` | what the agent finally answered; callable **after** the scope closes |
 | `.read(turn_id)` | that turn's `list[ToolCallOutcome]`, or `None` if nothing was recorded |
 | `.read_turn(turn_id)` | the `task` / `answer` text recorded for that turn, or `None` |
+| `.flush(include_unanswered=False, batch_size=64)` | uploads now; larger requested batches are split at the contract's 64-turn limit |
 | `.policy` | what the control plane said to run — **informational here**; `attach()` does not act on it |
 | `.agent_fingerprint` | `{"execution_sha256": ...}` only when SDK reconciliation was exact; otherwise `None` |
 | `.adapters_bound` | e.g. `("adk", "langchain")`; `()` is a real answer, not a failure |
 | `.close()` | unbinds the adapters; idempotent, never raises. Also a context manager |
 
-**A turn boundary is declared, not inferred.** Guessing where one request ends and the next begins is the same class of guess this SDK refuses everywhere else, and getting it wrong silently merges two users' tool calls into one record. Keep the yielded id: it is the join key for any outcome that arrives later than the turn does — the draft kept an hour afterwards, the pull request merged the next morning. Absent a `turn_id=` you get `t_` plus 16 hex characters; `conversation_id=` is written to a `conversation_id` file beside `tool_calls.jsonl` in the turn's directory.
+**A turn boundary is declared, not inferred.** Guessing where one request ends and the next begins is the same class of guess this SDK refuses everywhere else, and getting it wrong silently merges two users' tool calls into one record. Keep the yielded id: it is the join key for any outcome that arrives later than the turn does — the draft kept an hour afterwards, the pull request merged the next morning. Production identifiers are exact 1–255-character strings with no leading/trailing whitespace or C0/C1 control characters. Because `turn_id` is also the on-disk directory name, `/`, `\`, `.` and `..` are additionally forbidden; the same path constraints apply to `agent_id` because the control plane addresses it as a URL segment. Absent or invalid `turn_id=` gets a fresh safe `t_` plus 16 hex characters, returned by the context manager; an invalid optional `conversation_id=` stays absent. A valid conversation id is written to a `conversation_id` file beside `tool_calls.jsonl` in the turn's directory. Remaining agent-id characters are percent-encoded at URL and idempotency-header seams instead of imposing any one agent product's slug grammar.
+
+**`task_id=` is correlation evidence, not authority.** Pass the opaque id of
+your case, job, ticket, or work item when a later control-plane process needs
+to join this turn to that exact task. The SDK writes it beside the trajectory,
+adds it to the optional `task_id` field in `POST /turns`, and emits
+`percepteye.task.id` on the turn's OTel spans. It never parses the id, creates
+hints, judges the trace, or treats the turn as trainable. Empty, non-string,
+C0/C1-control-bearing, whitespace-padded, over-255-character, or conflicting values
+stay absent; control-plane clustering and dataset services validate the
+binding before any downstream use.
 
 **Nothing in `turn()` can fail the turn.** If the directory cannot be created, capture is skipped and the body still runs.
 
@@ -224,7 +236,7 @@ With `register=True` the call makes exactly two outbound requests, once, at star
 
 They are separate calls because the answer does not exist yet when the turn opens — `record_answer()` is callable after the scope has closed, for the same reason `turn()` yields its id. **Omit them and the periodic flush sends nothing**: a turn with no recorded answer is held back on every 32-turn flush and leaves only at `close()` or the `atexit` hook, carrying no text at all.
 
-`record_tool_call()` works inside a turn exactly as it does inside a rollout. With the `otel` extra installed, a turn's span carries `percepteye.turn.id` rather than `percepteye.rollout.id`, so your own telemetry can tell the two apart too.
+`record_tool_call()` works inside a turn exactly as it does inside a rollout. With the `otel` extra installed, a turn's span carries `percepteye.turn.id` rather than `percepteye.rollout.id`, so your own telemetry can tell the two apart too. When supplied, `percepteye.task.id` is also carried on both chat and tool-call spans, so either OTLP ingestion or the turn upload has the same neutral correlation evidence.
 
 **Execution identity is optional and fail-closed.** `attach()` cannot infer the
 agent whose call your surrounding application makes. Pass that same live Python
@@ -267,7 +279,10 @@ The cadence is **every 32 turns, on a short-lived daemon thread**, plus an
 `atexit` hook that sends the remainder — including turns that never recorded an
 answer, since at shutdown none is coming. Uploading is therefore automatic; you
 do not have to call anything. `flush()` and `close()` remain available and are
-serialized against the automatic flush, so a turn cannot be sent twice.
+serialized against the automatic flush, so a turn cannot be sent twice. The
+published wire admits at most 64 turns per request; `flush(batch_size=...)`
+therefore caps larger requested chunks at 64 rather than emitting an invalid
+batch.
 
 Turns that have not been uploaded — no consent, an unreachable control plane, a
 low-traffic agent that has not reached the cadence — stay as trajectory

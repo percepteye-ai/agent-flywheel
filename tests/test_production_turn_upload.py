@@ -18,10 +18,13 @@ wrong order when the thing being asked about is whether to send.
 """
 from __future__ import annotations
 
+import json
 import time
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
 
 import percepteye_agent_flywheel as fw
 from percepteye_agent_flywheel.errors import ConfigurationError
@@ -88,8 +91,10 @@ def _attached(monkeypatch, tmp_path, transport, **attach_kwargs):
         px.close()
 
 
-def _turn(px, tid, *, ask, answer=None, calls=()):
-    with px.turn(turn_id=tid, input_text=ask, conversation_id="c1"):
+def _turn(px, tid, *, ask, answer=None, calls=(), task_id=None):
+    with px.turn(
+        turn_id=tid, input_text=ask, conversation_id="c1", task_id=task_id,
+    ):
         for c in calls:
             record_tool_call(**c)
     if answer:
@@ -208,11 +213,15 @@ def test_the_wire_shape_is_turn_native(monkeypatch, tmp_path):
     against outcome/status_code -- could not be reused."""
     tr = _Transport()
     with _attached(monkeypatch, tmp_path, tr) as px:
-        _turn(px, "t1", ask="refund 4417", answer="Refunded.", calls=[OK])
+        _turn(
+            px, "t1", ask="refund 4417", answer="Refunded.", calls=[OK],
+            task_id="case-4417",
+        )
         px.flush()
 
     t = tr.sent[0]
     assert t["turn_id"] == "t1"
+    assert t["task_id"] == "case-4417"
     assert t["conversation_id"] == "c1"
     assert t["input_text"] == "refund 4417"
     assert t["final_text"] == "Refunded."
@@ -221,6 +230,154 @@ def test_the_wire_shape_is_turn_native(monkeypatch, tmp_path):
     # Not the corpus projection.
     assert "messages" not in t
     assert "success" not in t["tool_calls"][0]
+    schema = json.loads(
+        (Path(__file__).resolve().parents[1] / "schema" / "flywheel-1.json")
+        .read_text(encoding="utf-8")
+    )
+    Draft202012Validator({
+        "$schema": schema["$schema"],
+        "$defs": schema["$defs"],
+        "$ref": "#/$defs/ProductionTurn",
+    }).validate(t)
+
+
+def test_task_correlation_is_optional_and_absence_stays_absent(
+    monkeypatch, tmp_path,
+):
+    tr = _Transport()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _turn(px, "t1", ask="hello", answer="hi")
+        px.flush()
+
+    assert "task_id" not in tr.sent[0]
+
+
+def test_task_only_turn_is_uploadable_neutral_evidence(monkeypatch, tmp_path):
+    tr = _Transport()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        with px.turn(turn_id="t1", task_id="case-4417"):
+            pass
+        px.flush()
+
+    assert tr.sent == [{
+        "turn_id": "t1",
+        "task_id": "case-4417",
+        "input_text": None,
+        "final_text": None,
+        "tool_calls": None,
+        "tool_calls_omitted_count": 0,
+    }]
+
+
+@pytest.mark.parametrize(
+    "task_id",
+    ["", " padded", "padded ", "line\nbreak", "x" * 256, 42],
+)
+def test_invalid_task_correlation_is_omitted_without_failing_the_turn(
+    monkeypatch, tmp_path, task_id,
+):
+    tr = _Transport()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _turn(px, "t1", ask="hello", answer="hi", task_id=task_id)
+        px.flush()
+
+    assert tr.sent[0]["final_text"] == "hi"
+    assert "task_id" not in tr.sent[0]
+
+
+def test_invalid_turn_and_conversation_ids_cannot_break_or_escape_the_turn_wire(
+    monkeypatch, tmp_path,
+):
+    tr = _Transport()
+    body_ran = False
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        with px.turn(
+            turn_id="t" * 256,
+            conversation_id="c" * 256,
+            input_text="hello",
+        ) as effective_turn_id:
+            body_ran = True
+        assert effective_turn_id.startswith("t_")
+        assert len(effective_turn_id) == 18
+        assert px.record_answer(effective_turn_id, "hi") is True
+        px.flush()
+
+    assert body_ran is True
+    assert tr.sent[0]["turn_id"] == effective_turn_id
+    assert "conversation_id" not in tr.sent[0]
+
+
+@pytest.mark.parametrize(
+    "agent_id",
+    [
+        "a" * 256, " padded", "padded ", "line\nbreak",
+        "customer/team", r"customer\team", ".", "..",
+    ],
+)
+def test_an_invalid_agent_id_is_rejected_before_capture_starts(
+    tmp_path, agent_id,
+):
+    with pytest.raises(ConfigurationError, match="production identifier grammar"):
+        fw.attach(
+            agent_id=agent_id,
+            trajectory_root=str(tmp_path),
+            register=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "hostile_id",
+    ["../escape", r"..\escape", ".", "..", "/absolute", " padded"],
+)
+def test_hostile_turn_ids_get_fresh_ids_and_never_escape_the_capture_root(
+    monkeypatch, tmp_path, hostile_id,
+):
+    capture_root = tmp_path / "capture"
+    absolute_escape = tmp_path / "absolute-escape"
+    candidate = str(absolute_escape) if hostile_id == "/absolute" else hostile_id
+    tr = _Transport()
+
+    with _attached(monkeypatch, capture_root, tr) as px:
+        with px.turn(turn_id=candidate, input_text="hello") as effective_turn_id:
+            pass
+        assert effective_turn_id.startswith("t_")
+        assert px.record_answer(candidate, "outside") is False
+        assert px.read_turn(candidate) is None
+        assert px.read(candidate) is None
+        assert px.record_answer(effective_turn_id, "inside") is True
+        px.flush()
+
+    assert tr.sent[0]["turn_id"] == effective_turn_id
+    assert (capture_root / effective_turn_id).is_dir()
+    assert not (tmp_path / "escape").exists()
+    assert not absolute_escape.exists()
+
+
+def test_conflicting_task_ids_fail_closed_to_no_binding(monkeypatch, tmp_path):
+    """Reusing a turn id must not let the last task id relabel earlier data."""
+    tr = _Transport()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        with px.turn(turn_id="same", task_id="case-a", input_text="hello"):
+            pass
+        with px.turn(turn_id="same", task_id="case-b"):
+            pass
+        px.record_answer("same", "hi")
+        px.flush()
+
+    assert "task_id" not in tr.sent[0]
+
+
+def test_repeated_identical_task_id_keeps_the_exact_binding(monkeypatch, tmp_path):
+    tr = _Transport()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        with px.turn(turn_id="same", task_id="case-a", input_text="hello"):
+            pass
+        with px.turn(turn_id="same", task_id="case-a"):
+            pass
+        px.record_answer("same", "hi")
+        px.flush()
+
+    assert tr.sent[0]["task_id"] == "case-a"
 
 
 def test_exact_attached_execution_identity_reaches_every_production_turn(
@@ -395,6 +552,32 @@ def test_turns_are_batched_not_sent_one_by_one(monkeypatch, tmp_path):
         px.flush(batch_size=2)
     assert [len(b) for b in tr.batches] == [2, 2, 1]
     assert len(tr.sent) == 5
+
+
+def test_requested_batches_larger_than_the_wire_limit_are_capped(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(
+        "percepteye_agent_flywheel.production._FLUSH_EVERY", 1_000,
+    )
+    tr = _Transport()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        for i in range(65):
+            _turn(px, f"t{i:02d}", ask=str(i), answer=str(i))
+        assert px.flush(batch_size=1_000)["sent"] == 65
+
+    assert [len(batch) for batch in tr.batches] == [64, 1]
+    schema = json.loads(
+        (Path(__file__).resolve().parents[1] / "schema" / "flywheel-1.json")
+        .read_text(encoding="utf-8")
+    )
+    validator = Draft202012Validator({
+        "$schema": schema["$schema"],
+        "$defs": schema["$defs"],
+        "$ref": "#/$defs/ProductionTurnBatch",
+    })
+    for batch in tr.batches:
+        validator.validate({"agent_id": "support", "turns": batch})
 
 
 def test_an_empty_turn_directory_is_not_uploaded(monkeypatch, tmp_path):

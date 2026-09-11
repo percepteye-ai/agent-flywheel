@@ -423,6 +423,75 @@ def test_exact_attached_execution_identity_reaches_turn_and_tool_spans(
     } == {digest}
 
 
+def test_task_correlation_reaches_input_answer_and_tool_spans(spans, tmp_path):
+    """Upload and OTLP paths carry the same neutral exact-join candidate."""
+    from percepteye_agent_flywheel.outcomes import record_tool_call
+    from percepteye_agent_flywheel.production import attach
+
+    px = attach(agent_id="a", trajectory_root=str(tmp_path), register=False)
+    try:
+        with px.turn(turn_id="t1", task_id="case-7", input_text="book"):
+            record_tool_call(
+                name="book", arguments={}, outcome="ok", status_code=201,
+            )
+        px.record_answer("t1", "Booked.")
+    finally:
+        px.close()
+
+    got = spans.get_finished_spans()
+    assert len(got) == 3
+    assert {
+        span.attributes.get("percepteye.task.id") for span in got
+    } == {"case-7"}
+
+
+def test_absent_task_correlation_invents_no_otel_attribute(spans, tmp_path):
+    from percepteye_agent_flywheel.outcomes import record_tool_call
+    from percepteye_agent_flywheel.production import attach
+
+    px = attach(agent_id="a", trajectory_root=str(tmp_path), register=False)
+    try:
+        with px.turn(turn_id="t1", input_text="book"):
+            record_tool_call(
+                name="book", arguments={}, outcome="ok", status_code=201,
+            )
+    finally:
+        px.close()
+
+    assert all(
+        "percepteye.task.id" not in span.attributes
+        for span in spans.get_finished_spans()
+    )
+
+
+def test_conflicting_task_correlation_is_omitted_from_later_spans(
+    spans, tmp_path,
+):
+    from percepteye_agent_flywheel.outcomes import record_tool_call
+    from percepteye_agent_flywheel.production import attach
+
+    px = attach(agent_id="a", trajectory_root=str(tmp_path), register=False)
+    try:
+        with px.turn(turn_id="same", task_id="case-a", input_text="first"):
+            pass
+        with px.turn(turn_id="same", task_id="case-b", input_text="second"):
+            record_tool_call(
+                name="book", arguments={}, outcome="ok", status_code=201,
+            )
+    finally:
+        px.close()
+
+    got = spans.get_finished_spans()
+    first = next(
+        span for span in got
+        if span.attributes.get("gen_ai.input.messages") == "first"
+    )
+    assert first.attributes["percepteye.task.id"] == "case-a"
+    later = [span for span in got if span is not first]
+    assert later
+    assert all("percepteye.task.id" not in span.attributes for span in later)
+
+
 def test_the_tool_span_carries_the_conversation_too(spans, tmp_path):
     """A consumer grouping an export into conversations must put a tool call in
     the same bucket as the turn that made it.

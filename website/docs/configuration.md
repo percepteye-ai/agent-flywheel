@@ -325,6 +325,7 @@ Every recorded outcome is additionally emitted as a span named `execute_tool <to
 | `percepteye.tool.latency_ms` | when measured |
 | `percepteye.rollout.id` | set inside a `serve()` rollout |
 | `percepteye.turn.id` | set inside `attach().turn()` — never stamped as a rollout id, or your own telemetry could not answer "how much of my traffic was training" |
+| `percepteye.task.id` | optional caller-supplied task/case/work-item correlation from `attach().turn(task_id=...)`; evidence only, never training authority |
 | `percepteye.agent.execution_sha256` | exact SDK-reconciled execution identity, only when discovery and adapter evidence were complete |
 
 **Only a reported failure sets the span status to error. An `unknown` leaves the span status unset** — marking it OK would assert a success nobody observed, and marking it ERROR would assert a failure nobody observed. The GenAI conventions have no attribute for "the result of this call was never observed", which is why the tri-state lives under `percepteye.*` rather than being bent into a standard attribute that means something else to every other consumer.

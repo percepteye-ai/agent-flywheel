@@ -66,6 +66,13 @@ from typing import TYPE_CHECKING, Any
 # forced it anyway.
 if TYPE_CHECKING:
     from ._http import ControlPlaneClient
+from .contract import (
+    _PRODUCTION_IDENTIFIER_MAX_CHARS,
+    _PRODUCTION_TURN_BATCH_MAX_ITEMS,
+    _production_agent_identifier,
+    _production_identifier,
+    _production_turn_identifier,
+)
 from .entrypoint import InputShape
 from .errors import ConfigurationError, TransportError
 from .execution_identity import normalize_attested_components
@@ -73,11 +80,14 @@ from .outcomes import (
     AGENT_FINGERPRINT_FILENAME,
     CONVERSATION_ID_FILENAME,
     Trajectory,
+    _normalize_task_id,
     _read_execution_fingerprint,
     _release,
     _RolloutScope,
     _write_execution_fingerprint,
+    _write_task_id,
     read_conversation_id,
+    read_task_id,
     read_turn_text,
     record_turn_text,
 )
@@ -271,7 +281,9 @@ def _capture_refusal(exc: BaseException) -> str | None:
     return detail or "the control plane refused this agent's turns (HTTP 403)."
 
 
-def _recorded_anything(text: dict[str, str], calls: Any) -> bool:
+def _recorded_anything(
+    text: dict[str, str], calls: Any, *, task_id: str | None = None,
+) -> bool:
     """Did this turn capture anything at all?
 
     ONE ANSWER, TWO ASKERS. ``_turn_wire`` returns ``None`` when this is False
@@ -281,7 +293,12 @@ def _recorded_anything(text: dict[str, str], calls: Any) -> bool:
     empty directory as lost end-user data and sends the operator hunting for a
     broken upload path.
     """
-    return bool(text.get("task") or text.get("answer") or calls)
+    # A valid caller correlation is itself turn-native evidence.  Dropping a
+    # task-only turn here made ``turn(task_id=...)`` create a durable sidecar
+    # that neither upload nor pruning considered a record.  Keep the neutral
+    # identifier on the wire; Mission Control can decide that a content-free
+    # turn contributes no usable observation.
+    return bool(text.get("task") or text.get("answer") or calls or task_id)
 
 
 class Attachment:
@@ -361,6 +378,7 @@ class Attachment:
     @contextmanager
     def turn(self, *, turn_id: str | None = None,
              conversation_id: str | None = None,
+             task_id: str | None = None,
              input_text: str | None = None) -> Iterator[str]:
         """Scope one user turn. Tool calls inside it land in its own trajectory.
 
@@ -376,12 +394,14 @@ class Attachment:
         Nothing in here can fail the turn. A trajectory that cannot be written
         disables capture for itself and says so once; the body still runs.
 
-        **A turn that records nothing leaves nothing behind.** The directory is
-        created by the first write, not by entering the turn. It used to be
-        created here, unconditionally, so an agent that answered from context
-        without calling a tool still cost one directory -- and at a million
-        turns that was a third of a gigabyte and a million inodes of empty
-        directories, for turns that had nothing to say.
+        **A turn with neither content nor declared correlation leaves nothing
+        behind.** Content creates the directory on its first write. A supplied
+        ``conversation_id`` or valid ``task_id`` is itself evidence and gets a
+        sidecar at scope entry. Before that distinction, every scope created a
+        directory unconditionally, so an agent that answered from context
+        without recording content or correlation still cost one directory --
+        and at a million turns that was a third of a gigabyte and a million
+        inodes for turns that had nothing to say.
 
         ``input_text`` records what the user ASKED, and :meth:`record_answer`
         records what the agent finally said. Both are OPTIONAL and both must be
@@ -391,22 +411,46 @@ class Attachment:
         code holds. Without them a turn records its tool calls and nothing
         else, which is exactly what it did before -- and is why tool outcomes
         stay zero-instrumentation while turn text is opt-in.
+
+        ``task_id`` is an optional opaque correlation supplied by the caller.
+        The SDK persists and forwards it but never interprets it: it is not a
+        success label, a policy identity, a hint, or permission to train.  A
+        control-plane consumer may use it as exact join evidence after its own
+        validation.  Invalid or conflicting values stay absent rather than
+        being guessed or rewritten, and cannot fail the served turn.
         """
-        tid = turn_id or f"t_{uuid.uuid4().hex[:16]}"
+        # An invalid caller id disables only that correlation, never the
+        # customer request. Generate a fresh wire-safe id and return it from
+        # the context manager so delayed outcomes still have an exact join.
+        tid = (
+            _production_turn_identifier(turn_id)
+            or f"t_{uuid.uuid4().hex[:16]}"
+        )
+        effective_conversation_id = _production_identifier(conversation_id)
         path = Path(self.trajectory_root) / tid
-        if conversation_id:
-            # The one thing that still needs the directory up front, because it
-            # writes a file whether or not a tool is ever called.
+        validated_task_id = _normalize_task_id(task_id)
+        if effective_conversation_id or validated_task_id:
+            # Correlation sidecars need the directory up front because they
+            # exist whether or not a tool is ever called.
             try:
                 path.mkdir(parents=True, exist_ok=True)
-                (path / "conversation_id").write_text(
-                    str(conversation_id), encoding="utf-8")
+                if effective_conversation_id:
+                    (path / CONVERSATION_ID_FILENAME).write_text(
+                        effective_conversation_id, encoding="utf-8")
+                _write_task_id(path, validated_task_id)
                 _write_execution_fingerprint(path, self._execution_sha256)
             except OSError:
                 pass
+        # Read back what was actually persisted.  In particular, a reused turn
+        # id carrying a different task creates a conflict marker; continuing
+        # with the caller's latest value here would make the OTLP path claim a
+        # binding that the upload path correctly refused.
+        effective_task_id = read_task_id(path)
         if input_text:
             record_turn_text(path, "task", input_text,
-                             turn_id=tid, conversation_id=conversation_id or "",
+                             turn_id=tid,
+                             conversation_id=effective_conversation_id or "",
+                             task_id=effective_task_id or "",
                              execution_sha256=self._execution_sha256 or "")
         # ONE counter block for both cadences, because they are the same
         # question -- "is periodic maintenance due?" -- asked twice. They were
@@ -429,7 +473,8 @@ class Attachment:
             self._flush_soon()
 
         with _RolloutScope(tid, str(path), kind="turn",
-                           conversation_id=conversation_id,
+                           conversation_id=effective_conversation_id,
+                           task_id=effective_task_id,
                            execution_sha256=self._execution_sha256):
             yield tid
 
@@ -444,7 +489,10 @@ class Attachment:
         Returns whether anything was written, and never raises -- a capture bug
         costs the observation and never the turn.
         """
-        path = Path(self.trajectory_root) / turn_id
+        safe_turn_id = _production_turn_identifier(turn_id)
+        if safe_turn_id is None:
+            return False
+        path = Path(self.trajectory_root) / safe_turn_id
         sidecar = path / AGENT_FINGERPRINT_FILENAME
         # A pre-existing turn with no identity may have been captured by an
         # older process. Never relabel it as this process merely because its
@@ -457,7 +505,8 @@ class Attachment:
             else None
         )
         return record_turn_text(
-            path, "answer", text, turn_id=turn_id,
+            path, "answer", text, turn_id=safe_turn_id,
+            task_id=read_task_id(path) or "",
             execution_sha256=execution_sha256 or "",
         )
 
@@ -468,7 +517,10 @@ class Attachment:
         that recorded neither half -- the distinction absence is never
         collapsed into.
         """
-        return read_turn_text(Path(self.trajectory_root) / turn_id)
+        safe_turn_id = _production_turn_identifier(turn_id)
+        if safe_turn_id is None:
+            return None
+        return read_turn_text(Path(self.trajectory_root) / safe_turn_id)
 
     def read(self, turn_id: str) -> Any:
         """The tool calls captured for one turn, or ``None`` if none were.
@@ -477,7 +529,10 @@ class Attachment:
         do everywhere else: no file means the turn reported nothing, and must
         not be rendered as an assertion that zero tool calls occurred.
         """
-        return Trajectory(Path(self.trajectory_root) / turn_id).read()
+        safe_turn_id = _production_turn_identifier(turn_id)
+        if safe_turn_id is None:
+            return None
+        return Trajectory(Path(self.trajectory_root) / safe_turn_id).read()
 
     def prune(
         self,
@@ -690,8 +745,11 @@ class Attachment:
         operator.
         """
         try:
-            return _recorded_anything(read_turn_text(d) or {},
-                                      Trajectory(d).read())
+            return _recorded_anything(
+                read_turn_text(d) or {},
+                Trajectory(d).read(),
+                task_id=read_task_id(d),
+            )
         except Exception:
             return True
 
@@ -703,11 +761,17 @@ class Attachment:
         projection into any training-row format happens on the far side, where
         it can change without a customer redeploying.
         """
+        turn_id = _production_turn_identifier(d.name)
+        if turn_id is None:
+            raise ValueError(
+                "captured turn id is not representable on the flywheel/1 wire"
+            )
         text = read_turn_text(d) or {}
         traj = Trajectory(d)
         calls = traj.read()
         answer = text.get("answer")
-        if not _recorded_anything(text, calls):
+        task_id = read_task_id(d)
+        if not _recorded_anything(text, calls, task_id=task_id):
             return None
         # THE TRI-STATE, asked of the trajectory FILE rather than inferred.
         # ``[] if self.adapters_bound else None`` answered a different
@@ -726,16 +790,18 @@ class Attachment:
         else:
             tool_calls = None
         wire: dict[str, Any] = {
-            "turn_id": d.name,
+            "turn_id": turn_id,
             "input_text": text.get("task"),
             "final_text": answer,
             "tool_calls": tool_calls,
             "tool_calls_omitted_count": traj.malformed,
         }
-        cid = read_conversation_id(d)
+        cid = _production_identifier(read_conversation_id(d))
         if cid:
             wire["conversation_id"] = cid
             wire["turn_index"] = self._turn_index(d, cid)
+        if task_id:
+            wire["task_id"] = task_id
         fingerprint = _read_execution_fingerprint(d)
         if fingerprint is not None:
             wire["agent_fingerprint"] = fingerprint
@@ -1032,8 +1098,17 @@ class Attachment:
 
             client = ControlPlaneClient(self._cp_url, self._api_key)
             tr = AttachTransport(client, self.agent_id)
-            for i in range(0, len(pending), max(1, batch_size)):
-                chunk = pending[i:i + max(1, batch_size)]
+            requested_batch_size = (
+                batch_size
+                if isinstance(batch_size, int) and not isinstance(batch_size, bool)
+                else 1
+            )
+            wire_batch_size = min(
+                max(1, requested_batch_size),
+                _PRODUCTION_TURN_BATCH_MAX_ITEMS,
+            )
+            for i in range(0, len(pending), wire_batch_size):
+                chunk = pending[i:i + wire_batch_size]
                 try:
                     tr.report_turns(self.agent_id, [w for _, w in chunk])
                 except Exception as exc:
@@ -1245,8 +1320,13 @@ def attach(
     an attachment with ``policy == {}``, because an agent must keep serving its
     users whatever we happen to think of our own availability.
     """
-    if not agent_id or not isinstance(agent_id, str):
-        raise ConfigurationError("attach() requires a non-empty agent_id")
+    if _production_agent_identifier(agent_id) is None:
+        raise ConfigurationError(
+            "attach() requires agent_id to match the production identifier "
+            "grammar: non-empty, control-free, without edge whitespace, and "
+            "without path separators or dot segments, with at most "
+            f"{_PRODUCTION_IDENTIFIER_MAX_CHARS} characters"
+        )
     if not trajectory_root or not isinstance(trajectory_root, str):
         raise ConfigurationError(
             "attach() requires trajectory_root -- the directory captured turns "

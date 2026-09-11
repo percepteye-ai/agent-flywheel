@@ -25,7 +25,11 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Literal
 
-from .contract import Outcome, ToolCallOutcome
+from .contract import (
+    Outcome,
+    ToolCallOutcome,
+    _production_identifier,
+)
 from .errors import ContractViolation
 from .evidence import extract_entity_ids
 from .execution_identity import is_lower_sha256
@@ -33,6 +37,7 @@ from .execution_identity import is_lower_sha256
 __all__ = [
     "AGENT_FINGERPRINT_FILENAME",
     "CONVERSATION_ID_FILENAME",
+    "TASK_ID_FILENAME",
     "TOOL_CALLS_FILENAME",
     "CaptureScope",
     "Trajectory",
@@ -68,6 +73,16 @@ TURNS_FILENAME = "turns.jsonl"
 #: Where a turn directory records which conversation it belongs to.
 CONVERSATION_ID_FILENAME = "conversation_id"
 
+#: The caller's opaque task/case/work-item correlation for one production
+#: turn.  This is evidence only: writing it grants no training eligibility and
+#: the SDK never interprets it.  A sidecar survives delayed answers and process
+#: restarts without coupling task identity to the agent's own turn id.
+TASK_ID_FILENAME = "task_id"
+
+#: A conflicting task binding is worse than no binding: it could attach advice
+#: for one customer task to another.  The marker is monotonic so a later writer
+#: cannot make a mixed turn look exact merely by winning the last write.
+_TASK_ID_CONFLICT_FILENAME = "task_id.conflict"
 #: SDK-authored execution identity captured beside one production turn. It is
 #: a sidecar rather than Attachment state so an old, pending turn flushed by a
 #: newer process can never be stamped with that process's execution identity.
@@ -113,6 +128,9 @@ _current_scope_kind: ContextVar[str | None] = ContextVar(
 #: for a value the scope already knew when it opened.
 _current_conversation: ContextVar[str | None] = ContextVar(
     "percepteye_current_conversation", default=None
+)
+_current_task: ContextVar[str | None] = ContextVar(
+    "percepteye_current_task", default=None
 )
 _current_execution_sha256: ContextVar[str | None] = ContextVar(
     "percepteye_current_execution_sha256", default=None
@@ -506,6 +524,7 @@ def _emit_span(rec: ToolCallOutcome, scope_id: str, kind: CaptureScope) -> None:
             rollout_id=scope_id if kind == "rollout" else None,
             turn_id=scope_id if kind == "turn" else None,
             conversation_id=_current_conversation.get(),
+            task_id=_current_task.get(),
             tool_call_id=rec.tool_call_id,
             execution_sha256=_current_execution_sha256.get(),
         )
@@ -565,6 +584,7 @@ def record_turn_text(
             **{("input_text" if kind == "task" else "output_text"): record["text"]},
             turn_id=ids.get("turn_id"),
             conversation_id=ids.get("conversation_id"),
+            task_id=ids.get("task_id"),
             rollout_id=ids.get("rollout_id"),
             execution_sha256=ids.get("execution_sha256"),
         )
@@ -591,6 +611,66 @@ def read_conversation_id(path: Any) -> str | None:
             encoding="utf-8").strip() or None
     except OSError:
         return None
+
+
+def _normalize_task_id(value: Any) -> str | None:
+    """Return one safe opaque correlation id, or ``None``.
+
+    The identifier is deliberately not parsed as a UUID or given any product
+    semantics: customer agents use many task-id formats.  It is still kept
+    conservative at the wire boundary.  Non-strings, leading/trailing
+    whitespace, C0/C1 control characters and values beyond the control
+    plane's 255-character field cannot be exact joins, so they remain absent
+    rather than being silently rewritten into a different id. This calls the
+    same predicate whose pattern is published in ``flywheel-1.json``.
+    """
+    return _production_identifier(value)
+
+
+def _write_task_id(path: Path, task_id: Any) -> None:
+    """Persist an exact task binding without ever failing the customer turn."""
+    value = _normalize_task_id(task_id)
+    if value is None:
+        return
+    sidecar = path / TASK_ID_FILENAME
+    conflict = path / _TASK_ID_CONFLICT_FILENAME
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        if conflict.exists():
+            return
+        try:
+            with sidecar.open("x", encoding="utf-8") as output:
+                output.write(value)
+            return
+        except FileExistsError:
+            pass
+        try:
+            current = sidecar.read_text(encoding="utf-8")
+        except OSError:
+            current = None
+        if current == value:
+            return
+        try:
+            conflict.open("x", encoding="utf-8").close()
+        except FileExistsError:
+            pass
+    except OSError:
+        return
+
+
+def read_task_id(path: Any) -> str | None:
+    """Read an exact, non-conflicting caller task binding, or ``None``."""
+    turn = Path(path)
+    if (turn / _TASK_ID_CONFLICT_FILENAME).exists():
+        return None
+    try:
+        raw = (turn / TASK_ID_FILENAME).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    value = _normalize_task_id(raw)
+    if value != raw or (turn / _TASK_ID_CONFLICT_FILENAME).exists():
+        return None
+    return value
 
 
 def read_turn_text(
@@ -711,12 +791,14 @@ class _RolloutScope:
 
     def __init__(self, rollout_id: str, trajectory_dir: str, *,
                  conversation_id: str | None = None,
+                 task_id: str | None = None,
                  execution_sha256: str | None = None,
                  kind: CaptureScope = "rollout") -> None:
         self._rid = rollout_id
         self._trajectory_dir = str(trajectory_dir)
         self._kind = kind
         self._conversation_id = conversation_id or None
+        self._task_id = _normalize_task_id(task_id)
         self._execution_sha256 = (
             execution_sha256 if is_lower_sha256(execution_sha256) else None
         )
@@ -728,6 +810,7 @@ class _RolloutScope:
             _current_trajectory_dir.set(self._trajectory_dir),
             _current_scope_kind.set(self._kind),
             _current_conversation.set(self._conversation_id),
+            _current_task.set(self._task_id),
             _current_execution_sha256.set(self._execution_sha256),
         ]
         return self._rid
@@ -738,7 +821,8 @@ class _RolloutScope:
             _current_trajectory_dir.reset(self._tokens[1])
             _current_scope_kind.reset(self._tokens[2])
             _current_conversation.reset(self._tokens[3])
-            _current_execution_sha256.reset(self._tokens[4])
+            _current_task.reset(self._tokens[4])
+            _current_execution_sha256.reset(self._tokens[5])
             self._tokens = []
         # The handle lives exactly as long as the scope that writes through it.
         # Without this the sink registry would grow one entry per turn for the

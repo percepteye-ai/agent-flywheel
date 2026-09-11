@@ -33,6 +33,58 @@ __all__ = [
 
 CONTRACT_VERSION = "flywheel/1"
 
+#: Exact limits published by ``schema/flywheel-1.json`` for the production
+#: turn wire.  The schema remains the authority; these names keep each runtime
+#: producer from restating a different boundary.
+_PRODUCTION_IDENTIFIER_MAX_CHARS = 255
+_PRODUCTION_TURN_BATCH_MAX_ITEMS = 64
+
+#: One exact grammar for opaque identifiers on the production-turn wire.
+#: Leading/trailing whitespace and C0/C1 controls are forbidden; internal
+#: spacing and non-ASCII customer identifiers otherwise remain opaque.
+#: These strings are asserted verbatim against the published JSON Schema.
+_PRODUCTION_IDENTIFIER_PATTERN = (
+    r"^(?!\s)(?!.*\s$)[^\u0000-\u001F\u007F-\u009F]+$"
+)
+_PRODUCTION_TURN_IDENTIFIER_PATTERN = (
+    r"^(?!\.{1,2}$)(?!\s)(?!.*\s$)(?!.*[\\/])"
+    r"[^\u0000-\u001F\u007F-\u009F]+$"
+)
+_PRODUCTION_AGENT_IDENTIFIER_PATTERN = _PRODUCTION_TURN_IDENTIFIER_PATTERN
+_PRODUCTION_IDENTIFIER_RE = re.compile(_PRODUCTION_IDENTIFIER_PATTERN)
+_PRODUCTION_TURN_IDENTIFIER_RE = re.compile(
+    _PRODUCTION_TURN_IDENTIFIER_PATTERN
+)
+
+
+def _production_identifier(value: Any) -> str | None:
+    """Return an exact identifier representable on the production-turn wire."""
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > _PRODUCTION_IDENTIFIER_MAX_CHARS
+        or _PRODUCTION_IDENTIFIER_RE.fullmatch(value) is None
+    ):
+        return None
+    return value
+
+
+def _production_turn_identifier(value: Any) -> str | None:
+    """Return an exact wire id that is also one safe directory segment."""
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > _PRODUCTION_IDENTIFIER_MAX_CHARS
+        or _PRODUCTION_TURN_IDENTIFIER_RE.fullmatch(value) is None
+    ):
+        return None
+    return value
+
+
+def _production_agent_identifier(value: Any) -> str | None:
+    """Return an exact wire id safe as the agent URL path segment."""
+    return _production_turn_identifier(value)
+
 Outcome = Literal["ok", "failed", "unknown"]
 
 ExclusionReason = Literal[

@@ -61,7 +61,8 @@ Issues = "https://github.com/percepteye-ai/agent-flywheel/issues"
 # it importable in the test environment rather than only in pip's isolated
 # build env. Build-time and test-time only; the one-runtime-dependency
 # invariant is about [project.dependencies] and is untouched.
-dev = ["pytest>=7.4", "pytest-asyncio>=0.23", "ruff==0.16.2", "mypy>=1.8",
+dev = ["pytest>=7.4", "pytest-asyncio>=0.23", "jsonschema>=4.22",
+       "ruff==0.16.2", "mypy>=1.8",
        "hatchling>=1.24"]
 # Frameworks the built-in adapters bind to. NOT runtime dependencies -- no
 # adapter imports its framework at module scope, so an absent framework just

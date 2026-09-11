@@ -17,6 +17,7 @@ import json
 import time
 import uuid
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from urllib.parse import quote
 
 # NOT imported at module scope. `_http` pulls in httpx, which is 83-87% of
 # this package's import time and ~88% of its resident memory -- and a process
@@ -26,8 +27,16 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 # forced it anyway.
 if TYPE_CHECKING:
     from ._http import ControlPlaneClient
-from .contract import RolloutOutput, RolloutRequest
-from .errors import TransportError
+from .contract import (
+    _PRODUCTION_TURN_BATCH_MAX_ITEMS,
+    RolloutOutput,
+    RolloutRequest,
+    _production_agent_identifier,
+    _production_identifier,
+    _production_turn_identifier,
+)
+from .errors import ContractViolation, TransportError
+from .outcomes import _normalize_task_id
 
 __all__ = ["AttachTransport", "FlywheelTransport"]
 
@@ -78,7 +87,7 @@ class AttachTransport:
     def register(self, spec: dict[str, Any]) -> dict[str, Any]:
         return self._c.request(
             "POST", "/agents", json_body=spec,
-            idempotency_key=f"reg-{self.agent_id}",
+            idempotency_key=f"reg-{quote(self.agent_id, safe='-._~')}",
         )
 
     def policy_current(self) -> dict[str, Any]:
@@ -186,9 +195,11 @@ class AttachTransport:
         the two must not be made to look alike, because their safe directions
         are opposite.
         """
+        if _production_agent_identifier(agent_id) is None:
+            return {}
         try:
             return self._c.request(
-                "GET", f"/agents/{agent_id}/capture") or {}
+                "GET", f"/agents/{quote(agent_id, safe='')}/capture") or {}
         except Exception:  # see docstring
             return {}
 
@@ -206,6 +217,42 @@ class AttachTransport:
         The idempotency key covers the BATCH, so a network-level replay of the
         same bytes is collapsed before the per-turn rule is reached.
         """
+        if _production_agent_identifier(agent_id) is None:
+            raise ContractViolation(
+                "production turn agent_id does not match the published "
+                "production agent identifier grammar"
+            )
+        if (
+            not isinstance(turns, list)
+            or not 1 <= len(turns) <= _PRODUCTION_TURN_BATCH_MAX_ITEMS
+        ):
+            raise ContractViolation(
+                "production turn batches must contain between 1 and "
+                f"{_PRODUCTION_TURN_BATCH_MAX_ITEMS} turns"
+            )
+        for index, turn in enumerate(turns):
+            if not isinstance(turn, dict):
+                raise ContractViolation(
+                    f"production turn {index} must be an object"
+                )
+            if _production_turn_identifier(turn.get("turn_id")) is None:
+                raise ContractViolation(
+                    f"production turn {index} has an invalid turn_id"
+                )
+            if (
+                "conversation_id" in turn
+                and _production_identifier(turn.get("conversation_id")) is None
+            ):
+                raise ContractViolation(
+                    f"production turn {index} has an invalid conversation_id"
+                )
+            if (
+                "task_id" in turn
+                and _normalize_task_id(turn.get("task_id")) != turn.get("task_id")
+            ):
+                raise ContractViolation(
+                    f"production turn {index} has an invalid task_id"
+                )
         digest = hashlib.sha256(
             json.dumps(turns, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()[:32]
@@ -213,7 +260,9 @@ class AttachTransport:
             "POST",
             "/turns",
             json_body={"agent_id": agent_id, "turns": turns},
-            idempotency_key=f"turns-{agent_id}-{digest}",
+            idempotency_key=(
+                f"turns-{quote(agent_id, safe='-._~')}-{digest}"
+            ),
         )
 
     def abandon(self, rollout: RolloutRequest, *, reason: str, detail: str = "") -> None:

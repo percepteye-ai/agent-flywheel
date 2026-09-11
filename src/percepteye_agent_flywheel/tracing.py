@@ -94,6 +94,7 @@ def record_tool_call_span(
     rollout_id: str | None = None,
     turn_id: str | None = None,
     conversation_id: str | None = None,
+    task_id: str | None = None,
     tool_call_id: str | None = None,
     execution_sha256: str | None = None,
 ) -> None:
@@ -147,6 +148,11 @@ def record_tool_call_span(
                 # sampled by the collector may not.
                 span.set_attribute(
                     "percepteye.conversation.id", str(conversation_id))
+            if task_id:
+                # Caller-authored correlation evidence only.  This does not
+                # assert success, policy identity or training eligibility; it
+                # gives an ingest-side consumer an exact task join to validate.
+                span.set_attribute("percepteye.task.id", str(task_id))
             if execution_sha256:
                 span.set_attribute(
                     "percepteye.agent.execution_sha256", str(execution_sha256)
@@ -201,6 +207,7 @@ def record_turn_span(
     output_text: str | None = None,
     turn_id: str | None = None,
     conversation_id: str | None = None,
+    task_id: str | None = None,
     agent_name: str | None = None,
     model: str | None = None,
     rollout_id: str | None = None,
@@ -262,6 +269,8 @@ def record_turn_span(
             if conversation_id:
                 span.set_attribute(
                     "percepteye.conversation.id", str(conversation_id))
+            if task_id:
+                span.set_attribute("percepteye.task.id", str(task_id))
             if execution_sha256:
                 span.set_attribute(
                     "percepteye.agent.execution_sha256", str(execution_sha256)

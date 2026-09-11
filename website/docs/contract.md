@@ -1,6 +1,6 @@
 # The contract
 
-The wire between an agent you run and a control plane you don't. It is one JSON Schema file, five types, and a small number of rules about absence.
+The wire between an agent you run and a control plane you don't. It is one JSON Schema file and a small number of rules about absence.
 
 ## One file is the authority
 
@@ -11,11 +11,22 @@ The wire between an agent you run and a control plane you don't. It is one JSON 
 | `$id` | `https://schemas.percepteye.ai/flywheel/1.json` |
 | `x-contract-version` | `flywheel/1` |
 | Python constant | `contract.CONTRACT_VERSION == "flywheel/1"` |
-| Types declared | `ToolCallRecord` · `Exclusion` · `RolloutRequest` · `RolloutOutput` · `ClaimResponse` |
+| Types declared | `ToolCallRecord` · `ProductionTurn` · `ProductionTurnBatch` · `Exclusion` · `RolloutRequest` · `RolloutOutput` · `ClaimResponse` |
 
 **Server implementations pin against the published schema; the schema is never generated from a server type.** The direction matters. Generate the schema from a server and the contract becomes whatever that server currently does — a field renamed in a handler silently redefines the wire for every customer-run agent already deployed against it. Pinning the other way means a server change that breaks the contract fails on the server.
 
 `RolloutOutput` and `ToolCallRecord` are marked **FLYWHEEL-AUTHORED**: an agent asserts them. `RolloutRequest` is **PERCEPTEYE-AUTHORED**: the control plane asserts it.
+
+`ProductionTurnBatch` is the closed body sent to `POST /turns`. Its optional
+`task_id` is an opaque customer correlation candidate. It is evidence only:
+the field does not claim that a turn succeeded, identify the sampled policy,
+carry generated advice, or authorize a training row. Those decisions remain
+control-plane responsibilities. Every production identifier is an exact
+1–255-character string without edge whitespace or C0/C1 controls. `turn_id`
+and `agent_id` additionally forbid path separators and the `.` / `..` path
+segments because they cross storage or URL-path boundaries. A batch contains
+at most 64 turns; the SDK splits a larger requested flush into conforming
+chunks.
 
 ## The Python types are hand-written to match
 
