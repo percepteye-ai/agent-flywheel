@@ -1,8 +1,8 @@
 # prime-agent through the Flywheel
 
-Status: **routing verified; the streaming blocker below is RESOLVED in the
-gateway (SSE passthrough + capture) — runnable once that gateway is
-deployed.**
+Status: **routing, streaming capture, execution attestation, and run-owned
+daemon cleanup are implemented. A launch still depends on a healthy control
+plane and a serving endpoint with the model's native tool parser enabled.**
 
 This is an **optional example adapter**, not SDK default behavior. prime-agent
 is a TypeScript binary, so it is served through the generic **command
@@ -18,6 +18,44 @@ export PERCEPTEYE_PRIME_HARNESS_SOURCE=/absolute/path/to/harness
 export PRIME_AGENT_KERNEL_VENV=/absolute/path/to/kernel-venv
 export PRIME_AGENT_PACKAGE_ROOT=/absolute/path/to/prime-agent
 ```
+
+One complete launch looks like this. Keep the model id stable as `policy`
+across the base and candidate arms: the per-rollout gateway binds that logical
+name to the exact policy under measurement.
+
+```bash
+cd /absolute/path/to/percepteye-agent-flywheel
+install -d -m 700 /absolute/path/to/empty-prime-harness
+test -z "$(ls -A /absolute/path/to/empty-prime-harness)"
+# Qualified macOS host: Node 24 must precede Homebrew's unpinned default Node.
+export PATH=/opt/homebrew/opt/node@24/bin:/opt/homebrew/bin:/usr/bin:/bin
+export PERCEPTEYE_CONTROL_PLANE_URL='https://control-plane.example/api/flywheel/v1'
+export PERCEPTEYE_API_KEY="$(cat /absolute/path/to/prime-agent.key)"
+export PERCEPTEYE_AGENT_ID='prime-agent'
+export PERCEPTEYE_AGENT_MODE=training
+export PERCEPTEYE_PRIME_HARNESS_SOURCE=/absolute/path/to/empty-prime-harness
+export PRIME_AGENT_KERNEL_VENV=/absolute/path/to/kernel-venv
+export PRIME_AGENT_PACKAGE_ROOT=/absolute/path/to/prime-agent
+export PRIME_WORKSPACE=/absolute/path/to/dedicated-rollout-workspace
+export PRIME_CONCURRENCY=4
+export PRIME_MAX_TURNS=15
+export PERCEPTEYE_MODEL_ID=policy
+export PERCEPTEYE_CONTEXT_WINDOW=65536
+export PERCEPTEYE_MAX_TOKENS=4096
+node --version       # require v24.x on this qualified host
+prime-agent --version
+exec .venv/bin/python examples/prime_agent/serve_prime.py
+```
+
+`prime-agent` must resolve through its installed package, not through an
+unattested debug wrapper. The example resolves the launcher symlink and refuses
+it unless its target is below `PRIME_AGENT_PACKAGE_ROOT`; otherwise a wrapper
+could change execution without moving the OPSD execution identity. The
+launcher's `#!/usr/bin/env node` also makes the order of `PATH` material, so pin
+and probe the intended Node runtime before starting the worker. Before polling,
+the example runs the resolved launcher's `--version` and `--help` under its
+scrubbed daemon environment and refuses a broken Node runtime or a Prime build
+that lacks any rollout flag this adapter uses.
 
 `PERCEPTEYE_PRIME_HARNESS_SOURCE` names the harness directory itself (normally
 `~/.prime/agent/harness`), not the whole agent directory. An empty directory is
@@ -68,6 +106,14 @@ removing the snapshot. The daemon receives no ambient project settings and no
 customer, provider, or Percepteye credential. Prime's client-owned session
 protocol supplies each worker with its private rollout environment, avoiding a
 supervisor whose live state belongs to the first disposable child.
+
+SIGTERM, SIGHUP, and Ctrl-C are converted into the same cleanup path. Repeated
+stop signals are ignored while live rollouts drain and teardown completes, so
+they cannot race removal of the attested snapshot. SIGKILL and machine failure
+cannot be caught; an orphaned
+`prime-agent` process alone is therefore not evidence that rollout polling is
+alive. The worker is the Python `serve_prime.py` process. Each run uses a unique
+Unix socket, so an older orphan cannot evict or serve a later run.
 
 The example reads `PERCEPTEYE_MODEL_ID`, `PERCEPTEYE_CONTEXT_WINDOW`, and
 `PERCEPTEYE_MAX_TOKENS` in the parent, then the Prime adapter supplies matching
@@ -148,10 +194,11 @@ run-scoped snapshot isolates and attests the global harness. A refinement write
 that still gets through can invalidate only its own child, never a later
 replica, and the affected rollout is excluded.
 
-## Better routing than route.ts
+## Why the explicit route remains
 
 Prime Intellect's own RL harness writes a per-rollout `models.json` into a
-per-trace agent dir and launches with `--provider`, setting
-`PRIME_AGENT_CODING_AGENT_DIR` and `HOME` to that directory. That is worth
-adopting over the extension: it isolates the harness state per rollout, which
-is also the fix for the identity problem above.
+per-trace agent directory. This adapter now provides the same per-rollout
+`PRIME_AGENT_CODING_AGENT_DIR` and `HOME` isolation, while `route.ts` supplies
+the one fact a static `models.json` cannot: the gateway URL and single-use key
+that are different for every claimed rollout. Both the route bytes and their
+fixed configuration are part of the execution identity.

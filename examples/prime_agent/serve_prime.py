@@ -13,11 +13,15 @@ from __future__ import annotations
 import os
 import pathlib
 import shutil
+import signal
 import socket
 import stat
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable
+from types import FrameType
+from typing import Any
 
 import percepteye_agent_flywheel as fw
 from percepteye_agent_flywheel.adapters.prime_agent import (
@@ -233,6 +237,130 @@ class _RunOwnedPrimeDaemon:
         finally:
             self._owns_socket_path = False
 
+
+SignalHandler = signal.Handlers | int | Callable[[int, FrameType | None], Any] | None
+
+
+def _install_cleanup_signal_handlers() -> dict[int, SignalHandler]:
+    """Turn service-manager termination into the normal cleanup path.
+
+    ``fw.serve`` deliberately owns no process-wide signal policy. This
+    standalone example does own a run-scoped Prime supervisor, though, and a
+    default SIGTERM/SIGHUP would bypass its ``finally`` block and leave that
+    supervisor behind. Raising ``SystemExit`` on the main thread preserves the
+    conventional exit status while still unwinding through ``daemon.close``.
+
+    SIGKILL and machine failure remain uncatchable. The unique socket keeps an
+    orphan from colliding with the next run; this handler prevents the ordinary
+    service-stop cases from creating one in the first place.
+    """
+    previous: dict[int, SignalHandler] = {}
+    terminating = False
+
+    def _exit(signum: int, _frame: FrameType | None) -> None:
+        nonlocal terminating
+        # ThreadPoolExecutor drains its running rollouts while ``fw.serve``
+        # unwinds. A service manager may repeat SIGTERM during that interval;
+        # a second exception would interrupt the drain and race snapshot
+        # teardown against live children. The first signal owns shutdown.
+        if terminating:
+            return
+        terminating = True
+        raise SystemExit(128 + signum)
+
+    cleanup_signals = [signal.SIGTERM, signal.SIGINT]
+    if hasattr(signal, "SIGHUP"):
+        cleanup_signals.append(signal.SIGHUP)
+    try:
+        for signum in cleanup_signals:
+            previous[signum] = signal.getsignal(signum)
+            signal.signal(signum, _exit)
+    except BaseException:
+        # ``signal.signal`` rejects a caller outside the main thread. Do not
+        # leave the first handler installed if a later one could not be.
+        for restore_signum, handler in previous.items():
+            signal.signal(restore_signum, handler)
+        raise
+    return previous
+
+
+def _ignore_cleanup_signals(previous: dict[int, SignalHandler]) -> None:
+    """Keep a repeated stop from interrupting daemon/snapshot teardown."""
+    for signum in previous:
+        signal.signal(signum, signal.SIG_IGN)
+
+
+def _restore_signal_handlers(previous: dict[int, SignalHandler]) -> None:
+    for signum, handler in previous.items():
+        signal.signal(signum, handler)
+
+
+_REQUIRED_PRIME_FLAGS = (
+    "--daemon-socket",
+    "--mode",
+    "--provider",
+    "--model",
+    "--no-session",
+    "--no-extensions",
+    "--no-skills",
+    "--no-prompt-templates",
+    "--no-context-files",
+    "--autonomous",
+    "--autonomous-max-turns",
+    "--autonomous-max-continuations",
+    "--autonomous-gate-timeout-ms",
+    "--autonomous-gate",
+)
+
+
+def _preflight_prime_runtime(
+    executable: str,
+    *,
+    env: dict[str, str],
+    cwd: str | os.PathLike[str],
+) -> str:
+    """Prove the pinned launcher can start and implements this adapter contract."""
+
+    def _run(option: str) -> subprocess.CompletedProcess[bytes]:
+        try:
+            return subprocess.run(
+                [executable, option],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                cwd=cwd,
+                env=env,
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError(
+                f"prime-agent {option} preflight could not execute: {exc}"
+            ) from exc
+
+    version_probe = _run("--version")
+    version = (version_probe.stdout or version_probe.stderr).decode(
+        "utf-8", "replace"
+    ).strip()
+    if version_probe.returncode != 0:
+        detail = version[:500] or f"exit {version_probe.returncode} without output"
+        raise RuntimeError(f"prime-agent runtime preflight failed: {detail}")
+
+    help_probe = _run("--help")
+    help_text = (help_probe.stdout + help_probe.stderr).decode("utf-8", "replace")
+    if help_probe.returncode != 0:
+        detail = help_text.strip()[:500] or (
+            f"exit {help_probe.returncode} without output"
+        )
+        raise RuntimeError(f"prime-agent flag preflight failed: {detail}")
+    missing = [flag for flag in _REQUIRED_PRIME_FLAGS if flag not in help_text]
+    if missing:
+        raise RuntimeError(
+            "prime-agent does not implement the required rollout flags: "
+            + ", ".join(missing)
+        )
+    return version.splitlines()[0] if version else "version not reported"
+
+
 ARGV = [
     "prime-agent",
     "--daemon-socket", _DAEMON_SOCKET,
@@ -338,13 +466,23 @@ def main() -> int:
             "max_tokens": str(MAX_TOKENS),
         },
     )
-    daemon = _RunOwnedPrimeDaemon(
-        _DAEMON_SOCKET,
-        harness.daemon_environment(),
-        cwd=harness.daemon_working_directory,
-        executable=str(resolved_launcher),
-    )
+    daemon: _RunOwnedPrimeDaemon | None = None
+    previous_signal_handlers: dict[int, SignalHandler] = {}
     try:
+        daemon_env = harness.daemon_environment()
+        version = _preflight_prime_runtime(
+            str(resolved_launcher),
+            env=daemon_env,
+            cwd=harness.daemon_working_directory,
+        )
+        print(f"Prime runtime preflight passed: {version}", flush=True)
+        daemon = _RunOwnedPrimeDaemon(
+            _DAEMON_SOCKET,
+            daemon_env,
+            cwd=harness.daemon_working_directory,
+            executable=str(resolved_launcher),
+        )
+        previous_signal_handlers = _install_cleanup_signal_handlers()
         daemon.start()
         return fw.serve(
             [str(resolved_launcher), *ARGV[1:]],
@@ -393,10 +531,20 @@ def main() -> int:
             command_output_adapter=PrimeAgentOutputAdapter(),
         )
     finally:
+        # Ignore repeated stop requests while the daemon and its attested
+        # snapshot are being dismantled. The installed handler independently
+        # suppresses repeats during fw.serve's in-flight-rollout drain.
         try:
-            daemon.close()
+            _ignore_cleanup_signals(previous_signal_handlers)
         finally:
-            harness.close()
+            try:
+                if daemon is not None:
+                    daemon.close()
+            finally:
+                try:
+                    harness.close()
+                finally:
+                    _restore_signal_handlers(previous_signal_handlers)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ import importlib.util
 import os
 import pathlib
 import secrets
+import signal
 
 from percepteye_agent_flywheel.isolation import build_child_env
 
@@ -123,6 +124,29 @@ def test_main_requires_explicit_harness_kernel_and_package_paths(monkeypatch, tm
         module.main()
 
 
+def test_main_refuses_a_launcher_outside_the_attested_package(monkeypatch, tmp_path):
+    import pytest
+
+    module = _load_example(monkeypatch, tmp_path)
+    source = tmp_path / "empty-harness"
+    kernel = tmp_path / "kernel"
+    package = tmp_path / "prime-package"
+    wrapper = tmp_path / "debug-wrapper" / "prime-agent"
+    source.mkdir()
+    kernel.mkdir()
+    (package / "dist").mkdir(parents=True)
+    (package / "package.json").write_text('{"name":"prime-agent"}\n')
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("PERCEPTEYE_PRIME_HARNESS_SOURCE", str(source))
+    monkeypatch.setenv("PRIME_AGENT_KERNEL_VENV", str(kernel))
+    monkeypatch.setenv("PRIME_AGENT_PACKAGE_ROOT", str(package))
+    monkeypatch.setattr(module.shutil, "which", lambda name: str(wrapper))
+
+    with pytest.raises(RuntimeError, match="does not belong"):
+        module.main()
+
+
 def test_main_wires_and_closes_one_run_scoped_snapshot(monkeypatch, tmp_path):
     module = _load_example(monkeypatch, tmp_path)
     source = tmp_path / "harness"
@@ -187,6 +211,11 @@ def test_main_wires_and_closes_one_run_scoped_snapshot(monkeypatch, tmp_path):
     monkeypatch.setattr(module, "PrimeHarnessSnapshot", _Snapshot)
     monkeypatch.setattr(module.fw, "serve", _serve)
     monkeypatch.setattr(module, "_RunOwnedPrimeDaemon", _Daemon)
+    monkeypatch.setattr(
+        module,
+        "_preflight_prime_runtime",
+        lambda executable, *, env, cwd: "0.test",
+    )
     assert module.main() == 7
     assert seen["source"] == str(source)
     assert seen["kernel"] == str(kernel)
@@ -208,6 +237,60 @@ def test_main_wires_and_closes_one_run_scoped_snapshot(monkeypatch, tmp_path):
     assert seen["daemon_executable"] == str(launcher)
     assert seen["argv"][0] == str(launcher)
     assert order == ["daemon.start", "serve", "daemon.close", "snapshot.close"]
+
+
+def test_runtime_preflight_checks_launcher_and_required_flags(monkeypatch, tmp_path):
+    module = _load_example(monkeypatch, tmp_path)
+    seen: list[tuple[list[str], dict]] = []
+    help_text = "\n".join(module._REQUIRED_PRIME_FLAGS).encode()
+
+    def _run(argv, **kwargs):
+        seen.append((argv, kwargs))
+        stdout = b"0.7.2\n" if argv[-1] == "--version" else help_text
+        return module.subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr=b"")
+
+    monkeypatch.setattr(module.subprocess, "run", _run)
+    assert module._preflight_prime_runtime(
+        "/attested/prime-agent",
+        env={"PATH": "/pinned/node24/bin"},
+        cwd=tmp_path,
+    ) == "0.7.2"
+    assert [call[0] for call in seen] == [
+        ["/attested/prime-agent", "--version"],
+        ["/attested/prime-agent", "--help"],
+    ]
+    assert all(call[1]["env"] == {"PATH": "/pinned/node24/bin"} for call in seen)
+    assert all(call[1]["cwd"] == tmp_path for call in seen)
+
+
+def test_runtime_preflight_names_a_broken_node_or_incompatible_prime(
+    monkeypatch, tmp_path
+):
+    import pytest
+
+    module = _load_example(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda argv, **kwargs: module.subprocess.CompletedProcess(
+            argv, 134, stdout=b"", stderr=b"dyld: Library not loaded"
+        ),
+    )
+    with pytest.raises(RuntimeError, match="dyld: Library not loaded"):
+        module._preflight_prime_runtime("prime-agent", env={}, cwd=tmp_path)
+
+    calls = 0
+
+    def _missing_flag(argv, **kwargs):
+        nonlocal calls
+        calls += 1
+        stdout = b"0.7.2\n" if calls == 1 else b"--mode\n--provider\n"
+        return module.subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr=b"")
+
+    monkeypatch.setattr(module.subprocess, "run", _missing_flag)
+    with pytest.raises(RuntimeError, match="required rollout flags"):
+        module._preflight_prime_runtime("prime-agent", env={}, cwd=tmp_path)
 
 
 def test_run_owned_daemon_is_started_and_explicitly_shut_down(monkeypatch, tmp_path):
@@ -280,3 +363,40 @@ def test_run_owned_daemon_is_started_and_explicitly_shut_down(monkeypatch, tmp_p
     assert shutdown[1]["cwd"] == str(tmp_path / "isolated-daemon-cwd")
     assert calls[-1] == ("wait", 5)
     assert not pathlib.Path(daemon.socket_path).exists()
+
+
+def test_service_stop_signals_unwind_through_the_cleanup_path(monkeypatch, tmp_path):
+    module = _load_example(monkeypatch, tmp_path)
+    changes: dict[int, list[object]] = {}
+    originals = {
+        signal.SIGTERM: object(),
+        signal.SIGINT: object(),
+        **({signal.SIGHUP: object()} if hasattr(signal, "SIGHUP") else {}),
+    }
+
+    monkeypatch.setattr(module.signal, "getsignal", lambda signum: originals[signum])
+
+    def _signal(signum, handler):
+        changes.setdefault(signum, []).append(handler)
+
+    monkeypatch.setattr(module.signal, "signal", _signal)
+    previous = module._install_cleanup_signal_handlers()
+
+    assert previous == originals
+    import pytest
+
+    first_signum = next(iter(changes))
+    with pytest.raises(SystemExit) as stopped:
+        changes[first_signum][0](first_signum, None)
+    assert stopped.value.code == 128 + first_signum
+    # Service managers commonly send a second TERM while graceful shutdown
+    # drains. No later stop signal can interrupt child teardown.
+    for signum, handlers in changes.items():
+        assert handlers[0](signum, None) is None
+
+    module._ignore_cleanup_signals(previous)
+    module._restore_signal_handlers(previous)
+    assert changes == {
+        signum: [changes[signum][0], signal.SIG_IGN, original]
+        for signum, original in originals.items()
+    }
