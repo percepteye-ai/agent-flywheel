@@ -69,7 +69,11 @@ and extension discovery; only the explicit `route.ts` extension remains. Any
 harness or fixed-settings mutation excludes that rollout.
 
 Every eligible result carries the framework-neutral
-`agent_fingerprint.execution_sha256` (one lowercase 64-hex SHA-256). It is a
+`agent_fingerprint.execution_sha256` (one lowercase 64-hex SHA-256). The same
+framework-neutral digest is sent as `agent_execution_sha256` on the
+authenticated rollout-worker registration, allowing the control plane to
+freeze the exact worker before dispatch and then reconcile it against every
+observed trajectory. It is a
 domain-separated canonical digest over the exact discovery observation, the
 command and serve configuration, the SDK/contract version, and opaque
 adapter-attested component hashes. OPSD consumes only this generic key; it does

@@ -1035,6 +1035,14 @@ def serve(
         contract_version=CONTRACT_VERSION,
     )
 
+    # Neutral worker evidence, not agent logic and not a model identity.  The
+    # control plane uses this authenticated registration fact to select the
+    # exact rollout worker whose end-to-end latency was qualified.  It still
+    # verifies every returned trajectory carries the same digest; registration
+    # is the pre-dispatch identity, not a substitute for observed evidence.
+    if runner.execution_sha256 is not None:
+        payload["agent_execution_sha256"] = runner.execution_sha256
+
     tr.register(payload)
 
     # ── the last mile ───────────────────────────────────────────────────────

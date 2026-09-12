@@ -36,6 +36,7 @@ from .contract import (
     _production_turn_identifier,
 )
 from .errors import ContractViolation, TransportError
+from .execution_identity import is_lower_sha256
 from .outcomes import _normalize_task_id
 
 __all__ = ["AttachTransport", "FlywheelTransport"]
@@ -79,16 +80,25 @@ class AttachTransport:
         self.agent_id = agent_id
         self.wait_ms = max(0, min(wait_ms, 25_000))
         self.lease_ms = max(1_000, min(lease_ms, 1_800_000))
+        # Set only after an authenticated registration succeeds.  Older
+        # servers/SDK clients naturally leave it absent and can continue to
+        # serve ordinary, unbound rollouts.
+        self.agent_execution_sha256: str | None = None
 
     def health(self) -> dict[str, Any]:
         """Called at startup. Misconfiguration must fail here, not on rollout 1."""
         return self._c.request("GET", "/health")
 
     def register(self, spec: dict[str, Any]) -> dict[str, Any]:
-        return self._c.request(
+        response = self._c.request(
             "POST", "/agents", json_body=spec,
             idempotency_key=f"reg-{quote(self.agent_id, safe='-._~')}",
         )
+        execution_sha = spec.get("agent_execution_sha256")
+        self.agent_execution_sha256 = (
+            execution_sha if is_lower_sha256(execution_sha) else None
+        )
+        return response
 
     def policy_current(self) -> dict[str, Any]:
         """What policy this agent should be running, per the control plane.
@@ -131,15 +141,18 @@ class AttachTransport:
             return {}
 
     def claim(self, max_rollouts: int) -> tuple[list[RolloutRequest], int]:
+        claim_body: dict[str, Any] = {
+            "agent_id": self.agent_id,
+            "max": max(1, min(max_rollouts, 16)),
+            "wait_ms": self.wait_ms,
+            "lease_ms": self.lease_ms,
+        }
+        if self.agent_execution_sha256 is not None:
+            claim_body["agent_execution_sha256"] = self.agent_execution_sha256
         body = self._c.request(
             "POST",
             "/rollouts/claim",
-            json_body={
-                "agent_id": self.agent_id,
-                "max": max(1, min(max_rollouts, 16)),
-                "wait_ms": self.wait_ms,
-                "lease_ms": self.lease_ms,
-            },
+            json_body=claim_body,
             idempotency_key=str(uuid.uuid4()),
             timeout=(self.wait_ms / 1000.0) + 10.0,
             # Claiming is NOT replayable. The control plane does not honour
@@ -165,6 +178,10 @@ class AttachTransport:
         )
 
     def report(self, rollout: RolloutRequest, output: RolloutOutput) -> dict[str, Any]:
+        headers = (
+            {"X-Percepteye-Lease-Token": rollout.lease_token}
+            if rollout.lease_token else None
+        )
         return self._c.request(
             "POST",
             f"/rollouts/{rollout.rollout_id}/result",
@@ -172,6 +189,7 @@ class AttachTransport:
             # The server keys on (rollout_id, attempt); an identical replay is
             # acknowledged as a duplicate rather than double-counted.
             idempotency_key=f"result-{rollout.rollout_id}",
+            headers=headers,
         )
 
     def capture_current(self, agent_id: str) -> dict[str, Any]:

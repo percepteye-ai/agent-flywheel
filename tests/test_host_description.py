@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 import stat
 import sys
 
@@ -300,13 +301,17 @@ def test_serve_registers_a_command_agent_as_described(registered, tmp_path):
     control plane recorded `unreadable`, and no workflows were ever generated.
     """
     argv = _fake_cli(tmp_path, WRITES_THEN_SLEEPS)
-    spec = registered(argv)
+    spec = registered(
+        argv,
+        attested_execution_components={"agent_package_sha256": "f" * 64},
+    )
 
     described = spec["discovered_agent"]
     assert described is not None, "a command agent still registers as unreadable"
     assert [t["name"] for t in described["tool_definitions"]] == ["glob", "read"]
     assert described["framework"] == "openclaw"
     assert described["system_prompt"] == "You are a triage agent."
+    assert re.fullmatch(r"[0-9a-f]{64}", spec["agent_execution_sha256"])
 
 
 def test_serve_still_sends_null_when_the_host_describes_nothing(registered, tmp_path):

@@ -82,6 +82,7 @@ class ControlPlaneClient:
         idempotency_key: str | None = None,
         timeout: float | None = None,
         retry_if_ambiguous: bool = True,
+        headers: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """Send one request, retrying transient failures.
 
@@ -91,15 +92,16 @@ class ControlPlaneClient:
         request that MAY have been processed performs it twice.
         """
         url = f"{self.base_url}{path}"
-        headers: dict[str, str] = {}
+        request_headers: dict[str, str] = dict(headers or {})
         if idempotency_key:
-            headers["Idempotency-Key"] = idempotency_key
+            request_headers["Idempotency-Key"] = idempotency_key
 
         last_err: str | None = None
         for attempt in range(1, self._max_attempts + 1):
             try:
                 resp = self._client.request(
-                    method, url, json=json_body, headers=headers or None,
+                    method, url, json=json_body,
+                    headers=request_headers or None,
                     timeout=timeout,
                 )
             except httpx.HTTPError as exc:

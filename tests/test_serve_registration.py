@@ -8,10 +8,17 @@ line one, with a green suite.
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 
 import percepteye_agent_flywheel as fw
 from percepteye_agent_flywheel.contract import CONTRACT_VERSION
+from percepteye_agent_flywheel.introspection import (
+    DiscoveredAgent,
+    ModelConfig,
+    ToolDefinition,
+)
 
 
 class _FakeTransport:
@@ -94,6 +101,7 @@ def test_a_command_entrypoint_reports_discovered_agent_null(captured):
     spec = captured(["python", "my_agent.py"])
     assert "discovered_agent" in spec
     assert spec["discovered_agent"] is None
+    assert "agent_execution_sha256" not in spec
 
 
 def test_introspect_false_omits_the_key_entirely(captured):
@@ -102,6 +110,7 @@ def test_introspect_false_omits_the_key_entirely(captured):
     spec = captured("tests.fixtures_agent:build", isolation="inprocess",
                     introspect=False)
     assert "discovered_agent" not in spec
+    assert "agent_execution_sha256" not in spec
 
 
 def test_the_env_kill_switch_disables_it_for_an_operator(captured, monkeypatch):
@@ -130,6 +139,42 @@ def test_a_real_agent_is_described_in_the_registration(captured):
     assert described["framework"] == "langchain"
     assert described["source_type"] == "sdk_runtime"
     assert [t["name"] for t in described["tool_definitions"]] == ["lookup"]
+    # This fixture does not expose its model configuration, so description is
+    # useful for workflow generation but cannot claim exact execution identity.
+    assert "agent_execution_sha256" not in spec
+
+
+def test_exact_execution_identity_reaches_registration(captured, monkeypatch):
+    described = DiscoveredAgent(
+        agent_name="customer-agent",
+        framework="customer-framework",
+        system_prompt="Use the registered tools.",
+        tool_definitions=[
+            ToolDefinition(name="lookup", input_schema={"type": "object"}),
+        ],
+        discovered_model_config=ModelConfig(
+            provider="gateway", model_name="policy",
+        ),
+    )
+    monkeypatch.setattr(fw, "introspect_agent", lambda _agent: described)
+    spec = captured(
+        "tests.fixtures_agent:build",
+        isolation="inprocess",
+        attested_execution_components={"agent_code_sha256": "f" * 64},
+    )
+    # Computed from the same framework-neutral descriptor stamped on every
+    # trajectory; it is never authored by the customer agent.
+    assert re.fullmatch(r"[0-9a-f]{64}", spec["agent_execution_sha256"])
+
+
+def test_description_alone_does_not_claim_exact_execution_identity(captured):
+    """Prompt/tool discovery cannot see customer orchestration code."""
+    pytest.importorskip("langchain_core")
+    spec = captured(
+        "tests.fixtures_agent:build_langchain", isolation="inprocess",
+    )
+    assert spec["discovered_agent"] is not None
+    assert "agent_execution_sha256" not in spec
 
 
 def test_serve_registers_as_a_rollout_and_attach_does_not(captured):
