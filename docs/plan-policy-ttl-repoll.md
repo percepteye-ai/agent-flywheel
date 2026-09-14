@@ -1,6 +1,6 @@
 # Scope: TTL and re-poll for `current_policy()`
 
-Status: **phases 1 and 2 BUILT** (`src/percepteye_agent_flywheel/policy.py`,
+Status: **phases 1 and 2 BUILT** (`src/agent_flywheel/policy.py`,
 `tests/test_policy_source.py`). Phase 3 (`background=True`) is deliberately
 unbuilt — per §6 it ships only if inline refresh proves insufficient for
 low-traffic agents, and nothing has measured that yet.
@@ -26,7 +26,7 @@ question 4 is answered in the module docstring: call it per turn.
 
 `current_policy()` is a single GET, and `apply_current_policy()` wraps it. Both
 are one-shot: they read `/policy/current` once, return kwargs, and hold no
-state. Verified in `src/percepteye_agent_flywheel/__init__.py:125` and
+state. Verified in `src/agent_flywheel/__init__.py:125` and
 `transport.py:75` — there is no cache, no TTL, no refresh, and nothing that
 re-reads.
 

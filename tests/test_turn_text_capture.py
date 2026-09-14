@@ -17,12 +17,12 @@ import json
 
 import pytest
 
-from percepteye_agent_flywheel.outcomes import (
+from agent_flywheel.outcomes import (
     TURNS_FILENAME,
     read_turn_text,
     record_turn_text,
 )
-from percepteye_agent_flywheel.production import attach
+from agent_flywheel.production import attach
 
 
 @pytest.fixture

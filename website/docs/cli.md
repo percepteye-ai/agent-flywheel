@@ -3,7 +3,7 @@
 Not Python? Pass an **argv list** instead of an import path. A compiled binary, a Node CLI, anything with a command line. There is no protocol to implement, so an existing CLI needs **no changes**.
 
 ```python
-import percepteye_agent_flywheel as fw
+import agent_flywheel as fw
 
 fw.serve(["opencode", "run"], agent_id="coding-agent", input_shape="text")
 fw.serve(["dsh", "--profile", "headless", fw.TASK], agent_id="dsh-agent", input_shape="text")
@@ -73,7 +73,7 @@ Each rollout's child starts with its cwd set to that rollout's own directory —
 Your environment otherwise passes through — your agent needs your credentials. Two things never do:
 
 - **The `PERCEPTEYE_` namespace is never inherited.** The long-lived control-plane key lives there and stays in the parent, because a rollout child runs customer agent code with a shell.
-- **Provider variables the gateway cannot serve are removed** (`UNROUTABLE_PROVIDER_VARS` in [`isolation.py`](https://github.com/percepteye-ai/agent-flywheel/blob/main/src/percepteye_agent_flywheel/isolation.py)) — Azure, Gemini/Vertex, Bedrock's bearer token, and the OpenAI-compatible resellers. `serve()` warns at startup if it finds any set. An agent that finds no provider raises, which is the outcome we want; silent off-gateway sampling is the one we do not.
+- **Provider variables the gateway cannot serve are removed** (`UNROUTABLE_PROVIDER_VARS` in [`isolation.py`](https://github.com/percepteye-ai/agent-flywheel/blob/main/src/agent_flywheel/isolation.py)) — Azure, Gemini/Vertex, Bedrock's bearer token, and the OpenAI-compatible resellers. `serve()` warns at startup if it finds any set. An agent that finds no provider raises, which is the outcome we want; silent off-gateway sampling is the one we do not.
 
 ### `endpoint_env` — when your agent reads other names
 
@@ -169,7 +169,7 @@ Only a host running the companion Node plugin writes that file — the hook fire
 
 ## Worked example: prime-agent
 
-[`examples/prime_agent/`](https://github.com/percepteye-ai/agent-flywheel/tree/main/examples/prime_agent) is the end-to-end one — a real TypeScript coding agent, served with no Percepteye code inside it.
+[`examples/prime_agent/`](https://github.com/percepteye-ai/agent-flywheel/tree/main/examples/prime_agent) is the end-to-end one — a real TypeScript coding agent, served with no Agent Flywheel code inside it.
 
 | piece | why |
 |:--|:--|

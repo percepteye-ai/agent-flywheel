@@ -172,7 +172,7 @@ def lane(y: float, direction: str, colour: str, num: str, label: str,
 add(f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}"'
     f' width="{W}" height="{H}" role="img"'
     f' aria-label="The agent flywheel as a closed ring: your agent runs a'
-    f' rollout, Percepteye scores the observed outcomes and trains a policy,'
+    f' rollout, PerceptEye scores the observed outcomes and trains a policy,'
     f' your production agent picks it up, and its live evidence feeds the next'
     f' lap. A dashed trust boundary runs down the middle; the two stations on'
     f' the left are processes you run, the two on the right are the control'

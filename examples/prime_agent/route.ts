@@ -31,7 +31,7 @@ export default function (pi: any) {
     // own none of the completion wire — which looks identical to a clean run.
     throw new Error(
       "OPENAI_BASE_URL is unset. This extension is meant to run under " +
-        "percepteye-agent-flywheel, which sets it per rollout.",
+        "agent-flywheel, which sets it per rollout.",
     );
   }
 

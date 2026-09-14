@@ -244,7 +244,7 @@ def turns_root():
     """Where per-session captures live when nothing names a directory.
 
     ONE definition, because there are two consumers now: this writer, and
-    ``percepteye report``, which had nothing to point at. A second copy of this
+    ``agent-flywheel report``, which had nothing to point at. A second copy of this
     join in the CLI would be a second answer to "where did my captures go" --
     and the reader is the half that gets it wrong silently, by reporting an
     empty directory rather than the one with the data in it.
@@ -312,8 +312,8 @@ def _contributing():
     if not url or not key:
         return None
     try:
-        from percepteye_agent_flywheel._http import ControlPlaneClient
-        from percepteye_agent_flywheel.transport import AttachTransport
+        from agent_flywheel._http import ControlPlaneClient
+        from agent_flywheel.transport import AttachTransport
     except Exception:
         return None
     agent = os.environ.get("PERCEPTEYE_AGENT_ID") or "goose"
@@ -335,7 +335,7 @@ def _reconcile():
     start (measured -- see ``endpoint.py``). Running it every SessionStart is
     what makes that self-correcting instead of a repair someone must remember.
     """
-    from percepteye_agent_flywheel.install_hooks import reconcile_endpoint
+    from agent_flywheel.install_hooks import reconcile_endpoint
 
     reconcile_endpoint()
 
@@ -390,11 +390,11 @@ def _report(event, base):
     try:
         with open(path, encoding="utf-8") as fh:
             state = json.load(fh)
-        from percepteye_agent_flywheel.contract import (
+        from agent_flywheel.contract import (
             RolloutOutput,
             RolloutRequest,
         )
-        from percepteye_agent_flywheel.outcomes import Trajectory
+        from agent_flywheel.outcomes import Trajectory
 
         traj = Trajectory(base)
         transport.report(

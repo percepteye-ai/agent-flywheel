@@ -70,7 +70,7 @@ def _tracer() -> Any:
 
         # get_tracer ONLY. No SDK import, no provider construction, no
         # set_tracer_provider -- see the module docstring.
-        _TRACER = trace.get_tracer("percepteye-agent-flywheel")
+        _TRACER = trace.get_tracer("agent-flywheel")
     except Exception:
         _TRACER = None
     return _TRACER

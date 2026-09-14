@@ -16,11 +16,11 @@ from __future__ import annotations
 import json
 import os
 
-from percepteye_agent_flywheel.adapters.prime_agent import (
+from agent_flywheel.adapters.prime_agent import (
     PRIME_TOOL_FORMAT,
     PrimeAgentOutputAdapter,
 )
-from percepteye_agent_flywheel.event_stream import (
+from agent_flywheel.event_stream import (
     parse_tool_calls,
     parse_tool_calls_with_omissions,
 )
@@ -219,8 +219,8 @@ def test_interleaved_noise_does_not_discard_the_outcomes():
 def test_the_trajectory_is_not_overwritten_by_the_stream():
     """An agent that called record_tool_call asserted something deliberate
     about itself; a parse must never overwrite it."""
-    from percepteye_agent_flywheel.contract import RolloutOutput, ToolCallOutcome
-    from percepteye_agent_flywheel.runner import _attach_command_projection
+    from agent_flywheel.contract import RolloutOutput, ToolCallOutcome
+    from agent_flywheel.runner import _attach_command_projection
 
     recorded = [ToolCallOutcome(
         name="from_trajectory", arguments={}, outcome="ok", status_code=None)]
@@ -230,8 +230,8 @@ def test_the_trajectory_is_not_overwritten_by_the_stream():
 
 
 def test_the_stream_fills_in_when_the_trajectory_recorded_nothing():
-    from percepteye_agent_flywheel.contract import RolloutOutput
-    from percepteye_agent_flywheel.runner import _attach_command_projection
+    from agent_flywheel.contract import RolloutOutput
+    from agent_flywheel.runner import _attach_command_projection
 
     out = RolloutOutput(final_text="")
     assert out.tool_calls is None
@@ -242,8 +242,8 @@ def test_the_stream_fills_in_when_the_trajectory_recorded_nothing():
 
 def test_an_empty_assertion_of_zero_calls_is_preserved():
     """``[]`` from the trajectory is a positive claim and must survive."""
-    from percepteye_agent_flywheel.contract import RolloutOutput
-    from percepteye_agent_flywheel.runner import _attach_command_projection
+    from agent_flywheel.contract import RolloutOutput
+    from agent_flywheel.runner import _attach_command_projection
 
     out = RolloutOutput(final_text="", tool_calls=[])
     _attach_command_projection(out, _stream(_START, _END_OK), _PRIME)
@@ -293,7 +293,7 @@ def test_an_empty_error_string_is_absence_not_a_failure():
 def test_a_stream_is_matched_by_its_events_not_by_a_declared_name():
     """A name is a claim; an event type is evidence. Nothing here trusts an
     agent's self-description."""
-    from percepteye_agent_flywheel.event_stream import FORMATS
+    from agent_flywheel.event_stream import FORMATS
 
     assert {f.name for f in FORMATS} == {"otel-genai"}
     # Two vocabularies in one stream: the first seen wins and the other's
@@ -358,8 +358,8 @@ def test_recognised_incomplete_stream_abstains_instead_of_asserting_zero():
 
 
 def test_command_projection_carries_the_independent_model_call_count():
-    from percepteye_agent_flywheel.contract import RolloutOutput
-    from percepteye_agent_flywheel.runner import _attach_command_projection
+    from agent_flywheel.contract import RolloutOutput
+    from agent_flywheel.runner import _attach_command_projection
 
     stdout = _stream(
         {"type": "agent_start"},
@@ -455,8 +455,8 @@ def _agent_that_emits_then(exit_code: int, tmp_path):
 def _run_command(tmp_path, script, timeout_s=30.0, *, output_adapter=_PRIME):
     import time as _t
 
-    from percepteye_agent_flywheel.contract import RolloutRequest
-    from percepteye_agent_flywheel.runner import run_rollout_as_command
+    from agent_flywheel.contract import RolloutRequest
+    from agent_flywheel.runner import run_rollout_as_command
 
     req = RolloutRequest(
         rollout_id="rl_x", turn_input="go",

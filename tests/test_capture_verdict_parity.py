@@ -27,7 +27,7 @@ import json
 
 import pytest
 
-from percepteye_agent_flywheel import capture_verdict
+from agent_flywheel import capture_verdict
 
 from .node_sdk import require_node_sdk, run_node
 

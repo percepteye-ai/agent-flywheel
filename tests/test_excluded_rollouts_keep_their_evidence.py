@@ -21,8 +21,8 @@ from __future__ import annotations
 import stat
 import time
 
-from percepteye_agent_flywheel.contract import RolloutRequest
-from percepteye_agent_flywheel.runner import RolloutRunner
+from agent_flywheel.contract import RolloutRequest
+from agent_flywheel.runner import RolloutRunner
 
 
 class _T:
@@ -148,7 +148,7 @@ class _RegistrationRefuses(_T):
     already blown its deadline actually meets."""
 
     def register_artifact(self, r, *, name, size_bytes, sha256, **kw):
-        from percepteye_agent_flywheel.errors import TransportError
+        from agent_flywheel.errors import TransportError
 
         raise TransportError("410 gone: deadline passed")
 
@@ -198,7 +198,7 @@ def test_the_agent_is_stopped_short_of_the_deadline(tmp_path):
     """Running to the deadline exactly leaves no wall-clock to collect
     artifacts and post the report, so the work is produced and then dropped at
     the last step. The agent's budget must reserve a delivery margin."""
-    from percepteye_agent_flywheel.runner import REPORT_MARGIN_S
+    from agent_flywheel.runner import REPORT_MARGIN_S
 
     seen: dict = {}
 
@@ -207,7 +207,7 @@ def test_the_agent_is_stopped_short_of_the_deadline(tmp_path):
                            input_shape="text", artifacts_dir=str(tmp_path),
                            rollout_timeout_s=10_000.0)
 
-    import percepteye_agent_flywheel.runner as _rmod
+    import agent_flywheel.runner as _rmod
     _orig = _rmod.run_rollout_as_command
 
     def _spy(cmd, rollout, *, trajectory_dir, timeout_s, env=None, cwd=None, **kw):

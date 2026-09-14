@@ -21,8 +21,8 @@ import pathlib
 
 import pytest
 
-from percepteye_agent_flywheel.contract import ToolCallOutcome
-from percepteye_agent_flywheel.outcomes import (
+from agent_flywheel.contract import ToolCallOutcome
+from agent_flywheel.outcomes import (
     ROLLOUT_ID_ENV,
     TRAJECTORY_DIR_ENV,
     Trajectory,
@@ -85,7 +85,7 @@ def test_trajectory_roundtrip_preserves_the_id(tmp_path):
 def test_the_report_wire_reconstruct_preserves_the_id():
     """runner._output_from_wire is the LAST boundary before the control plane;
     a drop here survives every other test in this file."""
-    from percepteye_agent_flywheel.runner import _output_from_wire
+    from agent_flywheel.runner import _output_from_wire
 
     out = _output_from_wire({
         "final_text": "done",
@@ -125,7 +125,7 @@ def test_langchain_adapter_reads_the_id_off_the_tool_message(monkeypatch, tmp_pa
     lc = pytest.importorskip("langchain_core")  # noqa: F841
     from langchain_core.messages.tool import ToolMessage
 
-    from percepteye_agent_flywheel.adapters.langchain import (
+    from agent_flywheel.adapters.langchain import (
         LangChainAdapter,
         _build_handler_cls,
     )
@@ -156,7 +156,7 @@ def test_adk_adapter_uses_the_function_call_id(tmp_path):
     pytest.importorskip("google.adk")
     from google.adk.plugins.plugin_manager import PluginManager
 
-    from percepteye_agent_flywheel.adapters.adk import ADKAdapter
+    from agent_flywheel.adapters.adk import ADKAdapter
 
     class _Tool:
         name = "lookup"
@@ -202,7 +202,7 @@ def test_the_span_carries_gen_ai_tool_call_id(monkeypatch):
         InMemorySpanExporter,
     )
 
-    import percepteye_agent_flywheel.tracing as mod
+    import agent_flywheel.tracing as mod
 
     exporter = InMemorySpanExporter()
     provider = TracerProvider()

@@ -21,7 +21,7 @@ from typing import ClassVar, TypedDict
 
 import pytest
 
-from percepteye_agent_flywheel.introspection import introspect
+from agent_flywheel.introspection import introspect
 
 pytest.importorskip("langgraph")
 pytest.importorskip("langchain_core")

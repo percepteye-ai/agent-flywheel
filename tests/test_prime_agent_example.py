@@ -7,7 +7,7 @@ import pathlib
 import secrets
 import signal
 
-from percepteye_agent_flywheel.isolation import build_child_env
+from agent_flywheel.isolation import build_child_env
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 

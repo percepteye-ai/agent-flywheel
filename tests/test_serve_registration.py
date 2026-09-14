@@ -12,9 +12,9 @@ import re
 
 import pytest
 
-import percepteye_agent_flywheel as fw
-from percepteye_agent_flywheel.contract import CONTRACT_VERSION
-from percepteye_agent_flywheel.introspection import (
+import agent_flywheel as fw
+from agent_flywheel.contract import CONTRACT_VERSION
+from agent_flywheel.introspection import (
     DiscoveredAgent,
     ModelConfig,
     ToolDefinition,

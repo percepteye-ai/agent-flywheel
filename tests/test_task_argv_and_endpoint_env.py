@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import time
 
-from percepteye_agent_flywheel import TASK
-from percepteye_agent_flywheel.contract import RolloutRequest
-from percepteye_agent_flywheel.isolation import build_child_env
-from percepteye_agent_flywheel.runner import _argv_with_task
+from agent_flywheel import TASK
+from agent_flywheel.contract import RolloutRequest
+from agent_flywheel.isolation import build_child_env
+from agent_flywheel.runner import _argv_with_task
 
 ARGV = ["dsh", "--profile", "headless", TASK]
 

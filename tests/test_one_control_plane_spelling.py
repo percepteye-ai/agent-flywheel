@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import ast
 
-from percepteye_agent_flywheel import ENV_CONTROL_PLANE_URL
-from percepteye_agent_flywheel.hosts import RECORDER
+from agent_flywheel import ENV_CONTROL_PLANE_URL
+from agent_flywheel.hosts import RECORDER
 
 #: Spellings that must not appear. Written out rather than derived, because the
 #: point is that no OTHER name is consulted at all.

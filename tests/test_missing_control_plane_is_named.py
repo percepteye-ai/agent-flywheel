@@ -24,8 +24,8 @@ from __future__ import annotations
 
 import pytest
 
-import percepteye_agent_flywheel as fw
-from percepteye_agent_flywheel.policy import PolicySource, missing_credentials_cause
+import agent_flywheel as fw
+from agent_flywheel.policy import PolicySource, missing_credentials_cause
 
 URL = "PERCEPTEYE_CONTROL_PLANE_URL"
 KEY = "PERCEPTEYE_API_KEY"
@@ -49,7 +49,7 @@ def unset(monkeypatch):
 def test_the_cause_names_the_variable_that_is_missing(url, key, expected):
     """One wrong cause for every case is worse than no cause at all.
 
-    ``percepteye install-hooks`` used to close by telling the customer to set
+    ``agent-flywheel install-hooks`` used to close by telling the customer to set
     ``PERCEPTEYE_API_KEY`` -- unconditionally, so the customer who had just
     exported it was told to export it, while the URL that was actually blocking
     them went unnamed.
@@ -59,7 +59,7 @@ def test_the_cause_names_the_variable_that_is_missing(url, key, expected):
 
 @pytest.mark.parametrize("call", ["current_policy", "current_prompt"])
 def test_the_one_shot_reads_say_which_variable_is_missing(unset, caplog, call):
-    with caplog.at_level("WARNING", logger="percepteye_agent_flywheel"):
+    with caplog.at_level("WARNING", logger="agent_flywheel"):
         assert getattr(fw, call)(agent_id="a") == {}
     assert any(URL in r.getMessage() and KEY in r.getMessage()
                for r in caplog.records), caplog.text
@@ -67,14 +67,14 @@ def test_the_one_shot_reads_say_which_variable_is_missing(unset, caplog, call):
 
 def test_apply_current_policy_says_it_too(unset, caplog):
     """It reads through ``current_policy``, so the seam covers it."""
-    with caplog.at_level("WARNING", logger="percepteye_agent_flywheel"):
+    with caplog.at_level("WARNING", logger="agent_flywheel"):
         assert fw.apply_current_policy(agent_id="a") == {}
     assert caplog.records
 
 
 def test_a_handle_that_can_never_refresh_does_not_report_success(unset, caplog):
     """``last_refresh_ok`` is the health signal; it said True having never run."""
-    with caplog.at_level("WARNING", logger="percepteye_agent_flywheel"):
+    with caplog.at_level("WARNING", logger="agent_flywheel"):
         snap = PolicySource(agent_id="a").current()
     assert snap.last_refresh_ok is False, (
         "a handle with no control plane configured reported a successful "
@@ -85,7 +85,7 @@ def test_a_handle_that_can_never_refresh_does_not_report_success(unset, caplog):
 def test_it_is_said_once_per_handle_not_once_per_call(unset, caplog):
     """A missing variable does not fix itself; a line per turn is noise."""
     src = PolicySource(agent_id="a")
-    with caplog.at_level("WARNING", logger="percepteye_agent_flywheel"):
+    with caplog.at_level("WARNING", logger="agent_flywheel"):
         for _ in range(5):
             src.current()
     assert len([r for r in caplog.records if URL in r.getMessage()]) == 1

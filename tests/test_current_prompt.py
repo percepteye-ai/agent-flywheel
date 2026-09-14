@@ -17,8 +17,8 @@ Two properties carry the weight here and neither is "it returns the text":
 """
 from __future__ import annotations
 
-import percepteye_agent_flywheel as fw
-from percepteye_agent_flywheel.transport import AttachTransport
+import agent_flywheel as fw
+from agent_flywheel.transport import AttachTransport
 
 SERVED = {
     "name": "support-triage", "version": 3, "sha256": "c" * 64,

@@ -23,8 +23,8 @@ from collections.abc import Callable
 from types import FrameType
 from typing import Any
 
-import percepteye_agent_flywheel as fw
-from percepteye_agent_flywheel.adapters.prime_agent import (
+import agent_flywheel as fw
+from agent_flywheel.adapters.prime_agent import (
     PrimeAgentOutputAdapter,
     PrimeHarnessSnapshot,
 )

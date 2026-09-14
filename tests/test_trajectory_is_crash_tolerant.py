@@ -20,9 +20,9 @@ from __future__ import annotations
 
 import json
 
-from percepteye_agent_flywheel.contract import RolloutOutput
-from percepteye_agent_flywheel.outcomes import Trajectory
-from percepteye_agent_flywheel.runner import _attach_trajectory
+from agent_flywheel.contract import RolloutOutput
+from agent_flywheel.outcomes import Trajectory
+from agent_flywheel.runner import _attach_trajectory
 
 OK = {"name": "read_file", "arguments": {"p": "/etc/hosts"},
       "outcome": "ok", "status_code": 200}

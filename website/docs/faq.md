@@ -11,7 +11,7 @@ Short answers. Each one links to the page that carries the detail.
     **Your end users' turns cross only if you turn that on.** `attach()` captures production turns to disk always, and uploads them only when an operator has enabled capture for that agent — off by default, precisely because those turns are your users' own messages and the answers you gave them. `Attachment.may_upload` is the live answer. → [Production](production.md)
 
 !!! note "The one thing that does route out"
-    During a **training** rollout your agent samples through Percepteye's per-rollout gateway, because that gateway is what attributes and captures the completion. Completions go out; tool calls stay local and run on your credentials. `attach()` binds its adapters with **no endpoint at all** and cannot re-point a byte of production traffic; `apply_current_policy()` only hands the endpoint back to your own client to use, and touches the process environment only if you ask for it with `set_env=True`. → [Production](production.md)
+    During a **training** rollout your agent samples through PerceptEye's per-rollout gateway, because that gateway is what attributes and captures the completion. Completions go out; tool calls stay local and run on your credentials. `attach()` binds its adapters with **no endpoint at all** and cannot re-point a byte of production traffic; `apply_current_policy()` only hands the endpoint back to your own client to use, and touches the process environment only if you ask for it with `set_env=True`. → [Production](production.md)
 
 ### Do I need to open a port?
 
@@ -29,7 +29,7 @@ Short answers. Each one links to the page that carries the detail.
 
 ### Do I have to rewrite my agent?
 
-**Zero lines change inside your agent.** The integration is one import and one call, in a separate serving script; the agent module stays free of any reference to Percepteye. [`tests/test_zero_instrumentation.py`](https://github.com/percepteye-ai/agent-flywheel/blob/main/tests/test_zero_instrumentation.py) is what holds that. → [Quickstart](quickstart.md) · [Python agents](python.md)
+**Zero lines change inside your agent.** The integration is one import and one call, in a separate serving script; the agent module stays free of any reference to Agent Flywheel. [`tests/test_zero_instrumentation.py`](https://github.com/percepteye-ai/agent-flywheel/blob/main/tests/test_zero_instrumentation.py) is what holds that. → [Quickstart](quickstart.md) · [Python agents](python.md)
 
 ### What if my agent isn't Python?
 

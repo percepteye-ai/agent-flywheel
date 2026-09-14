@@ -3,19 +3,20 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "percepteye-agent-flywheel"
+name = "agent-flywheel"
 version = "0.1.0"
 # PyPI renders this verbatim as the page's og:description, and PyPI's <title>
 # and <meta description> carry no description at all -- so this string is the
 # entire machine-readable summary of the project on the one page in this
 # ecosystem that Google can reach without an inbound link (pypi.org publishes a
 # sitemap; github.com does not). It is therefore DEFINITIONAL, not imperative:
-# an LLM asked "what is percepteye-agent-flywheel?" must get a category noun.
+# an LLM asked "what is agent-flywheel?" must get a category noun.
 description = "Self-improving agents through continual learning: in-process agentic RL that turns your own agent's work into training data. Observed tool outcomes, outbound-only, one runtime dependency."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
-authors = [{ name = "Percepteye" }]
+authors = [{ name = "PerceptEye" }]
+maintainers = [{ name = "PerceptEye" }]
 keywords = [
   "agents", "agent-rl", "agentic-ai", "reinforcement-learning", "rlvr",
   "rollout", "evaluation", "agent-evals", "llm", "llmops",
@@ -94,22 +95,22 @@ docs = ["mkdocs-material>=9.7"]
 otel-test = ["opentelemetry-sdk>=1.20"]
 
 # Third parties ship adapters through this group. Ours live in
-# percepteye_agent_flywheel.adapters and need no entry point: an adapter imports its
+# agent_flywheel.adapters and need no entry point: an adapter imports its
 # framework only at bind time, so shipping it here costs nothing and adds no
 # dependency. Separate distributions would have bought a release cadence we do
 # not need, in exchange for version skew between core and adapter -- the same
 # class of silent breakage the probe design exists to remove.
-[project.entry-points."percepteye_agent_flywheel.adapters"]
+[project.entry-points."agent_flywheel.adapters"]
 
 #: THE ONE COMMAND a CLI-agent customer runs. A wheel has no post-install hook
 #: -- pip executes no code from one -- so `pip install` alone can register
 #: nothing with the host, and it cannot be deferred to serve(): the customer
 #: this is for runs a binary and may never start a Python process at all.
 [project.scripts]
-percepteye = "percepteye_agent_flywheel.cli:main"
+agent-flywheel = "agent_flywheel.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/percepteye_agent_flywheel"]
+packages = ["src/agent_flywheel"]
 
 [tool.hatch.build.targets.sdist]
 # EVERY ENTRY IS ANCHORED WITH A LEADING SLASH, and that is not decoration.

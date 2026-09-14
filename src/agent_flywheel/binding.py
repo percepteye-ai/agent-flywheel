@@ -49,7 +49,7 @@ __all__ = [
 
 ProbeStatus = Literal["detected", "absent", "unsupported_version", "symbol_missing"]
 
-ENTRY_POINT_GROUP = "percepteye_agent_flywheel.adapters"
+ENTRY_POINT_GROUP = "agent_flywheel.adapters"
 
 
 @dataclass(frozen=True)

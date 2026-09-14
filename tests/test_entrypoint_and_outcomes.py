@@ -5,9 +5,9 @@ import os
 
 import pytest
 
-from percepteye_agent_flywheel import record_tool_call, resolve_entrypoint
-from percepteye_agent_flywheel.errors import EntrypointError
-from percepteye_agent_flywheel.outcomes import (
+from agent_flywheel import record_tool_call, resolve_entrypoint
+from agent_flywheel.errors import EntrypointError
+from agent_flywheel.outcomes import (
     ROLLOUT_ID_ENV,
     TRAJECTORY_DIR_ENV,
     Trajectory,

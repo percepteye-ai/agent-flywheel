@@ -19,7 +19,7 @@ import threading
 
 import pytest
 
-from percepteye_agent_flywheel.policy import (
+from agent_flywheel.policy import (
     JITTER_FRACTION,
     MIN_TTL_S,
     PolicySnapshot,
@@ -355,7 +355,7 @@ def test_the_handle_has_no_set_env():
     mutation landing under whatever else the process is doing."""
     import inspect
 
-    from percepteye_agent_flywheel import policy as ps
+    from agent_flywheel import policy as ps
 
     assert "set_env" not in inspect.signature(ps.policy_source).parameters
     assert "set_env" not in inspect.signature(ps.PolicySource.__init__).parameters
@@ -366,7 +366,7 @@ def test_the_handle_never_chooses_an_arm():
     results attributable. No splitting, no fallback picking, no dice."""
     import inspect
 
-    from percepteye_agent_flywheel import policy as ps
+    from agent_flywheel import policy as ps
 
     src = inspect.getsource(ps)
     assert "random.choice" not in src
@@ -389,8 +389,8 @@ def test_the_handle_and_the_one_shot_function_share_ONE_unpack():
     least as much between two of OUR surfaces as between two of theirs."""
     import inspect
 
-    import percepteye_agent_flywheel as fw
-    from percepteye_agent_flywheel import policy as ps
+    import agent_flywheel as fw
+    from agent_flywheel import policy as ps
 
     assert "endpoint_kwargs" in inspect.getsource(fw.apply_current_policy)
     assert "endpoint_kwargs" in inspect.getsource(ps.PolicySource._absorb)
@@ -400,7 +400,7 @@ def test_an_endpoint_with_no_usable_credential_is_NOTHING_TO_APPLY():
     """Returning it would produce 401s at the caller's first request rather
     than a legible empty answer here — and the handle must agree with the
     one-shot function about that, since they share the unpack."""
-    import percepteye_agent_flywheel as fw
+    import agent_flywheel as fw
 
     body = {"endpoint": {"base_url": "https://a/v1", "model": "m",
                          "api_key_env": "NOT_SET_ANYWHERE_XYZ"}}

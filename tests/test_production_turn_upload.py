@@ -26,14 +26,14 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator
 
-import percepteye_agent_flywheel as fw
-from percepteye_agent_flywheel.errors import ConfigurationError
-from percepteye_agent_flywheel.introspection import (
+import agent_flywheel as fw
+from agent_flywheel.errors import ConfigurationError
+from agent_flywheel.introspection import (
     DiscoveredAgent,
     ModelConfig,
     ToolDefinition,
 )
-from percepteye_agent_flywheel.outcomes import record_tool_call
+from agent_flywheel.outcomes import record_tool_call
 
 
 class _Transport:
@@ -75,11 +75,11 @@ def _attached(monkeypatch, tmp_path, transport, **attach_kwargs):
     monkeypatch.setenv("PERCEPTEYE_CONTROL_PLANE_URL", "https://cp.invalid")
     monkeypatch.setenv("PERCEPTEYE_API_KEY", "pek_x")
     monkeypatch.setattr(
-        "percepteye_agent_flywheel.transport.AttachTransport",
+        "agent_flywheel.transport.AttachTransport",
         lambda client, agent_id: transport,
     )
     monkeypatch.setattr(
-        "percepteye_agent_flywheel._http.ControlPlaneClient.close",
+        "agent_flywheel._http.ControlPlaneClient.close",
         lambda self: None,
     )
     px = fw.attach(
@@ -384,7 +384,7 @@ def test_exact_attached_execution_identity_reaches_every_production_turn(
     monkeypatch, tmp_path,
 ):
     monkeypatch.setattr(
-        "percepteye_agent_flywheel.introspection.introspect",
+        "agent_flywheel.introspection.introspect",
         lambda _entrypoint: _exact_description(),
     )
     tr = _Transport()
@@ -409,7 +409,7 @@ def test_exact_attached_execution_identity_reaches_every_production_turn(
 
 def test_incomplete_attached_discovery_withholds_identity(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        "percepteye_agent_flywheel.introspection.introspect",
+        "agent_flywheel.introspection.introspect",
         lambda _entrypoint: DiscoveredAgent(
             agent_name="unknown",
             framework="customer-framework",
@@ -439,7 +439,7 @@ def test_reused_turn_id_with_conflicting_execution_identity_fails_closed(
     monkeypatch, tmp_path,
 ):
     monkeypatch.setattr(
-        "percepteye_agent_flywheel.introspection.introspect",
+        "agent_flywheel.introspection.introspect",
         lambda _entrypoint: _exact_description(),
     )
     first = fw.attach(
@@ -558,7 +558,7 @@ def test_requested_batches_larger_than_the_wire_limit_are_capped(
     monkeypatch, tmp_path,
 ):
     monkeypatch.setattr(
-        "percepteye_agent_flywheel.production._FLUSH_EVERY", 1_000,
+        "agent_flywheel.production._FLUSH_EVERY", 1_000,
     )
     tr = _Transport()
     with _attached(monkeypatch, tmp_path, tr) as px:
@@ -614,7 +614,7 @@ def test_flushing_does_not_reorder_a_conversation(monkeypatch, tmp_path):
     Real turn ids are ``t_<uuid>``, which do not sort in creation order, so
     the shape below is the ordinary case and ``t0..t3`` was the special one.
     """
-    from percepteye_agent_flywheel.export import iter_records
+    from agent_flywheel.export import iter_records
 
     # Created oldest-first; NAME order is the reverse.
     ids = ["zz_first", "mm_second", "bb_third", "aa_fourth"]
@@ -710,7 +710,7 @@ def test_tool_calls_none_vs_empty_comes_from_the_FILE(monkeypatch, tmp_path):
     called nothing. Deriving it from whether an adapter bound at ATTACH time
     answered a different question, and would have uploaded a turn with no
     trajectory as a positive assertion that the agent made zero calls."""
-    from percepteye_agent_flywheel.outcomes import TOOL_CALLS_FILENAME
+    from agent_flywheel.outcomes import TOOL_CALLS_FILENAME
 
     tr = _Transport()
     with _attached(monkeypatch, tmp_path, tr) as px:

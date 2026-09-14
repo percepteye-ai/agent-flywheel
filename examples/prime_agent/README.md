@@ -24,7 +24,7 @@ across the base and candidate arms: the per-rollout gateway binds that logical
 name to the exact policy under measurement.
 
 ```bash
-cd /absolute/path/to/percepteye-agent-flywheel
+cd /absolute/path/to/agent-flywheel
 install -d -m 700 /absolute/path/to/empty-prime-harness
 test -z "$(ls -A /absolute/path/to/empty-prime-harness)"
 # Qualified macOS host: Node 24 must precede Homebrew's unpinned default Node.

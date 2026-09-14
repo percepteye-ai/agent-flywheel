@@ -5,8 +5,8 @@ import json
 
 import pytest
 
-from percepteye_agent_flywheel import RolloutOutput, RolloutRequest, ToolCallOutcome
-from percepteye_agent_flywheel.errors import ContractViolation
+from agent_flywheel import RolloutOutput, RolloutRequest, ToolCallOutcome
+from agent_flywheel.errors import ContractViolation
 
 
 def _tc(**kw):
@@ -167,7 +167,7 @@ def test_every_exclusion_reason_the_code_knows_is_declared_by_the_schema():
     import pathlib
     import typing
 
-    from percepteye_agent_flywheel.contract import ExclusionReason
+    from agent_flywheel.contract import ExclusionReason
 
     schema = json.loads(
         (pathlib.Path(__file__).resolve().parents[1] / "schema" / "flywheel-1.json").read_text()

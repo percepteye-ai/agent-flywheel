@@ -1,6 +1,6 @@
 """``attach()`` -- capture in the process that serves your users.
 
-:func:`~percepteye_agent_flywheel.serve` contributes CAPACITY: it claims tasks from
+:func:`~agent_flywheel.serve` contributes CAPACITY: it claims tasks from
 the control plane and runs your agent against them in a child process. This
 module contributes EVIDENCE instead, from the turns your agent is already serving.
 Same adapters, same tri-state, same trajectory file, same absence contract --
@@ -9,7 +9,7 @@ scoped around a live user turn rather than a claimed rollout.
 **It captures. It never reroutes.** Those are different jobs and mixing them
 would be a correctness bug, not an inconvenience: pointing a production agent
 at a new endpoint is a decision with user-visible consequences, and it belongs
-to :func:`~percepteye_agent_flywheel.apply_current_policy`, where the customer
+to :func:`~agent_flywheel.apply_current_policy`, where the customer
 makes it explicitly. ``attach`` binds the adapters with no endpoint at all,
 which the adapters handle by design -- ``LangChainAdapter._route`` returns
 immediately when it was handed no chat model, and the ADK adapter ignores the
@@ -651,7 +651,7 @@ class Attachment:
             # is data the control plane will never see, and an operator who
             # is not told will look for those turns upstream.
             warnings.warn(
-                f"percepteye: retention deleted {unsent} captured turn(s) "
+                f"agent-flywheel: retention deleted {unsent} captured turn(s) "
                 f"that had not been uploaded -- including any still waiting "
                 f"on an answer, which the periodic flush holds back. They are "
                 f"gone. Raise retention_turns, or check why uploads are not "
@@ -937,7 +937,7 @@ class Attachment:
         self.upload_refusal = reason
         try:
             warnings.warn(
-                f"percepteye: the control plane refused this agent's captured "
+                f"agent-flywheel: the control plane refused this agent's captured "
                 f"turns and uploading has stopped: {reason} The turns stay on "
                 f"disk (Attachment.upload_refusal repeats this), and uploading "
                 f"resumes on its own if capture is enabled again.",
@@ -1247,7 +1247,7 @@ def _reconcile_attached_execution(
     digest = runner.configure_execution_identity(
         described,
         discovery_enabled=True,
-        sdk=f"percepteye-agent-flywheel-python/{__version__}",
+        sdk=f"agent-flywheel-python/{__version__}",
         contract_version=CONTRACT_VERSION,
     )
     return described, ({"execution_sha256": digest} if digest is not None else None)
@@ -1271,7 +1271,7 @@ def attach(
 
     One call at startup::
 
-        import percepteye_agent_flywheel as fw
+        import agent_flywheel as fw
 
         px = fw.attach(agent_id="support-agent", trajectory_root="/var/lib/percepteye")
 
@@ -1447,7 +1447,7 @@ def attach(
                     # the one question a `mode` on a registration exists to
                     # answer.
                     "mode": "production",
-                    "sdk": f"percepteye-agent-flywheel-python/{__version__}",
+                    "sdk": f"agent-flywheel-python/{__version__}",
                     "contract_version": CONTRACT_VERSION,
                     "reports_tool_calls": bool(bound),
                     "isolation": "inprocess",

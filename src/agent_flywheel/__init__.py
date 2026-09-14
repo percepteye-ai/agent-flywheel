@@ -1,8 +1,8 @@
-"""percepteye-agent-flywheel -- run your own agent against Percepteye rollouts.
+"""agent-flywheel -- run your own agent against PerceptEye rollouts.
 
-    import percepteye_agent_flywheel as ph
+    import agent_flywheel as fw
 
-    ph.serve(
+    fw.serve(
         "my_package.agent:build",       # importable, so a child can rebuild it
         agent_id="my-coding-agent",
         input_shape="text",
@@ -74,7 +74,7 @@ from .execution_identity import ExecutionChild, ExecutionSnapshot
 from .host_description import WARMUP_PROMPT, warm_up_command
 
 # Re-exported, not used in this module. The redundant alias is the
-# explicit-re-export form: it keeps `from percepteye_agent_flywheel import
+# explicit-re-export form: it keeps `from agent_flywheel import
 # read_discovered_agent` working -- which it does today -- without adding the
 # name to __all__ and thereby claiming it as a supported public surface.
 from .host_description import read_discovered_agent as read_discovered_agent
@@ -141,7 +141,6 @@ __all__ = [
     "Outcome",
     "PolicySnapshot",
     "PolicySource",
-    "PrimeHarnessSnapshot",
     "PromptDecision",
     "RolloutOutput",
     "RolloutRequest",
@@ -170,21 +169,6 @@ __all__ = [
     "resolve_mode",
     "serve",
 ]
-
-
-def __getattr__(name: str) -> Any:
-    """Lazy compatibility for the preview Prime adapter export."""
-    if name != "PrimeHarnessSnapshot":
-        raise AttributeError(name)
-    warnings.warn(
-        "fw.PrimeHarnessSnapshot is deprecated; import PrimeHarnessSnapshot "
-        "from percepteye_agent_flywheel.adapters.prime_agent",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    from .adapters.prime_agent import PrimeHarnessSnapshot
-
-    return PrimeHarnessSnapshot
 
 #: Every environment variable this package reads. Two of them select
 #: behaviour -- PERCEPTEYE_AGENT_MODE and PERCEPTEYE_INTROSPECT -- and the rest are
@@ -349,7 +333,7 @@ def current_policy(
     cause = missing_credentials_cause(url, key)
     if cause:
         _log.warning(
-            "percepteye: not reading the served policy for agent_id=%r: %s, so "
+            "agent-flywheel: not reading the served policy for agent_id=%r: %s, so "
             "the control plane was never asked. This agent keeps the model it "
             "is on.", agent_id, cause,
         )
@@ -413,7 +397,7 @@ def current_prompt(
     It answers the same four questions the Node SDK's ``promptDecision`` asks,
     in the same order and with the same sentences, so the two packages refuse
     the same bundles for the same stated reason. See
-    :mod:`percepteye_agent_flywheel.prompt`.
+    :mod:`agent_flywheel.prompt`.
     """
     url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL) or ""
     key = api_key or os.environ.get(ENV_API_KEY) or ""
@@ -424,7 +408,7 @@ def current_prompt(
         # about why, which sends an operator to the dashboard to look for an
         # approval that was never the problem.
         _log.warning(
-            "percepteye: not reading the served prompt for agent_id=%r: %s, so "
+            "agent-flywheel: not reading the served prompt for agent_id=%r: %s, so "
             "the control plane was never asked. This agent keeps the prompt it "
             "assembles itself.", agent_id, cause,
         )
@@ -509,7 +493,7 @@ def endpoint_kwargs(
     # whose promotion never arrives needs the sentence, not the empty dict.
     if is_archive_ref(model):
         _log.warning(
-            "percepteye: NOT applying the served policy for this agent: the "
+            "agent-flywheel: NOT applying the served policy for this agent: the "
             "served model %r is a stored-artifact reference, not a name an "
             "endpoint can serve; that address would 404 on every completion. "
             "Keeping the model you are on.", model,
@@ -694,7 +678,7 @@ def _describe_via_host(
         f"For OpenClaw specifically, the usual cause is the conversation-hook "
         f"opt-in: the host silently refuses to register `llm_input` for a "
         f"non-bundled plugin unless the config sets\n"
-        f"  plugins.entries.percepteye-agent-flywheel.hooks."
+        f"  plugins.entries.agent-flywheel.hooks."
         f"allowConversationAccess = true",
         RuntimeWarning,
         stacklevel=3,
@@ -915,7 +899,7 @@ def serve(
     if CONTRACT_VERSION not in [v for v in served if v]:
         raise ConfigurationError(
             f"control plane speaks {served}, this SDK speaks {CONTRACT_VERSION}. "
-            f"Upgrade percepteye-agent-flywheel."
+            f"Upgrade agent-flywheel."
         )
 
     # Provider configuration we cannot point at the gateway. Reported here, in
@@ -927,7 +911,7 @@ def serve(
     stripped = unroutable_providers_present()
     if stripped:
         warnings.warn(
-            f"{', '.join(stripped)} set in this environment. The Percepteye "
+            f"{', '.join(stripped)} set in this environment. The PerceptEye "
             f"gateway speaks the OpenAI completions API, so these cannot be "
             f"routed through it, and they are REMOVED from each rollout's "
             f"child process. An agent built on one of those providers will "
@@ -980,7 +964,7 @@ def serve(
         # always received here. Reaching this line at all means
         # resolved_mode == "training".
         "mode": "rollout",
-        "sdk": f"percepteye-agent-flywheel-python/{__version__}",
+        "sdk": f"agent-flywheel-python/{__version__}",
         "contract_version": CONTRACT_VERSION,
         "reports_tool_calls": bool(reports_tool_calls),
         "isolation": isolation,

@@ -26,10 +26,10 @@ import time
 import weakref
 from contextlib import contextmanager
 
-import percepteye_agent_flywheel as fw
-from percepteye_agent_flywheel.errors import TransportError
-from percepteye_agent_flywheel.outcomes import record_tool_call
-from percepteye_agent_flywheel.production import _FLUSH_EVERY
+import agent_flywheel as fw
+from agent_flywheel.errors import TransportError
+from agent_flywheel.outcomes import record_tool_call
+from agent_flywheel.production import _FLUSH_EVERY
 
 
 class _Transport:
@@ -74,11 +74,11 @@ def _attached(monkeypatch, tmp_path, transport, **kw):
     monkeypatch.setenv("PERCEPTEYE_CONTROL_PLANE_URL", "https://cp.invalid")
     monkeypatch.setenv("PERCEPTEYE_API_KEY", "pek_x")
     monkeypatch.setattr(
-        "percepteye_agent_flywheel.transport.AttachTransport",
+        "agent_flywheel.transport.AttachTransport",
         lambda client, agent_id: transport,
     )
     monkeypatch.setattr(
-        "percepteye_agent_flywheel._http.ControlPlaneClient.close",
+        "agent_flywheel._http.ControlPlaneClient.close",
         lambda self: None,
     )
     px = fw.attach(agent_id="support", trajectory_root=str(tmp_path), **kw)
@@ -273,17 +273,17 @@ def test_close_does_not_hang_on_an_unresponsive_control_plane(
     and waiting on it unbounded would let an unresponsive control plane keep a
     customer's process from exiting. A turn not sent now is still on disk.
     """
-    from percepteye_agent_flywheel.production import _CLOSE_FLUSH_GRACE_S
+    from agent_flywheel.production import _CLOSE_FLUSH_GRACE_S
 
     tr = _Transport(slow=30.0)
     monkeypatch.setenv("PERCEPTEYE_CONTROL_PLANE_URL", "https://cp.invalid")
     monkeypatch.setenv("PERCEPTEYE_API_KEY", "pek_x")
     monkeypatch.setattr(
-        "percepteye_agent_flywheel.transport.AttachTransport",
+        "agent_flywheel.transport.AttachTransport",
         lambda client, agent_id: tr,
     )
     monkeypatch.setattr(
-        "percepteye_agent_flywheel._http.ControlPlaneClient.close",
+        "agent_flywheel._http.ControlPlaneClient.close",
         lambda self: None,
     )
     px = fw.attach(agent_id="support", trajectory_root=str(tmp_path))

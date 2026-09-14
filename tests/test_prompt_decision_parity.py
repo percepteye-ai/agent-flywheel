@@ -26,7 +26,7 @@ import json
 
 import pytest
 
-from percepteye_agent_flywheel import prompt_decision
+from agent_flywheel import prompt_decision
 
 from .node_sdk import require_node_sdk, run_node
 

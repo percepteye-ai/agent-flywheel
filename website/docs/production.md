@@ -10,7 +10,7 @@ None of it requires a redeploy of your agent's code, and none of it opens an inb
 ## One shot, at startup
 
 ```python
-import percepteye_agent_flywheel as fw
+import agent_flywheel as fw
 from openai import OpenAI
 
 kw = fw.apply_current_policy(agent_id="my-coding-agent")

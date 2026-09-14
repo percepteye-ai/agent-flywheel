@@ -7,14 +7,14 @@ two are easy to confuse and only one of them ships anything anywhere.
 user's message, the answer and the calls exactly as they were observed, with
 the projection into any training-row format happening on the far side, where it
 can change without a customer redeploying. Nothing in this package imports this
-module, and none of its names is re-exported from ``percepteye_agent_flywheel``
+module, and none of its names is re-exported from ``agent_flywheel``
 -- so an ``attach()`` that is uploading turns is not running a line of it.
 
 This module is for the OTHER caller: somebody who wants their captured turns as
 a LOCAL CORPUS, without a control plane in the loop at all. It is reached by
 importing it, which is supported and is the whole interface::
 
-    from percepteye_agent_flywheel.export import write_records
+    from agent_flywheel.export import write_records
 
     write_records("/var/lib/percepteye", "turns.jsonl")
 

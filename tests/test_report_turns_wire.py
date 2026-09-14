@@ -1,7 +1,7 @@
 """The turn upload's actual wire call, which nothing tested.
 
 WHY THIS FILE EXISTS. Every production-turn test in this package monkeypatches
-``percepteye_agent_flywheel.transport.AttachTransport`` with a duck-typed fake
+``agent_flywheel.transport.AttachTransport`` with a duck-typed fake
 that has its own ``report_turns``. That is the right shape for testing the
 Attachment -- but it means the REAL ``report_turns`` was never executed by
 anything: not the route it posts to, not the body it builds, not the
@@ -24,15 +24,15 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker
 
-from percepteye_agent_flywheel.contract import (
+from agent_flywheel.contract import (
     _PRODUCTION_AGENT_IDENTIFIER_PATTERN,
     _PRODUCTION_IDENTIFIER_MAX_CHARS,
     _PRODUCTION_IDENTIFIER_PATTERN,
     _PRODUCTION_TURN_BATCH_MAX_ITEMS,
     _PRODUCTION_TURN_IDENTIFIER_PATTERN,
 )
-from percepteye_agent_flywheel.errors import ContractViolation
-from percepteye_agent_flywheel.transport import AttachTransport
+from agent_flywheel.errors import ContractViolation
+from agent_flywheel.transport import AttachTransport
 
 from .node_sdk import ABI_CHECK, node_sdk, require_node_sdk, run_node
 

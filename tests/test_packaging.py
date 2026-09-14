@@ -34,8 +34,8 @@ import pytest
 from hatchling.builders.sdist import SdistBuilder
 from hatchling.builders.wheel import WheelBuilder
 
-from percepteye_agent_flywheel import install_hooks
-from percepteye_agent_flywheel.hosts import HOSTS_DIR
+from agent_flywheel import install_hooks
+from agent_flywheel.hosts import HOSTS_DIR
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -112,11 +112,11 @@ def test_every_host_manifest_in_the_wheel_has_an_installer(built):
     """
     shipped = {
         n for n in built["wheel"]
-        if n.startswith("percepteye_agent_flywheel/hosts/")
+        if n.startswith("agent_flywheel/hosts/")
         and n.endswith(".json")
     }
     installable = {
-        f"percepteye_agent_flywheel/hosts/{value.relative_to(HOSTS_DIR).as_posix()}"
+        f"agent_flywheel/hosts/{value.relative_to(HOSTS_DIR).as_posix()}"
         for value in vars(install_hooks).values()
         if isinstance(value, pathlib.Path)
         and value.is_relative_to(HOSTS_DIR)

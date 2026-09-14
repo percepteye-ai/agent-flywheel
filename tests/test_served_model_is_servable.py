@@ -29,8 +29,8 @@ import json
 
 import pytest
 
-import percepteye_agent_flywheel as fw
-from percepteye_agent_flywheel.policy import PolicySource, is_archive_ref
+import agent_flywheel as fw
+from agent_flywheel.policy import PolicySource, is_archive_ref
 
 #: Every prefix the control plane can hand back as an artifact reference, plus
 #: the names that must keep working. A guard that refused too much would keep a
@@ -101,7 +101,7 @@ def test_the_refusal_is_said_out_loud(caplog):
     An operator whose promotion never arrives has to be able to tell those two
     apart, so the refusal names the model and why it was refused.
     """
-    with caplog.at_level("WARNING", logger="percepteye_agent_flywheel"):
+    with caplog.at_level("WARNING", logger="agent_flywheel"):
         fw.endpoint_kwargs(_policy("gs://bucket/run/iter_0"))
     assert any("gs://bucket/run/iter_0" in r.getMessage()
                and "stored-artifact" in r.getMessage()

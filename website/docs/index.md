@@ -11,7 +11,7 @@ hide:
 # Your agent, made better by its own work
 
 <p class="fw-hero__sub">
-<code>percepteye-agent-flywheel</code> turns the work your agent already does into training
+<code>agent-flywheel</code> turns the work your agent already does into training
 data, and delivers what it learns back as an endpoint your agent already calls. It runs
 in your process, behind your firewall, on your credentials — unchanged.
 </p>
@@ -21,7 +21,7 @@ in your process, behind your firewall, on your credentials — unchanged.
 [How the loop closes](how-it-works.md){ .fw-btn .fw-btn--ghost }
 </div>
 
-<p class="fw-note">pip install percepteye-agent-flywheel · one runtime dependency · MIT</p>
+<p class="fw-note">pip install agent-flywheel · one runtime dependency · MIT</p>
 
 </div>
 
@@ -67,7 +67,7 @@ in your process, behind your firewall, on your credentials — unchanged.
   <div class="fw-card__art fw-art--mint"><div class="fw-card__tile">🐍</div></div>
   <div class="fw-card__body">
     <h3>Python agents</h3>
-    <p>LangChain, LangGraph and Google ADK report per-call outcomes with no Percepteye code in your agent.</p>
+    <p>LangChain, LangGraph and Google ADK report per-call outcomes with no Agent Flywheel code in your agent.</p>
     <div class="fw-card__more">Bind an adapter</div>
   </div>
 </a>
@@ -94,7 +94,7 @@ in your process, behind your firewall, on your credentials — unchanged.
 
 ## The loop, in one figure
 
-![Onboarding once, then the flywheel as a closed ring: your agent and your production agent on the left inside your infrastructure, the Percepteye control plane on the right, and four numbered lanes crossing a dashed trust boundary between them.](assets/flywheel-architecture.svg)
+![Onboarding once, then the flywheel as a closed ring: your agent and your production agent on the left inside your infrastructure, the PerceptEye control plane on the right, and four numbered lanes crossing a dashed trust boundary between them.](assets/flywheel-architecture.svg)
 
 **Register once, then loop forever.** The SDK describes your agent from inside its own
 process and registers it — once, before the first rollout. After that: it claims a task,

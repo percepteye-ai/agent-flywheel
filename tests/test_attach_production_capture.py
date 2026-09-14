@@ -15,9 +15,9 @@ from contextlib import contextmanager
 
 import pytest
 
-import percepteye_agent_flywheel as fw
-from percepteye_agent_flywheel import record_tool_call
-from percepteye_agent_flywheel.errors import ConfigurationError
+import agent_flywheel as fw
+from agent_flywheel import record_tool_call
+from agent_flywheel.errors import ConfigurationError
 
 DEAD = "http://127.0.0.1:9"          # discard port: refuses, fast
 
@@ -264,11 +264,11 @@ def _attach_with(monkeypatch, tmp_path, transport):
     monkeypatch.setenv("PERCEPTEYE_CONTROL_PLANE_URL", "https://cp.invalid")
     monkeypatch.setenv("PERCEPTEYE_API_KEY", "pek_x")
     monkeypatch.setattr(
-        "percepteye_agent_flywheel.transport.AttachTransport",
+        "agent_flywheel.transport.AttachTransport",
         lambda client, agent_id: transport,
     )
     monkeypatch.setattr(
-        "percepteye_agent_flywheel._http.ControlPlaneClient.close",
+        "agent_flywheel._http.ControlPlaneClient.close",
         lambda self: None,
     )
     px = fw.attach(agent_id="support", trajectory_root=str(tmp_path))

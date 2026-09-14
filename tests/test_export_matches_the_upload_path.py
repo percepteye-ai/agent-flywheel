@@ -18,16 +18,16 @@ import inspect
 
 import pytest
 
-import percepteye_agent_flywheel.introspection as introspection_module
-from percepteye_agent_flywheel import export
-from percepteye_agent_flywheel.export import turn_to_record
-from percepteye_agent_flywheel.introspection import (
+import agent_flywheel.introspection as introspection_module
+from agent_flywheel import export
+from agent_flywheel.export import turn_to_record
+from agent_flywheel.introspection import (
     DiscoveredAgent,
     ModelConfig,
     ToolDefinition,
 )
-from percepteye_agent_flywheel.outcomes import record_tool_call
-from percepteye_agent_flywheel.production import attach
+from agent_flywheel.outcomes import record_tool_call
+from agent_flywheel.production import attach
 
 
 @pytest.fixture

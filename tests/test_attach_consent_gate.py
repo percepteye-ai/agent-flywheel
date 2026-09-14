@@ -17,7 +17,7 @@ from contextlib import contextmanager
 
 import pytest
 
-import percepteye_agent_flywheel as fw
+import agent_flywheel as fw
 
 
 class _Transport:
@@ -38,10 +38,10 @@ def _attached(monkeypatch, tmp_path, registration, **env):
     for k, v in env.items():
         monkeypatch.delenv(k, raising=False) if v is None else monkeypatch.setenv(k, v)
     monkeypatch.setattr(
-        "percepteye_agent_flywheel.transport.AttachTransport",
+        "agent_flywheel.transport.AttachTransport",
         lambda client, agent_id: _Transport(registration))
     monkeypatch.setattr(
-        "percepteye_agent_flywheel._http.ControlPlaneClient.close",
+        "agent_flywheel._http.ControlPlaneClient.close",
         lambda self: None)
     px = fw.attach(agent_id="support", trajectory_root=str(tmp_path))
     try:
@@ -140,7 +140,7 @@ def test_a_blip_does_not_overwrite_a_specific_refusal(monkeypatch, tmp_path):
                 return {}
 
         monkeypatch.setattr(
-            "percepteye_agent_flywheel.transport.AttachTransport",
+            "agent_flywheel.transport.AttachTransport",
             lambda client, agent_id: _Blip())
         px._recheck_capture()
         assert px.may_upload is False
@@ -156,7 +156,7 @@ def test_late_consent_asks_the_same_predicate(monkeypatch, tmp_path):
     true answer does not turn it on -- and that a real yes does.
     """
     monkeypatch.setattr(
-        "percepteye_agent_flywheel._http.ControlPlaneClient.close",
+        "agent_flywheel._http.ControlPlaneClient.close",
         lambda self: None)
     class _Cap:
         def __init__(self, payload):
@@ -167,7 +167,7 @@ def test_late_consent_asks_the_same_predicate(monkeypatch, tmp_path):
 
     for payload, expected in (({"turns": "true"}, False), ({"turns": True}, True)):
         monkeypatch.setattr(
-            "percepteye_agent_flywheel.transport.AttachTransport",
+            "agent_flywheel.transport.AttachTransport",
             lambda client, agent_id, _p=payload: _Cap(_p))
         px = fw.attach(agent_id="support", trajectory_root=str(tmp_path),
                        register=False, control_plane_url="https://cp.invalid",

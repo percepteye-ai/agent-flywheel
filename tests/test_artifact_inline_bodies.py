@@ -17,8 +17,8 @@ import hashlib
 import stat
 import time
 
-from percepteye_agent_flywheel.contract import RolloutRequest
-from percepteye_agent_flywheel.runner import (
+from agent_flywheel.contract import RolloutRequest
+from agent_flywheel.runner import (
     MAX_INLINE_ARTIFACT_BYTES,
     MAX_INLINE_TOTAL_BYTES,
     RolloutRunner,

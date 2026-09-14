@@ -8,8 +8,8 @@ skipped.
 """
 from __future__ import annotations
 
-import percepteye_agent_flywheel as fw
-from percepteye_agent_flywheel.prompt import SERVABLE_PROMPT_STATUSES, prompt_decision
+import agent_flywheel as fw
+from agent_flywheel.prompt import SERVABLE_PROMPT_STATUSES, prompt_decision
 
 APPROVED = {
     "name": "support-triage", "version": 3, "sha256": "c" * 64,

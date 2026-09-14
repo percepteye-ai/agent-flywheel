@@ -1,4 +1,4 @@
-"""``percepteye`` — the one command a CLI-agent customer runs.
+"""``agent-flywheel`` — the one command a CLI-agent customer runs.
 
 Deliberately tiny, and deliberately NOT importing the rest of the package at
 module scope beyond what it needs: this is the entry point for someone whose
@@ -41,22 +41,22 @@ def _cmd_install_hooks(args: argparse.Namespace) -> int:
     try:
         out = install_goose(force=args.force)
     except FileExistsError as exc:
-        print(f"percepteye: {exc}", file=sys.stderr)
+        print(f"agent-flywheel: {exc}", file=sys.stderr)
         return 2
     except (OSError, FileNotFoundError) as exc:
-        print(f"percepteye: could not install hooks: {exc}", file=sys.stderr)
+        print(f"agent-flywheel: could not install hooks: {exc}", file=sys.stderr)
         return 1
 
-    print(f"percepteye: goose plugin {PLUGIN_NAME!r} installed at {out['root']}")
-    print(f"            recorder  {out['recorder']}")
-    print(f"            python    {out['python']}")
+    print(f"agent-flywheel: goose plugin {PLUGIN_NAME!r} installed at {out['root']}")
+    print(f"                recorder  {out['recorder']}")
+    print(f"                python    {out['python']}")
     if out["replaced_foreign"]:
-        print("            (replaced a plugin this command did not install)")
+        print("                (replaced a plugin this command did not install)")
     _print_endpoint(out["endpoint"])
-    print(f"            {_contribution_line()}")
+    print(f"                {_contribution_line()}")
     print()
     print("goose will load it on its next run. Nothing else is required for tool")
-    print("outcomes; `percepteye report` prints what it recorded.")
+    print("outcomes; `agent-flywheel report` prints what it recorded.")
     _ = goose_plugins_dir  # imported for the error path's message symmetry
     return 0
 
@@ -89,7 +89,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
         reporter = _load(REPORTER, "_percepteye_report")
         recorder = _load(RECORDER, "_percepteye_record")
     except (OSError, ImportError) as exc:
-        print(f"percepteye: this install is missing its reporter: {exc}",
+        print(f"agent-flywheel: this install is missing its reporter: {exc}",
               file=sys.stderr)
         return 1
 
@@ -111,12 +111,12 @@ def _cmd_report(args: argparse.Namespace) -> int:
             sessions = []
         if sessions:
             target = max(sessions, key=os.path.getmtime)
-            print(f"percepteye: the most recent session under {root}\n")
+            print(f"agent-flywheel: the most recent session under {root}\n")
         else:
             # The reporter's own empty-state help, which names the directory
             # and how to record one, is better than anything said here.
             target = root
-    return int(reporter.main(["percepteye report", target]))
+    return int(reporter.main(["agent-flywheel report", target]))
 
 
 def _print_endpoint(ep: dict) -> None:
@@ -130,14 +130,14 @@ def _print_endpoint(ep: dict) -> None:
     """
     from .endpoint import GOOSE_ENDPOINT_KEY
 
-    print(f"            mode      {ep.get('mode')} — {ep.get('reason')}")
+    print(f"                mode      {ep.get('mode')} — {ep.get('reason')}")
     if ep.get("value"):
-        print(f"            endpoint  {ep['value']}")
+        print(f"                endpoint  {ep['value']}")
     elif ep.get("mode") == "production":
-        print("            endpoint  (unset — goose uses its own default)")
+        print("                endpoint  (unset — goose uses its own default)")
     if ep.get("shadowed_by"):
-        print(f"            NOTE: ${ep['shadowed_by']} is set in your environment "
-              f"and outranks\n                  {GOOSE_ENDPOINT_KEY} in "
+        print(f"                NOTE: ${ep['shadowed_by']} is set in your environment "
+              f"and outranks\n                      {GOOSE_ENDPOINT_KEY} in "
               f"{ep.get('path')}. That variable wins.")
 
 
@@ -147,16 +147,16 @@ def _cmd_status(args: argparse.Namespace) -> int:
     st = installed_state()
     if not st["installed"]:
         if st["foreign"]:
-            print(f"percepteye: a plugin exists at {st['root']} that this command "
-                  f"did not install; run `percepteye install-hooks --force` to "
+            print(f"agent-flywheel: a plugin exists at {st['root']} that this command "
+                  f"did not install; run `agent-flywheel install-hooks --force` to "
                   f"replace it.")
         else:
-            print("percepteye: goose plugin NOT installed — run "
-                  "`percepteye install-hooks`.")
+            print("agent-flywheel: goose plugin NOT installed — run "
+                  "`agent-flywheel install-hooks`.")
         return 1
-    print(f"percepteye: installed at {st['root']}")
-    print(f"            contract  {st.get('contract_version')}")
-    print(f"            recorder  {st.get('recorder')}"
+    print(f"agent-flywheel: installed at {st['root']}")
+    print(f"                contract  {st.get('contract_version')}")
+    print(f"                recorder  {st.get('recorder')}"
           f"{'' if st.get('recorder_present') else '   [MISSING]'}")
     # Reported from a RECONCILE, not from the stamp: it re-reads the config and
     # the mode, so this prints where traffic will actually go on the next run
@@ -166,25 +166,25 @@ def _cmd_status(args: argparse.Namespace) -> int:
     try:
         _print_endpoint(reconcile_endpoint())
     except OSError as exc:
-        print(f"            endpoint  UNREADABLE — {exc}")
+        print(f"                endpoint  UNREADABLE — {exc}")
     # Printed on STATUS as well as install, because "where does my traffic go"
     # and "am I contributing" are the two questions this command exists to
     # answer and only the first one was answered.
-    print(f"            {_contribution_line()}")
+    print(f"                {_contribution_line()}")
     if st.get("stale"):
         # Said loudly: the rendered command is a snapshot of two paths, so a
         # moved virtualenv or a contract bump leaves a plugin that loads and
         # records nothing. That is exactly the silent-capture-loss this package
         # front-loads its checks to prevent.
-        print("            STALE — re-run `percepteye install-hooks`.")
+        print("                STALE — re-run `agent-flywheel install-hooks`.")
         return 1
     return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="percepteye",
-        description="Percepteye Agent Flywheel — CLI-agent setup.",
+        prog="agent-flywheel",
+        description="Agent Flywheel — CLI-agent setup.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -220,7 +220,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # spelling that works -- so the only thing wrong with a traceback here
         # is that it buries that message under a stack the customer cannot act
         # on. Print it and exit; do not guess a mode.
-        print(f"percepteye: {exc}", file=sys.stderr)
+        print(f"agent-flywheel: {exc}", file=sys.stderr)
         return 2
 
 

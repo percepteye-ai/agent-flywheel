@@ -105,13 +105,13 @@ PYTHON="${PYTHON:-}"
 if [ -z "$PYTHON" ]; then
   for cand in "$ROOT/.venv/bin/python" python3 python; do
     if command -v "$cand" >/dev/null 2>&1 \
-       && "$cand" -c "import percepteye_agent_flywheel" >/dev/null 2>&1; then
+       && "$cand" -c "import agent_flywheel" >/dev/null 2>&1; then
       PYTHON="$cand"; break
     fi
   done
 fi
 if [ -z "$PYTHON" ]; then
-  echo "✗ no python with percepteye_agent_flywheel importable" >&2
+  echo "✗ no python with agent_flywheel importable" >&2
   echo "  (tried \$PYTHON, $ROOT/.venv/bin/python, python3, python)." >&2
   echo "  Run: pip install -e ." >&2
   exit 1
@@ -152,7 +152,7 @@ w.write(recordFor({ name:'bash', arguments:{command:'sleep 1 &'}, callId:'c6' },
 
 "$PYTHON" - "$OUT" <<'PY'
 import sys
-from percepteye_agent_flywheel.outcomes import Trajectory
+from agent_flywheel.outcomes import Trajectory
 
 t = Trajectory(sys.argv[1])
 calls = t.read()

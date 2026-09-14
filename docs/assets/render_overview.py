@@ -1,4 +1,4 @@
-"""Render the Percepteye Agent Flywheel OVERVIEW as PNG frames.
+"""Render the PerceptEye Agent Flywheel OVERVIEW as PNG frames.
 
 This is the customer's story, and it has ONE subject: their agent. The whole
 animation happens *to* a single card. It is wrapped, it is observed, it sends
@@ -49,7 +49,7 @@ _WRAP_BODY = {
 }[FLAVOUR]
 _WRAP_LABEL = {
     "python": 'fw.serve("my.agent:build")',
-    "node": "percepteye-agent-flywheel",
+    "node": "agent-flywheel",
 }[FLAVOUR]
 #: The harnesses THIS package actually supports. The Python list in the Node
 #: figure advertised LangChain and ADK to an OpenClaw customer.
@@ -269,7 +269,7 @@ BEATS = [
     ("work",     8.90, 12.60, "4", "it does the work",
      "Real tasks, in your process. Every tool call observed: ok, failed, unknown."),
     ("train",   12.60, 15.90, "5", "evidence, not transcripts",
-     "Percepteye scores what your agent actually did, and trains on it."),
+     "PerceptEye scores what your agent actually did, and trains on it."),
     ("deliver", 15.90, 19.10, "6", "a trained policy comes home",
      "base_url, model, and a marker that tells you when the served config moved."),
     ("better",  19.10, 23.40, "7", "same agent. same code. better policy.",
@@ -558,7 +558,7 @@ def draw_frame(i):
     if a_pl > .01:
         rrect(d, PLAT, 12, fill=fade(PF_FILL, a_pl),
               outline=fade(PF_EDGE, a_pl), width=1)
-        text(d, (PLAT[0] + 24, PLAT[1] + 34), "Percepteye", F_CARD, fade(TXT, a_pl),
+        text(d, (PLAT[0] + 24, PLAT[1] + 34), "PerceptEye", F_CARD, fade(TXT, a_pl),
              anchor="lm")
         text(d, (PLAT[0] + 24, PLAT[1] + 60), "control plane", F_CARD,
              fade(PF_TITLE, a_pl), anchor="lm")

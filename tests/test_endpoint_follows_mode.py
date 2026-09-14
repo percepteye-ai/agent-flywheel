@@ -11,13 +11,13 @@ import json
 
 import pytest
 
-from percepteye_agent_flywheel.endpoint import (
+from agent_flywheel.endpoint import (
     GOOSE_ENDPOINT_KEY,
     plan,
     read_scalar,
     set_scalar,
 )
-from percepteye_agent_flywheel.install_hooks import (
+from agent_flywheel.install_hooks import (
     ORIGINAL_ENDPOINT_KEY,
     PLUGIN_NAME,
     STAMP_FILENAME,
@@ -209,7 +209,7 @@ def _session_start(root, cfg, env_extra):
     import subprocess
     import sys
 
-    from percepteye_agent_flywheel.hosts import RECORDER
+    from agent_flywheel.hosts import RECORDER
 
     env = dict(os.environ)
     env.update({"GOOSE_PATH_ROOT": str(root),

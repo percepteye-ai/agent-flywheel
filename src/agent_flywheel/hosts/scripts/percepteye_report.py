@@ -89,7 +89,7 @@ def render(records: list[dict], malformed: int, source: str) -> str:
         outcome = rec.get("outcome")
         counts[outcome if outcome in counts else "unknown"] += 1
 
-    out = ["", f"  {_bold('percepteye')} {_dim('·')} {source}", ""]
+    out = ["", f"  {_bold('agent-flywheel')} {_dim('·')} {source}", ""]
     out.append(f"  {_bold(str(total))} tool call{'' if total == 1 else 's'}")
     out.append(f"  {_dim('─' * 46)}")
     for key in _ORDER:
@@ -150,10 +150,10 @@ def _empty_help(target: str) -> str:
         f"  No trajectory at {_bold(target)}.",
         "",
         "  Run your agent once with the plugin installed and it records a",
-        f"  directory per session; {_bold('percepteye report')} then reads the most",
+        f"  directory per session; {_bold('agent-flywheel report')} then reads the most",
         "  recent one. Check the plugin is registered with:",
         "",
-        f"    {_bold('percepteye status')}",
+        f"    {_bold('agent-flywheel status')}",
         "",
         "  To capture one run into a directory you name, set",
         f"  {_bold('PERCEPTEYE_TRAJECTORY_DIR')} and point this at the same path.",
