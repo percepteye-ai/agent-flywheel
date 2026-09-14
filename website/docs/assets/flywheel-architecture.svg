@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 900" width="1200" height="900" role="img" aria-label="The agent flywheel as a closed ring: your agent runs a rollout, PerceptEye scores the observed outcomes and trains a policy, your production agent picks it up, and its live evidence feeds the next lap. A dashed trust boundary runs down the middle; the two stations on the left are processes you run, the two on the right are the control plane. Four numbered lanes cross the boundary.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 900" width="1200" height="900" role="img" aria-label="The agent flywheel as a closed ring: your agent runs a rollout, PerceptEye scores the observed outcomes and trains a policy, your production agent picks it up, and, once an operator enables capture, its live evidence feeds the next lap. A dashed trust boundary runs down the middle; the two stations on the left are processes you run, the two on the right are the control plane. Four numbered lanes cross the boundary; the fourth is dashed because it is opt-in.">
 <defs>
 <marker id="a58a6ff" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#58a6ff"/></marker>
 <marker id="aa371f7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a371f7"/></marker>
@@ -120,13 +120,13 @@
 <text x="600" y="704.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#a371f7" text-anchor="middle">3</text>
 <text x="600" y="674" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e6edf3" text-anchor="middle">the promoted policy</text>
 <text x="600" y="726" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="middle">an endpoint your agent already calls</text>
-<line x1="450" y1="782" x2="750" y2="782" stroke="#58a6ff" stroke-width="1.6" marker-end="url(#a58a6ff)" opacity="1.0"/>
+<line x1="450" y1="782" x2="750" y2="782" stroke="#58a6ff" stroke-width="1.6" marker-end="url(#a58a6ff)" opacity="1.0" stroke-dasharray="6 5"/>
 <circle cx="600" cy="782" r="13" fill="#0d1117"/>
 <circle cx="600" cy="782" r="12" fill="#58a6ff" opacity="0.16"/>
 <circle cx="600" cy="782" r="12" fill="none" stroke="#58a6ff" stroke-width="1.2" opacity="0.7"/>
 <text x="600" y="786.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#58a6ff" text-anchor="middle">4</text>
 <text x="600" y="756" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e6edf3" text-anchor="middle">live evidence, via fw.attach()</text>
-<text x="600" y="808" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="middle">captured from the turns you already serve</text>
+<text x="600" y="808" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="middle">sent only once an operator enables capture</text>
 <line x1="958" y1="522" x2="958" y2="660" stroke="#a371f7" stroke-width="1.4" marker-end="url(#aa371f7)" opacity="1.0"/>
 <rect x="877.9075" y="550" width="160.185" height="22" rx="11" fill="#0d1117"/>
 <text x="958" y="565" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="middle">scored, then trained on</text>

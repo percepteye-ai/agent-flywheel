@@ -29,7 +29,7 @@ in your process, behind your firewall, on your credentials — unchanged.
 <div class="fw-stat"><div class="fw-stat__n">0</div><div class="fw-stat__l">lines changed inside your agent</div></div>
 <div class="fw-stat"><div class="fw-stat__n">1</div><div class="fw-stat__l">runtime dependency (<code>httpx</code>)</div></div>
 <div class="fw-stat"><div class="fw-stat__n">0</div><div class="fw-stat__l">inbound ports, containers, GPUs</div></div>
-<div class="fw-stat"><div class="fw-stat__n">980</div><div class="fw-stat__l">tests, zero skips permitted</div></div>
+<div class="fw-stat"><div class="fw-stat__n">982</div><div class="fw-stat__l">tests, zero skips permitted</div></div>
 </div>
 
 ## Start here
@@ -99,7 +99,8 @@ in your process, behind your firewall, on your credentials — unchanged.
 **Register once, then loop forever.** The SDK describes your agent from inside its own
 process and registers it — once, before the first rollout. After that: it claims a task,
 your agent runs it, the outcomes go back, a policy is trained and promoted, and your
-production agent picks it up. Its live turns then feed the next lap.
+production agent picks it up. Once an operator enables capture for it, its live
+turns feed the next lap too.
 
 That last step is what makes it a flywheel rather than a pipeline: **the better agent
 generates the better evidence.**
