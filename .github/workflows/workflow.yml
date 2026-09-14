@@ -12,12 +12,18 @@ name: release
 #   2. PyPI Project Name : agent-flywheel
 #      Owner            : percepteye-ai
 #      Repository name  : agent-flywheel
-#      Workflow name    : release.yml
+#      Workflow name    : workflow.yml
 #      Environment name : pypi
 #   3. Create a GitHub environment named `pypi` (Settings -> Environments) and
 #      add yourself as a required reviewer, so a publish waits for a human.
 #
 # After that, publishing is: push a tag, approve the environment. That is all.
+#
+# THIS FILE'S NAME IS PART OF THAT CONFIGURATION. PyPI matches the publisher on
+# the workflow FILE name, not on `name:` above, and a token minted by any other
+# file is refused with `invalid-publisher` before anything uploads. That is how
+# the first v0.1.0 run failed, as release.yml, against a publisher registered
+# for workflow.yml. Rename this file only together with the publisher on PyPI.
 #
 # NOTE, because it is irreversible: PyPI never allows a filename to be reused,
 # even after deletion. A version published by mistake is spent forever. The
