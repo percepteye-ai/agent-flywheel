@@ -1162,7 +1162,7 @@ class RolloutRunner:
         # had already revoked -- burning the customer's compute to produce a
         # result nothing would accept.
         proc = subprocess.Popen(
-            [sys.executable, "-m", "percepteye_agent_flywheel.child"],
+            [sys.executable, "-m", "agent_flywheel.child"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

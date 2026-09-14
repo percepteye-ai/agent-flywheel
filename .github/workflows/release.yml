@@ -9,7 +9,7 @@ name: release
 #
 #   1. https://pypi.org/manage/account/publishing/  ("pending publisher",
 #      which is the flow for a project that does NOT exist on PyPI yet)
-#   2. PyPI Project Name : percepteye-agent-flywheel
+#   2. PyPI Project Name : agent-flywheel
 #      Owner            : percepteye-ai
 #      Repository name  : agent-flywheel
 #      Workflow name    : release.yml

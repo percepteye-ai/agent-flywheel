@@ -17,9 +17,9 @@ import sys
 
 import pytest
 
-import percepteye_agent_flywheel as fw
-from percepteye_agent_flywheel.contract import CONTRACT_VERSION
-from percepteye_agent_flywheel.host_description import (
+import agent_flywheel as fw
+from agent_flywheel.contract import CONTRACT_VERSION
+from agent_flywheel.host_description import (
     DISCOVERED_AGENT_FILENAME,
     parse_discovered_agent,
     read_discovered_agent,
@@ -96,7 +96,7 @@ def test_an_unusable_record_is_an_absence_not_a_crash():
 
 
 def test_a_huge_prompt_is_bounded_the_same_way_reflection_bounds_one():
-    from percepteye_agent_flywheel.introspection import _MAX_PROMPT_CHARS
+    from agent_flywheel.introspection import _MAX_PROMPT_CHARS
 
     d = parse_discovered_agent({**HOST_RECORD, "system_prompt": "x" * 500_000})
     assert len(d.system_prompt) == _MAX_PROMPT_CHARS

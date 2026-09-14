@@ -71,7 +71,10 @@ def goose_plugins_dir() -> Path:
 
 
 #: The directory name IS the plugin name to goose (it reads
-#: ``path.file_name()``), so this string is user-visible and stable.
+#: ``path.file_name()``), so this string is user-visible and stable. It
+#: deliberately kept its name when the package became ``agent-flywheel``: a
+#: new name would strand an existing install's directory beside the new one,
+#: where goose would still load its hooks and nothing here would see it.
 PLUGIN_NAME = "percepteye-agent-flywheel"
 
 #: Written beside the manifest so a later run can tell what it is looking at.
@@ -270,7 +273,7 @@ def install_goose(
     if GOOSE_MANIFEST.is_file():
         shutil.copyfile(GOOSE_MANIFEST, root / "plugin.json")
     # THE ORIGINAL IS CAPTURED ONCE AND NEVER RECAPTURED. On a re-install --
-    # `pip install --upgrade` then `percepteye install-hooks` is the ordinary
+    # `pip install --upgrade` then `agent-flywheel install-hooks` is the ordinary
     # upgrade path -- the config may already hold OUR gateway URL, because a
     # previous install put it there. Reading it again would record our own URL
     # as "what the customer had", and `production` would then restore the

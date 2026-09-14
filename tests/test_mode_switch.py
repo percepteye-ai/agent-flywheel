@@ -24,8 +24,8 @@ from __future__ import annotations
 
 import pytest
 
-import percepteye_agent_flywheel as fw
-from percepteye_agent_flywheel.errors import ConfigurationError
+import agent_flywheel as fw
+from agent_flywheel.errors import ConfigurationError
 
 CALL = dict(agent_id="a", input_shape="text")
 
@@ -270,7 +270,7 @@ def test_the_switch_is_namespaced(monkeypatch):
     value RAISES, so a collision would stop a flywheel over a word never
     addressed to us. The prefix is what buys the right to refuse.
     """
-    from percepteye_agent_flywheel import ENV_MODE
+    from agent_flywheel import ENV_MODE
     assert ENV_MODE == "PERCEPTEYE_AGENT_MODE"
     assert ENV_MODE.startswith("PERCEPTEYE_")
 
@@ -295,7 +295,7 @@ def test_the_switch_does_not_reach_a_rollout_child(tmp_path, monkeypatch):
     may mean something to the customer's own agent, and stripping it would have
     been presumptuous. The prefix is what makes scrubbing ours to do.
     """
-    from percepteye_agent_flywheel.isolation import build_child_env
+    from agent_flywheel.isolation import build_child_env
 
     monkeypatch.setenv("PERCEPTEYE_AGENT_MODE", "training")
     monkeypatch.setenv("PERCEPTEYE_API_KEY", "pek_long_lived")

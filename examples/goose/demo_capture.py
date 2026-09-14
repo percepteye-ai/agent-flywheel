@@ -12,7 +12,7 @@ SDK = pathlib.Path(__file__).resolve().parents[2]
 DEMO = pathlib.Path(os.environ.get("DEMO_ROOT", "/tmp/percepteye-demo"))
 #: Prefer the console script beside THIS interpreter, so the demo works
 #: from any virtualenv the package is installed into.
-PERCEPTEYE = str(pathlib.Path(sys.executable).with_name("percepteye"))
+CLI = str(pathlib.Path(sys.executable).with_name("agent-flywheel"))
 shutil.rmtree(DEMO, ignore_errors=True)
 (DEMO / "goose-root" / "config").mkdir(parents=True)
 (DEMO / "work").mkdir(parents=True)
@@ -56,10 +56,10 @@ srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 port = srv.server_address[1]
 
-print("── 1. the ONLY install ──\n   $ pip install percepteye-agent-flywheel\n")
+print("── 1. the ONLY install ──\n   $ pip install agent-flywheel\n")
 print("── 2. the ONLY command ──")
 env = {**os.environ, "GOOSE_PATH_ROOT": str(DEMO / "goose-root")}
-subprocess.run([PERCEPTEYE, "install-hooks"], env=env, check=True)
+subprocess.run([CLI, "install-hooks"], env=env, check=True)
 
 print("\n── 3. the customer runs goose THEIR way — nothing of ours on this line ──")
 env.update({
@@ -86,5 +86,5 @@ if not found:
 print("\n── 5. the day-one payoff, no account and no network ──")
 if found:
     subprocess.run([sys.executable,
-                    str(SDK / "src/percepteye_agent_flywheel/hosts/scripts/percepteye_report.py"),
+                    str(SDK / "src/agent_flywheel/hosts/scripts/percepteye_report.py"),
                     str(found[0].parent)])

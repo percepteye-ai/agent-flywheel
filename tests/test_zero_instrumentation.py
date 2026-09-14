@@ -13,10 +13,10 @@ import time
 
 import pytest
 
-import percepteye_agent_flywheel as fw
-from percepteye_agent_flywheel.contract import RolloutRequest
-from percepteye_agent_flywheel.entrypoint import resolve_entrypoint
-from percepteye_agent_flywheel.runner import run_rollout_in_process
+import agent_flywheel as fw
+from agent_flywheel.contract import RolloutRequest
+from agent_flywheel.entrypoint import resolve_entrypoint
+from agent_flywheel.runner import run_rollout_in_process
 
 pytest.importorskip("langchain_core")
 
@@ -94,7 +94,7 @@ def test_binding_off_captures_nothing_rather_than_guessing(tmp_path):
 def test_auto_skips_a_framework_that_is_not_installed():
     """"auto" probes without committing: an absent framework is skipped, not
     an error. A NAMED adapter is a different assertion and does raise."""
-    from percepteye_agent_flywheel.binding import bind_selected
+    from agent_flywheel.binding import bind_selected
 
     report, unbinds = bind_selected("auto", llm_url="https://gw/x", api_key="k")
     for u in unbinds:
@@ -112,7 +112,7 @@ def test_auto_skips_a_framework_that_is_not_installed():
 
 
 def test_an_explicitly_named_missing_adapter_raises():
-    from percepteye_agent_flywheel.binding import bind_selected
+    from agent_flywheel.binding import bind_selected
 
     with pytest.raises(KeyError, match="nosuchframework"):
         bind_selected(["nosuchframework"], llm_url="https://gw/x", api_key="k")
@@ -126,8 +126,8 @@ def test_a_call_is_attributed_to_the_agent_that_made_it(tmp_path):
     of scoring an unobserved call as a success."""
     from langchain_core.tools import tool
 
-    from percepteye_agent_flywheel.binding import bind_selected
-    from percepteye_agent_flywheel.outcomes import Trajectory, _RolloutScope
+    from agent_flywheel.binding import bind_selected
+    from agent_flywheel.outcomes import Trajectory, _RolloutScope
 
     @tool
     def deploy(q: str) -> str:
@@ -153,7 +153,7 @@ def test_a_call_is_attributed_to_the_agent_that_made_it(tmp_path):
 
 
 def test_agent_name_survives_the_wire():
-    from percepteye_agent_flywheel import ToolCallOutcome
+    from agent_flywheel import ToolCallOutcome
 
     wire = ToolCallOutcome(name="t", arguments={}, outcome="ok", status_code=200,
                            agent_name="planner").to_wire()

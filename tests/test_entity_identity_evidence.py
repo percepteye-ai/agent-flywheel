@@ -17,14 +17,14 @@ import json
 
 import pytest
 
-from percepteye_agent_flywheel.contract import ToolCallOutcome
-from percepteye_agent_flywheel.errors import ContractViolation
-from percepteye_agent_flywheel.evidence import (
+from agent_flywheel.contract import ToolCallOutcome
+from agent_flywheel.errors import ContractViolation
+from agent_flywheel.evidence import (
     IDENTITY_FIELDS,
     WEAK_ID_FIELDS,
     extract_entity_ids,
 )
-from percepteye_agent_flywheel.outcomes import Trajectory, record_tool_call
+from agent_flywheel.outcomes import Trajectory, record_tool_call
 
 # ── extraction ───────────────────────────────────────────────────────────────
 
@@ -212,7 +212,7 @@ def test_identity_survives_the_child_to_parent_boundary():
     agent that reports its own tool calls resolved the identity THERE. The
     parent rebuilding the record from the wire is exactly where that evidence
     goes quietly missing -- it did, until this test."""
-    from percepteye_agent_flywheel.runner import _output_from_wire
+    from agent_flywheel.runner import _output_from_wire
 
     out = _output_from_wire({
         "final_text": "done",
@@ -228,7 +228,7 @@ def test_identity_survives_the_child_to_parent_boundary():
 def test_a_wire_record_without_identity_is_still_readable():
     """Every producer predates this field. Absent must mean empty, not a
     KeyError that costs the whole rollout."""
-    from percepteye_agent_flywheel.runner import _output_from_wire
+    from agent_flywheel.runner import _output_from_wire
 
     out = _output_from_wire({
         "final_text": "done",
@@ -240,8 +240,8 @@ def test_a_wire_record_without_identity_is_still_readable():
 
 def test_a_cli_agents_event_stream_yields_identity():
     """An explicit Prime example format resolves identity from structured output."""
-    from percepteye_agent_flywheel.adapters.prime_agent import PRIME_TOOL_FORMAT
-    from percepteye_agent_flywheel.event_stream import parse_tool_calls
+    from agent_flywheel.adapters.prime_agent import PRIME_TOOL_FORMAT
+    from agent_flywheel.event_stream import parse_tool_calls
 
     calls = parse_tool_calls("\n".join([
         json.dumps({"type": "tool_execution_start", "toolCallId": "c1",
@@ -273,8 +273,8 @@ def test_langchain_capture_yields_identity_with_no_instrumentation(tmp_path):
     pytest.importorskip("langchain_core")
     from langchain_core.tools import tool
 
-    from percepteye_agent_flywheel.binding import bind_selected
-    from percepteye_agent_flywheel.outcomes import _RolloutScope
+    from agent_flywheel.binding import bind_selected
+    from agent_flywheel.outcomes import _RolloutScope
 
     @tool
     def create_issue(project: str) -> dict:
@@ -303,8 +303,8 @@ def test_adk_capture_yields_identity_with_no_instrumentation(tmp_path):
 
     from google.adk.plugins.plugin_manager import PluginManager
 
-    from percepteye_agent_flywheel.binding import bind_selected
-    from percepteye_agent_flywheel.outcomes import _RolloutScope
+    from agent_flywheel.binding import bind_selected
+    from agent_flywheel.outcomes import _RolloutScope
 
     class _Tool:
         def __init__(self, name):

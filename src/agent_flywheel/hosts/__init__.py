@@ -1,8 +1,8 @@
 """Host payloads — the files a CLI agent's own plugin system loads.
 
 These are DATA, not code this package imports. They ship in the wheel so that
-``pip install percepteye-agent-flywheel`` is the only install a customer needs:
-``percepteye install-hooks`` points the host at them.
+``pip install agent-flywheel`` is the only install a customer needs:
+``agent-flywheel install-hooks`` points the host at them.
 
 The split that used to exist — a separate marketplace repository for the goose
 plugin — was a packaging accident, not an architecture. Its own commit says so:
@@ -15,7 +15,7 @@ the drift this package refuses everywhere else.
 It runs once per tool call, inside someone else's agent, and it BLOCKS that agent
 until it exits — goose awaits each hook command. Measured on CPython 3.14:
 importing this package costs 46 ms against a 16 ms interpreter floor, so an
-``import percepteye_agent_flywheel`` in the recorder would nearly triple the
+``import agent_flywheel`` in the recorder would nearly triple the
 per-tool-call latency of every rollout. The once-per-session entry points can
 afford it; this one cannot.
 """

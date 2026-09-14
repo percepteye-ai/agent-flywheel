@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import pytest
 
-from percepteye_agent_flywheel.outcomes import _RolloutScope, record_tool_call
-from percepteye_agent_flywheel.tracing import (
+from agent_flywheel.outcomes import _RolloutScope, record_tool_call
+from agent_flywheel.tracing import (
     record_tool_call_span,
     tracing_available,
 )
@@ -35,7 +35,7 @@ def spans(monkeypatch):
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
 
-    import percepteye_agent_flywheel.tracing as mod
+    import agent_flywheel.tracing as mod
 
     monkeypatch.setattr(mod, "_TRACER", provider.get_tracer("test"))
     monkeypatch.setattr(mod, "_RESOLVED", True)
@@ -135,7 +135,7 @@ def test_we_never_install_a_tracer_provider(monkeypatch):
     """
     from opentelemetry import trace
 
-    import percepteye_agent_flywheel.tracing as mod
+    import agent_flywheel.tracing as mod
 
     called: list[object] = []
     monkeypatch.setattr(
@@ -157,14 +157,14 @@ def test_the_sdk_is_never_imported_by_the_egress_module():
     implementation into a library that must not own one."""
     import inspect
 
-    import percepteye_agent_flywheel.tracing as mod
+    import agent_flywheel.tracing as mod
 
     assert "opentelemetry.sdk" not in inspect.getsource(mod)
 
 
 def test_with_no_provider_configured_nothing_raises(monkeypatch):
     """A library with no provider must be silent, not broken."""
-    import percepteye_agent_flywheel.tracing as mod
+    import agent_flywheel.tracing as mod
 
     monkeypatch.setattr(mod, "_TRACER", None)
     monkeypatch.setattr(mod, "_RESOLVED", True)
@@ -173,7 +173,7 @@ def test_with_no_provider_configured_nothing_raises(monkeypatch):
 
 def test_a_telemetry_failure_never_reaches_the_caller(spans, monkeypatch):
     """This runs on the customer's own execution path beside the trajectory write."""
-    import percepteye_agent_flywheel.tracing as mod
+    import agent_flywheel.tracing as mod
 
     class _Exploding:
         def start_as_current_span(self, *a, **kw):
@@ -190,7 +190,7 @@ def test_recording_an_outcome_still_writes_the_trajectory_and_also_emits(spans, 
     """Egress is ADDITIVE. The trajectory stays the record of what was trained on,
     because spans cannot carry logprobs or token ids — the GenAI convention
     defines no attribute for either."""
-    from percepteye_agent_flywheel.outcomes import Trajectory
+    from agent_flywheel.outcomes import Trajectory
 
     with _RolloutScope("rl_x", str(tmp_path)):
         record_tool_call("deploy", {"svc": "api"}, outcome="unknown", status_code=None)
@@ -213,7 +213,7 @@ def test_a_turn_span_carries_the_prompt_and_the_completion(spans):
     OPSD wants them plus a reference; RAFT plus a reward and a proven success;
     DPO wants two to pair. None reads a sampled logprob, which is why a span
     suffices here where it would not for offline GRPO."""
-    from percepteye_agent_flywheel.tracing import record_turn_span
+    from agent_flywheel.tracing import record_turn_span
 
     record_turn_span(input_text="summarise the incident",
                      output_text="Three services timed out.",
@@ -228,7 +228,7 @@ def test_a_turn_span_carries_the_prompt_and_the_completion(spans):
 def test_a_turn_with_no_content_emits_no_span(spans):
     """An empty turn span would assert a turn happened and carried no content,
     which is a different claim from not being given the content."""
-    from percepteye_agent_flywheel.tracing import record_turn_span
+    from agent_flywheel.tracing import record_turn_span
 
     record_turn_span(turn_id="t2")
     assert spans.get_finished_spans() == ()
@@ -237,7 +237,7 @@ def test_a_turn_with_no_content_emits_no_span(spans):
 def test_half_a_turn_still_emits(spans):
     """The answer arrives later than the question; neither half waits for the
     other."""
-    from percepteye_agent_flywheel.tracing import record_turn_span
+    from agent_flywheel.tracing import record_turn_span
 
     record_turn_span(input_text="just the question", turn_id="t3")
     span = _only(spans)
@@ -250,7 +250,7 @@ def test_a_production_turn_is_not_stamped_as_a_rollout(spans):
     `percepteye.rollout.id` to keep our own training traffic out of the
     customer's observed-traffic accounting. A production turn must carry the
     turn id and NO rollout id, or every served turn looks like our work."""
-    from percepteye_agent_flywheel.tracing import record_turn_span
+    from agent_flywheel.tracing import record_turn_span
 
     record_turn_span(input_text="q", output_text="a", turn_id="t4")
     span = _only(spans)
@@ -259,7 +259,7 @@ def test_a_production_turn_is_not_stamped_as_a_rollout(spans):
 
 
 def test_a_rollout_turn_IS_stamped_so_ingest_can_exclude_it(spans):
-    from percepteye_agent_flywheel.tracing import record_turn_span
+    from agent_flywheel.tracing import record_turn_span
 
     record_turn_span(input_text="q", output_text="a", rollout_id="r9")
     span = _only(spans)
@@ -269,7 +269,7 @@ def test_a_rollout_turn_IS_stamped_so_ingest_can_exclude_it(spans):
 def test_turn_content_is_bounded(spans):
     """One span must not dominate the customer's export, and an exporter that
     drops an oversized span costs the whole turn rather than its tail."""
-    from percepteye_agent_flywheel.tracing import _MAX_TURN_CHARS, record_turn_span
+    from agent_flywheel.tracing import _MAX_TURN_CHARS, record_turn_span
 
     record_turn_span(input_text="x" * (_MAX_TURN_CHARS + 5_000), turn_id="t5")
     assert len(_only(spans).attributes["gen_ai.input.messages"]) == _MAX_TURN_CHARS
@@ -278,7 +278,7 @@ def test_turn_content_is_bounded(spans):
 def test_recording_a_turn_emits_the_span_from_the_same_call(spans, tmp_path):
     """One call site for one fact. A turn that reached the trajectory but not
     the customer's traces is the drift nobody notices until they compare."""
-    from percepteye_agent_flywheel.outcomes import record_turn_text
+    from agent_flywheel.outcomes import record_turn_text
 
     record_turn_text(tmp_path, "task", "asked", turn_id="t6")
     span = _only(spans)
@@ -300,7 +300,7 @@ def test_a_production_tool_call_is_not_stamped_as_a_rollout(spans):
     Stamping a served turn's tool call with it makes every one of them look
     like contributed work -- which is the exact failure the comment beside this
     code describes."""
-    from percepteye_agent_flywheel.tracing import record_tool_call_span
+    from agent_flywheel.tracing import record_tool_call_span
 
     record_tool_call_span("shell", {"cmd": "ls"}, outcome="ok", turn_id="t9")
     span = _only(spans)
@@ -309,7 +309,7 @@ def test_a_production_tool_call_is_not_stamped_as_a_rollout(spans):
 
 
 def test_a_rollout_tool_call_IS_stamped_so_ingest_can_exclude_it(spans):
-    from percepteye_agent_flywheel.tracing import record_tool_call_span
+    from agent_flywheel.tracing import record_tool_call_span
 
     record_tool_call_span("shell", {"cmd": "ls"}, outcome="ok", rollout_id="r9")
     span = _only(spans)
@@ -337,8 +337,8 @@ def test_a_turn_writes_one_span_per_turn_text_not_one_per_turn(spans, tmp_path):
     Pinned from this side only. The consumer is in another repository and this
     package imports nothing from it.
     """
-    from percepteye_agent_flywheel.outcomes import record_tool_call
-    from percepteye_agent_flywheel.production import attach
+    from agent_flywheel.outcomes import record_tool_call
+    from agent_flywheel.production import attach
 
     px = attach(agent_id="a", trajectory_root=str(tmp_path), register=False)
     try:
@@ -373,8 +373,8 @@ def test_a_turn_writes_one_span_per_turn_text_not_one_per_turn(spans, tmp_path):
 def test_exact_attached_execution_identity_reaches_turn_and_tool_spans(
     spans, tmp_path, monkeypatch,
 ):
-    import percepteye_agent_flywheel as fw
-    from percepteye_agent_flywheel.introspection import (
+    import agent_flywheel as fw
+    from agent_flywheel.introspection import (
         DiscoveredAgent,
         ModelConfig,
         ToolDefinition,
@@ -385,7 +385,7 @@ def test_exact_attached_execution_identity_reaches_turn_and_tool_spans(
             return task
 
     monkeypatch.setattr(
-        "percepteye_agent_flywheel.introspection.introspect",
+        "agent_flywheel.introspection.introspect",
         lambda _entrypoint: DiscoveredAgent(
             agent_name="customer-agent",
             framework="customer-framework",
@@ -425,8 +425,8 @@ def test_exact_attached_execution_identity_reaches_turn_and_tool_spans(
 
 def test_task_correlation_reaches_input_answer_and_tool_spans(spans, tmp_path):
     """Upload and OTLP paths carry the same neutral exact-join candidate."""
-    from percepteye_agent_flywheel.outcomes import record_tool_call
-    from percepteye_agent_flywheel.production import attach
+    from agent_flywheel.outcomes import record_tool_call
+    from agent_flywheel.production import attach
 
     px = attach(agent_id="a", trajectory_root=str(tmp_path), register=False)
     try:
@@ -446,8 +446,8 @@ def test_task_correlation_reaches_input_answer_and_tool_spans(spans, tmp_path):
 
 
 def test_absent_task_correlation_invents_no_otel_attribute(spans, tmp_path):
-    from percepteye_agent_flywheel.outcomes import record_tool_call
-    from percepteye_agent_flywheel.production import attach
+    from agent_flywheel.outcomes import record_tool_call
+    from agent_flywheel.production import attach
 
     px = attach(agent_id="a", trajectory_root=str(tmp_path), register=False)
     try:
@@ -467,8 +467,8 @@ def test_absent_task_correlation_invents_no_otel_attribute(spans, tmp_path):
 def test_conflicting_task_correlation_is_omitted_from_later_spans(
     spans, tmp_path,
 ):
-    from percepteye_agent_flywheel.outcomes import record_tool_call
-    from percepteye_agent_flywheel.production import attach
+    from agent_flywheel.outcomes import record_tool_call
+    from agent_flywheel.production import attach
 
     px = attach(agent_id="a", trajectory_root=str(tmp_path), register=False)
     try:
@@ -506,8 +506,8 @@ def test_the_tool_span_carries_the_conversation_too(spans, tmp_path):
     and was not re-checked. The assertion is here so the claim cannot drift
     from the code again.
     """
-    from percepteye_agent_flywheel.outcomes import record_tool_call
-    from percepteye_agent_flywheel.production import attach
+    from agent_flywheel.outcomes import record_tool_call
+    from agent_flywheel.production import attach
 
     px = attach(agent_id="a", trajectory_root=str(tmp_path), register=False)
     try:
@@ -529,8 +529,8 @@ def test_the_tool_span_carries_the_conversation_too(spans, tmp_path):
 def test_a_turn_with_no_conversation_sets_no_conversation_attribute(spans, tmp_path):
     """Absence stays absence. Stamping an empty string, or the turn id, would
     make an ungrouped call look like it belonged to a conversation."""
-    from percepteye_agent_flywheel.outcomes import record_tool_call
-    from percepteye_agent_flywheel.production import attach
+    from agent_flywheel.outcomes import record_tool_call
+    from agent_flywheel.production import attach
 
     px = attach(agent_id="a", trajectory_root=str(tmp_path), register=False)
     try:

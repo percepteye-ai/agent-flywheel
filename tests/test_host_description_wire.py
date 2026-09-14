@@ -17,7 +17,7 @@ import sys
 import textwrap
 from pathlib import Path
 
-from percepteye_agent_flywheel.host_description import (
+from agent_flywheel.host_description import (
     DISCOVERED_AGENT_FILENAME,
     framework_from_argv,
     warm_up_command,

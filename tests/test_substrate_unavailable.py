@@ -7,8 +7,8 @@ tools". The SDK already knew every one of those calls had failed; it had
 nowhere to say so, because ``substrate_unavailable`` was declared in the
 contract and emitted nowhere.
 """
-from percepteye_agent_flywheel.contract import RolloutOutput, ToolCallOutcome
-from percepteye_agent_flywheel.runner import _mark_substrate_unavailable
+from agent_flywheel.contract import RolloutOutput, ToolCallOutcome
+from agent_flywheel.runner import _mark_substrate_unavailable
 
 
 def _call(outcome, name="ipython"):
@@ -68,5 +68,5 @@ def test_an_existing_exclusion_is_never_overwritten():
 def test_the_reason_is_in_the_contract_vocabulary():
     import typing
 
-    from percepteye_agent_flywheel.contract import ExclusionReason
+    from agent_flywheel.contract import ExclusionReason
     assert "substrate_unavailable" in typing.get_args(ExclusionReason)

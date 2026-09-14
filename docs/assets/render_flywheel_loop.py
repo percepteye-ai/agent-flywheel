@@ -44,10 +44,10 @@ from PIL import Image, ImageDraw, ImageFont
 FLAVOUR = os.environ.get("FLAVOUR", "python")
 _F = {
     "python": {
-        "cmd": "pip install percepteye-agent-flywheel",
+        "cmd": "pip install agent-flywheel",
         "dep": "+ httpx   \u2190 the only runtime dependency",
         "box": "flywheel harness",
-        "l1": "import percepteye_agent_flywheel as fw",
+        "l1": "import agent_flywheel as fw",
         "l2": 'fw.serve("my.agent:build")',
         "foot": "1 import  \u00b7  1 call  \u00b7  MIT",
         "prod": "fw.apply_current_policy(...)",
@@ -57,7 +57,7 @@ _F = {
         "policy_note": "\u2190 the better policy, as an endpoint you can call",
     },
     "node": {
-        "cmd": "openclaw plugins install percepteye-agent-flywheel",
+        "cmd": "openclaw plugins install agent-flywheel",
         "dep": "+ nothing   \u2190 zero runtime dependencies",
         "box": "flywheel plugin",
         "l1": "export PERCEPTEYE_AGENT_MODE=training",
@@ -262,7 +262,7 @@ STAGES = [
     ("report",   17.70, 19.90, "7", "report",
      "Result, artifacts and outcomes go back — a crash reports as a typed exclusion."),
     ("score",    19.90, 22.30, "8", "score & train",
-     "Percepteye grades the rollout and trains the policy. This is the part you don't build."),
+     "PerceptEye grades the rollout and trains the policy. This is the part you don't build."),
     ("improve",  22.30, 26.40, "9", "improve", _F["improve"]),
 ]
 
@@ -657,7 +657,7 @@ def draw_frame(i: int) -> Image.Image:
     if a_pf > 0.01:
         rrect(d, PLATFORM, 12, fill=mix(BG, PF_FILL, a_pf),
               outline=mix(BG, PF_EDGE, a_pf), width=1)
-        text(d, (PLATFORM[0] + 24, PLATFORM[1] + 34), "Percepteye", F_BOX,
+        text(d, (PLATFORM[0] + 24, PLATFORM[1] + 34), "PerceptEye", F_BOX,
              mix(BG, TXT, a_pf), anchor="lm")
         text(d, (PLATFORM[0] + 24, PLATFORM[1] + 58), "control plane", F_BOX,
              mix(BG, PF_TITLE, a_pf), anchor="lm")

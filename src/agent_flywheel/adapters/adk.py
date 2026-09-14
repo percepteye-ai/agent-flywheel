@@ -63,7 +63,7 @@ _REQUIRED = (
 #: One name, so ADK's own duplicate-name check in ``register_plugin`` becomes
 #: our idempotence guarantee: a second runner in the same process cannot
 #: install a second copy and double-record every call.
-_PLUGIN_NAME = "percepteye_agent_flywheel"
+_PLUGIN_NAME = "agent_flywheel"
 
 _lock = threading.Lock()
 _plugin_cls: type | None = None

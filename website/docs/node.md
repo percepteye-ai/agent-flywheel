@@ -1,12 +1,12 @@
 # Node harnesses
 
-**One npm package, two harnesses, zero dependencies.** `percepteye-agent-flywheel` is a plugin the harness already loads. It records what your agent's tools actually did — `ok`, `failed` or **`unknown`** — into the same trajectory file the Python SDK writes and reads.
+**One npm package, two harnesses, zero dependencies.** `agent-flywheel` is a plugin the harness already loads. It records what your agent's tools actually did — `ok`, `failed` or **`unknown`** — into the same trajectory file the Python SDK writes and reads.
 
 It is its own repository — [`percepteye-ai/agent-flywheel-node`](https://github.com/percepteye-ai/agent-flywheel-node) — and that repo's README is the reference for the plugin's internals. This page is the contract it shares with the Python SDK.
 
 ```bash
-openclaw plugins install percepteye-agent-flywheel            # OpenClaw
-dsh plugin --profile <name> add percepteye-agent-flywheel     # DeepSeek Harness
+openclaw plugins install agent-flywheel            # OpenClaw
+dsh plugin --profile <name> add agent-flywheel     # DeepSeek Harness
 ```
 
 | harness | entry module | hook | can it change the run? |
@@ -18,7 +18,7 @@ No mutation seam is registered, in either mode. Every hook below is void-returni
 
 ## The mode decides which hooks are subscribed
 
-`PERCEPTEYE_AGENT_MODE` is the switch — `training` (the default) or `production`, resolved from the same closed set of spellings the Python SDK accepts, and `plugins.entries.percepteye-agent-flywheel.config.mode` overrides the environment. A value neither can parse is not guessed: the plugin degrades to `production` and says so, because someone typing `prodction` is trying to *stop* contributing.
+`PERCEPTEYE_AGENT_MODE` is the switch — `training` (the default) or `production`, resolved from the same closed set of spellings the Python SDK accepts, and `plugins.entries.agent-flywheel.config.mode` overrides the environment. A value neither can parse is not guessed: the plugin degrades to `production` and says so, because someone typing `prodction` is trying to *stop* contributing.
 
 The split is structural. `registerRolloutDriver` is called from one place under one predicate, so in production mode the module that could claim a rollout or start a turn is never reached — "observe-only" is the absence of a subscription rather than a branch inside each handler that a later edit could invert.
 
@@ -150,7 +150,7 @@ The OpenClaw entry also registers `llm_input` and writes `discovered_agent.json`
 | NUL bytes and lone surrogates stripped | Postgres JSONB refuses them, and the payload is customer-authored prompt text and provider-shaped tool JSON |
 
 !!! warning
-    `llm_input` is a **conversation hook**. OpenClaw refuses to register it for a non-bundled plugin unless the operator opts in with `plugins.entries.percepteye-agent-flywheel.hooks.allowConversationAccess=true`. The refusal is a warn-level diagnostic on the host's side, not a throw — so without the opt-in the plugin loads, the recorder works, and the agent registers as `unreadable` forever. The plugin says this out loud at startup, once, and only when a trajectory directory makes it relevant. If `discovered_agent.json` does not appear after the first model call, this is why.
+    `llm_input` is a **conversation hook**. OpenClaw refuses to register it for a non-bundled plugin unless the operator opts in with `plugins.entries.agent-flywheel.hooks.allowConversationAccess=true`. The refusal is a warn-level diagnostic on the host's side, not a throw — so without the opt-in the plugin loads, the recorder works, and the agent registers as `unreadable` forever. The plugin says this out loud at startup, once, and only when a trajectory directory makes it relevant. If `discovered_agent.json` does not appear after the first model call, this is why.
 
 The DeepSeek Harness entry registers no describer. It records tool outcomes and nothing else.
 
@@ -167,18 +167,18 @@ Zero dependencies is a hard constraint, not a preference: this runs inside someo
 
 ## The two halves cannot drift
 
-The plugins and the Python SDK are two ends of one ABI — whatever a plugin appends, `percepteye_agent_flywheel.outcomes.Trajectory` has to read back with the same meaning. **A JS suite that only checked itself would let a plugin stay green while writing a line the reader counts as malformed**, surfacing later as a silently short tool-call list.
+The plugins and the Python SDK are two ends of one ABI — whatever a plugin appends, `agent_flywheel.outcomes.Trajectory` has to read back with the same meaning. **A JS suite that only checked itself would let a plugin stay green while writing a line the reader counts as malformed**, surfacing later as a silently short tool-call list.
 
 **The check lives in the Python repository, because the reader does.** The plugins' own suite moved to `percepteye-ai/agent-flywheel-node` with them and runs there; what can only be checked here is that what they write is what `Trajectory` reads. So the two commands run from two different repositories — clone the Node SDK **beside** the Python one:
 
 ```bash
 # the plugins' own suite, in their repo
-cd /path/to/percepteye-agent-flywheel/..
+cd /path/to/agent-flywheel/..
 git clone https://github.com/percepteye-ai/agent-flywheel-node
 (cd agent-flywheel-node && npm test)                # zero skips
 
 # the JS writers against the Python reader, in THIS repo
-cd percepteye-agent-flywheel && pip install -e .
+cd agent-flywheel && pip install -e .
 ./scripts/cross_language_abi_check.sh
 ```
 

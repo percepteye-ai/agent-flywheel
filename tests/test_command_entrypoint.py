@@ -11,8 +11,8 @@ from __future__ import annotations
 import stat
 import time
 
-from percepteye_agent_flywheel import RolloutRequest
-from percepteye_agent_flywheel.runner import RolloutRunner
+from agent_flywheel import RolloutRequest
+from agent_flywheel.runner import RolloutRunner
 
 
 class _T:

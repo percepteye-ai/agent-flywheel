@@ -18,7 +18,7 @@ import subprocess
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SRC = ROOT / "src" / "percepteye_agent_flywheel"
+SRC = ROOT / "src" / "agent_flywheel"
 
 #: Names of internal systems. None of them may appear anywhere in the package.
 INTERNAL_NAMES = (
@@ -147,7 +147,7 @@ def test_no_internal_system_names_in_the_package():
     for path in _package_files():
         text = path.read_text().lower()
         for name in INTERNAL_NAMES:
-            # `percepteye_agent_flywheel` is our own name; match the internal ones only
+            # `agent_flywheel` is our own name; match the internal ones only
             # as standalone words.
             for m in re.finditer(rf"\b{re.escape(name)}\b", text):
                 line = text[: m.start()].count("\n") + 1
@@ -219,7 +219,7 @@ def test_package_imports_with_only_httpx_available():
 
     for mod in ("contract", "errors", "entrypoint", "isolation", "outcomes",
                 "transport", "runner", "child", "_http"):
-        importlib.import_module(f"percepteye_agent_flywheel.{mod}")
+        importlib.import_module(f"agent_flywheel.{mod}")
 
 
 def test_license_exists_and_is_mit():
@@ -241,7 +241,7 @@ def test_schema_is_present_and_parses():
 def test_schema_and_code_agree_on_the_outcome_enum():
     import json
 
-    from percepteye_agent_flywheel.contract import _VALID_OUTCOMES
+    from agent_flywheel.contract import _VALID_OUTCOMES
 
     schema = json.loads((ROOT / "schema" / "flywheel-1.json").read_text())
     enum = schema["$defs"]["ToolCallRecord"]["properties"]["outcome"]["enum"]
@@ -258,7 +258,7 @@ def test_schema_requires_outcome_and_status_code():
 
 @pytest.mark.parametrize("mod", ["contract", "errors", "isolation", "outcomes"])
 def test_modules_are_importable_standalone(mod):
-    __import__(f"percepteye_agent_flywheel.{mod}")
+    __import__(f"agent_flywheel.{mod}")
 
 
 def test_every_serve_kwarg_in_the_readme_actually_exists():
@@ -269,7 +269,7 @@ def test_every_serve_kwarg_in_the_readme_actually_exists():
     import pathlib
     import re
 
-    import percepteye_agent_flywheel as fw
+    import agent_flywheel as fw
 
     readme = (pathlib.Path(__file__).resolve().parent.parent / "README.md").read_text()
     params = set(inspect.signature(fw.serve).parameters)

@@ -1,8 +1,8 @@
 """The SDK carries its exact registered execution through claim and report."""
 from __future__ import annotations
 
-from percepteye_agent_flywheel.contract import RolloutOutput, RolloutRequest
-from percepteye_agent_flywheel.transport import AttachTransport
+from agent_flywheel.contract import RolloutOutput, RolloutRequest
+from agent_flywheel.transport import AttachTransport
 
 EXPECTED = "a" * 64
 

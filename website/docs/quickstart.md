@@ -5,7 +5,7 @@ Install the package, add two lines to the process that already runs your agent, 
 ## Install
 
 ```bash
-pip install percepteye-agent-flywheel
+pip install agent-flywheel
 ```
 
 !!! warning "Not on PyPI yet"
@@ -16,12 +16,12 @@ pip install percepteye-agent-flywheel
 
 One runtime dependency: `httpx`. Python 3.10 → 3.13. Nothing else is needed to integrate.
 
-The `[otel]` extra is available and optional — `pip install "percepteye-agent-flywheel[otel]"` additionally emits each outcome as a span. It pulls the OpenTelemetry **API** only: this package emits into a `TracerProvider` you already registered and never installs one.
+The `[otel]` extra is available and optional — `pip install "agent-flywheel[otel]"` additionally emits each outcome as a span. It pulls the OpenTelemetry **API** only: this package emits into a `TracerProvider` you already registered and never installs one.
 
 ## The integration
 
 ```python
-import percepteye_agent_flywheel as fw
+import agent_flywheel as fw
 
 fw.serve("my_package.agent:build", agent_id="my-coding-agent", input_shape="text")
 ```

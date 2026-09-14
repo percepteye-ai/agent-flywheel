@@ -12,7 +12,7 @@
 | **① Claim** | your process long-polls for a rollout and is granted a lease | you dial out |
 | **② Run** | fresh child process, own environment, single-use credential | your agent, unchanged |
 | **③ Record** | tool calls land as `ok` / `failed` / `unknown`; artifacts collected on every path | adapters, from the outside |
-| **④ Score** | tasks generated from your real tool surface, graded against compiled checks | Percepteye |
+| **④ Score** | tasks generated from your real tool surface, graded against compiled checks | PerceptEye |
 | **⑤ Improve** | your production agent picks up the promoted policy | one call at startup |
 
 ---
@@ -70,7 +70,7 @@ Sub-agents are walked to depth **4** — deep enough for the graphs people build
     {
       "agent_id": "research-agent",
       "mode": "rollout",
-      "sdk": "percepteye-agent-flywheel-python/0.1.0",
+      "sdk": "agent-flywheel-python/0.1.0",
       "contract_version": "flywheel/1",
       "reports_tool_calls": false,
       "isolation": "subprocess",
@@ -174,17 +174,17 @@ A `410` from any control-plane call raises `LeaseLost`. The heartbeat thread the
 | `subprocess` *(default)* | real — a child can be killed | any | must be importable (`"module:attr"`) |
 | `inprocess` | advisory — Python cannot kill a thread | `1` only | accepts a constructed object |
 
-The constraint is checked at construction, not discovered at rollout time. Under subprocess isolation the parent spawns `python -m percepteye_agent_flywheel.child`, hands it the job as JSON on stdin, and reads the result from the last line of stdout. A [command entrypoint](cli.md) is already its own process: it runs in a new session, in the rollout's own directory, with the task on stdin *and* in `PERCEPTEYE_TURN_INPUT`.
+The constraint is checked at construction, not discovered at rollout time. Under subprocess isolation the parent spawns `python -m agent_flywheel.child`, hands it the job as JSON on stdin, and reads the result from the last line of stdout. A [command entrypoint](cli.md) is already its own process: it runs in a new session, in the rollout's own directory, with the task on stdin *and* in `PERCEPTEYE_TURN_INPUT`.
 
 **Configuration crosses into a fresh child at spawn, never into a running parent.** `RolloutRequest` has no `environment` field, and it is a contract violation to send one — an earlier SDK wrote server-supplied values into the host process's `os.environ`, which was both a global mutation in a live application and useless, because the agent's client had already read its base URL when it was constructed.
 
 Three rules govern the child's environment, and none is configurable:
 
-1. **No `PERCEPTEYE_` variable is inherited.** The long-lived control-plane key and every customer- or harness-specific setting stay in the parent. An explicit execution adapter can add its own non-Percepteye child variables; core does not recognize any customer's route vocabulary.
+1. **No `PERCEPTEYE_` variable is inherited.** The long-lived control-plane key and every customer- or harness-specific setting stay in the parent. An explicit execution adapter can add its own non-PerceptEye child variables; core does not recognize any customer's route vocabulary.
 2. **Two rollout-scoped values are set:** `PERCEPTEYE_ROLLOUT_ID` and `PERCEPTEYE_TRAJECTORY_DIR`.
 3. **The per-rollout endpoint and its single-use key are set last**, so they beat anything inherited: `OPENAI_BASE_URL`, `OPENAI_API_BASE`, `OPENAI_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`.
 
-Everything else of yours passes through — your agent needs your credentials; that is the premise of running it in your process — **except** provider configuration the gateway cannot serve. `AZURE_OPENAI_*`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `NVIDIA_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, `GROQ_API_KEY` and the rest of [`UNROUTABLE_PROVIDER_VARS`](https://github.com/percepteye-ai/agent-flywheel/blob/main/src/percepteye_agent_flywheel/isolation.py) are removed, and `serve()` warns at startup if it finds any. An agent that finds no provider configured raises in front of the person who configured it. **Silent off-gateway sampling is the outcome that must not happen**: a trajectory from an unobserved completion cannot back an on-policy objective while looking exactly like one that can.
+Everything else of yours passes through — your agent needs your credentials; that is the premise of running it in your process — **except** provider configuration the gateway cannot serve. `AZURE_OPENAI_*`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `NVIDIA_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, `GROQ_API_KEY` and the rest of [`UNROUTABLE_PROVIDER_VARS`](https://github.com/percepteye-ai/agent-flywheel/blob/main/src/agent_flywheel/isolation.py) are removed, and `serve()` warns at startup if it finds any. An agent that finds no provider configured raises in front of the person who configured it. **Silent off-gateway sampling is the outcome that must not happen**: a trajectory from an unobserved completion cannot back an on-policy objective while looking exactly like one that can.
 
 Two limits, stated plainly:
 

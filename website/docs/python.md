@@ -3,12 +3,12 @@
 A Python agent is served by handing `serve()` an import path. Everything on this page is about what happens on the far side of that string.
 
 ```python
-import percepteye_agent_flywheel as fw
+import agent_flywheel as fw
 
 fw.serve("my_package.agent:build", agent_id="research-agent", input_shape="text")
 ```
 
-Adapters are on by default, so a LangChain, LangGraph or Google ADK agent reports per-call outcomes with **no Percepteye code inside it**. Not Python? Pass an argv list instead — see [CLI and other languages](cli.md).
+Adapters are on by default, so a LangChain, LangGraph or Google ADK agent reports per-call outcomes with **no Agent Flywheel code inside it**. Not Python? Pass an argv list instead — see [CLI and other languages](cli.md).
 
 ## The entrypoint is an import path, not an object
 
@@ -115,7 +115,7 @@ Naming an adapter is an assertion that it is how your calls get captured, so it 
 
 ## Zero instrumentation, worked end to end
 
-This agent contains no reference to Percepteye of any kind:
+This agent contains no reference to Agent Flywheel of any kind:
 
 ```python
 # lc_agent.py — your existing agent, untouched
@@ -142,7 +142,7 @@ def build():
 Served with the three lines from the [Quickstart](quickstart.md):
 
 ```python
-import percepteye_agent_flywheel as fw
+import agent_flywheel as fw
 
 fw.serve("lc_agent:build", agent_id="research-agent", input_shape="text")
 ```
@@ -164,12 +164,12 @@ On a rollout whose task is `"count to three"`, the reported trajectory is:
 
 **`unknown`, not `ok`.** The tool returned a string and nothing observed whether the call succeeded. `Tool.invoke({"q": ...})` with a plain dict has no tool-call id to attach, so LangChain returns raw content rather than a `ToolMessage` — and raw content from a tool that worked is byte-identical to raw content from a tool that caught its own exception and returned prose. Calling that `ok` is the single most consequential lie a capture can tell, so the adapter does not.
 
-That is the honest floor zero instrumentation buys you, and it is enforced by [`tests/test_zero_instrumentation.py`](https://github.com/percepteye-ai/agent-flywheel/blob/main/tests/test_zero_instrumentation.py) inside the 980-test suite. Drive the same tool through a model-issued tool call and the same adapter reports `"outcome": "ok"` with the model's `tool_call_id` attached, because then there is a `ToolMessage` with a real `status`.
+That is the honest floor zero instrumentation buys you, and it is enforced by [`tests/test_zero_instrumentation.py`](https://github.com/percepteye-ai/agent-flywheel/blob/main/tests/test_zero_instrumentation.py) inside the 982-test suite. Drive the same tool through a model-issued tool call and the same adapter reports `"outcome": "ok"` with the model's `tool_call_id` attached, because then there is a `ToolMessage` with a real `status`.
 
 One call where you *do* know the answer gets you the rest:
 
 ```python
-from percepteye_agent_flywheel import record_tool_call
+from agent_flywheel import record_tool_call
 
 record_tool_call("charge_card", {"amount": 4200}, outcome="ok", status_code=201)
 ```
@@ -197,7 +197,7 @@ with px.turn(task_id=case_id, conversation_id=conv_id) as turn_id:
 
 The bar is the one the built-ins meet: no framework import at module scope, report `unknown` rather than guessing, and fail loudly at bind time rather than degrade silently. An adapter is a small object — `name`, `distribution`, `supported`, `required_symbols`, `capabilities()`, and a `bind()` that returns an unbind callable.
 
-Be aware of where the wiring currently stops. `serve()` and `attach()` resolve adapter **names** against the built-in registry only; the `percepteye_agent_flywheel.adapters` entry-point group is read by `binding.discover_adapters()`, and no public entry point calls it. So today a third-party adapter distribution is not picked up by `adapters="auto"`, and its name is not accepted in `adapters=[...]`. Reach it by passing the instance under `isolation="inprocess"`, or open an issue — a framework worth an adapter is worth wiring properly.
+Be aware of where the wiring currently stops. `serve()` and `attach()` resolve adapter **names** against the built-in registry only; the `agent_flywheel.adapters` entry-point group is read by `binding.discover_adapters()`, and no public entry point calls it. So today a third-party adapter distribution is not picked up by `adapters="auto"`, and its name is not accepted in `adapters=[...]`. Reach it by passing the instance under `isolation="inprocess"`, or open an issue — a framework worth an adapter is worth wiring properly.
 
 ## Related
 

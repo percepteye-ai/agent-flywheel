@@ -1,6 +1,6 @@
 # Configuration
 
-Every knob is a keyword argument on `serve()` or one of eleven environment variables. **Three change what the SDK does** — `PERCEPTEYE_AGENT_MODE`, `PERCEPTEYE_INTROSPECT` and `PERCEPTEYE_CAPTURE`. The rest are addresses, credentials and locations.
+Every knob is a keyword argument on `serve()` or one of seven environment variables. **Two change what the SDK does** — `PERCEPTEYE_AGENT_MODE` and `PERCEPTEYE_INTROSPECT`. The rest are addresses, credentials and locations.
 
 ## The mode switch
 
@@ -178,7 +178,7 @@ The claim long-poll (`wait_ms`, 25s), the requested lease (`lease_ms`, 30 min) a
 | rule | effect |
 |:--|:--|
 | Your environment passes through | your agent needs your credentials. That is the premise of running it in your process. |
-| The inherited `PERCEPTEYE_` namespace is scrubbed completely | no customer- or harness-specific setting crosses implicitly; an execution adapter may supply its own non-Percepteye variables through its child environment |
+| The inherited `PERCEPTEYE_` namespace is scrubbed completely | no customer- or harness-specific setting crosses implicitly; an execution adapter may supply its own non-PerceptEye variables through its child environment |
 | Two are then set | `PERCEPTEYE_ROLLOUT_ID` and `PERCEPTEYE_TRAJECTORY_DIR`, scoped to this rollout |
 | Routing is set last | `OPENAI_BASE_URL`, `OPENAI_API_BASE`, `OPENAI_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, so they beat anything inherited |
 | Unroutable provider config is removed | see below |
@@ -245,7 +245,7 @@ Declared by you, never inferred. An earlier SDK guessed the call convention from
 Return a string, or a `RolloutOutput` when you have more to say.
 
 ```python
-from percepteye_agent_flywheel import RolloutOutput
+from agent_flywheel import RolloutOutput
 
 def invoke(task: str) -> RolloutOutput:
     return RolloutOutput(
@@ -294,19 +294,15 @@ Symlinks are **never** followed — one dropped in the agent's own directory wou
 | `PERCEPTEYE_ROLLOUT_ID` | *Set by us* for the child. Read it to tag your own logs. |
 | `PERCEPTEYE_TRAJECTORY_DIR` | *Set by us* for the child — already this rollout's directory. Append to `$PERCEPTEYE_TRAJECTORY_DIR/tool_calls.jsonl`; any other file you leave there is collected as an artifact. Also the variable the Node plugins read. |
 | `PERCEPTEYE_TURN_INPUT` | *Set by us* for a command entrypoint. The task, also on stdin. |
-| `PERCEPTEYE_LLM_BASE_URL` | The gateway `percepteye install-hooks` points a `training` install at. **Unset means routing is left exactly as it was**, and the CLI says so — so a goose install with no value here captures tool outcomes and no completions. |
-| `PERCEPTEYE_CAPTURE` | Set to `0`, `false`, `no` or `off` to stop the goose plugin recording tool outcomes. On by default; this is the kill switch. |
-| `PERCEPTEYE_HOME` | Where the plugin records when nothing names a directory. Default `~/.percepteye`; captures land in `turns/<session>/` under it, which is what `percepteye report` reads. |
-| `PERCEPTEYE_AGENT_ID` | The agent the goose plugin reports as. Default `goose`. |
 
-Only `PERCEPTEYE_AGENT_MODE`, `PERCEPTEYE_INTROSPECT` and `PERCEPTEYE_CAPTURE` change behavior. The optional Prime example also reads its own documented route settings in `examples/prime_agent`; those are example inputs, not SDK child-environment policy. `PERCEPTEYE_INTROSPECT` and `introspect=` are ANDed — either one off disables discovery — and **only a deliberate value disables it**: a typo leaves it on rather than silently switching capture off while you believe it is running.
+Only `PERCEPTEYE_AGENT_MODE` and `PERCEPTEYE_INTROSPECT` change behavior. The optional Prime example also reads its own documented route settings in `examples/prime_agent`; those are example inputs, not SDK child-environment policy. `PERCEPTEYE_INTROSPECT` and `introspect=` are ANDed — either one off disables discovery — and **only a deliberate value disables it**: a typo leaves it on rather than silently switching capture off while you believe it is running.
 
 The one variable this SDK will *write* is under your control: `apply_current_policy(set_env=True)` exports `OPENAI_BASE_URL` and `OPENAI_API_KEY`. It is off by default, because mutating the process environment is a side effect a caller should ask for.
 
 ## OpenTelemetry
 
 ```bash
-pip install "percepteye-agent-flywheel[otel]"
+pip install "agent-flywheel[otel]"
 ```
 
 The extra is `opentelemetry-api>=1.20` — **the API only, never the SDK.** This package emits into whatever `TracerProvider` you already registered and **never installs one**. `set_tracer_provider` is once-only, so calling it would either lose all our spans (if yours was configured first) or silently kill your entire GenAI telemetry (if we won). With no provider configured, the API's no-op tracer swallows everything, which is the correct outcome for a library.

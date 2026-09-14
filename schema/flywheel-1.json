@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.percepteye.ai/flywheel/1.json",
-  "title": "Percepteye Flywheel contract, version 1",
-  "description": "The wire contract between a customer-run agent and the Percepteye control plane. THIS FILE IS THE AUTHORITY. Server implementations pin against the published schema; the schema is never generated from a server type. The Python types in src/percepteye_agent_flywheel/contract.py are hand-written to match this file, not generated from it, and the test suite asserts the two agree.",
+  "title": "PerceptEye Flywheel contract, version 1",
+  "description": "The wire contract between a customer-run agent and the PerceptEye control plane. THIS FILE IS THE AUTHORITY. Server implementations pin against the published schema; the schema is never generated from a server type. The Python types in src/agent_flywheel/contract.py are hand-written to match this file, not generated from it, and the test suite asserts the two agree.",
   "x-contract-version": "flywheel/1",
   "$defs": {
     "ToolCallRecord": {
@@ -299,7 +299,7 @@
     },
     "RolloutOutput": {
       "type": "object",
-      "description": "FLYWHEEL-AUTHORED. Every field a customer-run flywheel may assert, and the complete set: the SDK is semi-trusted, so anything Percepteye authors during scoring or training is absent by construction here and rejected at intake if present. The properties below are the whole allowed vocabulary -- additionalProperties is false, so what is permitted is stated positively rather than by listing what is not.",
+      "description": "FLYWHEEL-AUTHORED. Every field a customer-run flywheel may assert, and the complete set: the SDK is semi-trusted, so anything PerceptEye authors during scoring or training is absent by construction here and rejected at intake if present. The properties below are the whole allowed vocabulary -- additionalProperties is false, so what is permitted is stated positively rather than by listing what is not.",
       "additionalProperties": false,
       "required": [
         "final_text"
@@ -367,7 +367,7 @@
           }
         },
         "reward": {
-          "description": "ADVISORY ONLY. Recorded on the rollout row. Percepteye's compiled suite remains the scored suite; this scalar never reaches the dataset emitters in v1.",
+          "description": "ADVISORY ONLY. Recorded on the rollout row. PerceptEye's compiled suite remains the scored suite; this scalar never reaches the dataset emitters in v1.",
           "type": [
             "number",
             "null"

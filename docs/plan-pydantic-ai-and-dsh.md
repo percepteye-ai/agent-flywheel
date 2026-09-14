@@ -162,7 +162,7 @@ second process is required to *capture* anything.
 ### The proposed surface
 
 ```python
-import percepteye_agent_flywheel as fw
+import agent_flywheel as fw
 
 fw.attach(agent_id="my-agent")   # register + resolve policy + bind adapters
 ```

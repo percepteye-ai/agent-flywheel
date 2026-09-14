@@ -16,8 +16,8 @@ pytest.importorskip("google.adk")
 
 from google.adk.plugins.plugin_manager import PluginManager
 
-from percepteye_agent_flywheel.adapters.adk import ADKAdapter
-from percepteye_agent_flywheel.outcomes import (
+from agent_flywheel.adapters.adk import ADKAdapter
+from agent_flywheel.outcomes import (
     Trajectory,
     _RolloutScope,
 )
@@ -85,7 +85,7 @@ def test_the_plugin_installs_with_no_customer_code(bound):
     own PluginManager -- as every ADK Runner does -- and ours is simply there.
     Binding at Runner instead would miss the app= path entirely."""
     pm = PluginManager()
-    assert any(p.name == "percepteye_agent_flywheel" for p in pm.plugins)
+    assert any(p.name == "agent_flywheel" for p in pm.plugins)
 
 
 def test_a_customers_own_plugins_survive_the_install(bound):
@@ -97,7 +97,7 @@ def test_a_customers_own_plugins_survive_the_install(bound):
     pm = PluginManager(plugins=[mine])
     names = [p.name for p in pm.plugins]
     assert "customer_own" in names
-    assert "percepteye_agent_flywheel" in names
+    assert "agent_flywheel" in names
 
 
 def test_unbind_restores_the_original_constructor():
@@ -105,7 +105,7 @@ def test_unbind_restores_the_original_constructor():
     unbind = adapter.bind(llm_url="u", api_key="k")
     unbind()
     pm = PluginManager()
-    assert not any(p.name == "percepteye_agent_flywheel" for p in pm.plugins)
+    assert not any(p.name == "agent_flywheel" for p in pm.plugins)
 
 
 def test_installing_twice_does_not_double_record(bound, tmp_path):
@@ -114,7 +114,7 @@ def test_installing_twice_does_not_double_record(bound, tmp_path):
     second = ADKAdapter().bind(llm_url="u", api_key="k")
     try:
         pm = PluginManager()
-        assert sum(p.name == "percepteye_agent_flywheel" for p in pm.plugins) == 1
+        assert sum(p.name == "agent_flywheel" for p in pm.plugins) == 1
         with _RolloutScope("rl_adk", str(tmp_path)):
             asyncio.run(_one_call(pm, _Tool(), _Ctx(), result={"ok": 1}))
         assert len(_calls(tmp_path)) == 1
@@ -310,7 +310,7 @@ def test_concurrent_tool_calls_do_not_overwrite_each_other(bound, tmp_path):
 def test_the_probe_resolves_every_symbol_the_adapter_binds():
     """Detection and binding read the same list, so 'detected' cannot be true
     while binding is broken."""
-    from percepteye_agent_flywheel.binding import probe
+    from agent_flywheel.binding import probe
 
     result = probe(ADKAdapter())
     assert result.ok, f"{result.status}: {result.reason} [{result.evidence}]"

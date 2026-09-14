@@ -104,7 +104,7 @@ _SETTLE_S = 60.0
 #: has to name a path explicitly. Both candidates are checked rather than one
 #: guessed: the first is a source checkout (the editable install most
 #: integrations use), the second is what the host's own installer produces.
-_PLUGIN_DIRNAME = "percepteye-agent-flywheel"
+_PLUGIN_DIRNAME = "agent-flywheel"
 
 
 def openclaw_plugin_path() -> str | None:
@@ -114,7 +114,7 @@ def openclaw_plugin_path() -> str | None:
     never has to hardcode a developer's absolute path into a repository.
     """
     candidates = [
-        # A source checkout: <repo>/src/percepteye_agent_flywheel/ -> <repo>/packages/<name>
+        # A source checkout: <repo>/src/agent_flywheel/ -> <repo>/packages/<name>
         Path(__file__).resolve().parents[2] / "packages" / _PLUGIN_DIRNAME,
         Path.home() / ".openclaw" / "extensions" / _PLUGIN_DIRNAME,
     ]

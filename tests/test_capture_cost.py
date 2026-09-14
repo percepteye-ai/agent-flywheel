@@ -25,8 +25,8 @@ from pathlib import Path
 
 import pytest
 
-import percepteye_agent_flywheel as fw
-from percepteye_agent_flywheel.outcomes import _RolloutScope, _sinks
+import agent_flywheel as fw
+from agent_flywheel.outcomes import _RolloutScope, _sinks
 
 
 @pytest.fixture(autouse=True)
@@ -220,7 +220,7 @@ def test_importing_the_package_does_not_import_httpx():
     """
     out = subprocess.run(
         [sys.executable, "-c",
-         "import sys, percepteye_agent_flywheel;"
+         "import sys, agent_flywheel;"
          "print('httpx' in sys.modules, 'ssl' in sys.modules)"],
         capture_output=True, text=True, check=True,
     ).stdout.strip()
@@ -229,7 +229,7 @@ def test_importing_the_package_does_not_import_httpx():
 
 def test_the_transport_still_works_when_it_is_finally_needed():
     """Deferring an import is only safe if the deferred thing still resolves."""
-    from percepteye_agent_flywheel._http import ControlPlaneClient
+    from agent_flywheel._http import ControlPlaneClient
 
     c = ControlPlaneClient("https://cp.invalid", "pek_x")
     assert c is not None
@@ -247,7 +247,7 @@ def test_importing_the_package_registers_no_atexit_hook():
     out = subprocess.run(
         [sys.executable, "-c",
          "import atexit, logging; b = atexit._ncallbacks();"
-         "import percepteye_agent_flywheel;"
+         "import agent_flywheel;"
          "print(atexit._ncallbacks() - b)"],
         capture_output=True, text=True, check=True,
     ).stdout.strip()
@@ -258,7 +258,7 @@ def test_recording_registers_the_cleanup_hook_exactly_once(tmp_path):
     out = subprocess.run(
         [sys.executable, "-c",
          "import atexit, os, tempfile, logging;"
-         "import percepteye_agent_flywheel as fw;"
+         "import agent_flywheel as fw;"
          "b = atexit._ncallbacks();"
          "d = tempfile.mkdtemp();"
          "os.environ['PERCEPTEYE_ROLLOUT_ID'] = 'rl_1';"

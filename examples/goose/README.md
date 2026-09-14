@@ -13,10 +13,9 @@ added to goose itself.
 > outcome. That fits an operator who wants to lend the flywheel capacity.
 >
 > If instead you *run goose yourself* and want the turns you already serve to
-> feed the flywheel, you do not need this file or any worker process — see
-> [CLI agents: three commands](../../README.md#cli-agents-three-commands).
-> `pip install`, `percepteye install-hooks`, and you start goose exactly as
-> before.
+> feed the flywheel, you do not need this file or any worker process:
+> `pip install agent-flywheel`, `agent-flywheel install-hooks`, and you start goose
+> exactly as before.
 
 ## The two halves
 
@@ -25,7 +24,7 @@ from the environment, and the names it reads are the ones `build_child_env`
 already sets per rollout — so on this path `serve_goose.py` carries the routing.
 
 **Tool outcomes** come from the hook plugin, which **ships in this wheel**. There
-is no second install and no external repository to clone: `percepteye
+is no second install and no external repository to clone: `agent-flywheel
 install-hooks` renders it, pointed at this virtualenv's interpreter. It is inert
 unless `PERCEPTEYE_TRAJECTORY_DIR` is set — which the SDK sets per rollout — so
 the same install is a no-op outside one. `serve_goose.py` refuses to start
@@ -33,7 +32,7 @@ without it, because `reports_tool_calls=True` is an assertion only the plugin
 makes true.
 
 ```bash
-percepteye install-hooks
+agent-flywheel install-hooks
 PERCEPTEYE_CONTROL_PLANE_URL=... PERCEPTEYE_API_KEY=... python serve_goose.py
 ```
 

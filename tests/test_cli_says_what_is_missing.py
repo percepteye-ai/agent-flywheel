@@ -9,7 +9,7 @@ result is the failure mode this package front-loads its checks to prevent: the
 plugin loads, tool outcomes land on disk, no rollout is ever claimed, and
 nothing anywhere says why.
 
-``percepteye report`` is here for a different reason: the reporter shipped in
+``agent-flywheel report`` is here for a different reason: the reporter shipped in
 every wheel with NO consumer at all -- one line of code named it, the constant
 binding it -- so the tool-failure rate the README leads with was reachable only
 by finding the script inside site-packages and running it by hand.
@@ -21,7 +21,7 @@ import time
 
 import pytest
 
-from percepteye_agent_flywheel.cli import main
+from agent_flywheel.cli import main
 
 URL = "PERCEPTEYE_CONTROL_PLANE_URL"
 KEY = "PERCEPTEYE_API_KEY"
@@ -91,7 +91,7 @@ def test_report_reads_the_most_recent_recorded_session(goose_home, capsys):
     """THE seam that had a producer and no consumer.
 
     The recorder writes one directory per session under ``PERCEPTEYE_HOME``;
-    nothing read them. ``percepteye report`` resolves that root by asking the
+    nothing read them. ``agent-flywheel report`` resolves that root by asking the
     recorder for it rather than rebuilding the join, so the reader cannot end
     up pointed somewhere the writer does not write.
     """

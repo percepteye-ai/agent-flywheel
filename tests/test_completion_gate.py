@@ -20,8 +20,8 @@ from __future__ import annotations
 
 import time
 
-from percepteye_agent_flywheel.contract import RolloutRequest
-from percepteye_agent_flywheel.runner import _argv_with_gate
+from agent_flywheel.contract import RolloutRequest
+from agent_flywheel.runner import _argv_with_gate
 
 ARGV = ["prime-agent", "-p", "--autonomous"]
 
@@ -93,7 +93,7 @@ def test_the_gate_reaches_the_spawned_process_argv(tmp_path):
     import stat as _stat
     from pathlib import Path
 
-    from percepteye_agent_flywheel.runner import run_rollout_as_command
+    from agent_flywheel.runner import run_rollout_as_command
 
     script = tmp_path / "agent.sh"
     script.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > argv.txt\n')
@@ -115,7 +115,7 @@ def test_without_a_flag_the_spawned_process_sees_no_extra_args(tmp_path):
     import stat as _stat
     from pathlib import Path
 
-    from percepteye_agent_flywheel.runner import run_rollout_as_command
+    from agent_flywheel.runner import run_rollout_as_command
 
     script = tmp_path / "agent.sh"
     script.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > argv.txt\n')

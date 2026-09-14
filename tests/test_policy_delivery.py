@@ -15,8 +15,8 @@ erroring, not by being an older build.
 """
 from __future__ import annotations
 
-import percepteye_agent_flywheel as fw
-from percepteye_agent_flywheel.transport import AttachTransport
+import agent_flywheel as fw
+from agent_flywheel.transport import AttachTransport
 
 
 class _Client:
@@ -106,7 +106,7 @@ def test_nvidia_keys_are_treated_as_unroutable():
     win, and without this the agent samples NVIDIA cloud while the control
     plane believes it is sampling the policy under training. Every rollout
     would be off-policy and nothing would raise."""
-    from percepteye_agent_flywheel.isolation import UNROUTABLE_PROVIDER_VARS
+    from agent_flywheel.isolation import UNROUTABLE_PROVIDER_VARS
 
     assert "NVIDIA_API_KEY" in UNROUTABLE_PROVIDER_VARS
     assert "NVIDIA_NIM_API_KEY" in UNROUTABLE_PROVIDER_VARS
@@ -115,7 +115,7 @@ def test_nvidia_keys_are_treated_as_unroutable():
 def test_an_nvidia_key_is_reported_at_startup():
     """Visible to the person who made the misconfiguration, rather than
     surfacing a run later as a training-grade exclusion nobody can explain."""
-    from percepteye_agent_flywheel.isolation import unroutable_providers_present
+    from agent_flywheel.isolation import unroutable_providers_present
 
     found = unroutable_providers_present({"NVIDIA_API_KEY": "nvapi-xxx"})
     assert found == ("NVIDIA_API_KEY",)
@@ -124,7 +124,7 @@ def test_an_nvidia_key_is_reported_at_startup():
 def test_an_nvidia_key_does_not_reach_the_child():
     """Removing the key is the reliable half — a provider we cannot redirect
     must not be usable from inside the rollout."""
-    from percepteye_agent_flywheel.isolation import build_child_env
+    from agent_flywheel.isolation import build_child_env
 
     env = build_child_env(
         rollout_id="r1", llm_url="http://gw/v1", api_key="k",

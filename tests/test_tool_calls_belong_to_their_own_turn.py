@@ -27,9 +27,9 @@ from __future__ import annotations
 
 import pytest
 
-from percepteye_agent_flywheel.export import conversation_to_record
-from percepteye_agent_flywheel.outcomes import record_tool_call
-from percepteye_agent_flywheel.production import attach
+from agent_flywheel.export import conversation_to_record
+from agent_flywheel.outcomes import record_tool_call
+from agent_flywheel.production import attach
 
 
 @pytest.fixture

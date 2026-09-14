@@ -15,11 +15,11 @@ from __future__ import annotations
 
 import json
 
-from percepteye_agent_flywheel.host_description import (
+from agent_flywheel.host_description import (
     _tool_from_wire,
     read_discovered_agent,
 )
-from percepteye_agent_flywheel.introspection import ToolDefinition
+from agent_flywheel.introspection import ToolDefinition
 
 
 def _write_agent(d, names):
@@ -58,7 +58,7 @@ class TestNoMergeMachinery:
     """
 
     def test_no_join_helper_survives(self):
-        import percepteye_agent_flywheel.host_description as hd
+        import agent_flywheel.host_description as hd
         assert not hasattr(hd, "_suffix_is_a_segment")
         assert not hasattr(hd, "_merge_tool_traits")
 

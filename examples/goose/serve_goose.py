@@ -23,7 +23,7 @@ and 4: a config-file OPENAI_BASE_URL beats a config-file OPENAI_HOST, which is
 why ``install_hooks`` writes the former.
 
 TOOL OUTCOMES come from the hook plugin, which SHIPS IN THIS WHEEL -- there is
-no second install and no external repository. ``percepteye install-hooks``
+no second install and no external repository. ``agent-flywheel install-hooks``
 renders it, pointed at this virtualenv's interpreter; it subscribes to goose's
 post-tool hook events and appends to ``$PERCEPTEYE_TRAJECTORY_DIR``. It is inert
 whenever that variable is unset, so the same install is a no-op outside a
@@ -41,7 +41,7 @@ from __future__ import annotations
 import os
 import pathlib
 
-import percepteye_agent_flywheel as fw
+import agent_flywheel as fw
 
 #: WHERE ROLLOUTS RUN. Each rollout's child starts with its cwd inside this
 #: directory and goose has a real shell — so this must never be a source tree.
@@ -278,7 +278,7 @@ def main() -> int:
             "outcomes would be recorded.\n"
             f"    Searched:\n      {searched}\n"
             "    Install it with:\n"
-            "      percepteye install-hooks"
+            "      agent-flywheel install-hooks"
         )
     if plugin is not None:
         print(f"[percepteye] hook plugin: {plugin}")

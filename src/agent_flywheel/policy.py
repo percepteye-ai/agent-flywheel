@@ -80,7 +80,7 @@ def missing_credentials_cause(url: str | None, key: str | None) -> str | None:
     ONE answer to a question asked wherever the control plane is dialled:
     ``current_policy``, ``current_prompt`` (and ``apply_current_policy``
     through the first), :meth:`PolicySource._fetch`,
-    :func:`~percepteye_agent_flywheel.attach`, and ``percepteye status``. All
+    :func:`~agent_flywheel.attach`, and ``agent-flywheel status``. All
     resolve the same pair, and all used to fail the same way: ``if not url or
     not key: return {}``, with nothing said. That empty answer is
     indistinguishable from the control plane's own "nothing is deployed for
@@ -110,7 +110,7 @@ def missing_credentials_cause(url: str | None, key: str | None) -> str | None:
 #: for exactly the reason this refuses to use one: ``model="gs://bucket/run/
 #: iter_0"`` is a bucket path, and it 404s on every completion. Re-asserting it
 #: here is not a duplicate gate -- it is the same argument
-#: :data:`~percepteye_agent_flywheel.prompt.SERVABLE_PROMPT_STATUSES` is
+#: :data:`~agent_flywheel.prompt.SERVABLE_PROMPT_STATUSES` is
 #: re-asserted on, applied to the other half of the pair: the only thing
 #: standing between a control plane that one day widens the filter and a
 #: customer's agent pointed at an address that answers nothing.
@@ -447,7 +447,7 @@ class PolicySource:
                 if not self._warned_no_credentials:
                     self._warned_no_credentials = True
                     _log.warning(
-                        "percepteye: policy_source(agent_id=%r) will never "
+                        "agent-flywheel: policy_source(agent_id=%r) will never "
                         "refresh: %s, so the control plane is never asked. "
                         "This agent keeps the model it is on, and no "
                         "promotion -- or rollback -- can reach it.",
@@ -459,7 +459,7 @@ class PolicySource:
                 # socket -- the one health signal the SDK offers, reporting
                 # fine about a handle that cannot work.
                 raise ConfigurationError(
-                    f"percepteye: {cause}, so the control plane cannot be "
+                    f"agent-flywheel: {cause}, so the control plane cannot be "
                     f"asked for a policy")
             # max_attempts=1: see REFRESH_TIMEOUT_S. The budget has to be a
             # TOTAL, and a retry ladder inside a "bounded" refresh is how a

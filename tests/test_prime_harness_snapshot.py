@@ -11,19 +11,19 @@ from pathlib import Path
 
 import pytest
 
-import percepteye_agent_flywheel as fw
-import percepteye_agent_flywheel.runner as runner_module
-from percepteye_agent_flywheel.adapters.prime_agent import PrimeHarnessSnapshot
-from percepteye_agent_flywheel.contract import RolloutOutput, RolloutRequest
-from percepteye_agent_flywheel.errors import ConfigurationError
-from percepteye_agent_flywheel.host_description import parse_discovered_agent
-from percepteye_agent_flywheel.introspection import (
+import agent_flywheel as fw
+import agent_flywheel.runner as runner_module
+from agent_flywheel.adapters.prime_agent import PrimeHarnessSnapshot
+from agent_flywheel.contract import RolloutOutput, RolloutRequest
+from agent_flywheel.errors import ConfigurationError
+from agent_flywheel.host_description import parse_discovered_agent
+from agent_flywheel.introspection import (
     DiscoveredAgent,
     ModelConfig,
     ToolDefinition,
 )
-from percepteye_agent_flywheel.isolation import build_child_env
-from percepteye_agent_flywheel.runner import RolloutRunner
+from agent_flywheel.isolation import build_child_env
+from agent_flywheel.runner import RolloutRunner
 
 
 class _Transport:
@@ -138,7 +138,7 @@ def _runner(
     runner.configure_execution_identity(
         _described(),
         discovery_enabled=True,
-        sdk="percepteye-agent-flywheel-python/0.1.0",
+        sdk="agent-flywheel-python/0.1.0",
         contract_version="flywheel/1",
     )
     return runner
@@ -564,7 +564,7 @@ def test_execution_descriptor_binds_config_and_canonical_component_map(tmp_path)
         )
         digest = runner.configure_execution_identity(
             _described(), discovery_enabled=True,
-            sdk="percepteye-agent-flywheel-python/0.1.0",
+            sdk="agent-flywheel-python/0.1.0",
             contract_version="flywheel/1",
         )
         assert digest is not None

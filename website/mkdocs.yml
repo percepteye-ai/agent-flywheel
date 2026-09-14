@@ -4,7 +4,7 @@ site_url: https://docs.percepteye.ai/flywheel/
 repo_url: https://github.com/percepteye-ai/agent-flywheel
 repo_name: percepteye-ai/agent-flywheel
 edit_uri: ""
-copyright: MIT © Percepteye
+copyright: MIT © PerceptEye
 
 docs_dir: docs
 site_dir: site
@@ -93,7 +93,7 @@ extra:
       link: https://github.com/percepteye-ai/agent-flywheel
       name: The SDK on GitHub
     - icon: fontawesome/brands/python
-      link: https://pypi.org/project/percepteye-agent-flywheel/
+      link: https://pypi.org/project/agent-flywheel/
       name: The package on PyPI
   generator: false
 

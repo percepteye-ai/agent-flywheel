@@ -12,7 +12,7 @@ from typing import ClassVar
 
 import pytest
 
-from percepteye_agent_flywheel.introspection import (
+from agent_flywheel.introspection import (
     DiscoveredAgent,
     introspect,
 )

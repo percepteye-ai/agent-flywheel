@@ -143,18 +143,23 @@ def arrow(x1: float, y1: float, x2: float, y2: float, colour: str, *,
 
 
 def lane(y: float, direction: str, colour: str, num: str, label: str,
-         sub: str) -> None:
+         sub: str, *, opt_in: bool = False) -> None:
     """One numbered lane crossing the trust boundary.
 
     ``direction`` is "out" (your side -> platform) or "in". Both are drawn the
     same weight: the arrowhead is the only thing that differs, because which
     side *opened* the connection is a fact about the protocol, not about the
     picture, and the README says it in words directly underneath.
+
+    ``opt_in`` dashes the line, for a lane that carries nothing until someone
+    turns it on. A solid line would draw a flow that is off by default as if
+    it were always running -- the same false picture as drawing no lane at all
+    for one that runs once enabled.
     """
     x_from, x_to = (L_X + CARD_W + 18, R_X - 18)
     if direction == "in":
         x_from, x_to = x_to, x_from
-    arrow(x_from, y, x_to, y, colour)
+    arrow(x_from, y, x_to, y, colour, dash="6 5" if opt_in else None)
 
     # The number rides on the line, on a plug of background so the rule does
     # not strike through it.
@@ -172,11 +177,12 @@ def lane(y: float, direction: str, colour: str, num: str, label: str,
 add(f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}"'
     f' width="{W}" height="{H}" role="img"'
     f' aria-label="The agent flywheel as a closed ring: your agent runs a'
-    f' rollout, Percepteye scores the observed outcomes and trains a policy,'
-    f' your production agent picks it up, and its live evidence feeds the next'
-    f' lap. A dashed trust boundary runs down the middle; the two stations on'
-    f' the left are processes you run, the two on the right are the control'
-    f' plane. Four numbered lanes cross the boundary.">')
+    f' rollout, PerceptEye scores the observed outcomes and trains a policy,'
+    f' your production agent picks it up, and, once an operator enables'
+    f' capture, its live evidence feeds the next lap. A dashed trust boundary'
+    f' runs down the middle; the two stations on the left are processes you'
+    f' run, the two on the right are the control plane. Four numbered lanes'
+    f' cross the boundary; the fourth is dashed because it is opt-in.">')
 
 add('<defs>')
 for c in (BLUE, PURPLE, GREEN):
@@ -307,8 +313,13 @@ lane(TOP_Y + 110, "out", BLUE, "2", "rollout + per-call outcomes",
      "ok · failed · unknown, per tool call")
 lane(BOT_Y + 28, "in", PURPLE, "3", "the promoted policy",
      "an endpoint your agent already calls")
+# Opt-in per agent and off by default: `Attachment.flush()` uploads served
+# turns only once an operator enables capture for that agent. Before that
+# existed this lane was simply false, and it was deleted from the SVG by hand
+# -- which the renderer never learned, so a re-render quietly redrew it as an
+# unconditional flow. It is true again now, conditionally, and drawn that way.
 lane(BOT_Y + 110, "out", BLUE, "4", "live evidence, via fw.attach()",
-     "captured from the turns you already serve")
+     "sent only once an operator enables capture", opt_in=True)
 
 # ── the two edges that close the ring ────────────────────────────────────────
 # Right: scoring feeds training, inside the control plane.

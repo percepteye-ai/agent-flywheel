@@ -30,7 +30,7 @@ chunks.
 
 ## The Python types are hand-written to match
 
-[`contract.py`](https://github.com/percepteye-ai/agent-flywheel/blob/main/src/percepteye_agent_flywheel/contract.py) is not generated from the schema. It is written by hand, because the schema cannot express the rules that matter most — that `status_code` has no default, that an `unknown` outcome discards a status from the *body* as well as the field, that a weak `entity_ids` key is refused by name. Those are constructor behavior, not shape.
+[`contract.py`](https://github.com/percepteye-ai/agent-flywheel/blob/main/src/agent_flywheel/contract.py) is not generated from the schema. It is written by hand, because the schema cannot express the rules that matter most — that `status_code` has no default, that an `unknown` outcome discards a status from the *body* as well as the field, that a weak `entity_ids` key is refused by name. Those are constructor behavior, not shape.
 
 Hand-written means drift is possible, so the suite asserts agreement. Three tests in `tests/test_contract.py`:
 
@@ -67,7 +67,7 @@ The last row is the one place the Python shape and the wire shape differ on purp
 
 **Anything derived from the inference wire is absent by construction, not by filtering.** The SDK is semi-trusted. An agent cannot assert a field it has no way to know, so the type simply has nowhere to put it:
 
-| Percepteye-authored | why an agent cannot know it |
+| PerceptEye-authored | why an agent cannot know it |
 |:--|:--|
 | the grade | computed by the compiled suite after the report; it comes back on the report ack |
 | the gateway's completion count | counted at the gateway. `llm_call_count` is what the agent *believes* it issued, and a mismatch means traffic escaped the wire |

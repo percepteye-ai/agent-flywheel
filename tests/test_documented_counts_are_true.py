@@ -20,6 +20,14 @@ build.
 
 Only files that are PRESENT are checked. ``website/`` is not packaged, so a run
 from inside an unpacked sdist checks the README and says so.
+
+WHERE THE COUNT CAN BE CHECKED AT ALL. The published number is the size of the
+suite with every optional framework installed. Without them, five modules skip
+themselves at import -- ``pytest.importorskip``, by design -- so a bare install
+collects fewer tests than the page states, and this failed in every job of the
+bare CI matrix. There the count check now skips and names the modules; the
+cross-copy check still runs, and CI's ``test-full`` job installs every extra and
+permits no skips, so the count itself is still enforced on every push.
 """
 from __future__ import annotations
 
@@ -44,11 +52,17 @@ PUBLISHED = (
 )
 
 
-def _collected() -> int:
-    """The suite's own size, by the recipe the README documents."""
+def _collected() -> tuple[int, list[str]]:
+    """The suite's size by the recipe the README documents, and the modules
+    that skipped themselves while it was being counted.
+
+    ``-rs`` is passed rather than inherited: the skip lines are how a short
+    count is told apart from a drifted one, so they must not depend on
+    whatever ``addopts`` happens to say.
+    """
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "tests/", "--collect-only", "-q",
-         "-p", "no:warnings"],
+         "-rs", "-p", "no:warnings"],
         cwd=ROOT, capture_output=True, text=True,
     )
     assert proc.returncode == 0, f"collection failed:\n{proc.stdout}{proc.stderr}"
@@ -57,12 +71,20 @@ def _collected() -> int:
         for m in re.finditer(r"^tests/.*: (\d+)$", proc.stdout, re.M)
     )
     assert total > 0, f"collected nothing:\n{proc.stdout}"
-    return total
+    skipped = re.findall(r"^SKIPPED \[\d+\] (tests/[^:]+)", proc.stdout, re.M)
+    return total, skipped
 
 
 @pytest.fixture(scope="module")
 def collected() -> int:
-    return _collected()
+    total, skipped = _collected()
+    if skipped:
+        pytest.skip(
+            f"{len(skipped)} test modules skipped themselves while the suite was "
+            f"counted ({', '.join(skipped)}), so {total} is not its size. The "
+            f"published count is checked where every optional framework is "
+            f"installed: CI's test-full job, which permits no skips.")
+    return total
 
 
 def test_every_published_test_count_matches_the_suite(collected):
@@ -89,11 +111,13 @@ def test_every_published_test_count_matches_the_suite(collected):
           " | awk -F': ' '/^tests\\/.*: [0-9]+$/{n+=$2} END{print n}'")
 
 
-def test_the_readme_and_the_docs_site_agree_with_each_other(collected):
+def test_the_readme_and_the_docs_site_agree_with_each_other():
     """Cheap, and it is the failure that actually shipped.
 
     The badge was corrected and the prose sixty lines below it was not, so one
-    page carried two counts fifty-four apart.
+    page carried two counts fifty-four apart. It compares the copies with each
+    other and never with the suite, so it needs no collection and runs even
+    where the count check above has to skip.
     """
     found = {}
     for rel, pattern in PUBLISHED:

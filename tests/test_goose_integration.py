@@ -3,7 +3,7 @@
 THE SPLIT IS GONE. The plugin used to live in its own repository because both
 marketplaces install from a repository ROOT and neither can install a
 subdirectory -- so the customer needed two installs. The wheel now ships the
-recorder itself (`percepteye_agent_flywheel/hosts/scripts/`) and `percepteye
+recorder itself (`agent_flywheel/hosts/scripts/`) and `agent-flywheel
 install-hooks` renders the plugin directory pointed at it, which is what
 collapsed two installs into one.
 
@@ -20,7 +20,7 @@ That matters for what this file can PROVE, not just for how it reads:
 2.  `examples/goose/serve_goose.py`, the CAPACITY-DONATION path, whose
     `reports_tool_calls=True` is an assertion only the recorder makes true. It
     is not the only path: a customer running goose themselves uses
-    `percepteye install-hooks` and no worker process at all.
+    `agent-flywheel install-hooks` and no worker process at all.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ from pathlib import Path
 
 import pytest
 
-from percepteye_agent_flywheel.outcomes import Trajectory
+from agent_flywheel.outcomes import Trajectory
 
 SERVE = Path(__file__).resolve().parent.parent / "examples" / "goose" / "serve_goose.py"
 
@@ -132,7 +132,7 @@ def test_serving_without_the_plugin_refuses_rather_than_downgrading(tmp_path):
     # actually works today. This used to say `goose plugin install <url>`,
     # sending the operator to a second install that the wheel now ships; a
     # refusal naming a stale fix costs more than one naming none.
-    assert "percepteye install-hooks" in proc.stderr
+    assert "agent-flywheel install-hooks" in proc.stderr
     assert "goose plugin install" not in proc.stderr
 
 
@@ -218,7 +218,7 @@ def test_argv_pins_the_routed_provider_and_bounds_the_episode(tmp_path):
 
 def _fire(event, env_extra, script=None):
     """Drive the real recorder the way goose does: argv, JSON on stdin."""
-    from percepteye_agent_flywheel.hosts import RECORDER
+    from agent_flywheel.hosts import RECORDER
 
     return subprocess.run(
         [sys.executable, str(script or RECORDER)],

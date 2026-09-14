@@ -21,9 +21,9 @@ import json
 
 import pytest
 
-from percepteye_agent_flywheel.contract import CONTRACT_VERSION
-from percepteye_agent_flywheel.hosts import RECORDER
-from percepteye_agent_flywheel.install_hooks import (
+from agent_flywheel.contract import CONTRACT_VERSION
+from agent_flywheel.hosts import RECORDER
+from agent_flywheel.install_hooks import (
     PLUGIN_NAME,
     goose_plugins_dir,
     install_goose,
@@ -56,7 +56,7 @@ def test_the_tool_call_path_never_imports_the_sdk():
     src = RECORDER.read_text(encoding="utf-8")
     for line in src.splitlines():
         if line.startswith(("import ", "from ")):        # column 0 == module scope
-            assert "percepteye_agent_flywheel" not in line, (
+            assert "agent_flywheel" not in line, (
                 f"module-level SDK import in the recorder: {line.strip()}")
 
 
@@ -80,7 +80,7 @@ def test_the_sdk_is_reached_only_from_the_session_branches():
             if isinstance(sub, (ast.Import, ast.ImportFrom)):
                 names = getattr(sub, "module", "") or ""
                 names += " ".join(a.name for a in sub.names)
-                assert "percepteye_agent_flywheel" not in names, (
+                assert "agent_flywheel" not in names, (
                     f"SDK import inside {node.name}, which the per-tool-call "
                     f"path can reach")
 
@@ -162,7 +162,7 @@ def test_the_recorder_can_never_deny_a_turn(tmp_path):
     written to stdout — are what make subscribing a blocking event safe, so they
     are now load-bearing for something they were not written for.
     """
-    from percepteye_agent_flywheel.hosts import RECORDER
+    from agent_flywheel.hosts import RECORDER
 
     src = RECORDER.read_text(encoding="utf-8")
     assert "sys.exit(2)" not in src and "exit(2)" not in src
@@ -289,10 +289,10 @@ def test_a_tool_call_never_pays_for_the_sdk():
     """
     hot = _importtime({"event": "PostToolUse", "session_id": "s",
                        "tool_name": "shell", "tool_input": {}})
-    assert "percepteye_agent_flywheel" not in hot, (
+    assert "agent_flywheel" not in hot, (
         "the per-tool-call path imported the SDK")
 
     control = _importtime({"event": "SessionStart", "session_id": "s"})
-    assert "percepteye_agent_flywheel" in control, (
+    assert "agent_flywheel" in control, (
         "positive control failed: this test cannot detect an SDK import at all, "
         "so its real assertion above proves nothing")

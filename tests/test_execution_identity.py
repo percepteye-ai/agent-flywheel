@@ -11,18 +11,18 @@ from typing import ClassVar
 
 import pytest
 
-from percepteye_agent_flywheel.contract import RolloutRequest
-from percepteye_agent_flywheel.errors import ConfigurationError
-from percepteye_agent_flywheel.execution_identity import (
+from agent_flywheel.contract import RolloutRequest
+from agent_flywheel.errors import ConfigurationError
+from agent_flywheel.execution_identity import (
     canonical_observation_sha256,
     normalize_attested_components,
 )
-from percepteye_agent_flywheel.introspection import (
+from agent_flywheel.introspection import (
     DiscoveredAgent,
     ModelConfig,
     ToolDefinition,
 )
-from percepteye_agent_flywheel.runner import RolloutRunner
+from agent_flywheel.runner import RolloutRunner
 
 
 class _Transport:
@@ -90,7 +90,7 @@ def _configure(runner: RolloutRunner) -> str | None:
     return runner.configure_execution_identity(
         _described(),
         discovery_enabled=True,
-        sdk="percepteye-agent-flywheel-python/0.1.0",
+        sdk="agent-flywheel-python/0.1.0",
         contract_version="flywheel/1",
     )
 
@@ -236,8 +236,8 @@ def test_no_entrypoint_gets_an_exact_identity_without_complete_adapter_evidence(
 
 def test_core_import_does_not_load_the_optional_prime_adapter():
     code = (
-        "import sys; import percepteye_agent_flywheel; "
-        "assert 'percepteye_agent_flywheel.adapters.prime_agent' not in sys.modules"
+        "import sys; import agent_flywheel; "
+        "assert 'agent_flywheel.adapters.prime_agent' not in sys.modules"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
 

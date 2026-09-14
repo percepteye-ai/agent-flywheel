@@ -38,6 +38,10 @@ generated — edit `../docs/assets/render_architecture.py`, run
 cp ../docs/assets/flywheel-architecture.svg docs/assets/
 ```
 
+`tests/test_architecture_svg_matches_its_renderer.py` re-renders the figure and
+fails if either copy differs from it byte for byte, so a hand-edited SVG — or a
+forgotten re-copy — turns the suite red instead of the site stale.
+
 Only what a page actually references lives here. The two animated GIFs in
 `../docs/assets/` are ~4 MB together and no page uses them, so they are
 deliberately not duplicated into the site. Copy one in if you reference it.
