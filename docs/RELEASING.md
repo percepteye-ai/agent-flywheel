@@ -15,6 +15,8 @@ Neither repository is public yet. That is why the PyPI page shows the figures'
 alt text; [§4](#4-making-the-repositories-public--not-done-yet) is the checklist
 for fixing it.
 
+Run every command below from the repository root, not from `docs/`.
+
 ## 1. Before any release
 
 **Python**, from a checkout with every extra installed and the Node repository
