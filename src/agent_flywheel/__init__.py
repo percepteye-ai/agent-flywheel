@@ -50,6 +50,7 @@ import warnings
 from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
+from . import declaration as _declaration
 from ._version import __version__
 from .contract import (
     CONTRACT_VERSION,
@@ -59,6 +60,7 @@ from .contract import (
     RolloutRequest,
     ToolCallOutcome,
 )
+from .declaration import Describe
 from .entrypoint import TASK, InputShape, resolve_entrypoint
 from .errors import (
     ConfigurationError,
@@ -81,8 +83,6 @@ from .host_description import WARMUP_PROMPT, warm_up_command
 from .host_description import read_discovered_agent as read_discovered_agent
 from .introspection import DiscoveredAgent, ToolDefinition
 from .introspection import introspect as introspect_agent
-from . import declaration as _declaration
-from .declaration import Describe
 from .isolation import unroutable_providers_present
 from .outcomes import (
     CaptureScope,

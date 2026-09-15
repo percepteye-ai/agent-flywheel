@@ -66,7 +66,6 @@ from typing import TYPE_CHECKING, Any
 # forced it anyway.
 if TYPE_CHECKING:
     from ._http import ControlPlaneClient
-from .declaration import Describe
 from .contract import (
     _PRODUCTION_IDENTIFIER_MAX_CHARS,
     _PRODUCTION_TURN_BATCH_MAX_ITEMS,
@@ -74,6 +73,7 @@ from .contract import (
     _production_identifier,
     _production_turn_identifier,
 )
+from .declaration import Describe
 from .entrypoint import InputShape
 from .errors import ConfigurationError, TransportError
 from .execution_identity import normalize_attested_components
