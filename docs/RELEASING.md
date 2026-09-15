@@ -9,7 +9,7 @@ repository takes copies of both.
 | repository | `percepteye-ai/agent-flywheel` | `percepteye-ai/agent-flywheel-node` |
 | registry | PyPI [`agent-flywheel`](https://pypi.org/project/agent-flywheel/) — published | npm `agent-flywheel` — **not yet published** (the name was free on 2026-09-14) |
 | version lives in | `src/agent_flywheel/_version.py`; `pyproject.toml` and the goose manifest repeat it, and `tests/test_one_version.py` holds all three together | `package.json`; the User-Agent derives from it, and `test/version.test.js` holds `openclaw.plugin.json` (version *and* description) equal to it |
-| publishes through | `.github/workflows/workflow.yml` on a `v*` tag, via PyPI trusted publishing | nothing yet — the first publish is manual ([§3](#3-node-release-npm)) |
+| publishes through | `.github/workflows/workflow.yml` on a `v*` tag, via PyPI trusted publishing | `.github/workflows/publish.yml` on a `v*` tag, via npm trusted publishing, after a manual first publish ([§3](#3-node-release-npm)) |
 
 Neither repository is public yet. That is why the PyPI page shows the figures'
 alt text; [§4](#4-making-the-repositories-public--not-done-yet) is the checklist
@@ -146,26 +146,45 @@ this repository's `test-full` job checks out the Node repository's `main`.
 Not yet published. The README says so ("Not on npm yet" and a grey static
 badge), and until the first release customers install from a clone.
 
+Releases go through the Node repository's `.github/workflows/publish.yml`, the
+same shape as `workflow.yml` here. A `v*` tag runs the whole CI workflow on the
+tagged commit, checks the tag against `package.json`, and publishes over OIDC.
+Only the very first publish is manual.
+
 1. **Bump `package.json`,** and set `openclaw.plugin.json` to the same version
    and description. `test/version.test.js` fails on either mismatch.
-2. **Run `npm test` and `npm pack --dry-run`,** as in §1.
-3. **First publish is manual,** from a clean checkout of `main`, with your npm
-   account's 2FA:
+2. **Run `npm test` and `npm pack --dry-run`,** as in §1. To rehearse the whole
+   pipeline on GitHub's runners, use Actions → publish → Run workflow: it runs
+   every check and ends in `npm publish --dry-run`.
+3. **The first publish is manual,** from a clean checkout of `main`, with your
+   npm account's 2FA. npm configures trusted publishers on a package that
+   already exists, so the workflow cannot create it:
 
    ```bash
    npm login
-   npm publish            # an unscoped package is public by default
+   npm publish --access public
    ```
 
-4. **After it lands,** restore the live npm badge (kept verbatim in the comment
-   above the README's badges) and remove the "Not on npm yet" warning. Verify
-   with `npm view agent-flywheel version`, then run
+4. **Then, once, on npmjs.com → the package → Settings:**
+   - **Trusted Publisher → GitHub Actions:** organization `percepteye-ai`,
+     repository `agent-flywheel-node`, workflow `publish.yml`, environment
+     `npm`. npm matches every field exactly, the file name included.
+   - **"Require two-factor authentication and disallow tokens",** so no
+     long-lived token can publish.
+   - Separately, in GitHub, **give the `npm` environment a required
+     reviewer.** Otherwise a tag publishes immediately.
+5. **Every release after that** is a merge, then a tag, in the Node repository:
+
+   ```bash
+   git switch main && git pull --ff-only
+   git tag -a vX.Y.Z -m "agent-flywheel X.Y.Z" && git push origin vX.Y.Z
+   ```
+
+6. **After the first release lands,** restore the live npm badge (kept verbatim
+   in the comment above the README's badges) and remove the "Not on npm yet"
+   warning. Verify with `npm view agent-flywheel version`, then run
    `openclaw plugins install agent-flywheel` on a test host and check the
    version `openclaw plugins list` reports.
-5. **Later releases:** npm supports trusted publishing from GitHub Actions. Set
-   it up after the first publish, with a tag-triggered workflow that mirrors
-   this repository's `workflow.yml`. Check npm's current documentation for the
-   exact setup.
 
 ### Node: what to know
 
@@ -182,6 +201,14 @@ badge), and until the first release customers install from a clone.
 - **The tarball ships no `docs/`.** The `files` allowlist excludes it, and
   `test/oss-boundary.test.js` checks what `npm pack` produces. So the README's
   figures can render on npm only from a public URL; see §4.
+- **The workflow's file name is part of the npm publisher,** exactly as on
+  PyPI. Rename `publish.yml` only together with the publisher settings.
+- **Provenance follows the repository's visibility.** npm cannot attest a
+  build from a private repository, so `publish.yml` turns provenance off while
+  the repository is private. The day it goes public, provenance switches on,
+  and a publish that cannot attest where it was built fails.
+- **npm is append-only too.** A version can never be published twice, not
+  even after an unpublish.
 
 ## 4. Making the repositories public — not done yet
 
@@ -255,6 +282,9 @@ gh repo edit percepteye-ai/agent-flywheel-node --visibility public --accept-visi
   `test/oss-boundary.test.js` ("names every README image relatively") in the
   same commit.
 - **Restore the live npm badge** once the package is published.
+- **Nothing to change in `publish.yml`.** It reads the repository's visibility
+  on every run, so the next release after the flip carries npm provenance.
+  From then on, a release that cannot attest where it was built fails.
 
 ### 4d. Also on the day
 
