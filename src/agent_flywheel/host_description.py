@@ -435,7 +435,14 @@ def _tools_from_request(body: Any) -> list[dict[str, Any]]:
             out.append({
                 "name": entry.get("name"),
                 "description": entry.get("description"),
-                "input_schema": entry.get("input_schema"),
+                # OpenAI's legacy flat ``functions`` shape spells the schema
+                # ``parameters``; read it rather than dropping the schema.
+                "input_schema": (entry.get("input_schema")
+                                 if "input_schema" in entry
+                                 else entry.get("parameters")),
+                # No ``read_only``, whatever the entry carries: a request is
+                # not a declaration, and a held-out pool admits declared reads.
+                # describe= reads its own (declaration.py).
                 "original_format": "anthropic_tool",
             })
     return out

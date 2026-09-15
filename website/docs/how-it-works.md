@@ -121,6 +121,32 @@ A host that exits on its own is read immediately; a fast CLI finishes in well un
 
 The warm-up child is **not a rollout** and is never captured, graded, or trained on. It gets the same environment scrub a rollout child gets — the whole `PERCEPTEYE_` namespace is stripped so the long-lived key stays in the parent, and `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` are forced to the loopback observer with a dummy key. The observer answers with an inert reply and forwards nothing, so a dispatch that outruns the kill reaches no live provider.
 
+### An agent nothing can read: `describe=`
+
+A custom agent — a plain class, no framework the SDK reflects on — registers as unreadable, and no task is ever generated for it. Say what it is instead:
+
+```python
+fw.serve(
+    "my_package.agent:build", agent_id="acme-bot", input_shape="text",
+    describe={
+        "system_prompt": SYSTEM_PROMPT,
+        "tools": TOOLS,          # the list you already send the model
+        "model": "gpt-4.1",      # optional
+    },
+)
+```
+
+- **`tools`** is the list your agent already sends its model: OpenAI function specs, Anthropic tools, or `{name, description, input_schema, read_only}`. It is read by the same parser that reads a tool list off a completion request, and a tool it cannot read refuses at startup rather than being dropped — as does a schema that is not a mapping.
+- **`read_only: true`** marks a tool that leaves the world unchanged. It goes at the top level of an entry, whichever shape — beside `function` in an OpenAI spec, never inside it — and must be a real boolean. Only a declaration says it: a `read_only` on a completion request the SDK observes is not read.
+- **`model`** is a model name, or a mapping of `model_name` (required), `provider`, `temperature` and `max_tokens`.
+- **What you declare wins; what you leave out still comes from reflection.** A LangChain agent whose prompt reflection cannot reach declares just `system_prompt` and keeps its reflected tools. Leaving `tools` out never means "no tools" — that is `tools=[]`.
+- **A zero-argument callable** works too, called once the agent is built, and only when introspection is on. One that raises refuses at startup, naming `describe=`.
+- **For a command agent, declaring all three replaces the warm-up** — `system_prompt`, `tools` and `model`, and nothing is spawned. Declare less and the warm-up still runs, for the rest.
+- **It is your word, not an observation**, so `source_type` is `sdk_declared` and a declared description never anchors an execution identity.
+- An unknown key (`prompt` for `system_prompt`, or `model` inside `model`) refuses at startup instead of declaring nothing — whether or not introspection is on, so lifting `PERCEPTEYE_INTROSPECT=0` later cannot turn it into a refusal to start. `introspect=False` with `describe=` is a contradiction and raises; `PERCEPTEYE_INTROSPECT=0` wins over it, with a warning.
+
+`fw.attach(..., describe=...)` takes the same argument: without `execution_entrypoint` it is the whole description the registration sends, which is how a production-only agent tells the control plane its prompt and tools. One that leaves `tools` out does not erase the tools `serve()` reflected for the same agent — the control plane keeps a catalogue that a later description did not observe. A bad declaration refuses before any adapter is bound.
+
 ### Opting out
 
 ```python

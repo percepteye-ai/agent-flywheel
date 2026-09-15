@@ -50,6 +50,7 @@ import warnings
 from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
+from . import declaration as _declaration
 from ._version import __version__
 from .contract import (
     CONTRACT_VERSION,
@@ -59,6 +60,7 @@ from .contract import (
     RolloutRequest,
     ToolCallOutcome,
 )
+from .declaration import Describe
 from .entrypoint import TASK, InputShape, resolve_entrypoint
 from .errors import (
     ConfigurationError,
@@ -558,13 +560,15 @@ def _describe_via_host(
     command: list[Any], *, artifacts_dir: str, agent_id: str,
     execution_snapshot: ExecutionSnapshot | None = None,
     endpoint_env: tuple[str, str] | None = None,
+    declared: _declaration.Declaration | None = None,
 ) -> DiscoveredAgent | None:
     """Have the host describe a command agent, by running it once.
 
     Returns None when the host produced nothing, having said why. The failure
     is silent everywhere else -- the plugin's hook simply never fires -- and an
     operator who is not told here finds out as an empty workflow list an hour
-    later, with nothing in between naming the cause.
+    later, with nothing in between naming the cause. ``declared`` is what
+    ``describe=`` already said, so the warning states what registers instead.
     """
     # The TASK sentinel marks where a rollout's task goes in the argv. There is
     # no rollout here, so it is filled with the warm-up prompt: an argv still
@@ -658,13 +662,20 @@ def _describe_via_host(
         )
         return described
 
+    if declared is None:
+        consequence = (
+            "This agent will register as introspection_state=unreadable, no "
+            "workflows will be generated for it, and every phase downstream of "
+            "that (reward suites, graded rollouts, training) has nothing to "
+            "work from.")
+    else:
+        consequence = "It registers only what describe= declared" + (
+            "; with no tools declared, no workflows will be generated for it."
+            if declared.tools is None else ".")
     warnings.warn(
         f"Could not describe {agent_id!r}: the agent ran, its host wrote no "
         f"description, and no completion request it made declared any tools. "
-        f"This agent will register as introspection_state=unreadable, no "
-        f"workflows will be generated for it, and every phase downstream of "
-        f"that (reward suites, graded rollouts, training) has nothing to work "
-        f"from.\n"
+        f"{consequence}\n"
         f"Two things to check, in this order:\n"
         f"  1. Does the agent reach its provider from an env var? The warm-up "
         f"points OPENAI_BASE_URL / OPENAI_API_BASE / ANTHROPIC_BASE_URL at a "
@@ -719,6 +730,7 @@ def serve(
     method: str | None = None,
     adapters: list[str] | str | None = "auto",
     introspect: bool = True,
+    describe: Describe | None = None,
     max_rollouts: int | None = None,
     on_event: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> int:
@@ -784,6 +796,21 @@ def serve(
             the SDK withholds the
             OPSD digest rather than claiming discovery identifies unobserved
             implementation code.
+        describe: your agent's own description, for when nothing can read it
+            -- a custom agent that is no framework the SDK reflects on, or a
+            prompt reflection cannot reach. A mapping of ``system_prompt``,
+            ``tools`` (the list you already send the model: OpenAI function
+            specs, Anthropic tools, or ``{name, description, input_schema,
+            read_only}``) and ``model``, or a zero-argument callable returning
+            one, called once the agent is built. What you declare wins; what
+            you leave out still comes from reflection, and leaving ``tools``
+            out never means "no tools" (that is ``tools=[]``). For a command
+            agent, declaring all three replaces the warm-up; declaring less
+            still runs it for the rest. A declared description never
+            anchors an execution identity -- it is your word, not an
+            observation. ``introspect=False`` with ``describe=`` is a
+            contradiction and raises; ``PERCEPTEYE_INTROSPECT=0`` wins over
+            it, with a warning.
         max_rollouts: stop after this many rollouts COMPLETE, and return. The
             only clean exit this function has: nothing in this package handles
             SIGINT or SIGTERM, so otherwise it runs until the process is
@@ -859,6 +886,16 @@ def serve(
         raise ModeNotAvailable(
             f"transport={transport!r} is not available in contract {CONTRACT_VERSION}."
         )
+
+    if describe is not None and not introspect:
+        raise ConfigurationError(
+            "describe= declares a description and introspect=False says to "
+            "send none; drop one of them"
+        )
+    if describe is not None and not callable(describe):
+        # A static declaration is checked NOW, before anything connects: a
+        # typo here otherwise surfaces as a run that generated nothing.
+        _declaration.resolve(describe)
 
     url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL)
     if not url:
@@ -985,7 +1022,16 @@ def serve(
     # "introspected, found nothing" -- the same absence-as-zero collapse the
     # tool-outcome contract exists to prevent, one layer up.
     discovery_enabled = introspect and _env_true("PERCEPTEYE_INTROSPECT", default=True)
+    if describe is not None and not discovery_enabled:
+        warnings.warn(
+            "PERCEPTEYE_INTROSPECT is off, and it wins: the description "
+            "declared with describe= is not sent.",
+            RuntimeWarning, stacklevel=2,
+        )
     described = None
+    # The customer's own declaration, resolved AFTER the build so a callable
+    # sees an agent whose tools are registered. See declaration.py.
+    declared = _declaration.resolve(describe) if discovery_enabled else None
     if discovery_enabled:
         described = introspect_agent(
             runner.resolved.fn if runner.resolved is not None else None
@@ -998,12 +1044,20 @@ def serve(
         # read that. See host_description.py for why this cannot wait for a
         # rollout (the launch gate and the first rollout are mutually
         # blocking).
-        if described is None and getattr(runner, "_command", None):
+        #
+        # Not when the customer declared ALL of it: then the warm-up has
+        # nothing to add. A partial declaration still runs it, because what
+        # they left out comes from observation -- skipping it registered a
+        # declared model with no tools and no prompt.
+        if (described is None and getattr(runner, "_command", None)
+                and not (declared is not None and declared.complete)):
             described = _describe_via_host(
                 runner._command, artifacts_dir=adir, agent_id=agent_id,
                 execution_snapshot=runner.execution_snapshot,
-                endpoint_env=endpoint_env,
+                endpoint_env=endpoint_env, declared=declared,
             )
+        described = _declaration.apply(declared, reflected=described,
+                                       agent_name=agent_id)
         payload["discovered_agent"] = described.to_wire() if described else None
 
     # The rollout fingerprint is authored here, after discovery, from the same
@@ -1011,9 +1065,12 @@ def serve(
     # discovery evidence and any adapter-attested opaque components. A disabled,
     # unreadable, or lossy description deliberately yields no digest, so an OPSD
     # consumer cannot mistake an unknown scaffold for an exact identity.
+    #
+    # A DECLARED description yields none either: it is the customer's word
+    # about their agent, not an observation of what runs.
     runner.configure_execution_identity(
         described,
-        discovery_enabled=discovery_enabled,
+        discovery_enabled=discovery_enabled and declared is None,
         sdk=payload["sdk"],
         contract_version=CONTRACT_VERSION,
     )

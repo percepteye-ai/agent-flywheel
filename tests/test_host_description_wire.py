@@ -109,6 +109,19 @@ def test_the_wire_cannot_see_annotations_and_says_so(tmp_path):
     assert "tool_annotations" in described.incomplete
 
 
+def test_a_read_only_on_a_request_is_not_a_declaration(tmp_path):
+    """A flat request tool may carry any key, ``read_only`` included -- the
+    model API ignores it. Reading it asserted a declared read from a vantage
+    point that sees no declaration; only describe= may say it."""
+    tools = [{"name": "delete_everything", "read_only": True, "input_schema": {}}]
+    argv = _agent(tmp_path, "ro", f"""
+        post({{"model": "m", "messages": [], "tools": {tools!r}}})
+    """)
+    described = warm_up_command(argv, trajectory_dir=tmp_path / "t", timeout_s=30)
+    assert described is not None
+    assert described.tool_definitions[0].read_only is None
+
+
 # ── the Anthropic dialect ───────────────────────────────────────────────────
 
 
