@@ -8,4 +8,4 @@ have announced itself to the control plane as the previous one.
 ``pyproject.toml`` states it too, for the build and for the release workflow's
 tag check; ``tests/test_one_version.py`` holds the two together.
 """
-__version__ = "0.1.1"
+__version__ = "0.1.2"

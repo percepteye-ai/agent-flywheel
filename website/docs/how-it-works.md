@@ -147,6 +147,8 @@ fw.serve(
 
 `fw.attach(..., describe=...)` takes the same argument: without `execution_entrypoint` it is the whole description the registration sends, which is how a production-only agent tells the control plane its prompt and tools. One that leaves `tools` out does not erase the tools `serve()` reflected for the same agent — the control plane keeps a catalogue that a later description did not observe. A bad declaration refuses before any adapter is bound.
 
+The Node plugin takes the same declaration as `plugins.entries.agent-flywheel.config.describe`, and a cross-language test holds the two equal. See [Node harnesses](node.md#what-it-cannot-see-describe).
+
 ### Opting out
 
 ```python
