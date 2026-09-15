@@ -24,10 +24,14 @@ TWO SOURCES, IN PREFERENCE ORDER.
    ``llm_input`` event. A file, not a function call, so anything that can write
    JSON can describe an agent -- one ABI, exactly as the plugin's trajectory
    writer and ``outcomes.py`` are the two ends of the tool-outcome ABI. This
-   is the richer source and it always wins: only the host knows its own
-   framework, its sub-agents, and its tools' read-only annotations.
+   is the richer source and it wins on everything it OBSERVED: only the host
+   knows its own framework, its sub-agents, and its tools' read-only
+   annotations.
 
-2. THE WIRE, when no plugin can write that file. Some hosts have no event that
+2. THE WIRE, when no plugin can write that file -- and for the gaps a
+   single-node file left open: its tools or its system prompt (see
+   ``_fill_from_wire``; current OpenClaw's ``llm_input`` carries no tool list,
+   so its file writes ``tool_definitions: null``). Some hosts have no event that
    carries a catalogue at all -- goose has twelve hook events and not one of
    them names a tool list, so a hook-based describer for goose is unwritable
    rather than merely unwritten. What every routable host does have is the
@@ -61,6 +65,7 @@ and kill the child. Typically well under a second.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import subprocess
@@ -666,6 +671,52 @@ def _json_reply() -> bytes:
     }).encode("utf-8")
 
 
+def _fill_from_wire(
+    described: DiscoveredAgent, wire: DiscoveredAgent | None,
+) -> DiscoveredAgent:
+    """``described`` with what only the wire observed filled in; nothing else.
+
+    Two gaps, and only when the file left them open: its TOOLS, and its SYSTEM
+    PROMPT. Its model configuration is never taken from the wire.
+
+    Only for a file that describes ONE node. A graph's root owns nothing of its
+    own -- its ``None`` is structural -- and whichever node made the request
+    the wire saw, that is not ours to say: grafting the wire's tools or prompt
+    onto the root would misattribute them. A merged graph also could not
+    anchor an exact identity, because its children's own digests cover prompts
+    the root's projection truncates.
+
+    Wire tools carry no annotations, so ``tool_annotations`` joins
+    ``incomplete``, and a part the file listed as unreadable stops being listed
+    once the wire has read it. The file's exact-observation digest covered the
+    file ALONE, so it is dropped rather than carried onto content it never
+    hashed; for a single node, identity reconciliation then hashes what is
+    actually registered, or declines to for a prompt at the public cap.
+    """
+    if wire is None or described.sub_agents:
+        return described
+    tools = (
+        wire.tool_definitions
+        if described.tool_definitions is None and wire.tool_definitions
+        else None
+    )
+    prompt = wire.system_prompt if described.system_prompt is None else None
+    if not tools and not prompt:
+        return described
+    filled = {name for name, got in (("tool_definitions", tools),
+                                     ("system_prompt", prompt)) if got}
+    incomplete = [i for i in described.incomplete if i not in filled]
+    if tools and "tool_annotations" not in incomplete:
+        incomplete.append("tool_annotations")
+    return dataclasses.replace(
+        described,
+        tool_definitions=tools or described.tool_definitions,
+        system_prompt=prompt or described.system_prompt,
+        incomplete=incomplete,
+        exact_observation_sha256=None,
+    )
+
+
 def framework_from_argv(argv: list[str]) -> str:
     """A framework name for a command agent: the binary it runs.
 
@@ -797,19 +848,40 @@ def warm_up_command(
     def _resolve() -> DiscoveredAgent | None:
         """The best description available, from either source.
 
-        THE FILE WINS, always. A host that describes itself states its own
-        framework, its sub-agents and its tools' read-only annotations --
-        everything the wire drops on the way to the model. The observer is the
-        floor under hosts that have no way to write that file, not a rival to
-        the ones that do.
+        THE FILE WINS on everything it observed. A host that describes itself
+        states its own framework, its sub-agents and its tools' read-only
+        annotations -- everything the wire drops on the way to the model. The
+        observer is the floor under hosts that have no way to write that file,
+        not a rival to the ones that do.
+
+        But a file can observe LESS than the wire, and then the wire fills the
+        gap (:func:`_fill_from_wire`). This used to return the file whenever it
+        existed: current OpenClaw writes ``tool_definitions: null`` -- its hook
+        event carries no tool list -- while the same agent's completion
+        request carried every tool, so the agent registered with no catalogue,
+        no workflows were generated for it, and the tools we had just watched
+        go past were thrown away.
         """
         described = read_discovered_agent(target)
-        if described is not None or observer is None:
+        if observer is None:
             return described
-        return observer.described(
+        wire = observer.described(
             agent_name=agent_name or framework_from_argv(argv),
             framework=framework_from_argv(argv),
         )
+        if described is None:
+            return wire
+        merged = _fill_from_wire(described, wire)
+        took = [part for part, before, after in (
+            ("tools", described.tool_definitions, merged.tool_definitions),
+            ("system prompt", described.system_prompt, merged.system_prompt),
+        ) if before is None and after is not None]
+        if took:
+            # Named, because the registration line below credits one source.
+            print(f"[percepteye] the host plugin's description had no "
+                  f"{' and no '.join(took)}; read from the agent's own "
+                  f"completion request instead.")
+        return merged
 
     try:
         if proc.stdin is not None:

@@ -1216,8 +1216,14 @@ def _reconcile_attached_execution(
     adapters_bound: tuple[str, ...],
     trajectory_root: str,
     attested_execution_components: Mapping[str, str],
+    discovery_enabled: bool = True,
 ) -> tuple[Any, dict[str, str] | None]:
-    """Use the rollout reconciler without claiming it owns production calls."""
+    """Use the rollout reconciler without claiming it owns production calls.
+
+    ``discovery_enabled`` is the customer's consent, asked the way serve()
+    asks it: when off, the entrypoint is still built and validated, but the
+    agent is not introspected and no execution identity is derived from it.
+    """
     if isinstance(entrypoint, (list, tuple)):
         raise ConfigurationError(
             "attach(execution_entrypoint=) requires an import spec or the live "
@@ -1243,10 +1249,10 @@ def _reconcile_attached_execution(
         reports_tool_calls=bool(adapters_bound),
         attested_execution_components=attested_execution_components,
     )
-    described = introspect(runner.resolved.fn)
+    described = introspect(runner.resolved.fn) if discovery_enabled else None
     digest = runner.configure_execution_identity(
         described,
-        discovery_enabled=True,
+        discovery_enabled=discovery_enabled,
         sdk=f"agent-flywheel-python/{__version__}",
         contract_version=CONTRACT_VERSION,
     )
@@ -1372,6 +1378,14 @@ def attach(
         # with no capture is still a served user.
         unbinds, bound = [], ()
 
+    # THE CUSTOMER'S CONSENT, read once and asked the way serve() asks it.
+    # With an entrypoint this used to be ignored: the agent was introspected
+    # and its description -- system prompt included -- registered under
+    # PERCEPTEYE_INTROSPECT=0, and an unrecognised agent's null then recorded
+    # `unreadable` rather than the opt-out.
+    from . import _env_true
+
+    introspection_consented = _env_true("PERCEPTEYE_INTROSPECT", default=True)
     described = None
     agent_fingerprint: dict[str, str] | None = None
     if execution_entrypoint is not None:
@@ -1383,6 +1397,7 @@ def attach(
                 adapters_bound=bound,
                 trajectory_root=trajectory_root,
                 attested_execution_components=normalized_components,
+                discovery_enabled=introspection_consented,
             )
         except Exception:
             # Unlike observation failures inside introspect(), invalid entrypoint
@@ -1459,7 +1474,15 @@ def attach(
                     ),
                     "entrypoint": "attach",
                 }
-                if execution_entrypoint is not None:
+                if introspection_consented:
+                    # A description when there is an agent to read, else
+                    # `null` -- "not described". Never an absent key: that is
+                    # the customer opting out, which the control plane records
+                    # as `disabled`, the destructive state that stops the
+                    # description a serve() registration stored from driving
+                    # workflow generation. The Node plugin sends null for the
+                    # same reason. Under PERCEPTEYE_INTROSPECT=0 the key IS
+                    # omitted: that opt-out is real.
                     registration["discovered_agent"] = (
                         described.to_wire() if described is not None else None
                     )
