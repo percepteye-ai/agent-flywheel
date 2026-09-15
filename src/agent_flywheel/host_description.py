@@ -24,10 +24,14 @@ TWO SOURCES, IN PREFERENCE ORDER.
    ``llm_input`` event. A file, not a function call, so anything that can write
    JSON can describe an agent -- one ABI, exactly as the plugin's trajectory
    writer and ``outcomes.py`` are the two ends of the tool-outcome ABI. This
-   is the richer source and it always wins: only the host knows its own
-   framework, its sub-agents, and its tools' read-only annotations.
+   is the richer source and it wins on everything it OBSERVED: only the host
+   knows its own framework, its sub-agents, and its tools' read-only
+   annotations.
 
-2. THE WIRE, when no plugin can write that file. Some hosts have no event that
+2. THE WIRE, when no plugin can write that file -- and for the gaps a
+   single-node file left open: its tools or its system prompt (see
+   ``_fill_from_wire``; current OpenClaw's ``llm_input`` carries no tool list,
+   so its file writes ``tool_definitions: null``). Some hosts have no event that
    carries a catalogue at all -- goose has twelve hook events and not one of
    them names a tool list, so a hook-based describer for goose is unwritable
    rather than merely unwritten. What every routable host does have is the
@@ -667,36 +671,33 @@ def _json_reply() -> bytes:
     }).encode("utf-8")
 
 
-def _node_has_tools(agent: DiscoveredAgent) -> bool:
-    return bool(agent.tool_definitions) or any(
-        _node_has_tools(child) for child in agent.sub_agents)
-
-
 def _fill_from_wire(
     described: DiscoveredAgent, wire: DiscoveredAgent | None,
 ) -> DiscoveredAgent:
     """``described`` with what only the wire observed filled in; nothing else.
 
-    Two gaps, both on the root, and only when the file left them open:
+    Two gaps, and only when the file left them open: its TOOLS, and its SYSTEM
+    PROMPT. Its model configuration is never taken from the wire.
 
-    * its TOOLS, when no node of the file carries any. Tools already on
-      sub-agents make the root's ``None`` structural, and grafting the wire's
-      copy of them onto the root would misattribute them.
-    * its SYSTEM PROMPT, when the file has none.
+    Only for a file that describes ONE node. A graph's root owns nothing of its
+    own -- its ``None`` is structural -- and whichever node made the request
+    the wire saw, that is not ours to say: grafting the wire's tools or prompt
+    onto the root would misattribute them. A merged graph also could not
+    anchor an exact identity, because its children's own digests cover prompts
+    the root's projection truncates.
 
     Wire tools carry no annotations, so ``tool_annotations`` joins
     ``incomplete``, and a part the file listed as unreadable stops being listed
     once the wire has read it. The file's exact-observation digest covered the
     file ALONE, so it is dropped rather than carried onto content it never
-    hashed; identity reconciliation then hashes what is actually registered,
-    or declines to for a prompt at the public cap.
+    hashed; for a single node, identity reconciliation then hashes what is
+    actually registered, or declines to for a prompt at the public cap.
     """
-    if wire is None:
+    if wire is None or described.sub_agents:
         return described
     tools = (
         wire.tool_definitions
-        if described.tool_definitions is None and not _node_has_tools(described)
-        and wire.tool_definitions
+        if described.tool_definitions is None and wire.tool_definitions
         else None
     )
     prompt = wire.system_prompt if described.system_prompt is None else None

@@ -249,15 +249,19 @@ def test_a_file_that_saw_no_tools_takes_them_from_the_wire(tmp_path):
     fills only the gap, says its tools carry no annotations, and the file's
     identity digest -- which covered the file alone -- is not carried over.
     """
+    # What the plugin actually writes (describe.js): null tools, AND the
+    # part it could not read named in `incomplete`.
     payload = {"agent_name": "from-the-file", "framework": "openclaw",
-               "system_prompt": "the host's own prompt", "tool_definitions": None}
+               "system_prompt": "the host's own prompt", "tool_definitions": None,
+               "incomplete": ["tool_definitions"]}
     described = warm_up_command(
         _file_then_request(tmp_path, payload), trajectory_dir=tmp_path / "t", timeout_s=30)
     assert described is not None
     assert described.framework == "openclaw"
     assert described.system_prompt == "the host's own prompt"
     assert [t.name for t in described.tool_definitions] == ["read_file", "write_file"]
-    assert "tool_annotations" in described.incomplete
+    # The wire read the part the file could not, and cannot read annotations.
+    assert described.incomplete == ["tool_annotations"]
     assert described.exact_observation_sha256 is None
 
 
@@ -274,18 +278,24 @@ def test_a_file_with_no_prompt_takes_the_wires(tmp_path):
     assert described.tool_definitions[0].read_only is True
 
 
-def test_tools_on_the_files_nodes_are_not_grafted_onto_its_root(tmp_path):
-    """A root with no tools of its own and nodes that carry them is a GRAPH:
-    its None is structural, and the wire's copy belongs to the nodes."""
+def test_nothing_from_the_wire_is_grafted_onto_a_graph_file(tmp_path):
+    """A root with sub-agents is a GRAPH: its None is structural, and the
+    request the wire saw came from SOME node -- not ours to attribute. Neither
+    the tools nor the prompt may land on the root, at any depth."""
     payload = {"agent_name": "graph", "framework": "langgraph",
-               "system_prompt": "route", "tool_definitions": None,
-               "sub_agents": [{"agent_name": "worker", "framework": "langgraph",
-                               "tool_definitions": [{"name": "read_file"}]}]}
+               "tool_definitions": None,
+               "sub_agents": [{"agent_name": "team", "framework": "langgraph",
+                               "tool_definitions": None,
+                               "sub_agents": [{"agent_name": "worker",
+                                               "framework": "langgraph",
+                                               "tool_definitions": None}]}]}
     described = warm_up_command(
-        _file_then_request(tmp_path, payload), trajectory_dir=tmp_path / "t", timeout_s=30)
+        _file_then_request(tmp_path, payload, system="You research."),
+        trajectory_dir=tmp_path / "t", timeout_s=30)
     assert described is not None
     assert described.tool_definitions is None
-    assert [t.name for t in described.sub_agents[0].tool_definitions] == ["read_file"]
+    assert described.system_prompt is None
+    assert described.sub_agents[0].sub_agents[0].tool_definitions is None
 
 
 def test_the_observer_never_answers_with_a_tool_call(tmp_path):
