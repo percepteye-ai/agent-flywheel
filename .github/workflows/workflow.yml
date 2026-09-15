@@ -5,19 +5,25 @@ name: release
 # a short-lived identity token for this workflow and PyPI verifies it against
 # the publisher you configured there. Nothing long-lived exists to leak.
 #
-# One-time setup on PyPI, and it must be done by a human with the account:
+# One-time setup on PyPI, done on 2026-09-14 by a human with the account. It
+# stays written down because redoing it (a new project, a renamed file) is the
+# same flow:
 #
-#   1. https://pypi.org/manage/account/publishing/  ("pending publisher",
-#      which is the flow for a project that does NOT exist on PyPI yet)
+#   1. https://pypi.org/manage/account/publishing/ -- a "pending publisher",
+#      the flow for a project that does not exist on PyPI yet. The first
+#      upload, 0.1.0, turned it into the project's ordinary publisher.
 #   2. PyPI Project Name : agent-flywheel
 #      Owner            : percepteye-ai
 #      Repository name  : agent-flywheel
 #      Workflow name    : workflow.yml
 #      Environment name : pypi
-#   3. Create a GitHub environment named `pypi` (Settings -> Environments) and
-#      add yourself as a required reviewer, so a publish waits for a human.
+#   3. A GitHub environment named `pypi` (Settings -> Environments). A required
+#      reviewer on it would make each publish wait for a human, but on the
+#      GitHub Team plan that only works once the repository is public
+#      (docs/RELEASING.md, section 4d).
 #
-# After that, publishing is: push a tag, approve the environment. That is all.
+# After that, publishing is: push a tag. That is all -- and until a reviewer
+# can be added, the tag publishes as soon as the build job passes.
 #
 # THIS FILE'S NAME IS PART OF THAT CONFIGURATION. PyPI matches the publisher on
 # the workflow FILE name, not on `name:` above, and a token minted by any other
@@ -99,7 +105,7 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
     runs-on: ubuntu-latest
-    environment: pypi        # gate this with a required reviewer in Settings
+    environment: pypi        # add a required reviewer once the repo is public (see the header)
     permissions:
       id-token: write
     steps:

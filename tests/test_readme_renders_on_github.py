@@ -15,11 +15,14 @@ A relative src, by contrast, is resolved by GitHub against the repo you are
 already authenticated to, so it renders.
 
 The trade-off is settled and it is not close: GitHub is the target surface for
-these figures, the package is not published, and ``docs/assets/`` is
-deliberately excluded from the wheel and the sdist -- ``test_packaging.py``
-builds the real artifacts and asserts it -- so there is no shipped artifact an
-absolute URL could help. Absolute URLs become correct only once the repo is
-PUBLIC, and on that day this test is what tells you it is now safe to flip.
+these figures. The package is on PyPI, whose page is this README, but an
+absolute URL would not rescue the figures there either: while the repo is
+private, ``raw.githubusercontent.com`` answers PyPI's visitors with the same
+404. And ``docs/assets/`` is deliberately excluded from the wheel and the
+sdist -- ``test_packaging.py`` builds the real artifacts and asserts it -- so
+no shipped artifact carries the files. Absolute URLs become correct only once
+the repo is PUBLIC, and on that day this test is what tells you it is now safe
+to flip.
 
 A comment saying "keep these relative" is what was there the first time. This
 is a mechanism: it fails the suite instead of the page.

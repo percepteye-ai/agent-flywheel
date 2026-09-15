@@ -8,12 +8,6 @@ Install the package, add two lines to the process that already runs your agent, 
 pip install agent-flywheel
 ```
 
-!!! warning "Not on PyPI yet"
-
-    That command does not resolve today. Until the first release, install from
-    source with repository access:
-    `pip install "git+ssh://git@github.com/percepteye-ai/agent-flywheel.git"`.
-
 One runtime dependency: `httpx`. Python 3.10 → 3.13. Nothing else is needed to integrate.
 
 The `[otel]` extra is available and optional — `pip install "agent-flywheel[otel]"` additionally emits each outcome as a span. It pulls the OpenTelemetry **API** only: this package emits into a `TracerProvider` you already registered and never installs one.
