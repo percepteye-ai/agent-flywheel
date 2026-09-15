@@ -88,7 +88,7 @@ That is the whole product. Not a dashboard you read, not a benchmark you run —
 | 🔭 **Honest evidence** | every tool call is recorded as `ok`, `failed`, or `unknown` — the third is legal, expected, and never rounded up to `ok`, so a verifier abstains instead of learning from a lie |
 | 🔒 **Nothing moves** | no container, no cluster, no GPU, no inbound port; every connection is dialled out from your side |
 
-**And you can watch every lap.** The control plane is the part you don't build — not a part you can't see. Sign in and the tasks it generated, how each rollout scored, and what got promoted are all there to inspect.
+**And you can watch every lap.** The control plane is the part you don't build — not a part you can't see. [Sign in](https://launch.percepteye.ai) and the tasks it generated, how each rollout scored, and what got promoted are all there to inspect.
 
 ## ⚡ Start in one call
 
@@ -108,25 +108,21 @@ It needs two things from the environment — there is no baked-in address:
 
 ```bash
 export PERCEPTEYE_CONTROL_PLANE_URL=https://launch.percepteye.ai/api/flywheel/v1
-export PERCEPTEYE_API_KEY=pefw_...        # issued by whoever operates your control plane
+export PERCEPTEYE_API_KEY=pefw_...        # free: sign in at https://launch.percepteye.ai
 ```
 
 Either one missing and `serve()` raises before the first rollout, naming it.
 
 Everything that can be misconfigured — entrypoint, credential, contract version, isolation mode — is checked **before the first rollout** and raises there, never mid-run.
 
-<!-- SIGNUP ROUTE STILL NEEDED — owner action. There is no self-service signup,
-     no key-request form and no "request access" endpoint anywhere in either SDK
-     repo; grep for one before assuming otherwise. support@percepteye.ai below is
-     the only non-security address either repo contains (the sibling Node README
-     is its single occurrence — it is uncorroborated by any code, config, DNS or
-     docs page here), and it is used because the Node README already gives it and
-     both SDKs must answer this question identically. Replace this paragraph with
-     the real route once it exists, in BOTH READMEs. Do not invent one, and do
-     not link a host that has not been resolved: docs.percepteye.ai was linked
-     here and does not resolve (checked 2026-09-06). -->
+<!-- THE KEY ROUTE, confirmed by the owner 2026-09-14: PerceptEye operates the
+     control plane, and sign-in is free and self-serve at
+     https://launch.percepteye.ai (HTTP 200, "Mission Control · PerceptEye").
+     Connecting an agent there issues its key -- shown once, bound to that
+     agent -- and prints the control-plane URL to export. The Node README says
+     the same; keep the two in step. -->
 
-**Where a `pefw_` key comes from:** it is issued by whoever operates your PerceptEye control plane — ask them, or write to **support@percepteye.ai**. There is no self-service page to sign up on, and this README deliberately does not point you at one.
+**Where a `pefw_` key comes from:** PerceptEye runs the control plane, and signing in is free and self-serve at **[launch.percepteye.ai](https://launch.percepteye.ai)**. Connect your agent there and you get its key — shown once, and scoped to that one agent — along with the exact `PERCEPTEYE_CONTROL_PLANE_URL` to export.
 
 > [!TIP]
 > Rollouts are real runs on your real credentials. Bound the first one with `max_rollouts=8` and point `artifacts_dir=` somewhere you don't mind it writing. `max_rollouts` is also the only clean exit: there is no signal handler, and Ctrl-C drains in-flight rollouts first.

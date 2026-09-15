@@ -245,7 +245,7 @@ The agent is stopped **10 seconds short of the deadline**, so there is time left
 
 Grading happens on the control plane, against tasks generated from the tool surface beat ⓪ reported. The SDK's job ends at faithful observation; `POST /rollouts/{id}/result` returns the acknowledgment, and `rollout_reported` carries its `grade` and `duplicate` flag straight to your `on_event` callback.
 
-**The control plane is the part you don't build — not a part you can't see.** Sign in and the tasks it generated, how each rollout scored, and what got promoted are all there to inspect.
+**The control plane is the part you don't build — not a part you can't see.** [Sign in](https://launch.percepteye.ai) and the tasks it generated, how each rollout scored, and what got promoted are all there to inspect.
 
 ---
 
