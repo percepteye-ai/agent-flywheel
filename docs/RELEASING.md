@@ -9,13 +9,50 @@ repository takes copies of both.
 | repository | `percepteye-ai/agent-flywheel` | `percepteye-ai/agent-flywheel-node` |
 | registry | PyPI [`agent-flywheel`](https://pypi.org/project/agent-flywheel/) — published | npm [`@percepteye/agent-flywheel`](https://www.npmjs.com/package/@percepteye/agent-flywheel), owned by the `percepteye` npm organization |
 | version lives in | `src/agent_flywheel/_version.py`; `pyproject.toml` and the goose manifest repeat it, and `tests/test_one_version.py` holds all three together | `package.json`; the User-Agent derives from it, and `test/version.test.js` holds `openclaw.plugin.json` (version *and* description) equal to it |
-| publishes through | `.github/workflows/workflow.yml` on a `v*` tag, via PyPI trusted publishing | `.github/workflows/publish.yml` on a `v*` tag, via npm trusted publishing, after a manual first publish ([§3](#3-node-release-npm)) |
+| publishes through | `.github/workflows/workflow.yml` on a `v*` tag, via PyPI trusted publishing. Works: 0.1.0, 0.1.1 and 0.1.2 went out this way | `.github/workflows/publish.yml` on a `v*` tag, via npm trusted publishing, **once the rehearsal proves it** ([§3](#3-node-release-npm)). Until then, by hand ([§3b](#3b-publishing-to-npm-by-hand)): 0.1.0 and 0.1.2 went out that way |
 
 Neither repository is public yet. That is why the PyPI page shows the figures'
 alt text; [§4](#4-making-the-repositories-public--not-done-yet) is the checklist
 for fixing it.
 
-Run every command below from the repository root, not from `docs/`.
+Run every command below from the repository root, not from `docs/`. On this
+Mac, put `PATH=/opt/homebrew/opt/node@24/bin:$PATH` in front of every `node` or
+`npm` command: Homebrew's node 25.4.0 fails to start (a missing `simdjson`
+library).
+
+## 0. The release, start to finish
+
+Follow this in order; each step links to the detail. When something fails,
+[§5](#5-when-a-publish-fails) maps the symptom to the cause.
+
+1. **Settle what the release depends on.** If it relies on a control-plane
+   change, that change must be deployed first: an SDK that talks to an older
+   Mission Control misbehaves. If the dashboard's install line pins the new
+   version (`pip install "agent-flywheel>=X.Y.Z"`), the release is urgent the
+   moment that deploy lands: until then the page's first command fails.
+2. **Bump both versions, one number for both.** Python: `_version.py`,
+   `pyproject.toml` and the goose manifest, then `uv lock`. Node: `package.json`
+   and `openclaw.plugin.json`. Then update the published test counts: three
+   places in the Python README plus `website/docs/python.md` and `index.md`, and
+   in the Node README the badge, the comment above it, and the Develop line.
+3. **Run §1 in both repositories,** with the Node SDK checked out and named
+   through `PERCEPTEYE_NODE_SDK`, so the Python parity tests run instead of
+   skipping: `N passed, 0 skipped`. CI cannot vouch for this part yet
+   ([§5](#5-when-a-publish-fails): `NODE_SDK_READ_TOKEN`).
+4. **Merge the Node PR first, then the Python one.** The Python parity tests
+   import the Node repository's `main`.
+5. **Rehearse npm's authentication before tagging.** In the Node repository,
+   Actions → publish → Run workflow. In the `rehearse` job's log, the
+   `npm verbose oidc` line is the verdict: `Successfully retrieved and set
+   token` means a tag will publish; anything else is a
+   [§5](#5-when-a-publish-fails) row. The rehearsal uploads nothing.
+6. **Tag both** `vX.Y.Z` on `main` and push the tags. Each tag publishes as
+   soon as its build passes; no reviewer gates it yet.
+7. **Watch both runs to the end,** and verify each registry itself, not the
+   green check: [§2](#2-python-release-pypi) step 6 and
+   [§3](#3-node-release-npm) step 6. If npm refused and nothing uploaded,
+   publish that version by hand ([§3b](#3b-publishing-to-npm-by-hand)) rather
+   than letting the two registries disagree.
 
 ## 1. Before any release
 
@@ -156,13 +193,30 @@ take the name.
 Releases go through the Node repository's `.github/workflows/publish.yml`, the
 same shape as `workflow.yml` here. A `v*` tag runs the whole CI workflow on the
 tagged commit, checks the tag against `package.json`, and publishes over OIDC.
-Only the very first publish is manual.
+Only the very first publish is manual — in principle. **As of 2026-09-15 no
+tag has ever published to npm:** the 0.1.2 tag run was refused, npm's token
+exchange answering `OIDC token exchange error - package not found` for
+`@percepteye/agent-flywheel`, and 0.1.2 was published by hand. Until a
+rehearsal shows `Successfully retrieved and set token`, expect to publish by
+hand ([§3b](#3b-publishing-to-npm-by-hand)).
 
 1. **Bump `package.json`,** and set `openclaw.plugin.json` to the same version
    and description. `test/version.test.js` fails on either mismatch.
-2. **Run `npm test` and `npm pack --dry-run`,** as in §1. To rehearse the whole
-   pipeline on GitHub's runners, use Actions → publish → Run workflow: it runs
-   every check and ends in `npm publish --dry-run`.
+2. **Run `npm test` and `npm pack --dry-run`,** as in §1. Then rehearse the
+   whole pipeline on GitHub's runners, **authentication included**: Actions →
+   publish → Run workflow. It runs every check and ends in
+   `npm publish --dry-run --loglevel verbose`, with the same `npm` environment
+   and `id-token: write` as the real publish. npm performs the OIDC exchange
+   before it looks at `--dry-run`, so the log's `npm verbose oidc` line tells
+   you whether a tag would publish — without uploading anything:
+   - `Successfully retrieved and set token`: tag away.
+   - `Failed token exchange request with body message: OIDC token exchange
+     error - package not found`: npm has no trusted publisher on
+     `@percepteye/agent-flywheel` that matches this workflow. Fix it on
+     npmjs.com (step 4), then rehearse again.
+   - A rehearsal of a version that is already published ends in `You cannot
+     publish over the previously published versions`. That is expected; the
+     `oidc` line above it is still the verdict.
 3. **The first publish is manual,** from a clean checkout of `main`. npm
    configures trusted publishers only on a package that already exists, so the
    workflow cannot create it. The npm account must be a member of the
@@ -181,9 +235,15 @@ Only the very first publish is manual.
      on a version that already exists.
 
 4. **Then, once, on npmjs.com → the package → Settings:**
+   - **The package is `@percepteye/agent-flywheel`**, the scoped one created on
+     2026-09-15. The deprecated unscoped `agent-flywheel` is a different
+     package with its own settings page: a publisher configured there
+     authorizes nothing for the scoped name.
    - **Trusted Publisher → GitHub Actions:** organization `percepteye-ai`,
      repository `agent-flywheel-node`, workflow `publish.yml`, environment
-     `npm`. npm matches every field exactly, the file name included.
+     `npm`. npm matches every field exactly, the file name included, and
+     answers any mismatch with the same `package not found` — so after saving,
+     rehearse (step 2) and read the `oidc` line.
    - **"Require two-factor authentication and disallow tokens",** so no
      long-lived token can publish.
    - **No required reviewer on the GitHub `npm` environment yet.** On the
@@ -197,9 +257,52 @@ Only the very first publish is manual.
    git tag -a vX.Y.Z -m "agent-flywheel X.Y.Z" && git push origin vX.Y.Z
    ```
 
-6. **Verify every release** with `npm view @percepteye/agent-flywheel version`.
-   Then run `openclaw plugins install @percepteye/agent-flywheel` on a test
-   host, and check the version `openclaw plugins list` reports.
+6. **Verify every release** on the registry. npm says "Your package is being
+   processed and may take a few minutes to become available", and until then
+   the version answers 404 — so wait for it, then install it fresh:
+
+   ```bash
+   until [ "$(curl -s -o /dev/null -w '%{http_code}' https://registry.npmjs.org/@percepteye%2fagent-flywheel/X.Y.Z)" = 200 ]; do sleep 15; done
+   npm view @percepteye/agent-flywheel dist-tags --prefer-online   # latest: X.Y.Z
+   cd "$(mktemp -d)" && npm init -y >/dev/null && npm install --prefer-online @percepteye/agent-flywheel@X.Y.Z
+   ```
+
+   `--prefer-online` matters: the document `npm install` reads lags the
+   version's own URL, and without it an install minutes after publishing can
+   answer "No matching version". Then run
+   `openclaw plugins install @percepteye/agent-flywheel` on a test host, and
+   check the version `openclaw plugins list` reports.
+
+### 3b. Publishing to npm by hand
+
+The path 0.1.0 and 0.1.2 took. It needs the npm account (a member of the
+`percepteye` organization, with two-factor on), and it produces a release with
+no provenance, which is all a private repository can have anyway.
+
+1. **A clean checkout of the tag**, never a working tree:
+
+   ```bash
+   git fetch origin --tags && git worktree add --detach /tmp/npm-publish vX.Y.Z
+   cd /tmp/npm-publish && git status --porcelain      # must print nothing
+   npm pack --dry-run                                 # the tarball CI's `publishable` job checked
+   ```
+
+2. **Sign in:** `npm login --auth-type=web` prints a URL; the account holder
+   opens it and signs in. `npm whoami` then names the account.
+3. **Publish under a pseudo-terminal:**
+
+   ```bash
+   script -q /dev/null npm publish --access public
+   ```
+
+   npm needs the second factor, and asks for it only when it has a terminal: it
+   prints `Authenticate your account at: https://www.npmjs.com/auth/cli/…` and
+   waits until that link is approved. Without `script`, an agent's shell has no
+   terminal, and npm exits at once with `EOTP` and the link redacted to `***`.
+   The run ends with `+ @percepteye/agent-flywheel@X.Y.Z`.
+4. **Sign out:** `npm logout`. Nothing should stay logged in on a shared
+   machine.
+5. **Verify** as in step 6 above.
 
 ### Node: what to know
 
@@ -321,3 +424,22 @@ gh repo edit percepteye-ai/agent-flywheel-node --visibility public --accept-visi
   - the PyPI page renders its figures, and its sidebar links resolve;
   - the npm page renders its figures;
   - `pip install agent-flywheel` still works.
+
+## 5. When a publish fails
+
+Every row below happened during a real release. A failed publish uploads
+nothing, and a tag that has not published yet can simply be re-run — check
+the registry (`https://pypi.org/pypi/agent-flywheel/X.Y.Z/json`,
+`https://registry.npmjs.org/@percepteye%2fagent-flywheel/X.Y.Z`) before assuming
+otherwise.
+
+| symptom | cause | fix |
+|:--|:--|:--|
+| Every job fails within seconds, with no steps and no log | GitHub Actions refused to start them: failed payment or spending limit. The reason is only in an annotation: `gh api repos/percepteye-ai/<repo>/check-runs/<job-id>/annotations` says "recent account payments have failed or your spending limit needs to be increased". macOS runners bill at 10× on private repositories | Fix it under the organization's Settings → Billing & plans, then `gh run rerun <run-id>`. The tag still points at the right commit |
+| npm `publish` job: `E404 Not Found - PUT https://registry.npmjs.org/@percepteye%2fagent-flywheel`, and nothing else | npm's OIDC exchange failed, npm fell back to `setup-node`'s placeholder token, and the registry answers an unauthenticated scoped publish with 404. The reason is logged only at `--loglevel verbose`, which `publish.yml` now passes: read the `npm verbose oidc` line | For `package not found`: the trusted publisher on `@percepteye/agent-flywheel` does not match org / repository / `publish.yml` / environment `npm` ([§3](#3-node-release-npm) step 4). Fix, rehearse until the `oidc` line says `Successfully retrieved and set token`, then `gh run rerun <run-id>`. Or publish by hand ([§3b](#3b-publishing-to-npm-by-hand)) |
+| The rehearsal passed, but the tag's publish was refused | The rehearsal used to skip authentication entirely: it had no `id-token: write` and no environment, so npm skipped the exchange without a word | Fixed: the rehearsal now authenticates exactly like the publish job. Read its `oidc` line |
+| Local `npm publish`: `EOTP This operation requires a one-time password`, link shown as `https://www.npmjs.com/auth/cli/***` | npm asks for the second factor only on a terminal; an agent's shell has none, and npm redacts the link in the error | `script -q /dev/null npm publish --access public`: npm prints the link, then waits for its approval |
+| `npm view` or `npm install` of a version answers 404 or "No matching version" right after `+ @percepteye/agent-flywheel@X.Y.Z` | "Your package is being processed and may take a few minutes to become available" | Poll the version's registry URL until it answers 200, then install with `--prefer-online` ([§3](#3-node-release-npm) step 6) |
+| `dyld: Library not loaded: …/libsimdjson…` | Homebrew's node 25.4.0 is broken on this Mac | `PATH=/opt/homebrew/opt/node@24/bin:$PATH` |
+| The `Set up job` step's GITHUB_TOKEN Permissions list no `IdToken`, so OIDC "must" be missing | Not evidence: GitHub never lists `id-token` there. The PyPI job that published 0.1.2 over OIDC lists only `Metadata: read` | Diagnose from the `oidc` log line instead |
+| Python CI: `test-full` and `node-plugins` fail at `Run actions/checkout@v4` | The `NODE_SDK_READ_TOKEN` secret is missing, so the private Node repository cannot be checked out and those jobs never reach their tests | Add the secret (or a read-only deploy key, or make both repositories public: [§4c](#4c-then-one-pr-per-repository)). Until then, run their suite locally with the Node SDK named: `PERCEPTEYE_NODE_SDK=<node checkout> .venv/bin/pytest -q` must print `0 skipped` |
