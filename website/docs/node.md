@@ -1,12 +1,12 @@
 # Node harnesses
 
-**One npm package, two harnesses, zero dependencies.** `agent-flywheel` is a plugin the harness already loads. It records what your agent's tools actually did — `ok`, `failed` or **`unknown`** — into the same trajectory file the Python SDK writes and reads.
+**One npm package, two harnesses, zero dependencies.** [`@percepteye/agent-flywheel`](https://www.npmjs.com/package/@percepteye/agent-flywheel) is a plugin the harness already loads, and it registers there as `agent-flywheel`. It records what your agent's tools actually did — `ok`, `failed` or **`unknown`** — into the same trajectory file the Python SDK writes and reads.
 
 It is its own repository — [`percepteye-ai/agent-flywheel-node`](https://github.com/percepteye-ai/agent-flywheel-node) — and that repo's README is the reference for the plugin's internals. This page is the contract it shares with the Python SDK.
 
 ```bash
-openclaw plugins install agent-flywheel            # OpenClaw
-dsh plugin --profile <name> add agent-flywheel     # DeepSeek Harness
+openclaw plugins install @percepteye/agent-flywheel            # OpenClaw
+dsh plugin --profile <name> add @percepteye/agent-flywheel     # DeepSeek Harness
 ```
 
 | harness | entry module | hook | can it change the run? |
