@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 
+from ._version import __version__
 from .contract import CONTRACT_VERSION
 from .errors import LeaseLost, TransportError
 
@@ -28,7 +29,7 @@ _RETRY_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 #: have been processed, and is only safe to resend if the endpoint is replayable.
 _NEVER_SENT = (httpx.ConnectError, httpx.ConnectTimeout)
 
-_SDK_UA = "agent-flywheel-python/0.1.0"
+_SDK_UA = f"agent-flywheel-python/{__version__}"
 
 
 class ControlPlaneClient:

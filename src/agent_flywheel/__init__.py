@@ -50,6 +50,7 @@ import warnings
 from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
+from ._version import __version__
 from .contract import (
     CONTRACT_VERSION,
     ExclusionReason,
@@ -104,8 +105,6 @@ from .prompt import (
 )
 from .runner import RolloutRunner
 from .transport import AttachTransport, FlywheelTransport
-
-__version__ = "0.1.0"
 
 #: This package's logger. It has no handler and never installs one -- it
 #: emits into whatever logging the customer's process already configured,
