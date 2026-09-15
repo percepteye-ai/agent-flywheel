@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-flywheel"
-version = "0.1.0"
+version = "0.1.1"
 # PyPI renders this verbatim as the page's og:description, and PyPI's <title>
 # and <meta description> carry no description at all -- so this string is the
 # entire machine-readable summary of the project on the one page in this

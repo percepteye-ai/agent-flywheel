@@ -56,13 +56,13 @@ Ship one line. Your agent keeps running in your process, behind your firewall, o
      requires every published copy to match it, here and on the docs site, so
      editing one copy alone turns the suite red. Re-derive by hand with:
        .venv/bin/python -m pytest tests/ --collect-only -q -p no:warnings \
-         | awk -F': ' '/^tests\/.*: [0-9]+$/{n+=$2} END{print n}'   # -> 982 -->
+         | awk -F': ' '/^tests\/.*: [0-9]+$/{n+=$2} END{print n}'   # -> 984 -->
 [![pypi](https://img.shields.io/pypi/v/agent-flywheel?style=for-the-badge&logo=pypi&logoColor=white&label=pypi&color=3b82f6)](https://pypi.org/project/agent-flywheel/)
 [![python](https://img.shields.io/badge/python-3.10%20→%203.13-3b82f6?style=for-the-badge&logo=python&logoColor=white)](pyproject.toml)
 <br/>
 [![runtime dependencies](https://img.shields.io/badge/runtime_deps-1-f59e0b?style=for-the-badge)](pyproject.toml)
 [![lines changed in your agent](https://img.shields.io/badge/lines_changed_in_your_agent-0-ec4899?style=for-the-badge)](#-zero-instrumentation-concretely)
-[![tests](https://img.shields.io/badge/tests-982_·_0_skips-22c55e?style=for-the-badge)](#-development)
+[![tests](https://img.shields.io/badge/tests-984_·_0_skips-22c55e?style=for-the-badge)](#-development)
 [![license](https://img.shields.io/badge/license-MIT-14b8a6?style=for-the-badge)](LICENSE)
 
 <img src="docs/assets/flywheel-overview.gif" width="1040"
@@ -88,7 +88,7 @@ That is the whole product. Not a dashboard you read, not a benchmark you run —
 | 🔭 **Honest evidence** | every tool call is recorded as `ok`, `failed`, or `unknown` — the third is legal, expected, and never rounded up to `ok`, so a verifier abstains instead of learning from a lie |
 | 🔒 **Nothing moves** | no container, no cluster, no GPU, no inbound port; every connection is dialled out from your side |
 
-**And you can watch every lap.** The control plane is the part you don't build — not a part you can't see. Sign in and the tasks it generated, how each rollout scored, and what got promoted are all there to inspect.
+**And you can watch every lap.** The control plane is the part you don't build — not a part you can't see. [Sign in](https://launch.percepteye.ai) and the tasks it generated, how each rollout scored, and what got promoted are all there to inspect.
 
 ## ⚡ Start in one call
 
@@ -108,25 +108,21 @@ It needs two things from the environment — there is no baked-in address:
 
 ```bash
 export PERCEPTEYE_CONTROL_PLANE_URL=https://launch.percepteye.ai/api/flywheel/v1
-export PERCEPTEYE_API_KEY=pefw_...        # issued by whoever operates your control plane
+export PERCEPTEYE_API_KEY=pefw_...        # free: sign in at https://launch.percepteye.ai
 ```
 
 Either one missing and `serve()` raises before the first rollout, naming it.
 
 Everything that can be misconfigured — entrypoint, credential, contract version, isolation mode — is checked **before the first rollout** and raises there, never mid-run.
 
-<!-- SIGNUP ROUTE STILL NEEDED — owner action. There is no self-service signup,
-     no key-request form and no "request access" endpoint anywhere in either SDK
-     repo; grep for one before assuming otherwise. support@percepteye.ai below is
-     the only non-security address either repo contains (the sibling Node README
-     is its single occurrence — it is uncorroborated by any code, config, DNS or
-     docs page here), and it is used because the Node README already gives it and
-     both SDKs must answer this question identically. Replace this paragraph with
-     the real route once it exists, in BOTH READMEs. Do not invent one, and do
-     not link a host that has not been resolved: docs.percepteye.ai was linked
-     here and does not resolve (checked 2026-09-06). -->
+<!-- THE KEY ROUTE, confirmed by the owner 2026-09-14: PerceptEye operates the
+     control plane, and sign-in is free and self-serve at
+     https://launch.percepteye.ai (HTTP 200, "Mission Control · PerceptEye").
+     Connecting an agent there issues its key -- shown once, bound to that
+     agent -- and prints the control-plane URL to export. The Node README says
+     the same; keep the two in step. -->
 
-**Where a `pefw_` key comes from:** it is issued by whoever operates your PerceptEye control plane — ask them, or write to **support@percepteye.ai**. There is no self-service page to sign up on, and this README deliberately does not point you at one.
+**Where a `pefw_` key comes from:** PerceptEye runs the control plane, and signing in is free and self-serve at **[launch.percepteye.ai](https://launch.percepteye.ai)**. Connect your agent there and you get its key — shown once, and scoped to that one agent — along with the exact `PERCEPTEYE_CONTROL_PLANE_URL` to export.
 
 > [!TIP]
 > Rollouts are real runs on your real credentials. Bound the first one with `max_rollouts=8` and point `artifacts_dir=` somewhere you don't mind it writing. `max_rollouts` is also the only clean exit: there is no signal handler, and Ctrl-C drains in-flight rollouts first.
@@ -354,7 +350,7 @@ python -m venv .venv
 
 The last one is **not** the Node package's own suite — that lives in the [Node repository](https://github.com/percepteye-ai/agent-flywheel-node) and runs there with `npm test`. This drives records through the Node writer and asserts the Python `Trajectory` reads them back with the same meaning, which is the half only this repo can check. **It needs a Node checkout**: point `PERCEPTEYE_NODE_SDK` at one, or keep it as a sibling directory. Without one it prints `SKIPPED` and exits 0, and the cross-language tests in the suite above skip with it.
 
-982 tests, and CI permits **zero skips** — a skipped test and a passing test look identical in a green check mark. CI names `PERCEPTEYE_NODE_SDK`, so the cross-language half cannot go green by skipping there. Other jobs assert that a bare install still works on Python 3.10→3.13, that the runtime dependency list never grows past `httpx`, and that the Node plugins never drift from the Python reader.
+984 tests, and CI permits **zero skips** — a skipped test and a passing test look identical in a green check mark. CI names `PERCEPTEYE_NODE_SDK`, so the cross-language half cannot go green by skipping there. Other jobs assert that a bare install still works on Python 3.10→3.13, that the runtime dependency list never grows past `httpx`, and that the Node plugins never drift from the Python reader.
 
 [`schema/flywheel-1.json`](schema/flywheel-1.json) is the wire contract and this repository owns it. Absence is never collapsed into zero: `tool_calls=None` means "I did not report tool calls"; `[]` means "I observed zero", a positive claim. The animations above are generated, not drawn — [`docs/assets/render.sh`](docs/assets/render.sh) rebuilds them.
 
