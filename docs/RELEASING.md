@@ -9,7 +9,7 @@ repository takes copies of both.
 | repository | `percepteye-ai/agent-flywheel` | `percepteye-ai/agent-flywheel-node` |
 | registry | PyPI [`agent-flywheel`](https://pypi.org/project/agent-flywheel/) — published | npm [`@percepteye/agent-flywheel`](https://www.npmjs.com/package/@percepteye/agent-flywheel), owned by the `percepteye` npm organization |
 | version lives in | `src/agent_flywheel/_version.py`; `pyproject.toml` and the goose manifest repeat it, and `tests/test_one_version.py` holds all three together | `package.json`; the User-Agent derives from it, and `test/version.test.js` holds `openclaw.plugin.json` (version *and* description) equal to it |
-| publishes through | `.github/workflows/workflow.yml` on a `v*` tag, via PyPI trusted publishing. Works: 0.1.0, 0.1.1 and 0.1.2 went out this way | `.github/workflows/publish.yml` on a `v*` tag, via npm trusted publishing, **once the rehearsal proves it** ([§3](#3-node-release-npm)). Until then, by hand ([§3b](#3b-publishing-to-npm-by-hand)): 0.1.0 and 0.1.2 went out that way |
+| publishes through | `.github/workflows/workflow.yml` on a `v*` tag, via PyPI trusted publishing. Works: 0.1.0, 0.1.1 and 0.1.2 went out this way | `.github/workflows/publish.yml` on a `v*` tag, via npm trusted publishing: the rehearsal's token exchange has succeeded since 2026-09-15 ([§3](#3-node-release-npm)). 0.1.0 and 0.1.2 went out by hand ([§3b](#3b-publishing-to-npm-by-hand)), the fallback if a tag is ever refused |
 
 Neither repository is public yet. That is why the PyPI page shows the figures'
 alt text; [§4](#4-making-the-repositories-public--not-done-yet) is the checklist
@@ -193,12 +193,13 @@ take the name.
 Releases go through the Node repository's `.github/workflows/publish.yml`, the
 same shape as `workflow.yml` here. A `v*` tag runs the whole CI workflow on the
 tagged commit, checks the tag against `package.json`, and publishes over OIDC.
-Only the very first publish is manual — in principle. **As of 2026-09-15 no
-tag has ever published to npm:** the 0.1.2 tag run was refused, npm's token
-exchange answering `OIDC token exchange error - package not found` for
-`@percepteye/agent-flywheel`, and 0.1.2 was published by hand. Until a
-rehearsal shows `Successfully retrieved and set token`, expect to publish by
-hand ([§3b](#3b-publishing-to-npm-by-hand)).
+Only the very first publish is manual. **What 0.1.2 taught, 2026-09-15:** its
+tag run was refused, npm's token exchange answering `OIDC token exchange error
+- package not found` for `@percepteye/agent-flywheel`, and 0.1.2 was published
+by hand. The trusted publisher on the scoped package was then deleted and added
+again exactly as step 4 lists, and the rehearsal's exchange returned 201 with
+`Successfully retrieved and set token`. No tag has completed a publish since,
+so rehearse before the next one anyway.
 
 1. **Bump `package.json`,** and set `openclaw.plugin.json` to the same version
    and description. `test/version.test.js` fails on either mismatch.
