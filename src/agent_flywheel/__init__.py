@@ -560,13 +560,15 @@ def _describe_via_host(
     command: list[Any], *, artifacts_dir: str, agent_id: str,
     execution_snapshot: ExecutionSnapshot | None = None,
     endpoint_env: tuple[str, str] | None = None,
+    declared: _declaration.Declaration | None = None,
 ) -> DiscoveredAgent | None:
     """Have the host describe a command agent, by running it once.
 
     Returns None when the host produced nothing, having said why. The failure
     is silent everywhere else -- the plugin's hook simply never fires -- and an
     operator who is not told here finds out as an empty workflow list an hour
-    later, with nothing in between naming the cause.
+    later, with nothing in between naming the cause. ``declared`` is what
+    ``describe=`` already said, so the warning states what registers instead.
     """
     # The TASK sentinel marks where a rollout's task goes in the argv. There is
     # no rollout here, so it is filled with the warm-up prompt: an argv still
@@ -660,13 +662,20 @@ def _describe_via_host(
         )
         return described
 
+    if declared is None:
+        consequence = (
+            "This agent will register as introspection_state=unreadable, no "
+            "workflows will be generated for it, and every phase downstream of "
+            "that (reward suites, graded rollouts, training) has nothing to "
+            "work from.")
+    else:
+        consequence = "It registers only what describe= declared" + (
+            "; with no tools declared, no workflows will be generated for it."
+            if declared.tools is None else ".")
     warnings.warn(
         f"Could not describe {agent_id!r}: the agent ran, its host wrote no "
         f"description, and no completion request it made declared any tools. "
-        f"This agent will register as introspection_state=unreadable, no "
-        f"workflows will be generated for it, and every phase downstream of "
-        f"that (reward suites, graded rollouts, training) has nothing to work "
-        f"from.\n"
+        f"{consequence}\n"
         f"Two things to check, in this order:\n"
         f"  1. Does the agent reach its provider from an env var? The warm-up "
         f"points OPENAI_BASE_URL / OPENAI_API_BASE / ANTHROPIC_BASE_URL at a "
@@ -796,7 +805,8 @@ def serve(
             one, called once the agent is built. What you declare wins; what
             you leave out still comes from reflection, and leaving ``tools``
             out never means "no tools" (that is ``tools=[]``). For a command
-            agent it replaces the warm-up. A declared description never
+            agent, declaring all three replaces the warm-up; declaring less
+            still runs it for the rest. A declared description never
             anchors an execution identity -- it is your word, not an
             observation. ``introspect=False`` with ``describe=`` is a
             contradiction and raises; ``PERCEPTEYE_INTROSPECT=0`` wins over
@@ -1035,14 +1045,16 @@ def serve(
         # rollout (the launch gate and the first rollout are mutually
         # blocking).
         #
-        # Not when the customer declared it: then the warm-up has nothing to
-        # add that the declaration does not already say, and its "could not
-        # describe" warning would be false.
-        if described is None and getattr(runner, "_command", None) and declared is None:
+        # Not when the customer declared ALL of it: then the warm-up has
+        # nothing to add. A partial declaration still runs it, because what
+        # they left out comes from observation -- skipping it registered a
+        # declared model with no tools and no prompt.
+        if (described is None and getattr(runner, "_command", None)
+                and not (declared is not None and declared.complete)):
             described = _describe_via_host(
                 runner._command, artifacts_dir=adir, agent_id=agent_id,
                 execution_snapshot=runner.execution_snapshot,
-                endpoint_env=endpoint_env,
+                endpoint_env=endpoint_env, declared=declared,
             )
         described = _declaration.apply(declared, reflected=described,
                                        agent_name=agent_id)

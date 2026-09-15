@@ -21,7 +21,8 @@ ONE PARSER. ``tools`` is the list the agent already sends its model -- OpenAI
 function specs, Anthropic tools, or the protocol's own ``{name, description,
 input_schema, read_only}`` -- read by the same code that reads a tool list off
 a completion request, so a declared tool and an observed one cannot disagree
-about shape.
+about shape. ``read_only`` is the one thing only a declaration carries: it goes
+at the top level of an entry, whichever shape, and a request's is never read.
 
 NOT EVIDENCE. A declaration is what the customer says their agent does, not an
 observation of what ran, so a declared description never anchors an execution
@@ -50,6 +51,9 @@ Describe = Mapping[str, Any] | Callable[[], Mapping[str, Any]]
 #: otherwise declare nothing in silence -- ``prompt`` for ``system_prompt``,
 #: ``tool_definitions`` for ``tools`` -- so it refuses at startup instead.
 _KEYS = frozenset({"system_prompt", "tools", "model"})
+#: The keys ``model`` may carry as a mapping, refused otherwise for the same
+#: reason: ``{"model": "gpt-4.1"}`` inside it would register ``unknown``.
+_MODEL_KEYS = frozenset({"provider", "model_name", "temperature", "max_tokens"})
 
 #: ``source_type`` of a description a declaration contributed to. A claim about
 #: where the description came from: the customer said it; nothing observed it.
@@ -64,6 +68,12 @@ class Declaration:
     tools: list[ToolDefinition] | None = None
     model: ModelConfig | None = None
 
+    @property
+    def complete(self) -> bool:
+        """Every part reflection or a warm-up could observe is declared, so
+        observing would add nothing. Anything less still observes the rest."""
+        return all(p is not None for p in (self.system_prompt, self.tools, self.model))
+
 
 def resolve(describe: Describe | None) -> Declaration | None:
     """``describe=`` validated and parsed, calling it if it is a callable.
@@ -72,11 +82,21 @@ def resolve(describe: Describe | None) -> Declaration | None:
     is None. Loud and early, because a declaration nobody reads is an agent
     registered without its tools and a run that generates nothing hours later:
     the failure this argument exists to prevent. Every tool is parsed here, so
-    a static declaration refuses before serve() connects to anything.
+    a static declaration refuses before serve() connects to anything. A
+    callable that raises is refused the same way, naming ``describe=``.
     """
     if describe is None:
         return None
-    spec = describe() if callable(describe) else describe
+    if callable(describe):
+        try:
+            spec = describe()
+        except ConfigurationError:
+            raise
+        except Exception as exc:
+            raise ConfigurationError(
+                f"describe= raised {type(exc).__name__}: {exc}") from exc
+    else:
+        spec = describe
     if not isinstance(spec, Mapping):
         raise ConfigurationError(
             f"describe= must be a mapping (or a callable returning one), got "
@@ -113,36 +133,66 @@ def _tools(declared: list[Any]) -> list[ToolDefinition]:
     Unlike an observed request, a declaration that names a tool the parser
     cannot read is the customer's mistake, and it is said at startup rather
     than dropped: a silently shorter catalogue is a smaller task universe
-    nobody chose.
+    nobody chose. So is a schema that is not a mapping, or a ``read_only``
+    that is not a bool, or one the parser would not see -- each would
+    otherwise register as an empty schema or an undeclared tool.
     """
     from .host_description import _tool_from_wire, _tools_from_request
 
     out = []
     for i, entry in enumerate(declared):
+        where = f"describe['tools'][{i}]"
         parsed = _tools_from_request({"tools": [entry]})
         tool = _tool_from_wire(parsed[0]) if parsed else None
         if tool is None:
             raise ConfigurationError(
-                f"describe['tools'][{i}] is not a tool: expected an OpenAI "
-                f"function spec, an Anthropic tool, or a mapping with a "
-                f"'name', got {entry!r:.120}"
+                f"{where} is not a tool: expected an OpenAI function spec, an "
+                f"Anthropic tool, or a mapping with a 'name', got {entry!r:.120}"
             )
-        out.append(tool)
+        schema = parsed[0]["input_schema"]
+        if schema is not None and not isinstance(schema, dict):
+            raise ConfigurationError(
+                f"{where}: the schema must be a JSON-schema mapping, got "
+                f"{type(schema).__name__}")
+        fn = entry.get("function")
+        if isinstance(fn, dict) and "read_only" in fn:
+            raise ConfigurationError(
+                f"{where}: read_only goes beside 'function', not inside it")
+        read_only = entry.get("read_only")
+        if read_only is not None and not isinstance(read_only, bool):
+            raise ConfigurationError(
+                f"{where}['read_only'] must be true or false, got {read_only!r}")
+        out.append(dataclasses.replace(tool, read_only=read_only))
     return out
 
 
 def _model(declared: str | Mapping[str, Any]) -> ModelConfig:
     if isinstance(declared, str):
+        if not declared.strip():
+            raise ConfigurationError("describe['model'] must not be empty")
         return ModelConfig(model_name=declared)
-    temperature = declared.get("temperature")
-    max_tokens = declared.get("max_tokens")
+    unknown = sorted(str(k) for k in declared if k not in _MODEL_KEYS)
+    if unknown:
+        raise ConfigurationError(
+            f"describe['model'] got unknown key(s) {unknown}; it accepts "
+            f"{sorted(_MODEL_KEYS)}")
+    name, provider = declared.get("model_name"), declared.get("provider")
+    temperature, max_tokens = declared.get("temperature"), declared.get("max_tokens")
+    if not isinstance(name, str) or not name.strip():
+        raise ConfigurationError("describe['model'] needs a 'model_name' string")
+    if provider is not None and not isinstance(provider, str):
+        raise ConfigurationError("describe['model']['provider'] must be a string")
+    if temperature is not None and (
+            isinstance(temperature, bool) or not isinstance(temperature, (int, float))):
+        raise ConfigurationError("describe['model']['temperature'] must be a number")
+    if max_tokens is not None and (
+            isinstance(max_tokens, bool) or not isinstance(max_tokens, int)):
+        raise ConfigurationError("describe['model']['max_tokens'] must be an integer")
     return ModelConfig(
-        provider=str(declared.get("provider") or "unknown"),
-        model_name=str(declared.get("model_name") or "unknown"),
-        temperature=(float(temperature) if isinstance(temperature, (int, float))
-                     and not isinstance(temperature, bool) else None),
-        max_tokens=(max_tokens if isinstance(max_tokens, int)
-                    and not isinstance(max_tokens, bool) else None),
+        provider=provider or "unknown",
+        model_name=name,
+        temperature=float(temperature) if temperature is not None else None,
+        max_tokens=max_tokens,
     )
 
 

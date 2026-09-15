@@ -136,14 +136,16 @@ fw.serve(
 )
 ```
 
-- **`tools`** is the list your agent already sends its model: OpenAI function specs, Anthropic tools, or `{name, description, input_schema, read_only}`. It is read by the same parser that reads a tool list off a completion request, and a tool it cannot read refuses at startup rather than being dropped.
+- **`tools`** is the list your agent already sends its model: OpenAI function specs, Anthropic tools, or `{name, description, input_schema, read_only}`. It is read by the same parser that reads a tool list off a completion request, and a tool it cannot read refuses at startup rather than being dropped — as does a schema that is not a mapping.
+- **`read_only: true`** marks a tool that leaves the world unchanged. It goes at the top level of an entry, whichever shape — beside `function` in an OpenAI spec, never inside it — and must be a real boolean. Only a declaration says it: a `read_only` on a completion request the SDK observes is not read.
+- **`model`** is a model name, or a mapping of `model_name` (required), `provider`, `temperature` and `max_tokens`.
 - **What you declare wins; what you leave out still comes from reflection.** A LangChain agent whose prompt reflection cannot reach declares just `system_prompt` and keeps its reflected tools. Leaving `tools` out never means "no tools" — that is `tools=[]`.
-- **A zero-argument callable** works too, called once the agent is built.
-- **For a command agent it replaces the warm-up.** Declare its tools and prompt; nothing is spawned.
+- **A zero-argument callable** works too, called once the agent is built, and only when introspection is on. One that raises refuses at startup, naming `describe=`.
+- **For a command agent, declaring all three replaces the warm-up** — `system_prompt`, `tools` and `model`, and nothing is spawned. Declare less and the warm-up still runs, for the rest.
 - **It is your word, not an observation**, so `source_type` is `sdk_declared` and a declared description never anchors an execution identity.
-- An unknown key (`prompt` for `system_prompt`) refuses at startup instead of declaring nothing. `introspect=False` with `describe=` is a contradiction and raises; `PERCEPTEYE_INTROSPECT=0` wins over it, with a warning.
+- An unknown key (`prompt` for `system_prompt`, or `model` inside `model`) refuses at startup instead of declaring nothing — whether or not introspection is on, so lifting `PERCEPTEYE_INTROSPECT=0` later cannot turn it into a refusal to start. `introspect=False` with `describe=` is a contradiction and raises; `PERCEPTEYE_INTROSPECT=0` wins over it, with a warning.
 
-`fw.attach(..., describe=...)` takes the same argument: without `execution_entrypoint` it is the whole description the registration sends, which is how a production-only agent tells the control plane its prompt and tools.
+`fw.attach(..., describe=...)` takes the same argument: without `execution_entrypoint` it is the whole description the registration sends, which is how a production-only agent tells the control plane its prompt and tools. One that leaves `tools` out does not erase the tools `serve()` reflected for the same agent — the control plane keeps a catalogue that a later description did not observe. A bad declaration refuses before any adapter is bound.
 
 ### Opting out
 

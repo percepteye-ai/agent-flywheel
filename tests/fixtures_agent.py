@@ -14,6 +14,16 @@ def build():
     return _Plain()
 
 
+#: One entry per build, for a test that must know the agent existed before
+#: something else ran.
+BUILT: list[str] = []
+
+
+def build_recorded():
+    BUILT.append("built")
+    return _Plain()
+
+
 class _EnvironmentProbe:
     def invoke(self, task: str) -> str:
         return f"{task}|{os.environ.get('FAKE_EXECUTION_MARKER', '<absent>')}"
