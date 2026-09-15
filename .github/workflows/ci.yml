@@ -58,12 +58,14 @@ jobs:
       # zero-skip step below then fails the build on every push: red for a
       # reason unrelated to the change, while the parity it exists to prove
       # goes unchecked. Node is installed here for the same reason: that test
-      # runs the Node SDK's own transport.
+      # runs the Node SDK's own transport. It is a private repo: see the
+      # node-plugins checkout below for the deploy key.
       - uses: actions/checkout@v4
         with:
           repository: percepteye-ai/agent-flywheel-node
           path: agent-flywheel-node
-          token: ${{ secrets.NODE_SDK_READ_TOKEN }}
+          ssh-key: ${{ secrets.NODE_SDK_DEPLOY_KEY }}
+          persist-credentials: false
       - run: pip install -e ".[dev,adapters-test,otel,otel-test]"
       - name: every optional framework is genuinely importable
         # Checked BEFORE pytest, so a framework that failed to install is a
@@ -181,17 +183,22 @@ jobs:
       # gets the same answer from the script's auto-discovery. One resolver,
       # two ways in.
       #
-      # It is a private repo, so this needs a token with read access to it.
-      # Without one the checkout fails loudly here rather than the ABI check
+      # It is a private repo, so this reads it with a DEPLOY KEY: an SSH key
+      # added to that one repository, read-only, and stored here as the secret
+      # NODE_SDK_DEPLOY_KEY. Not a personal token -- that expires with its
+      # owner's settings and can reach whatever else its owner can. Without
+      # the key the checkout fails loudly here rather than the ABI check
       # silently skipping, which is the right order: a missing credential is a
       # CI defect, not a reason to stop checking the contract. And if the path
       # it lands at ever changes, the ABI check fails too -- a NAMED path that
-      # is not there is an error there, not a skip.
+      # is not there is an error there, not a skip. `persist-credentials:
+      # false`: nothing after the checkout needs to reach that repository.
       - uses: actions/checkout@v4
         with:
           repository: percepteye-ai/agent-flywheel-node
           path: agent-flywheel-node
-          token: ${{ secrets.NODE_SDK_READ_TOKEN }}
+          ssh-key: ${{ secrets.NODE_SDK_DEPLOY_KEY }}
+          persist-credentials: false
       - name: what the plugins write is what the Python SDK reads
         # One definition, invoked from here and runnable by hand. It used to be
         # inline, and a local approximation of it passed while the real one

@@ -37,8 +37,9 @@ Follow this in order; each step links to the detail. When something fails,
    in the Node README the badge, the comment above it, and the Develop line.
 3. **Run §1 in both repositories,** with the Node SDK checked out and named
    through `PERCEPTEYE_NODE_SDK`, so the Python parity tests run instead of
-   skipping: `N passed, 0 skipped`. CI cannot vouch for this part yet
-   ([§5](#5-when-a-publish-fails): `NODE_SDK_READ_TOKEN`).
+   skipping: `N passed, 0 skipped`. CI's `test-full` and `node-plugins` jobs
+   check the same once the deploy key is in place
+   ([§5](#5-when-a-publish-fails): `NODE_SDK_DEPLOY_KEY`).
 4. **Merge the Node PR first, then the Python one.** The Python parity tests
    import the Node repository's `main`.
 5. **Rehearse npm's authentication before tagging.** In the Node repository,
@@ -169,8 +170,14 @@ this repository's `test-full` job checks out the Node repository's `main`.
   payments fail or its spending limit is reached, jobs are "not started" and
   fail in seconds with no logs. The reason is only in the run's annotation.
   macOS jobs bill at 10× on private repositories.
-- **CI needs `NODE_SDK_READ_TOKEN`.** The `test-full` and `node-plugins` jobs
-  check out the private Node repository and stop at checkout without it.
+- **CI reads the Node repository with a deploy key.** The `test-full` and
+  `node-plugins` jobs check out the private Node repository over SSH with the
+  secret `NODE_SDK_DEPLOY_KEY`: the private half of a key whose public half is
+  a read-only deploy key on `agent-flywheel-node` alone. A deploy key never
+  expires and reaches one repository, unlike the personal token the jobs used
+  to need (`NODE_SDK_READ_TOKEN`, never set, so those jobs had never run). To
+  rotate it, add a new key and replace the secret
+  ([§5](#5-when-a-publish-fails)).
 - **A version bump is a new execution identity.** The `sdk` string is part of
   the hashed descriptor, so every agent's `execution_sha256` changes on every
   release.
@@ -397,10 +404,11 @@ gh repo edit percepteye-ai/agent-flywheel-node --visibility public --accept-visi
   it is now safe to flip".
 - **Restore the `ci` badge,** which is kept verbatim in the comment above the
   badges.
-- **Drop `NODE_SDK_READ_TOKEN` if the Node repository is public too.** The
-  cross-repository checkouts in `ci.yml` no longer need `token:`, so remove
-  them and delete the secret. Pull requests from forks never receive secrets,
-  so this is also what lets outside contributors' PRs run `test-full`.
+- **Drop the deploy key if the Node repository is public too.** The
+  cross-repository checkouts in `ci.yml` no longer need `ssh-key:`, so remove
+  those lines, delete the `NODE_SDK_DEPLOY_KEY` secret here and the deploy key
+  on the Node repository. Pull requests from forks never receive secrets, so
+  this is also what lets outside contributors' PRs run `test-full`.
 - **Release a new patch version.** The corrected images and links reach PyPI
   only with a new version, because descriptions are frozen per release.
 
@@ -448,4 +456,4 @@ otherwise.
 | `npm view` or `npm install` of a version answers 404 or "No matching version" right after `+ @percepteye/agent-flywheel@X.Y.Z` | "Your package is being processed and may take a few minutes to become available" | Poll the version's registry URL until it answers 200, then install with `--prefer-online` ([§3](#3-node-release-npm) step 6) |
 | `dyld: Library not loaded: …/libsimdjson…` | Homebrew's node 25.4.0 is broken on this Mac | `PATH=/opt/homebrew/opt/node@24/bin:$PATH` |
 | The `Set up job` step's GITHUB_TOKEN Permissions list no `IdToken`, so OIDC "must" be missing | Not evidence: GitHub never lists `id-token` there. The PyPI job that published 0.1.2 over OIDC lists only `Metadata: read` | Diagnose from the `oidc` log line instead |
-| Python CI: `test-full` and `node-plugins` fail at `Run actions/checkout@v4` | The `NODE_SDK_READ_TOKEN` secret is missing, so the private Node repository cannot be checked out and those jobs never reach their tests | Add the secret (or a read-only deploy key, or make both repositories public: [§4c](#4c-then-one-pr-per-repository)). Until then, run their suite locally with the Node SDK named: `PERCEPTEYE_NODE_SDK=<node checkout> .venv/bin/pytest -q` must print `0 skipped` |
+| Python CI: `test-full` and `node-plugins` fail at `Run actions/checkout@v4` | The private Node repository could not be read: the `NODE_SDK_DEPLOY_KEY` secret is missing, or its public half is not a deploy key on `agent-flywheel-node` | Create the pair and register both halves: `ssh-keygen -t ed25519 -N "" -C "agent-flywheel CI reads agent-flywheel-node" -f /tmp/node_sdk_key`, then `gh repo deploy-key add /tmp/node_sdk_key.pub --repo percepteye-ai/agent-flywheel-node --title "agent-flywheel CI (read-only)"` (read-only unless `--allow-write`), then `gh secret set NODE_SDK_DEPLOY_KEY --repo percepteye-ai/agent-flywheel < /tmp/node_sdk_key`, then delete both files. Until then, run their suite locally with the Node SDK named: `PERCEPTEYE_NODE_SDK=<node checkout> .venv/bin/pytest -q` must print `0 skipped` |
