@@ -101,6 +101,8 @@ Sub-agents are walked to depth **4** — deep enough for the graphs people build
 
 Reflecting harder does not help. The **host** is the only party that can describe a CLI agent, because the host assembled the prompt and built the tool list it sent to the model. The [Node plugin](node.md) observes one `llm_input` event and writes `discovered_agent.json`; `serve()` reads it.
 
+A host with no plugin is still described: the warm-up's model endpoint is a loopback observer of ours, and the completion request the agent sends carries its system prompt and tool list. The two sources combine rather than compete. **The file wins on everything it observed** — framework, sub-agents, and the read-only annotations the wire drops — and **the wire fills only what the file did not observe**: current OpenClaw's `llm_input` carries no tool list, so its file says `tool_definitions: null`, and the tools come from the request instead (marked `incomplete: ["tool_annotations"]`, because a wire tool never says whether it only reads). Tools a file already places on sub-agents are never copied onto its root.
+
 The bootstrap is circular, and that is why the warm-up exists:
 
 ```text
@@ -117,7 +119,7 @@ So the agent is run **once at `serve()` time, before registering**, on a trivial
 
 A host that exits on its own is read immediately; a fast CLI finishes in well under a second. The child is spawned in its own process group and killed with it.
 
-The warm-up child is **not a rollout** and is never captured, graded, or trained on. It gets the same environment scrub a rollout child gets — the whole `PERCEPTEYE_` namespace is stripped so the long-lived key stays in the parent, and `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` are forced to `http://127.0.0.1:1/v1` with a dummy key, so a dispatch that outruns the kill fails closed instead of sampling a live provider unobserved.
+The warm-up child is **not a rollout** and is never captured, graded, or trained on. It gets the same environment scrub a rollout child gets — the whole `PERCEPTEYE_` namespace is stripped so the long-lived key stays in the parent, and `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` are forced to the loopback observer with a dummy key. The observer answers with an inert reply and forwards nothing, so a dispatch that outruns the kill reaches no live provider.
 
 ### Opting out
 

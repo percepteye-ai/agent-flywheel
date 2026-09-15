@@ -1430,7 +1430,7 @@ def attach(
     if register and url and key:
         client: ControlPlaneClient | None = None
         try:
-            from . import __version__
+            from . import __version__, _env_true
             from ._http import ControlPlaneClient
             from .contract import CONTRACT_VERSION
             from .transport import AttachTransport
@@ -1463,6 +1463,17 @@ def attach(
                     registration["discovered_agent"] = (
                         described.to_wire() if described is not None else None
                     )
+                elif _env_true("PERCEPTEYE_INTROSPECT", default=True):
+                    # `null`, not an absent key. With no entrypoint there is
+                    # no agent object here to describe: "not described". An
+                    # ABSENT key says the customer opted out, and the control
+                    # plane records that as `disabled` -- the destructive
+                    # state, which stops the description a serve()
+                    # registration stored from driving workflow generation.
+                    # The Node plugin sends null for the same reason. The
+                    # customer's real opt-out, PERCEPTEYE_INTROSPECT=0, still
+                    # omits the key.
+                    registration["discovered_agent"] = None
                 reg = tr.register(registration)
                 # WHAT THE SERVER SAID, not what we assume, and asked through
                 # the ONE predicate `_recheck_capture` asks -- see

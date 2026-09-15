@@ -204,6 +204,8 @@ px.record_answer(turn_id, reply)          # after the scope closes — the answe
 
 With `register=True` the call makes exactly two outbound requests, once, at startup: `POST /agents` then `GET /policy/current`. It registers as `mode: "production"` — `serve()` sends `"rollout"`, and a training donor versus a production reader is the one distinction a `mode` on a registration exists to draw. `register=False` skips both, for a process that should make no outbound connection at all.
 
+**Without `execution_entrypoint` there is no agent object to describe, and the registration says so:** `discovered_agent: null`. It does not omit the key — the control plane reads an absent key as you opting out of introspection, records the agent as `disabled`, and a description your `serve()` registration stored stops driving workflow generation. Your real opt-out, `PERCEPTEYE_INTROSPECT=0`, still omits it.
+
 **Everything fails open.** An unreachable control plane yields an attachment with `policy == {}` and costs you nothing else; a framework that cannot be bound yields `adapters_bound == ()` rather than a process that will not start. (`serve()` raises there instead, and correctly: a rollout with no capture is a wasted rollout, while a production turn with no capture is still a served user.) A registration the control plane *refuses* while the policy read succeeds emits a `RuntimeWarning` and nothing more — the two calls no longer share one `except`, so a payload intake dislikes cannot also demote you to the untrained policy.
 
 | on the `Attachment` | |

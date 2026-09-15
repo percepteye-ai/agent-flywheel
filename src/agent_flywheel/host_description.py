@@ -61,6 +61,7 @@ and kill the child. Typically well under a second.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import subprocess
@@ -666,6 +667,55 @@ def _json_reply() -> bytes:
     }).encode("utf-8")
 
 
+def _node_has_tools(agent: DiscoveredAgent) -> bool:
+    return bool(agent.tool_definitions) or any(
+        _node_has_tools(child) for child in agent.sub_agents)
+
+
+def _fill_from_wire(
+    described: DiscoveredAgent, wire: DiscoveredAgent | None,
+) -> DiscoveredAgent:
+    """``described`` with what only the wire observed filled in; nothing else.
+
+    Two gaps, both on the root, and only when the file left them open:
+
+    * its TOOLS, when no node of the file carries any. Tools already on
+      sub-agents make the root's ``None`` structural, and grafting the wire's
+      copy of them onto the root would misattribute them.
+    * its SYSTEM PROMPT, when the file has none.
+
+    Wire tools carry no annotations, so ``tool_annotations`` joins
+    ``incomplete``, and a part the file listed as unreadable stops being listed
+    once the wire has read it. The file's exact-observation digest covered the
+    file ALONE, so it is dropped rather than carried onto content it never
+    hashed; identity reconciliation then hashes what is actually registered,
+    or declines to for a prompt at the public cap.
+    """
+    if wire is None:
+        return described
+    tools = (
+        wire.tool_definitions
+        if described.tool_definitions is None and not _node_has_tools(described)
+        and wire.tool_definitions
+        else None
+    )
+    prompt = wire.system_prompt if described.system_prompt is None else None
+    if not tools and not prompt:
+        return described
+    filled = {name for name, got in (("tool_definitions", tools),
+                                     ("system_prompt", prompt)) if got}
+    incomplete = [i for i in described.incomplete if i not in filled]
+    if tools and "tool_annotations" not in incomplete:
+        incomplete.append("tool_annotations")
+    return dataclasses.replace(
+        described,
+        tool_definitions=tools or described.tool_definitions,
+        system_prompt=prompt or described.system_prompt,
+        incomplete=incomplete,
+        exact_observation_sha256=None,
+    )
+
+
 def framework_from_argv(argv: list[str]) -> str:
     """A framework name for a command agent: the binary it runs.
 
@@ -797,19 +847,40 @@ def warm_up_command(
     def _resolve() -> DiscoveredAgent | None:
         """The best description available, from either source.
 
-        THE FILE WINS, always. A host that describes itself states its own
-        framework, its sub-agents and its tools' read-only annotations --
-        everything the wire drops on the way to the model. The observer is the
-        floor under hosts that have no way to write that file, not a rival to
-        the ones that do.
+        THE FILE WINS on everything it observed. A host that describes itself
+        states its own framework, its sub-agents and its tools' read-only
+        annotations -- everything the wire drops on the way to the model. The
+        observer is the floor under hosts that have no way to write that file,
+        not a rival to the ones that do.
+
+        But a file can observe LESS than the wire, and then the wire fills the
+        gap (:func:`_fill_from_wire`). This used to return the file whenever it
+        existed: current OpenClaw writes ``tool_definitions: null`` -- its hook
+        event carries no tool list -- while the same agent's completion
+        request carried every tool, so the agent registered with no catalogue,
+        no workflows were generated for it, and the tools we had just watched
+        go past were thrown away.
         """
         described = read_discovered_agent(target)
-        if described is not None or observer is None:
+        if observer is None:
             return described
-        return observer.described(
+        wire = observer.described(
             agent_name=agent_name or framework_from_argv(argv),
             framework=framework_from_argv(argv),
         )
+        if described is None:
+            return wire
+        merged = _fill_from_wire(described, wire)
+        took = [part for part, before, after in (
+            ("tools", described.tool_definitions, merged.tool_definitions),
+            ("system prompt", described.system_prompt, merged.system_prompt),
+        ) if before is None and after is not None]
+        if took:
+            # Named, because the registration line below credits one source.
+            print(f"[percepteye] the host plugin's description had no "
+                  f"{' and no '.join(took)}; read from the agent's own "
+                  f"completion request instead.")
+        return merged
 
     try:
         if proc.stdin is not None:
