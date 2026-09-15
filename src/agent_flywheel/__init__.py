@@ -47,7 +47,7 @@ from __future__ import annotations
 import logging
 import os
 import warnings
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal
 
 from ._version import __version__
@@ -715,6 +715,7 @@ def serve(
     execution_snapshot: ExecutionSnapshot | None = None,
     harness_snapshot: ExecutionSnapshot | None = None,
     attested_execution_components: Mapping[str, str] | None = None,
+    volatile_command_values: Sequence[str] | None = None,
     reports_tool_calls: bool = False,
     method: str | None = None,
     adapters: list[str] | str | None = "auto",
@@ -784,6 +785,21 @@ def serve(
             the SDK withholds the
             OPSD digest rather than claiming discovery identifies unobserved
             implementation code.
+        volatile_command_values: command options whose VALUE is transport
+            rather than identity, named exactly as the command spells them --
+            ``("--daemon-socket",)`` for an agent launched with a per-process
+            socket path. The option token stays in the execution identity and
+            only its value is dropped, so an agent that runs with a socket is
+            still distinct from one that does not, while a restart that moves
+            the socket keeps the same ``execution_sha256``. That matters
+            because an OPSD run binds the digest recorded at preparation and
+            refuses every episode attested with a different one: an undeclared
+            PID-bearing argument invalidates the prepared run on the next
+            restart. Nothing is detected -- an option that is not declared is
+            identity, including one that looks like a temp path -- and a name
+            that is absent from the command, or that names the program itself,
+            raises :class:`ConfigurationError` rather than quietly covering
+            nothing. Command entrypoints only; an importable agent has no argv.
         max_rollouts: stop after this many rollouts COMPLETE, and return. The
             only clean exit this function has: nothing in this package handles
             SIGINT or SIGTERM, so otherwise it runs until the process is
@@ -938,6 +954,7 @@ def serve(
         on_event=on_event,
         reports_tool_calls=reports_tool_calls,
         attested_execution_components=attested_execution_components,
+        volatile_command_values=volatile_command_values,
     )
 
     # A command entrypoint has no resolved object -- ``resolved`` is None by

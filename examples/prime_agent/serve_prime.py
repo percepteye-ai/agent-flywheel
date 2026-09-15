@@ -110,9 +110,23 @@ WORKSPACE.mkdir(parents=True, exist_ok=True)
 #:
 #: ``prime-agent --version`` works regardless — it never touches the daemon —
 #: so it is not a liveness check for this.
+#:
+#: The path carries this process's PID, so it is different on every restart.
+#: THAT is transport, not identity: the same build of this agent, restarted,
+#: is the same agent. It is declared as such in ``VOLATILE_COMMAND_VALUES``
+#: below and reaches ``fw.serve``, which drops the value — and only the value —
+#: from ``execution_sha256``. Without that declaration each restart minted a
+#: new execution identity and invalidated any OPSD run already prepared
+#: against the previous one (observed: prime-agent registered
+#: 3502c7cd… on 2026-09-12 and 409c43ee… on 2026-09-15).
 _DAEMON_SOCKET = str(
     pathlib.Path(tempfile.gettempdir()) / f"percepteye-prime-{os.getpid()}.sock"
 )
+
+#: The one argument in ARGV whose VALUE varies per process. ``--daemon-socket``
+#: itself stays in the identity, so a build that runs without a private daemon
+#: socket remains a different execution from this one.
+VOLATILE_COMMAND_VALUES = ("--daemon-socket",)
 
 
 class _RunOwnedPrimeDaemon:
@@ -529,6 +543,8 @@ def main() -> int:
             # hashes remain diagnostic evidence.
             execution_snapshot=harness,
             command_output_adapter=PrimeAgentOutputAdapter(),
+            # The socket path is per-process; see VOLATILE_COMMAND_VALUES.
+            volatile_command_values=VOLATILE_COMMAND_VALUES,
         )
     finally:
         # Ignore repeated stop requests while the daemon and its attested

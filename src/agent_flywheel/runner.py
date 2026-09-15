@@ -27,7 +27,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -38,10 +38,12 @@ from .event_stream import CommandOutputAdapter, CommandOutputProjection
 from .execution_identity import (
     ExecutionChild,
     ExecutionSnapshot,
+    canonical_command_argv,
     canonical_observation_sha256,
     execution_descriptor_sha256,
     is_lower_sha256,
     normalize_attested_components,
+    normalize_volatile_command_values,
 )
 from .introspection import _MAX_PROMPT_CHARS, DiscoveredAgent
 from .isolation import build_child_env
@@ -637,6 +639,9 @@ class RolloutRunner:
         execution_snapshot: ExecutionSnapshot | None = None,
         reports_tool_calls: bool = False,
         attested_execution_components: Mapping[str, str] | None = None,
+        #: Command options whose VALUE is transport rather than identity, by
+        #: name. Declared, never detected — see execution_identity.
+        volatile_command_values: Sequence[str] | None = None,
     ) -> None:
         if isolation not in ("subprocess", "inprocess"):
             raise ConfigurationError(
@@ -652,6 +657,13 @@ class RolloutRunner:
             )
         self._spec: str | None = None
         self._command: list[str] | None = None
+        #: The command's canonical identity argv, computed once at startup so a
+        #: bad declaration stops the process in front of whoever wrote it
+        #: rather than at registration.
+        self._identity_argv: list[dict[str, Any]] | None = None
+        self._volatile_command_values = normalize_volatile_command_values(
+            volatile_command_values
+        )
         self._entrypoint_object_type: str | None = None
         self._execution_sha256: str | None = None
         self._execution_descriptor: dict[str, Any] | None = None
@@ -717,6 +729,11 @@ class RolloutRunner:
             # substitution. Stringifying it here is how it would silently
             # become the literal '<task>' in someone's argv.
             self._command = [a if a is TASK else str(a) for a in entrypoint]
+            self._identity_argv = canonical_command_argv(
+                self._command,
+                volatile_value_options=self._volatile_command_values,
+                task_sentinel=TASK,
+            )
             self.resolved = None  # type: ignore[assignment]
             self.transport = transport
             self.artifacts_dir = str(artifacts_dir)
@@ -736,6 +753,13 @@ class RolloutRunner:
         if command_output_adapter is not None:
             raise ConfigurationError(
                 "command_output_adapter is supported only for command entrypoints"
+            )
+        if self._volatile_command_values:
+            raise ConfigurationError(
+                "volatile_command_values names command options, and this "
+                "entrypoint is an importable agent with no argv. An in-process "
+                "agent's identity carries no per-process launch arguments; "
+                "remove the declaration."
             )
         if _is_import_spec(entrypoint):
             self._spec = entrypoint
@@ -838,12 +862,14 @@ class RolloutRunner:
             return None
 
         if self._command is not None:
+            assert self._identity_argv is not None  # set with self._command
             entrypoint: dict[str, Any] = {
                 "kind": "command",
-                "argv": [
-                    {"task_input": True} if item is TASK else {"literal": str(item)}
-                    for item in self._command
-                ],
+                # Already canonical, and already validated at construction. The
+                # declared-volatile values are absent from these entries, so the
+                # digest survives a restart that moves a socket path; every
+                # other token is verbatim, so it does not survive a real change.
+                "argv": list(self._identity_argv),
             }
         elif self._spec is not None:
             entrypoint = {

@@ -1,17 +1,29 @@
 #!/usr/bin/env bash
-# The capture contract, checked across the language boundary.
+# The TWO contracts the Node SDK and the Python SDK share, checked across the
+# language boundary by running both implementations.
 #
-# The Node plugins and the Python SDK are two ends of one ABI: whatever a
-# plugin appends to $PERCEPTEYE_TRAJECTORY_DIR/tool_calls.jsonl, `Trajectory`
-# has to read back with the same meaning. A JS suite that only checks itself
-# would let the halves drift -- a plugin staying green while writing a line the
-# reader counts as malformed, surfacing later as a silently short tool-call
-# list.
+# 1. THE CAPTURE CONTRACT. Whatever a plugin appends to
+#    $PERCEPTEYE_TRAJECTORY_DIR/tool_calls.jsonl, `Trajectory` has to read back
+#    with the same meaning. A JS suite that only checks itself would let the
+#    halves drift -- a plugin staying green while writing a line the reader
+#    counts as malformed, surfacing later as a silently short tool-call list.
+#
+# 2. THE EXECUTION DIGEST. Both SDKs hash the same descriptor under the same
+#    two domain separators, and Mission Control binds the result into an
+#    ed25519-signed training workload and refuses every episode whose
+#    attestation does not match. Until this section existed the two agreed only
+#    by convention: nothing executed both. A one-sided change to the canonical
+#    encoding, or to the command-argv projection that drops declared transport
+#    values, would make the SAME agent attest a DIFFERENT identity depending on
+#    which SDK registered it -- worse than the per-restart instability the
+#    projection was added to fix, because it is silent on both sides.
 #
 # THIS FILE EXISTS SO CI AND A DEVELOPER RUN THE SAME CHECK. It used to live
 # inline in the workflow, and a local approximation of it passed while the real
 # one failed: the JS half had grown two records and the assertion had not. One
-# definition, invoked from both places.
+# definition, invoked from both places -- and, since the execution digest was
+# added, from tests/test_cross_language_abi_check.py as well, so the Python
+# suite goes red on a drift in either language.
 #
 #   ./scripts/cross_language_abi_check.sh
 #
@@ -188,4 +200,346 @@ assert (calls[5].outcome, calls[5].error_class) == ("unknown", "StillRunning"), 
 print("cross-language capture contract holds:", got)
 print("identity crossed the boundary:", calls[3].entity_ids)
 print("dsh classifier agrees with the reader")
+PY
+
+# ─────────────────────────────────────────────────────────────────────────────
+# THE EXECUTION DIGEST, computed by BOTH implementations over the SAME bytes.
+#
+# The descriptor and the command vectors are written ONCE, as JSON, and each
+# language parses that one file. Writing them twice would have let a typo in
+# either copy masquerade as agreement.
+#
+# Each projection case is hashed into the same descriptor with only
+# `entrypoint.argv` replaced, so a digest that moves means the PROJECTION
+# moved. The entries themselves are compared too, not just the digests: a
+# digest match tells you the bytes agreed, and the entries tell you which byte
+# differed when they do not.
+#
+# FOUR of the five named refusals live in the projection and are checked here.
+# The fifth -- declaring volatile command values on an importable, argv-less
+# entrypoint -- is raised by Python's RolloutRunner, which has no Node
+# counterpart (this package's descriptor carries `entrypoint.kind:
+# "host_plugin"` and no argv at all), so it is checked by the Python suite
+# alone. A fifth projection-level refusal, an empty command, is checked instead.
+#
+# ONE refusal is deliberately asymmetric and is checked separately, at
+# "node_only_refusals" below: an argv token that is not already a string.
+# Python stringifies at the entrypoint, before the projection; Node has no
+# entrypoint to stringify at and must not guess, because the two languages
+# spell the same value differently. Asserting it in the symmetric table would
+# have been a lie about what Python does.
+echo
+echo "cross-language ABI check: the execution digest"
+
+cat > "$OUT/vectors.json" <<'JSON'
+{
+  "descriptor": {
+    "schema": "percepteye.agent_execution/v1",
+    "sdk": "agent-flywheel-abi-check/0",
+    "contract_version": "flywheel/1",
+    "entrypoint": {"kind": "command", "argv": [{"literal": "agent"}]},
+    "configuration": {
+      "input_shape": "text",
+      "isolation": "subprocess",
+      "concurrency": 1,
+      "method": null,
+      "adapters": "auto",
+      "gate_flag": null,
+      "endpoint_env": null,
+      "reports_tool_calls": false
+    },
+    "discovered_agent": {
+      "agent_name": "customer-agent",
+      "unicode": "😀",
+      "ordered": {"": 1, "😀": 2},
+      "numbers": [1, 1.0, -0.0, 0.1, 9007199254740991],
+      "values": [null, true, false, "line\n"]
+    },
+    "discovery_observation_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "attested_components": {
+      "customer.release": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  },
+  "projections": {
+    "undeclared_a": {
+      "command": ["agent", "--daemon-socket", "/tmp/agent-111.sock", "--mode", "json", {"task_sentinel": true}],
+      "declare": []
+    },
+    "undeclared_b": {
+      "command": ["agent", "--daemon-socket", "/tmp/agent-222.sock", "--mode", "json", {"task_sentinel": true}],
+      "declare": []
+    },
+    "declared_a": {
+      "command": ["agent", "--daemon-socket", "/tmp/agent-111.sock", "--mode", "json", {"task_sentinel": true}],
+      "declare": ["--daemon-socket"]
+    },
+    "declared_b": {
+      "command": ["agent", "--daemon-socket", "/tmp/agent-222.sock", "--mode", "json", {"task_sentinel": true}],
+      "declare": ["--daemon-socket"]
+    },
+    "joined_a": {
+      "command": ["agent", "--daemon-socket=/tmp/agent-111.sock", "--mode", "json", {"task_sentinel": true}],
+      "declare": ["--daemon-socket"]
+    },
+    "joined_b": {
+      "command": ["agent", "--daemon-socket=/tmp/agent-222.sock", "--mode", "json", {"task_sentinel": true}],
+      "declare": ["--daemon-socket"]
+    },
+    "no_option": {
+      "command": ["agent", "--mode", "json", {"task_sentinel": true}],
+      "declare": []
+    }
+  },
+  "refusals": {
+    "option_absent_from_command": {
+      "command": ["agent", "--daemon-socket", "/tmp/agent-111.sock", "--mode", "json", {"task_sentinel": true}],
+      "declare": ["--daemon-sock"]
+    },
+    "option_is_argv0": {
+      "command": ["agent", "--daemon-socket", "/tmp/agent-111.sock", "--mode", "json", {"task_sentinel": true}],
+      "declare": ["agent"]
+    },
+    "option_is_last_argument": {
+      "command": ["agent", "--mode", "json", "--daemon-socket"],
+      "declare": ["--daemon-socket"]
+    },
+    "value_slot_is_the_task_sentinel": {
+      "command": ["agent", "--daemon-socket", {"task_sentinel": true}],
+      "declare": ["--daemon-socket"]
+    },
+    "command_is_empty": {
+      "command": [],
+      "declare": ["--daemon-socket"]
+    }
+  },
+  "node_only_refusals": {
+    "non_string_token": {
+      "command": ["agent", "--mode", 1.0, true, null, {"task_sentinel": true}],
+      "declare": [],
+      "python_entries": [
+        {"literal": "agent"}, {"literal": "--mode"}, {"literal": "1.0"},
+        {"literal": "True"}, {"literal": "None"}, {"task_input": true}
+      ]
+    },
+    "non_string_value_for_a_declared_option": {
+      "command": ["agent", "--daemon-socket", 8080, "--mode", "json"],
+      "declare": ["--daemon-socket"],
+      "python_entries": [
+        {"literal": "agent"}, {"literal": "--daemon-socket"},
+        {"volatile_value": "--daemon-socket"}, {"literal": "--mode"},
+        {"literal": "json"}
+      ]
+    }
+  }
+}
+JSON
+
+"$NODE" --input-type=module -e "
+import { readFileSync, writeFileSync } from 'node:fs';
+import {
+  canonicalCommandArgv, executionDescriptorSha256,
+  normalizeVolatileCommandValues,
+} from '$PKG/execution-identity.js';
+
+const vectors = JSON.parse(readFileSync('$OUT/vectors.json', 'utf8'));
+// The argv slot each rollout's task is substituted into. Python spells it
+// \`fw.TASK\`; both sides compare it by identity, never by its text, which is
+// why the shared file carries a marker each language swaps for its own.
+const TASK = Symbol('task');
+const materialize = (command) => command.map((item) => (
+  item !== null && typeof item === 'object' && item.task_sentinel === true
+    ? TASK : item));
+const project = (entry) => canonicalCommandArgv(materialize(entry.command), {
+  volatileValueOptions: normalizeVolatileCommandValues(entry.declare),
+  taskSentinel: TASK,
+});
+
+const out = { fixed: executionDescriptorSha256(vectors.descriptor),
+              projections: {}, refusals: {} };
+for (const [name, entry] of Object.entries(vectors.projections)) {
+  const argv = project(entry);
+  out.projections[name] = { argv, digest: executionDescriptorSha256({
+    ...vectors.descriptor,
+    entrypoint: { ...vectors.descriptor.entrypoint, argv },
+  }) };
+}
+for (const [name, entry] of Object.entries(vectors.refusals)) {
+  try {
+    project(entry);
+    out.refusals[name] = null;   // accepted -- the Python half fails on this
+  } catch (err) {
+    out.refusals[name] = err.name;
+  }
+}
+out.node_only_refusals = {};
+for (const [name, entry] of Object.entries(vectors.node_only_refusals)) {
+  try {
+    project(entry);
+    out.node_only_refusals[name] = null;
+  } catch (err) {
+    out.node_only_refusals[name] = err.name;
+  }
+}
+writeFileSync('$OUT/node-execution.json', JSON.stringify(out));
+"
+
+"$PYTHON" - "$OUT/vectors.json" "$OUT/node-execution.json" <<'PY'
+import json
+import sys
+
+from agent_flywheel import TASK
+from agent_flywheel.errors import ConfigurationError
+from agent_flywheel.execution_identity import (
+    canonical_command_argv,
+    execution_descriptor_sha256,
+    normalize_volatile_command_values,
+)
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    vectors = json.load(fh)
+with open(sys.argv[2], encoding="utf-8") as fh:
+    node = json.load(fh)
+
+descriptor = vectors["descriptor"]
+
+
+def materialize(command):
+    return [
+        TASK if isinstance(item, dict) and item.get("task_sentinel") is True
+        else item
+        for item in command
+    ]
+
+
+def project(entry):
+    return canonical_command_argv(
+        materialize(entry["command"]),
+        volatile_value_options=normalize_volatile_command_values(entry["declare"]),
+        task_sentinel=TASK,
+    )
+
+
+# (a) ONE IDENTICAL DESCRIPTOR. Both languages parsed the same file and hashed
+# what they parsed. The pin catches the case the comparison cannot: both halves
+# changing together, which would silently re-mint every agent already
+# registered against a signed workload.
+PINNED_FIXED = "ef0f4220250f17ab96e790a4a436ffd119ce99df9d94415c5a7f1e493d588034"
+fixed = execution_descriptor_sha256(descriptor)
+assert fixed == node["fixed"], (
+    "the SAME descriptor hashes differently in Python and Node:\n"
+    f"  python {fixed}\n  node   {node['fixed']}")
+assert fixed == PINNED_FIXED, (
+    f"the execution descriptor digest MOVED in both languages: {fixed} "
+    f"(was {PINNED_FIXED}). Every agent already registered attests the old "
+    f"one, and Mission Control refuses an episode whose attestation does not "
+    f"match. If this change is deliberate, it is a contract version bump.")
+
+# (b)+(c) THE PROJECTION. Entries first: a digest mismatch says only that some
+# byte differed, and the entries say which.
+digests = {}
+for name, entry in vectors["projections"].items():
+    argv = project(entry)
+    assert argv == node["projections"][name]["argv"], (
+        f"the canonical argv entries differ for {name}:\n"
+        f"  python {argv}\n  node   {node['projections'][name]['argv']}")
+    digest = execution_descriptor_sha256({**descriptor, "entrypoint": {
+        **descriptor["entrypoint"], "argv": argv}})
+    assert digest == node["projections"][name]["digest"], (
+        f"the execution digest differs for {name}:\n"
+        f"  python {digest}\n  node   {node['projections'][name]['digest']}")
+    digests[name] = digest
+
+# Each relation is asserted in BOTH languages, not once on the pair: two
+# implementations that agreed on a WRONG projection would pass a cross-language
+# comparison and nothing else.
+for lang, by_name in (("python", digests),
+                      ("node", {k: v["digest"]
+                                for k, v in node["projections"].items()})):
+    # The defect: a per-process socket path re-minted identity on every restart.
+    assert by_name["declared_a"] == by_name["declared_b"], lang
+    # Nothing is detected -- undeclared, the same two commands stay two agents.
+    assert by_name["undeclared_a"] != by_name["undeclared_b"], lang
+    # The option TOKEN is still identity, so declaring its value is not the
+    # same as not passing the option.
+    assert by_name["declared_a"] != by_name["no_option"], lang
+    assert by_name["declared_a"] != by_name["undeclared_a"], lang
+    # Both spellings collapse; neither is rewritten into the other.
+    assert by_name["joined_a"] == by_name["joined_b"], lang
+    assert by_name["joined_a"] != by_name["declared_a"], lang
+
+# BACKWARD COMPATIBILITY, cross-language: with nothing declared the projection
+# is the plain verbatim argv, and no key is added to the descriptor.
+for name in ("undeclared_a", "no_option"):
+    entry = vectors["projections"][name]
+    verbatim = [
+        {"task_input": True}
+        if isinstance(item, dict) and item.get("task_sentinel") is True
+        else {"literal": str(item)}
+        for item in entry["command"]
+    ]
+    assert project(entry) == verbatim, name
+    assert node["projections"][name]["argv"] == verbatim, name
+
+# THE REFUSALS. A declaration that cannot be honoured must stop the process in
+# front of whoever wrote it, in BOTH languages. One side accepting it silently
+# would mean that side's digest still carries the per-process value.
+for name in vectors["refusals"]:
+    try:
+        project(vectors["refusals"][name])
+    except ConfigurationError:
+        pass
+    else:
+        raise AssertionError(f"python accepted the {name} declaration")
+    assert node["refusals"][name] == "ConfigurationError", (
+        f"node did not refuse the {name} declaration: "
+        f"{node['refusals'][name]!r}")
+
+# THE ONE ASYMMETRY, asserted rather than left to a convention.
+#
+# `str()` and `String()` do not spell the same value the same way: Python
+# writes True/1.0/None where JavaScript writes true/1/null. A token that is
+# not already a string therefore CANNOT be stringified inside the projection
+# without the two SDKs minting different identities for one command.
+#
+# Python never reaches its projection with such a token -- `RolloutRunner`
+# stringifies at the entrypoint (`[a if a is TASK else str(a) for a in
+# entrypoint]`), so `str()` happens where the caller still knows what the value
+# meant -- and the projection's own `str()` is a no-op on that path. Node has
+# no command entrypoint yet, so it has no such boundary to stringify at, and
+# refuses the token instead of guessing which language's spelling to use.
+#
+# Node refuses in EVERY slot, including one a declaration would have voided
+# (`non_string_value_for_a_declared_option`), where the token never would have
+# been hashed at all. That slot is where a per-process number arrives most
+# easily -- a port -- and accepting it there teaches the caller a habit that
+# splits the digest the first time the same argv is built without the
+# declaration.
+#
+# Both halves are checked, because each is how the other stays safe: Node must
+# REFUSE, and Python must still project these commands its own way. If Python
+# ever gains the same refusal, the second assertion goes red -- and the fix
+# then is to move these vectors into "refusals" above, where both languages
+# are required to refuse.
+for name, entry in vectors["node_only_refusals"].items():
+    assert node["node_only_refusals"][name] == "ConfigurationError", (
+        f"node did not refuse the {name} command: "
+        f"{node['node_only_refusals'][name]!r}. A non-string argv token "
+        f"stringified in JavaScript is spelled differently than in Python, so "
+        f"accepting it means the SAME agent attests a DIFFERENT identity "
+        f"depending on which SDK registered it.")
+    entries = project(entry)
+    assert entries == entry["python_entries"], (
+        f"python's projection of the {name} command moved:\n"
+        f"  got      {entries}\n  expected {entry['python_entries']}\n"
+        f"This is what python does with the argv node refuses -- including "
+        f"the spellings only python produces (str(True) == 'True'). If python "
+        f"now REFUSES this command too, move the vector into 'refusals', "
+        f"where both languages must refuse.")
+
+print("execution descriptor digest agrees:", fixed)
+print("volatile-value projection agrees:",
+      {k: v[:12] for k, v in sorted(digests.items())})
+print("both languages refuse:", ", ".join(sorted(vectors["refusals"])))
+print("node refuses the un-stringified argv python stringifies earlier:",
+      ", ".join(sorted(vectors["node_only_refusals"])))
 PY

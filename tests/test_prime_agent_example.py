@@ -400,3 +400,131 @@ def test_service_stop_signals_unwind_through_the_cleanup_path(monkeypatch, tmp_p
         signum: [changes[signum][0], signal.SIG_IGN, original]
         for signum, original in originals.items()
     }
+
+
+def test_the_example_keeps_one_execution_identity_across_restarts(
+    monkeypatch, tmp_path
+):
+    """The registered command carries a PID; the identity must not.
+
+    Driven through the example's own ARGV and its own declaration rather than
+    a hand-written command, so a change to how serve_prime spells either one
+    is caught here.
+    """
+    from agent_flywheel.introspection import (
+        DiscoveredAgent,
+        ModelConfig,
+        ToolDefinition,
+    )
+    from agent_flywheel.runner import RolloutRunner
+
+    class _Transport:
+        lease_ms = 1_800_000
+
+    def _identity(pid: int, *, declare: bool) -> tuple[list[str], str]:
+        monkeypatch.setattr(os, "getpid", lambda: pid)
+        module = _load_example(monkeypatch, tmp_path / f"pid-{pid}")
+        argv = list(module.ARGV)
+        runner = RolloutRunner(
+            argv,
+            transport=_Transport(),
+            input_shape="text",
+            artifacts_dir=str(tmp_path / f"artifacts-{pid}"),
+            attested_execution_components={"prime.continual_harness": "a" * 64},
+            volatile_command_values=(
+                module.VOLATILE_COMMAND_VALUES if declare else None
+            ),
+        )
+        digest = runner.configure_execution_identity(
+            DiscoveredAgent(
+                agent_name="prime-agent",
+                framework="prime",
+                system_prompt="Complete the task.",
+                tool_definitions=[ToolDefinition(name="shell", input_schema={})],
+                discovered_model_config=ModelConfig(
+                    provider="percepteye", model_name="policy",
+                ),
+            ),
+            discovery_enabled=True,
+            sdk="agent-flywheel-python/0.1.1",
+            contract_version="flywheel/1",
+        )
+        assert digest is not None
+        return argv, digest
+
+    first_argv, first = _identity(4242, declare=True)
+    second_argv, second = _identity(9999, declare=True)
+
+    # The PID really does reach the registered command -- otherwise this test
+    # would pass against an example that never had the defect.
+    socket_index = first_argv.index("--daemon-socket") + 1
+    assert first_argv[socket_index] != second_argv[socket_index]
+    assert "4242" in first_argv[socket_index]
+    assert first == second
+
+    # And the declaration is what does it, not an accident of the argv.
+    assert _identity(4242, declare=False)[1] != _identity(9999, declare=False)[1]
+
+
+def test_the_example_hands_its_volatile_declaration_to_serve(monkeypatch, tmp_path):
+    """A declaration nothing passes on is a constant, not a mechanism."""
+    package_root = tmp_path / "prime-package"
+    (package_root / "dist").mkdir(parents=True)
+    (package_root / "package.json").write_text("{}")
+    launcher = package_root / "bin" / "prime-agent"
+    launcher.parent.mkdir()
+    launcher.write_text("#!/bin/sh\n")
+    harness_source = tmp_path / "harness-source"
+    harness_source.mkdir()
+
+    module = _load_example(
+        monkeypatch,
+        tmp_path / "serve",
+        PERCEPTEYE_PRIME_HARNESS_SOURCE=str(harness_source),
+        PRIME_AGENT_KERNEL_VENV=str(tmp_path / "kernel-venv"),
+        PRIME_AGENT_PACKAGE_ROOT=str(package_root),
+    )
+
+    class _Harness:
+        daemon_working_directory = str(tmp_path)
+
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def daemon_environment(self) -> dict[str, str]:
+            return {}
+
+        def close(self) -> None:
+            pass
+
+    class _Daemon:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    captured: dict = {}
+
+    def _serve(command, **kwargs):
+        captured["command"] = list(command)
+        captured["kwargs"] = kwargs
+        return 0
+
+    monkeypatch.setattr(module.shutil, "which", lambda name: str(launcher))
+    monkeypatch.setattr(module, "PrimeHarnessSnapshot", _Harness)
+    monkeypatch.setattr(module, "_RunOwnedPrimeDaemon", _Daemon)
+    monkeypatch.setattr(module, "_preflight_prime_runtime", lambda *a, **k: "1.0.0")
+    monkeypatch.setattr(module, "_install_cleanup_signal_handlers", dict)
+    monkeypatch.setattr(module, "_ignore_cleanup_signals", lambda previous: None)
+    monkeypatch.setattr(module, "_restore_signal_handlers", lambda previous: None)
+    monkeypatch.setattr(module.fw, "serve", _serve)
+
+    assert module.main() == 0
+    assert captured["kwargs"]["volatile_command_values"] == module.VOLATILE_COMMAND_VALUES
+    # And the declared option is in the command that was actually registered.
+    for option in module.VOLATILE_COMMAND_VALUES:
+        assert option in captured["command"]

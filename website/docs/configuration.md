@@ -137,6 +137,7 @@ fw.serve(..., on_event=lambda kind, ev: print(kind, ev))
 | `harness_snapshot` | `None` | deprecated compatibility alias for `execution_snapshot`; no harness behavior exists in core |
 | `command_output_adapter` | `None` | explicit command stdout projection; without one, stdout is final text and no structured evidence is inferred |
 | `attested_execution_components` | `None` | opaque `{stable_name: lowercase_sha256}` evidence from an execution adapter; folded into the generic OPSD execution identity |
+| `volatile_command_values` | `None` | command options whose VALUE is transport, not identity, e.g. `("--daemon-socket",)`; the option token stays in `execution_sha256` and only its value is dropped, so a restart that moves a socket path keeps the same digest. Command entrypoints only; a name absent from the command raises |
 | `reports_tool_calls` | `False` | assert that this flywheel reports a per-call outcome for every call it makes |
 | `method` | `None` | name the entrypoint method instead of probing |
 | `adapters` | `"auto"` | `"auto"`, `[]`, or names: `"langchain"`, `"adk"` |
@@ -153,7 +154,12 @@ and recursive sub-agent tree **and** an execution adapter supplies at least one
 attested component for otherwise-unobserved implementation/state, `serve()` stamps each rollout with
 `agent_fingerprint.execution_sha256`. Its canonical descriptor includes those
 facts, the entrypoint and serve configuration, the SDK/contract version, and
-any `attested_execution_components`. Discovery disabled, unreadable, lossy, or
+any `attested_execution_components`. Every argv token of a command entrypoint
+is one of those entrypoint facts, except the value of an option named in
+`volatile_command_values`, which is excluded — the option token itself is kept,
+so a restart that moves a per-process socket path keeps the digest while
+running with no socket at all is still a different execution.
+Discovery disabled, unreadable, lossy, or
 unbacked by attested implementation evidence means the key is absent, so OPSD refuses instead of training on a universal
 "unknown agent" identity. Adapter evidence must hash mutable state discovery
 cannot see; it is a digest map, never a place for raw configuration or secrets.

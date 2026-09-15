@@ -6,6 +6,17 @@ those routinely contain process addresses and make equal executions look
 different.  Adapter-owned immutable inputs arrive only as opaque SHA-256
 components, so core does not need to understand any particular harness,
 runtime, or customer agent.
+
+A command entrypoint's argv is the one place where a per-process value can
+still reach the digest through an identity fact: an agent launched with
+``--daemon-socket /tmp/agent-<pid>.sock`` is the same agent on every restart,
+but its argv is not the same argv.  The host therefore DECLARES which option
+values are transport, by name, and :func:`canonical_command_argv` replaces
+exactly those values with a marker naming the option they belonged to.  The
+option token itself survives, so "runs with a socket" and "runs without one"
+stay different executions.  Nothing here guesses: an undeclared temp path,
+port or PID is identity, because the alternative is a heuristic that erases
+real identity in the cases it gets wrong.
 """
 from __future__ import annotations
 
@@ -14,7 +25,7 @@ import json
 import math
 import re
 import struct
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Protocol
 
 from .errors import ConfigurationError
@@ -22,10 +33,12 @@ from .errors import ConfigurationError
 __all__ = [
     "ExecutionChild",
     "ExecutionSnapshot",
+    "canonical_command_argv",
     "canonical_observation_sha256",
     "execution_descriptor_sha256",
     "is_lower_sha256",
     "normalize_attested_components",
+    "normalize_volatile_command_values",
 ]
 
 _OBSERVATION_DOMAIN = b"percepteye-agent-observation-v1\0"
@@ -205,6 +218,121 @@ def normalize_attested_components(
             )
         out[name] = digest
     return dict(sorted(out.items()))
+
+
+#: Distinguishes "no sentinel was supplied" from any value a caller could pass,
+#: so an argv item can never accidentally compare equal to the absent sentinel.
+_NO_SENTINEL = object()
+
+
+def normalize_volatile_command_values(
+    options: Iterable[str] | None,
+) -> tuple[str, ...]:
+    """Validate a declaration of which command option VALUES are not identity.
+
+    Only the shape of the declaration is checked here.  Whether each option is
+    actually present in a command is checked by :func:`canonical_command_argv`,
+    which is the only place the command is known.
+    """
+    if options is None:
+        return ()
+    if isinstance(options, (str, bytes, Mapping)):
+        raise ConfigurationError(
+            "volatile command values must be a sequence of option names, e.g. "
+            "('--daemon-socket',), not a single string or mapping"
+        )
+    out: list[str] = []
+    for option in options:
+        if not isinstance(option, str) or not option.strip():
+            raise ConfigurationError(
+                "volatile command value entries must be non-empty option names"
+            )
+        _unicode_string(option, path="volatile command option")
+        if option not in out:
+            out.append(option)
+    return tuple(out)
+
+
+def canonical_command_argv(
+    command: Sequence[Any],
+    *,
+    volatile_value_options: Sequence[str] = (),
+    task_sentinel: Any = _NO_SENTINEL,
+) -> list[dict[str, Any]]:
+    """Project a command entrypoint into canonical identity argv entries.
+
+    Every token is an identity fact by default.  A declared option keeps its
+    own token and loses only its value, which becomes ``{"volatile_value":
+    <option>}``: the option's PRESENCE stays in the digest while the
+    per-process path, port or handle it carried does not.
+
+    ``--opt value`` and ``--opt=value`` are both recognised, because a host
+    that spells it the second way would otherwise be told its option is not
+    present.  The two spellings are different argv and stay different
+    identities; neither is rewritten into the other.
+
+    With nothing declared this returns exactly what it returned before the
+    declaration existed, so an agent that declares nothing keeps its digest.
+    """
+    if not command:
+        raise ConfigurationError("a command entrypoint must have at least one argument")
+    declared = tuple(volatile_value_options)
+    program = command[0]
+    for option in declared:
+        if program is not task_sentinel and option == str(program):
+            raise ConfigurationError(
+                f"volatile command value {option!r} is argv[0], the program itself. "
+                f"Voiding it would erase the entrypoint from its own identity; "
+                f"name an option whose value is transport instead."
+            )
+
+    entries: list[dict[str, Any]] = []
+    voided: set[str] = set()
+    index = 0
+    while index < len(command):
+        item = command[index]
+        if item is task_sentinel:
+            entries.append({"task_input": True})
+            index += 1
+            continue
+        text = str(item)
+        joined = next((o for o in declared if text.startswith(f"{o}=")), None)
+        if joined is not None:
+            entries.append({"volatile_value": joined})
+            voided.add(joined)
+            index += 1
+            continue
+        if text in declared:
+            if index + 1 >= len(command):
+                raise ConfigurationError(
+                    f"volatile command value {text!r} is the last argument and "
+                    f"carries no value to void"
+                )
+            if command[index + 1] is task_sentinel:
+                raise ConfigurationError(
+                    f"volatile command value {text!r} is followed by the task "
+                    f"input sentinel; voiding it would erase where each "
+                    f"rollout's task is substituted"
+                )
+            entries.append({"literal": text})
+            entries.append({"volatile_value": text})
+            voided.add(text)
+            index += 2
+            continue
+        entries.append({"literal": text})
+        index += 1
+
+    missing = [option for option in declared if option not in voided]
+    if missing:
+        raise ConfigurationError(
+            "volatile command values name "
+            + ", ".join(repr(option) for option in missing)
+            + ", which this command entrypoint does not contain. Declare each "
+            "option exactly as the command spells it ('--opt value' or "
+            "'--opt=value'); a declaration that matches nothing would silently "
+            "stop covering the value it was added for."
+        )
+    return entries
 
 
 def is_lower_sha256(value: Any) -> bool:

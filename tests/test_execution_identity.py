@@ -11,10 +11,13 @@ from typing import ClassVar
 
 import pytest
 
+import agent_flywheel as fw
 from agent_flywheel.contract import RolloutRequest
 from agent_flywheel.errors import ConfigurationError
 from agent_flywheel.execution_identity import (
+    canonical_command_argv,
     canonical_observation_sha256,
+    execution_descriptor_sha256,
     normalize_attested_components,
 )
 from agent_flywheel.introspection import (
@@ -279,6 +282,207 @@ def test_adapter_lifecycle_failure_abstains_without_losing_the_report(
         assert out.final_text == ""
     else:
         assert out.final_text == "ran"
+
+
+def _command_identity(
+    tmp_path,
+    command,
+    *,
+    volatile_command_values=None,
+    described=None,
+    sdk="agent-flywheel-python/0.1.0",
+    **kwargs,
+) -> str:
+    runner = RolloutRunner(
+        command,
+        transport=_Transport(),
+        input_shape="text",
+        artifacts_dir=str(tmp_path / "artifacts"),
+        attested_execution_components={"customer.release": "a" * 64},
+        volatile_command_values=volatile_command_values,
+        **kwargs,
+    )
+    digest = runner.configure_execution_identity(
+        described or _described(),
+        discovery_enabled=True,
+        sdk=sdk,
+        contract_version="flywheel/1",
+    )
+    assert digest is not None
+    return digest
+
+
+def _socket_argv(path: str) -> list:
+    return ["agent", "--daemon-socket", path, "--mode", "json", fw.TASK]
+
+
+def test_a_declared_volatile_value_survives_restart_while_its_option_stays_identity(
+    tmp_path,
+):
+    """The defect: a PID-bearing socket path used to re-mint identity per boot."""
+    declared = ("--daemon-socket",)
+    first = _command_identity(
+        tmp_path, _socket_argv("/tmp/agent-111.sock"),
+        volatile_command_values=declared,
+    )
+    second = _command_identity(
+        tmp_path, _socket_argv("/tmp/agent-222.sock"),
+        volatile_command_values=declared,
+    )
+    assert first == second
+
+    # Nothing is detected. The SAME two commands, undeclared, stay two
+    # identities -- which is what made every restart a new agent.
+    assert (
+        _command_identity(tmp_path, _socket_argv("/tmp/agent-111.sock"))
+        != _command_identity(tmp_path, _socket_argv("/tmp/agent-222.sock"))
+    )
+
+    # Presence is identity even though the value is not: an agent with no
+    # daemon socket at all must not collide with one that has a private one.
+    without = _command_identity(tmp_path, ["agent", "--mode", "json", fw.TASK])
+    assert without != first
+
+    # Both option spellings are accepted, and they are not rewritten into each
+    # other: `--opt=value` is a different argv from `--opt value`.
+    joined_one = _command_identity(
+        tmp_path, ["agent", "--daemon-socket=/tmp/agent-111.sock", "--mode", "json",
+                   fw.TASK],
+        volatile_command_values=declared,
+    )
+    joined_two = _command_identity(
+        tmp_path, ["agent", "--daemon-socket=/tmp/agent-222.sock", "--mode", "json",
+                   fw.TASK],
+        volatile_command_values=declared,
+    )
+    assert joined_one == joined_two != first
+
+
+def test_a_real_change_still_moves_the_execution_digest(tmp_path):
+    """Dropping a declared value must not make identity blind to anything else."""
+    declared = ("--daemon-socket",)
+    argv = _socket_argv("/tmp/agent-111.sock")
+    base = _command_identity(tmp_path, argv, volatile_command_values=declared)
+
+    other_prompt = DiscoveredAgent(
+        agent_name="customer-agent",
+        framework="customer-framework",
+        system_prompt="Refuse every task.",
+        tool_definitions=[ToolDefinition(name="read", input_schema={"type": "object"})],
+        discovered_model_config=ModelConfig(provider="gateway", model_name="policy"),
+    )
+    other_tools = DiscoveredAgent(
+        agent_name="customer-agent",
+        framework="customer-framework",
+        system_prompt="Use the registered tools to complete the task.",
+        tool_definitions=[
+            ToolDefinition(name="read", input_schema={"type": "object"}),
+            ToolDefinition(name="write", input_schema={"type": "object"}),
+        ],
+        discovered_model_config=ModelConfig(provider="gateway", model_name="policy"),
+    )
+    moved = {
+        "prompt": _command_identity(
+            tmp_path, argv, volatile_command_values=declared, described=other_prompt,
+        ),
+        "tools": _command_identity(
+            tmp_path, argv, volatile_command_values=declared, described=other_tools,
+        ),
+        "sdk": _command_identity(
+            tmp_path, argv, volatile_command_values=declared,
+            sdk="agent-flywheel-python/0.2.0",
+        ),
+        "reports_tool_calls": _command_identity(
+            tmp_path, argv, volatile_command_values=declared, reports_tool_calls=True,
+        ),
+        # A non-declared argument next to the declared one is still identity.
+        "other_argument": _command_identity(
+            tmp_path,
+            ["agent", "--daemon-socket", "/tmp/agent-111.sock", "--mode", "text",
+             fw.TASK],
+            volatile_command_values=declared,
+        ),
+    }
+    for name, digest in moved.items():
+        assert digest != base, name
+    assert len(set(moved.values()) | {base}) == len(moved) + 1
+
+
+def test_a_volatile_declaration_that_covers_nothing_is_refused_by_name(tmp_path):
+    def _build(command, values, **kwargs):
+        RolloutRunner(
+            command, transport=_Transport(), input_shape="text",
+            artifacts_dir=str(tmp_path / "refused"),
+            volatile_command_values=values, **kwargs,
+        )
+
+    with pytest.raises(ConfigurationError, match="does not contain"):
+        _build(_socket_argv("/tmp/agent-111.sock"), ("--daemon-sock",))
+
+    # Voiding argv[0] would erase the entrypoint itself.
+    with pytest.raises(ConfigurationError, match="argv\\[0\\], the program itself"):
+        _build(_socket_argv("/tmp/agent-111.sock"), ("agent",))
+
+    with pytest.raises(ConfigurationError, match="no value to void"):
+        _build(["agent", "--mode", "json", "--daemon-socket"], ("--daemon-socket",))
+
+    with pytest.raises(ConfigurationError, match="task input sentinel"):
+        _build(["agent", "--daemon-socket", fw.TASK], ("--daemon-socket",))
+
+    with pytest.raises(ConfigurationError, match="no argv"):
+        _build("tests.fixtures_agent:build", ("--daemon-socket",))
+
+    # A bare string is iterable, so accepting one would declare every character.
+    with pytest.raises(ConfigurationError, match="not a single string"):
+        _build(_socket_argv("/tmp/agent-111.sock"), "--daemon-socket")
+
+    with pytest.raises(ConfigurationError, match="non-empty option names"):
+        _build(_socket_argv("/tmp/agent-111.sock"), ("  ",))
+
+    # RolloutRunner never reaches this one -- _is_command already requires a
+    # non-empty list -- but the projection is exported and must not index into
+    # an empty command for whoever calls it next.
+    with pytest.raises(ConfigurationError, match="at least one argument"):
+        canonical_command_argv([])
+
+
+def test_an_agent_that_declares_nothing_keeps_the_digest_it_registered(tmp_path):
+    """The descriptor gains nothing when no option value is declared.
+
+    Spelled out as the descriptor this SDK built BEFORE the declaration
+    existed, so a future change to the canonical argv projection cannot
+    silently re-mint the identity of every already-registered agent.
+    """
+    command = ["agent", "--mode", "json", fw.TASK]
+    described = _described()
+    previously_registered = execution_descriptor_sha256({
+        "schema": "percepteye.agent_execution/v1",
+        "sdk": "agent-flywheel-python/0.1.0",
+        "contract_version": "flywheel/1",
+        "entrypoint": {
+            "kind": "command",
+            "argv": [
+                {"task_input": True} if item is fw.TASK else {"literal": str(item)}
+                for item in command
+            ],
+        },
+        "configuration": {
+            "input_shape": "text",
+            "isolation": "subprocess",
+            "concurrency": 1,
+            "method": None,
+            "adapters": "auto",
+            "gate_flag": None,
+            "endpoint_env": None,
+            "reports_tool_calls": False,
+        },
+        "discovered_agent": described.to_wire(),
+        "discovery_observation_sha256": canonical_observation_sha256(
+            described.to_wire()
+        ),
+        "attested_components": {"customer.release": "a" * 64},
+    })
+    assert _command_identity(tmp_path, command) == previously_registered
 
 
 def test_reserved_component_name_and_cross_language_canonical_vector():
