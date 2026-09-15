@@ -1,6 +1,6 @@
 {
   "name": "percepteye-agent-flywheel",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "See your agent's real tool failure rate \u2014 then turn those same outcomes into a self-improving, continual learning loop for your agents. Observe-only: records ok/failed/unknown per tool call to a local file. No network, inert until enabled.",
   "homepage": "https://github.com/percepteye-ai/agent-flywheel",
   "license": "MIT"

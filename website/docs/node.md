@@ -154,6 +154,27 @@ The OpenClaw entry also registers `llm_input` and writes `discovered_agent.json`
 
 The DeepSeek Harness entry registers no describer. It records tool outcomes and nothing else.
 
+### What it cannot see: `describe`
+
+OpenClaw's `llm_input` carries no tool list, so on its own the plugin registers an agent whose tools are unknown, and no task can be generated for it. The operator knows what the agent sends its model, and declares it in the plugin's config. It is the same declaration as the Python SDK's [`describe=`](how-it-works.md#an-agent-nothing-can-read-describe):
+
+```json
+"plugins": { "entries": { "agent-flywheel": { "config": { "describe": {
+  "system_prompt": "You triage support tickets.",
+  "tools": [{ "name": "lookup_ticket", "input_schema": { "type": "object" }, "read_only": true }]
+} } } } }
+```
+
+- **Same rules, same wire record, same refusals** — for anything JSON carries, except an integer beyond 2⁵³ inside a schema, which JavaScript holds rounded. `src/declaration.js` is a rule-for-rule port of `declaration.py`. Where the two languages part by default (whitespace, coercion, number types, sort order), the rule is Python's or one both keep: a tool's name and description must be strings, `max_tokens` a whole number from 1 to 2⁵³ − 1, `temperature` finite, and refusals name JSON types. `tests/test_describe_parity.py`, in this repository, runs both over one table: every accepted declaration must produce the identical record, alone and merged over the plugin's observation, and every refused one must refuse with the same sentence.
+- **What you declare wins** over the observation where given. The training registration merges it over the startup observation; the production registration sends it instead of `null`.
+- **It anchors no execution identity**, on the registration, a rollout report or a production turn. With an `executionSnapshot` configured, a startup warning says the identity is withheld.
+- **Three differences, each forced by the host:**
+    - A bad declaration: the Python SDK refuses to start, but a throw from an OpenClaw plugin's `register()` fails the plugin load and takes local capture down with it. So the plugin drops it with a warning naming the same cause, and registers only what it observed. For the same reason the config schema accepts any `describe` value, so OpenClaw never refuses the plugin over one.
+    - `introspect: false` together with `describe`: Python's `serve(introspect=False, describe=...)` refuses the contradiction; the plugin warns and sends nothing.
+    - With nothing observed, the record names the host, `framework: "openclaw"`. Python, which cannot know a custom agent's framework, says `custom`.
+
+**Consent is asked the same way too.** `introspect: false` in the plugin config, or `PERCEPTEYE_INTROSPECT=0`, registers the agent with no description at all, which the control plane records as the opt-out. Either side's refusal stands, and no execution identity is authored.
+
 ## Package
 
 | | |

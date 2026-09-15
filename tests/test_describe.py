@@ -151,6 +151,13 @@ def test_declared_tools_replace_reflected_ones_and_empty_is_an_answer(captured, 
     assert d["tool_definitions"] == []
 
 
+def test_a_whole_float_is_a_max_tokens(captured):  # noqa: F811
+    """`1024.0` in a JSON config is 1024 to the Node plugin, so it is here."""
+    d = _serve(captured, describe={"model": {"model_name": "m", "max_tokens": 1024.0}})
+    assert d["discovered_agent"]["discovered_model_config"]["max_tokens"] == 1024
+    assert isinstance(d["discovered_agent"]["discovered_model_config"]["max_tokens"], int)
+
+
 def test_each_declared_part_stops_being_unknown(captured, monkeypatch):  # noqa: F811
     _reflected(monkeypatch, incomplete=[
         "system_prompt", "tool_definitions", "tool", "discovered_model_config"])
@@ -251,7 +258,14 @@ def _fn(name="x", **fn):
     ({"model": {"provider": "openai", "model": "gpt-4.1"}}, "unknown key"),
     ({"model": {"provider": "openai"}}, "needs a 'model_name'"),
     ({"model": {"model_name": "m", "temperature": "0.2"}}, "temperature'\\] must be a number"),
-    ({"model": {"model_name": "m", "max_tokens": 1.5}}, "max_tokens'\\] must be an integer"),
+    # An infinity would go out as `Infinity`, which is not JSON; a huge int
+    # overflowed float() with an OverflowError instead of this refusal.
+    ({"model": {"model_name": "m", "temperature": float("inf")}}, "must be a finite number"),
+    ({"model": {"model_name": "m", "temperature": 10**400}}, "must be a finite number"),
+    ({"model": {"model_name": "m", "max_tokens": 1.5}}, "max_tokens'\\] must be a whole number"),
+    ({"model": {"model_name": "m", "max_tokens": 0}}, "max_tokens'\\] must be a whole number"),
+    # Beyond 2**53 the Node plugin, reading the same JSON, holds another number.
+    ({"model": {"model_name": "m", "max_tokens": 2**53}}, "max_tokens'\\] must be a whole number"),
     ({"model": {"model_name": "m", "provider": 3}}, "provider'\\] must be a string"),
     ({"model": " "}, "must not be empty"),
     # Inside a tool: each would otherwise register an empty schema or an
@@ -260,6 +274,9 @@ def _fn(name="x", **fn):
     ({"tools": [_fn(parameters=[])]}, "must be a JSON-schema mapping"),
     ({"tools": [{"name": "x", "read_only": "true"}]}, "must be true or false"),
     ({"tools": [_fn(read_only=True)]}, "beside 'function'"),
+    # Coerced, a name or description became text no two languages agree on.
+    ({"tools": [{"name": 5}]}, "'name' must be a string, got number"),
+    ({"tools": [_fn(description=["a"])]}, "'description' must be a string, got array"),
 ])
 def test_a_bad_declaration_refuses_at_startup(captured, monkeypatch, describe, match):  # noqa: F811
     # With no control plane configured, the only way to reach THIS error is to

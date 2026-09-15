@@ -31,6 +31,8 @@ identity: the callers decline one whenever this module contributed.
 from __future__ import annotations
 
 import dataclasses
+import json
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -58,6 +60,44 @@ _MODEL_KEYS = frozenset({"provider", "model_name", "temperature", "max_tokens"})
 #: ``source_type`` of a description a declaration contributed to. A claim about
 #: where the description came from: the customer said it; nothing observed it.
 SOURCE_TYPE = "sdk_declared"
+
+#: The largest integer both SDKs hold exactly. The Node plugin reads the same
+#: declaration from JSON into doubles, so a larger ``max_tokens`` would register
+#: a different number from each.
+_MAX_EXACT_INT = 2**53 - 1
+
+
+def _json_type(value: Any) -> str:
+    """``value``'s JSON type, the name both SDKs print alike. ``1`` and ``1.0``
+    are one ``number``: a JSON reader in JavaScript cannot tell them apart."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, Mapping):
+        return "object"
+    if isinstance(value, (list, tuple)):
+        return "array"
+    return type(value).__name__
+
+
+def _key_list(keys: Any) -> str:
+    """Key names as a JSON array, sorted by code point: one rendering both SDKs
+    produce, whatever quotes, escapes or scripts a key contains."""
+    return json.dumps(sorted(str(k) for k in keys))
+
+
+def _render(value: Any) -> str:
+    """A value quoted back in a refusal, cut at 120 characters."""
+    try:
+        text = json.dumps(value)
+    except (TypeError, ValueError):
+        text = repr(value)
+    return text[:120]
 
 
 @dataclass(frozen=True)
@@ -100,13 +140,13 @@ def resolve(describe: Describe | None) -> Declaration | None:
     if not isinstance(spec, Mapping):
         raise ConfigurationError(
             f"describe= must be a mapping (or a callable returning one), got "
-            f"{type(spec).__name__}"
+            f"{_json_type(spec)}"
         )
-    unknown = sorted(str(k) for k in spec if k not in _KEYS)
+    unknown = [k for k in spec if k not in _KEYS]
     if unknown:
         raise ConfigurationError(
-            f"describe= got unknown key(s) {unknown}; it accepts "
-            f"{sorted(_KEYS)}"
+            f"describe= got unknown key(s) {_key_list(unknown)}; it accepts "
+            f"{_key_list(_KEYS)}"
         )
     prompt, tools, model = (spec.get(k) for k in ("system_prompt", "tools", "model"))
     if prompt is not None and not isinstance(prompt, str):
@@ -135,25 +175,36 @@ def _tools(declared: list[Any]) -> list[ToolDefinition]:
     than dropped: a silently shorter catalogue is a smaller task universe
     nobody chose. So is a schema that is not a mapping, or a ``read_only``
     that is not a bool, or one the parser would not see -- each would
-    otherwise register as an empty schema or an undeclared tool.
+    otherwise register as an empty schema or an undeclared tool. And a name
+    or description that is not a string: the wire's parser would coerce it,
+    and no two languages coerce ``1.0`` or ``{}`` to the same text.
     """
     from .host_description import _tool_from_wire, _tools_from_request
 
     out = []
     for i, entry in enumerate(declared):
         where = f"describe['tools'][{i}]"
+        if isinstance(entry, dict):
+            fn = entry.get("function")
+            body = fn if isinstance(fn, dict) else entry
+            for field in ("name", "description"):
+                value = body.get(field)
+                if value is not None and not isinstance(value, str):
+                    raise ConfigurationError(
+                        f"{where}: '{field}' must be a string, got "
+                        f"{_json_type(value)}")
         parsed = _tools_from_request({"tools": [entry]})
         tool = _tool_from_wire(parsed[0]) if parsed else None
         if tool is None:
             raise ConfigurationError(
                 f"{where} is not a tool: expected an OpenAI function spec, an "
-                f"Anthropic tool, or a mapping with a 'name', got {entry!r:.120}"
+                f"Anthropic tool, or a mapping with a 'name', got {_render(entry)}"
             )
         schema = parsed[0]["input_schema"]
         if schema is not None and not isinstance(schema, dict):
             raise ConfigurationError(
                 f"{where}: the schema must be a JSON-schema mapping, got "
-                f"{type(schema).__name__}")
+                f"{_json_type(schema)}")
         fn = entry.get("function")
         if isinstance(fn, dict) and "read_only" in fn:
             raise ConfigurationError(
@@ -161,7 +212,7 @@ def _tools(declared: list[Any]) -> list[ToolDefinition]:
         read_only = entry.get("read_only")
         if read_only is not None and not isinstance(read_only, bool):
             raise ConfigurationError(
-                f"{where}['read_only'] must be true or false, got {read_only!r}")
+                f"{where}['read_only'] must be true or false, got {_render(read_only)}")
         out.append(dataclasses.replace(tool, read_only=read_only))
     return out
 
@@ -171,29 +222,53 @@ def _model(declared: str | Mapping[str, Any]) -> ModelConfig:
         if not declared.strip():
             raise ConfigurationError("describe['model'] must not be empty")
         return ModelConfig(model_name=declared)
-    unknown = sorted(str(k) for k in declared if k not in _MODEL_KEYS)
+    unknown = [k for k in declared if k not in _MODEL_KEYS]
     if unknown:
         raise ConfigurationError(
-            f"describe['model'] got unknown key(s) {unknown}; it accepts "
-            f"{sorted(_MODEL_KEYS)}")
+            f"describe['model'] got unknown key(s) {_key_list(unknown)}; it "
+            f"accepts {_key_list(_MODEL_KEYS)}")
     name, provider = declared.get("model_name"), declared.get("provider")
-    temperature, max_tokens = declared.get("temperature"), declared.get("max_tokens")
     if not isinstance(name, str) or not name.strip():
         raise ConfigurationError("describe['model'] needs a 'model_name' string")
     if provider is not None and not isinstance(provider, str):
         raise ConfigurationError("describe['model']['provider'] must be a string")
-    if temperature is not None and (
-            isinstance(temperature, bool) or not isinstance(temperature, (int, float))):
-        raise ConfigurationError("describe['model']['temperature'] must be a number")
-    if max_tokens is not None and (
-            isinstance(max_tokens, bool) or not isinstance(max_tokens, int)):
-        raise ConfigurationError("describe['model']['max_tokens'] must be an integer")
     return ModelConfig(
         provider=provider or "unknown",
         model_name=name,
-        temperature=float(temperature) if temperature is not None else None,
-        max_tokens=max_tokens,
+        temperature=_temperature(declared.get("temperature")),
+        max_tokens=_max_tokens(declared.get("max_tokens")),
     )
+
+
+def _temperature(value: Any) -> float | None:
+    """A finite number, or None. An infinity would be sent as ``Infinity``,
+    which is not JSON; an integer too large for a float would overflow."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigurationError("describe['model']['temperature'] must be a number")
+    try:
+        value = float(value)
+    except OverflowError:
+        value = math.inf
+    if not math.isfinite(value):
+        raise ConfigurationError(
+            "describe['model']['temperature'] must be a finite number")
+    return value
+
+
+def _max_tokens(value: Any) -> int | None:
+    """A whole number from 1 to 2**53 - 1, or None. ``1024.0`` counts: the Node
+    plugin reads the same JSON and cannot tell it from ``1024``."""
+    if value is None:
+        return None
+    whole = (isinstance(value, int) and not isinstance(value, bool)) or (
+        isinstance(value, float) and math.isfinite(value) and value.is_integer())
+    if not whole or not 1 <= value <= _MAX_EXACT_INT:
+        raise ConfigurationError(
+            "describe['model']['max_tokens'] must be a whole number from 1 to "
+            f"{_MAX_EXACT_INT}")
+    return int(value)
 
 
 def apply(
