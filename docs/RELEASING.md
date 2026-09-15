@@ -239,11 +239,16 @@ hand ([§3b](#3b-publishing-to-npm-by-hand)).
      2026-09-15. The deprecated unscoped `agent-flywheel` is a different
      package with its own settings page: a publisher configured there
      authorizes nothing for the scoped name.
-   - **Trusted Publisher → GitHub Actions:** organization `percepteye-ai`,
-     repository `agent-flywheel-node`, workflow `publish.yml`, environment
-     `npm`. npm matches every field exactly, the file name included, and
-     answers any mismatch with the same `package not found` — so after saving,
-     rehearse (step 2) and read the `oidc` line.
+   - **Trusted publishing → Select your publisher → GitHub Actions:**
+     "Organization or user" `percepteye-ai`, "Repository"
+     `agent-flywheel-node`, "Workflow filename" `publish.yml` (the file name
+     only, not its path), "Environment name" `npm`, and under "Allowed
+     actions" permit direct `npm publish`: the workflow runs `npm publish`, not
+     `npm stage publish`. npm matches every field exactly and answers any
+     mismatch with the same `package not found`.
+   - **An entry cannot be edited.** To change a field, delete the entry and
+     add it again. npm does not check an entry when you save it, so after
+     saving, rehearse (step 2) and read the `oidc` line.
    - **"Require two-factor authentication and disallow tokens",** so no
      long-lived token can publish.
    - **No required reviewer on the GitHub `npm` environment yet.** On the
