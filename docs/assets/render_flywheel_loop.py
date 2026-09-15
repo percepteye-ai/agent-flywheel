@@ -57,7 +57,7 @@ _F = {
         "policy_note": "\u2190 the better policy, as an endpoint you can call",
     },
     "node": {
-        "cmd": "openclaw plugins install agent-flywheel",
+        "cmd": "openclaw plugins install @percepteye/agent-flywheel",
         "dep": "+ nothing   \u2190 zero runtime dependencies",
         "box": "flywheel plugin",
         "l1": "export PERCEPTEYE_AGENT_MODE=training",
@@ -218,7 +218,15 @@ LZ = (40, 92, 780, 628)          # your infrastructure zone
 BOUND_X = 800
 RZ = (828, 92, 1244, 628)        # percepteye zone
 
-INSTALL  = (72, 134, 440, 206)
+#: The install card matches the cards beneath it unless its command would run
+#: past the edge -- which the Node one, `openclaw plugins install
+#: @percepteye/agent-flywheel`, does by about 40px. Then the card grows right,
+#: into the empty space above the first lane, just far enough to hold the
+#: command and the cursor after it (the install section draws that cursor at
+#: +40 past the command, and the "$" sits 18 in from the left edge, so 18 is
+#: the matching margin). The Python command fits, so its figure is unchanged.
+_CURSOR_END = 72 + 40 + F_CODES.getbbox(_F["cmd"])[2] / SS
+INSTALL  = (72, 134, max(440, math.ceil(_CURSOR_END + 18)), 206)
 HARNESS  = (72, 226, 440, 338)
 AGENT    = (72, 368, 440, 520)
 PROD     = (72, 536, 440, 616)

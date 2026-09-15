@@ -7,7 +7,7 @@ repository takes copies of both.
 | | Python | Node |
 |:--|:--|:--|
 | repository | `percepteye-ai/agent-flywheel` | `percepteye-ai/agent-flywheel-node` |
-| registry | PyPI [`agent-flywheel`](https://pypi.org/project/agent-flywheel/) — published | npm `agent-flywheel` — **not yet published** (the name was free on 2026-09-14) |
+| registry | PyPI [`agent-flywheel`](https://pypi.org/project/agent-flywheel/) — published | npm [`@percepteye/agent-flywheel`](https://www.npmjs.com/package/@percepteye/agent-flywheel), owned by the `percepteye` npm organization |
 | version lives in | `src/agent_flywheel/_version.py`; `pyproject.toml` and the goose manifest repeat it, and `tests/test_one_version.py` holds all three together | `package.json`; the User-Agent derives from it, and `test/version.test.js` holds `openclaw.plugin.json` (version *and* description) equal to it |
 | publishes through | `.github/workflows/workflow.yml` on a `v*` tag, via PyPI trusted publishing | `.github/workflows/publish.yml` on a `v*` tag, via npm trusted publishing, after a manual first publish ([§3](#3-node-release-npm)) |
 
@@ -39,7 +39,7 @@ older package name, and nothing should ever upload those.
 
 ```bash
 npm test                                   # N passed, 0 skipped
-npm pack --dry-run                         # agent-flywheel-<version>.tgz, no test/ or docs/
+npm pack --dry-run                         # percepteye-agent-flywheel-<version>.tgz, no test/ or docs/
 ```
 
 **If a figure renderer changed**, re-render on macOS (the GIF/PNG renderers use
@@ -107,7 +107,9 @@ this repository's `test-full` job checks out the Node repository's `main`.
   `invalid-publisher` before anything uploaded. Rename the file only together
   with the publisher.
 - **A tag publishes immediately.** The `pypi` environment has no required
-  reviewer. For a human gate, add one under Settings → Environments → `pypi`.
+  reviewer, and cannot have one yet: on the GitHub Team plan, required
+  reviewers only work on public repositories. Add one on the day the
+  repository goes public ([§4d](#4d-also-on-the-day)).
 - **PyPI is append-only.** A version or filename can never be reused, even
   after deletion, and a release's description can never be edited. A README
   fix reaches PyPI only as a new version: 0.1.1 was published for exactly that.
@@ -143,8 +145,13 @@ this repository's `test-full` job checks out the Node repository's `main`.
 
 ## 3. Node release (npm)
 
-Not yet published. The README says so ("Not on npm yet" and a grey static
-badge), and until the first release customers install from a clone.
+Published as
+[`@percepteye/agent-flywheel`](https://www.npmjs.com/package/@percepteye/agent-flywheel),
+under the `percepteye` npm organization. npm lets only personal accounts own
+an unscoped name, which is why the package is scoped. It first went out on
+2026-09-14 as the unscoped `agent-flywheel`, and that 0.1.0 is still on the
+registry, deprecated with a pointer to the scoped name, so nobody else can
+take the name.
 
 Releases go through the Node repository's `.github/workflows/publish.yml`, the
 same shape as `workflow.yml` here. A `v*` tag runs the whole CI workflow on the
@@ -156,14 +163,22 @@ Only the very first publish is manual.
 2. **Run `npm test` and `npm pack --dry-run`,** as in §1. To rehearse the whole
    pipeline on GitHub's runners, use Actions → publish → Run workflow: it runs
    every check and ends in `npm publish --dry-run`.
-3. **The first publish is manual,** from a clean checkout of `main`, with your
-   npm account's 2FA. npm configures trusted publishers on a package that
-   already exists, so the workflow cannot create it:
+3. **The first publish is manual,** from a clean checkout of `main`. npm
+   configures trusted publishers only on a package that already exists, so the
+   workflow cannot create it. The npm account must be a member of the
+   `percepteye` organization, and it must have two-factor turned on, because
+   npm refuses to publish from an account without it:
 
    ```bash
    npm login
    npm publish --access public
    ```
+
+   Two things to get right before this runs:
+   - **The README ships inside the tarball, and npm renders it.** It must
+     already read as published: no "not on npm yet" notice.
+   - **Don't tag this commit.** A `v*` tag starts `publish.yml`, which fails
+     on a version that already exists.
 
 4. **Then, once, on npmjs.com → the package → Settings:**
    - **Trusted Publisher → GitHub Actions:** organization `percepteye-ai`,
@@ -171,8 +186,10 @@ Only the very first publish is manual.
      `npm`. npm matches every field exactly, the file name included.
    - **"Require two-factor authentication and disallow tokens",** so no
      long-lived token can publish.
-   - Separately, in GitHub, **give the `npm` environment a required
-     reviewer.** Otherwise a tag publishes immediately.
+   - **No required reviewer on the GitHub `npm` environment yet.** On the
+     Team plan, required reviewers only work on public repositories, so until
+     the repository goes public ([§4d](#4d-also-on-the-day)), a `v*` tag
+     publishes as soon as CI passes.
 5. **Every release after that** is a merge, then a tag, in the Node repository:
 
    ```bash
@@ -180,18 +197,18 @@ Only the very first publish is manual.
    git tag -a vX.Y.Z -m "agent-flywheel X.Y.Z" && git push origin vX.Y.Z
    ```
 
-6. **After the first release lands,** restore the live npm badge (kept verbatim
-   in the comment above the README's badges) and remove the "Not on npm yet"
-   warning. Verify with `npm view agent-flywheel version`, then run
-   `openclaw plugins install agent-flywheel` on a test host and check the
-   version `openclaw plugins list` reports.
+6. **Verify every release** with `npm view @percepteye/agent-flywheel version`.
+   Then run `openclaw plugins install @percepteye/agent-flywheel` on a test
+   host, and check the version `openclaw plugins list` reports.
 
 ### Node: what to know
 
-- **One name everywhere.** The npm package, the OpenClaw plugin id and the
-  DeepSeek Harness plugin name are all `agent-flywheel`, and `cordis.patch.yml`
-  loads the `agent-flywheel/dsh` subpath. That subpath is the published package
-  name, so the two must move together.
+- **Two names, on purpose.** The npm package is `@percepteye/agent-flywheel`.
+  The OpenClaw plugin id and the DeepSeek Harness plugin name stay
+  `agent-flywheel`, so the OpenClaw config key stays too. `cordis.patch.yml`
+  loads `@percepteye/agent-flywheel/dsh`: the published package name plus the
+  subpath. The two must move together, and `test/dsh.test.js` fails if they
+  differ.
 - **Renaming the plugin id strands existing installs.** OpenClaw keys config by
   it (`plugins.entries.agent-flywheel`), so a rename needs every install
   reinstalled and its config entry moved.
@@ -214,12 +231,13 @@ Only the very first publish is manual.
 
 **Why.** Both READMEs point at their figures by relative path
 (`docs/assets/*.gif`) and link to files in the repository the same way. GitHub
-resolves those for signed-in members. PyPI and npm cannot resolve a relative
-path at all. And an absolute `raw.githubusercontent.com` URL answers 404 to
-everyone while a repository is private, because images are fetched without a
-GitHub session. So today the PyPI page shows the figures' alt text, and its
-sidebar links (Homepage, Documentation, Source, Issues) 404 for anyone outside
-the organisation.
+resolves those for signed-in members. PyPI cannot resolve a relative path at
+all. npm rewrites relative image paths to `raw.githubusercontent.com` URLs on
+the repository's default branch. But a `raw.githubusercontent.com` URL answers
+404 to everyone while a repository is private, because images are fetched
+without a GitHub session. So today neither registry page shows the figures,
+and PyPI's sidebar links (Homepage, Documentation, Source, Issues) 404 for
+anyone outside the organisation.
 
 **Order:** audit, then flip visibility, then flip the README URLs and their
 tests, then release. Do both repositories in the same window. The Node README
@@ -278,10 +296,11 @@ gh repo edit percepteye-ai/agent-flywheel-node --visibility public --accept-visi
   only with a new version, because descriptions are frozen per release.
 
 **Node:**
-- **Make the README `<img>` sources absolute** raw URLs, and update
-  `test/oss-boundary.test.js` ("names every README image relatively") in the
-  same commit.
-- **Restore the live npm badge** once the package is published.
+- **Leave the README's image paths relative.** npm already rewrites them to
+  `raw.githubusercontent.com` URLs on the default branch (seen on the live
+  package page on 2026-09-14). Those resolve the moment the repository is
+  public, with no new release. `test/oss-boundary.test.js` holds them relative,
+  and should keep doing so.
 - **Nothing to change in `publish.yml`.** It reads the repository's visibility
   on every run, so the next release after the flip carries npm provenance.
   From then on, a release that cannot attest where it was built fails.
@@ -290,6 +309,9 @@ gh repo edit percepteye-ai/agent-flywheel-node --visibility public --accept-visi
 
 - **Protect `main`** in both repositories: require a PR and the checks that
   pass today. Neither has branch protection now.
+- **Add a required reviewer** to the `pypi` environment here and the `npm`
+  environment in the Node repository. On the Team plan that only works once a
+  repository is public. Until then, a `v*` tag publishes as soon as CI passes.
 - **Actions costs change.** Standard GitHub-hosted runners are free for public
   repositories, so the minutes and spending-limit block no longer applies to
   them. Under Settings → Actions, require approval for workflows from
@@ -297,4 +319,5 @@ gh repo edit percepteye-ai/agent-flywheel-node --visibility public --accept-visi
 - **Verify signed out,** in a private window:
   - both GitHub pages render their figures;
   - the PyPI page renders its figures, and its sidebar links resolve;
+  - the npm page renders its figures;
   - `pip install agent-flywheel` still works.
