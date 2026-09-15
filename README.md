@@ -44,9 +44,10 @@ Ship one line. Your agent keeps running in your process, behind your firewall, o
      nothing checks.
        [![ci](https://img.shields.io/github/actions/workflow/status/percepteye-ai/agent-flywheel/ci.yml?branch=main&label=ci&style=for-the-badge&logo=githubactions&logoColor=white&color=22c55e)](https://github.com/percepteye-ai/agent-flywheel/actions)
      `pypi` is live and asks PyPI for the published version of
-     `agent-flywheel`. PyPI answers anonymous callers, so unlike `ci` it only
-     reads "not found" until the first release is out. This README is also
-     that release's PyPI page, so it must not say "not published" anywhere.
+     `agent-flywheel`. PyPI answers anonymous callers, so unlike `ci` it
+     renders while the repo is private, and it has shown the current release
+     since 0.1.0 went out on 2026-09-14. This README is also each release's
+     PyPI page, so it must never claim the package is unreleased.
      `ci` gets no static stand-in: the hardcoded `tests` badge below already
      carries what a reader wanted from it, and a README cannot assert its own
      pipeline state. That badge used to be hardcoded with nothing checking it,
