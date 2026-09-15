@@ -39,6 +39,15 @@ def _fn(**function):
     return {"type": "function", "function": {"name": "x", **function}}
 
 
+# Characters where the two languages part by default, built with chr() so the
+# source shows what they are. Python's str.strip() takes NEL and the C0
+# separators and keeps the BOM; JavaScript's trim() does the opposite.
+NEL, US, BOM = chr(0x85), chr(0x1F), chr(0xFEFF)
+#: One key JSON escapes, one astral key, one key a UTF-16 sort puts in the
+#: wrong place (U+FFFF sorts after U+1F600 by code point, before it by unit).
+QUOTE_KEY, ASTRAL_KEY, LAST_BMP_KEY = "it's", chr(0x1F600), chr(0xFFFF)
+
+
 ACCEPTED: dict[str, object] = {
     "every tool shape": {
         "system_prompt": "You resolve orders.",
@@ -57,9 +66,11 @@ ACCEPTED: dict[str, object] = {
         "tools": [{**_fn(parameters={}), "read_only": False}]},
     "an explicit null schema wins over parameters": {
         "tools": [{"name": "x", "input_schema": None, "parameters": {"type": "object"}}]},
-    "names are stripped, descriptions coerced": {
-        "tools": [{"name": "  padded  ", "description": 5},
-                  {"name": "flag", "description": True}]},
+    "names are stripped the way Python strips": {
+        "tools": [{"name": "  padded  "}, {"name": US + "search" + NEL},
+                  {"name": BOM + "kept"}]},
+    "a whole float is a max_tokens": {"model": {"model_name": "m", "max_tokens": 1024.0}},
+    "the largest max_tokens both hold": {"model": {"model_name": "m", "max_tokens": 2**53 - 1}},
     "a model mapping": {
         "model": {"provider": "openai", "model_name": "gpt-4.1",
                   "temperature": 0.2, "max_tokens": 512}},
@@ -73,7 +84,12 @@ ACCEPTED: dict[str, object] = {
 REFUSED: dict[str, object] = {
     "a typo'd key": {"prompt": "typo"},
     "a tool with no name": {"tools": [{"description": "no name"}]},
-    "an empty object is no name": {"tools": [{"name": {}}]},
+    "an object is no name": {"tools": [{"name": {}}]},
+    "a numeric name": {"tools": [{"name": 5}]},
+    "a numeric description": {"tools": [_fn(description=1.0)]},
+    "a name that is only Python whitespace": {"tools": [{"name": NEL}]},
+    "keys rendered and sorted alike": {QUOTE_KEY: 1, ASTRAL_KEY: 1, LAST_BMP_KEY: 1},
+    "a float": 1.0,
     "a null tool": {"tools": [None]},
     "tools not a list": {"tools": "search"},
     "a list": ["not", "a", "mapping"],
@@ -89,6 +105,9 @@ REFUSED: dict[str, object] = {
     "a boolean max_tokens": {"model": {"model_name": "m", "max_tokens": True}},
     "a numeric provider": {"model": {"model_name": "m", "provider": 3}},
     "an empty model": {"model": " "},
+    "a model that is only Python whitespace": {"model": NEL},
+    "no max_tokens": {"model": {"model_name": "m", "max_tokens": 0}},
+    "a max_tokens past 2**53": {"model": {"model_name": "m", "max_tokens": 2**53}},
     "a string schema": {"tools": [{"name": "x", "input_schema": "{}"}]},
     "a list of parameters": {"tools": [_fn(parameters=[])]},
     "a string read_only": {"tools": [{"name": "x", "read_only": "true"}]},

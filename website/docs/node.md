@@ -165,10 +165,13 @@ OpenClaw's `llm_input` carries no tool list, so on its own the plugin registers 
 } } } } }
 ```
 
-- **Same rules, same wire record, same refusals.** `src/declaration.js` is a rule-for-rule port of `declaration.py`. `tests/test_describe_parity.py`, in this repository, runs both over one table: every accepted declaration must produce the identical record, alone and merged over the plugin's observation, and every refused one must refuse with the same sentence.
+- **Same rules, same wire record, same refusals** — for anything JSON carries, except an integer beyond 2⁵³ inside a schema, which JavaScript holds rounded. `src/declaration.js` is a rule-for-rule port of `declaration.py`. Where the two languages part by default (whitespace, coercion, number types, sort order), the rule is Python's or one both keep: a tool's name and description must be strings, `max_tokens` a whole number from 1 to 2⁵³ − 1, `temperature` finite, and refusals name JSON types. `tests/test_describe_parity.py`, in this repository, runs both over one table: every accepted declaration must produce the identical record, alone and merged over the plugin's observation, and every refused one must refuse with the same sentence.
 - **What you declare wins** over the observation where given. The training registration merges it over the startup observation; the production registration sends it instead of `null`.
-- **It anchors no execution identity**, on the registration, a rollout report or a production turn.
-- **One difference, forced by the host:** the Python SDK refuses to start on a bad declaration, but a throw from an OpenClaw plugin's `register()` fails the plugin load and takes local capture down with it. So the plugin drops a bad declaration with a warning naming the same cause, and registers only what it observed.
+- **It anchors no execution identity**, on the registration, a rollout report or a production turn. With an `executionSnapshot` configured, a startup warning says the identity is withheld.
+- **Three differences, each forced by the host:**
+    - A bad declaration: the Python SDK refuses to start, but a throw from an OpenClaw plugin's `register()` fails the plugin load and takes local capture down with it. So the plugin drops it with a warning naming the same cause, and registers only what it observed. For the same reason the config schema accepts any `describe` value, so OpenClaw never refuses the plugin over one.
+    - `introspect: false` together with `describe`: Python's `serve(introspect=False, describe=...)` refuses the contradiction; the plugin warns and sends nothing.
+    - With nothing observed, the record names the host, `framework: "openclaw"`. Python, which cannot know a custom agent's framework, says `custom`.
 
 **Consent is asked the same way too.** `introspect: false` in the plugin config, or `PERCEPTEYE_INTROSPECT=0`, registers the agent with no description at all, which the control plane records as the opt-out. Either side's refusal stands, and no execution identity is authored.
 
