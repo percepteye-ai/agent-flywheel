@@ -435,8 +435,15 @@ def _tools_from_request(body: Any) -> list[dict[str, Any]]:
             out.append({
                 "name": entry.get("name"),
                 "description": entry.get("description"),
-                "input_schema": entry.get("input_schema"),
+                # OpenAI's legacy flat ``functions`` shape spells the schema
+                # ``parameters``; read it rather than dropping the schema.
+                "input_schema": (entry.get("input_schema")
+                                 if "input_schema" in entry
+                                 else entry.get("parameters")),
                 "original_format": "anthropic_tool",
+                # The protocol's own flat shape can carry a declaration; a
+                # host request never does, so this stays None there.
+                "read_only": entry.get("read_only"),
             })
     return out
 

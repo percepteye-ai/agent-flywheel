@@ -121,6 +121,30 @@ A host that exits on its own is read immediately; a fast CLI finishes in well un
 
 The warm-up child is **not a rollout** and is never captured, graded, or trained on. It gets the same environment scrub a rollout child gets — the whole `PERCEPTEYE_` namespace is stripped so the long-lived key stays in the parent, and `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` are forced to the loopback observer with a dummy key. The observer answers with an inert reply and forwards nothing, so a dispatch that outruns the kill reaches no live provider.
 
+### An agent nothing can read: `describe=`
+
+A custom agent — a plain class, no framework the SDK reflects on — registers as unreadable, and no task is ever generated for it. Say what it is instead:
+
+```python
+fw.serve(
+    "my_package.agent:build", agent_id="acme-bot", input_shape="text",
+    describe={
+        "system_prompt": SYSTEM_PROMPT,
+        "tools": TOOLS,          # the list you already send the model
+        "model": "gpt-4.1",      # optional
+    },
+)
+```
+
+- **`tools`** is the list your agent already sends its model: OpenAI function specs, Anthropic tools, or `{name, description, input_schema, read_only}`. It is read by the same parser that reads a tool list off a completion request, and a tool it cannot read refuses at startup rather than being dropped.
+- **What you declare wins; what you leave out still comes from reflection.** A LangChain agent whose prompt reflection cannot reach declares just `system_prompt` and keeps its reflected tools. Leaving `tools` out never means "no tools" — that is `tools=[]`.
+- **A zero-argument callable** works too, called once the agent is built.
+- **For a command agent it replaces the warm-up.** Declare its tools and prompt; nothing is spawned.
+- **It is your word, not an observation**, so `source_type` is `sdk_declared` and a declared description never anchors an execution identity.
+- An unknown key (`prompt` for `system_prompt`) refuses at startup instead of declaring nothing. `introspect=False` with `describe=` is a contradiction and raises; `PERCEPTEYE_INTROSPECT=0` wins over it, with a warning.
+
+`fw.attach(..., describe=...)` takes the same argument: without `execution_entrypoint` it is the whole description the registration sends, which is how a production-only agent tells the control plane its prompt and tools.
+
 ### Opting out
 
 ```python
