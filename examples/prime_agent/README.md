@@ -64,9 +64,16 @@ paths and bytes once. Every discovery/rollout child receives a private HOME and
 `PRIME_AGENT_CODING_AGENT_DIR` containing a read-only copy, and the copy is
 attested after exit. Each private agent directory also starts with fixed,
 read-only settings that disable auto-refine, auto-compaction, and telemetry
-writes. The command disables implicit skills, prompt templates, context files,
-and extension discovery; only the explicit `route.ts` extension remains. Any
-harness or fixed-settings mutation excludes that rollout.
+writes, and that cap how long one model call may take. That cap is not
+cosmetic: Prime's provider client defaults to a 600000ms request timeout with
+retries on top, and no command-line flag reaches it — `--autonomous-timeout-ms`
+is evaluated between turns, so it does not fire while a turn is blocked in the
+call. Without the cap, a gateway that accepts the connection and never answers
+holds a rollout until the SDK kills it on its deadline, with nothing in
+`inference_calls` and nothing to say why. The command disables implicit skills,
+prompt templates, context files, and extension discovery; only the explicit
+`route.ts` extension remains. Any harness or fixed-settings mutation excludes
+that rollout.
 
 Every eligible result carries the framework-neutral
 `agent_fingerprint.execution_sha256` (one lowercase 64-hex SHA-256). The same
@@ -78,6 +85,18 @@ domain-separated canonical digest over the exact discovery observation, the
 command and serve configuration, the SDK/contract version, and opaque
 adapter-attested component hashes. OPSD consumes only this generic key; it does
 not know that this example uses Prime or a Python kernel.
+
+**A sealed workload is bound to the digest it was prepared against, so changing
+any input to the digest means re-preparing it.** The fixed settings, `route.ts`,
+the harness tree, the route configuration, the kernel venv and the installed
+`dist/` are all inputs; edit any of them and the restarted agent registers a
+different `agent_execution_sha256`. Work already prepared under the previous one
+stays invisible to it — the control plane makes a sealed rollout claimable only
+by the exact frozen digest, and rejects a report whose fingerprint does not
+match with `410 lease_lost`. The symptom is indistinguishable from an agent that
+cannot run at all: it registers, long-polls, prints `claim_empty` forever, and
+every rollout is reaped `status=abandoned` / `exclusion_reason=deadline_exceeded`.
+Re-prepare every affected workload after the restart.
 
 For diagnostics, `agent_fingerprint.harness_sha256` still names only the
 snapshotted continual-harness tree and `agent_fingerprint.kernel_sha256` names

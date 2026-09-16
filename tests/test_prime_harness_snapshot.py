@@ -30,6 +30,27 @@ class _Transport:
     lease_ms = 1_800_000
 
 
+#: The settings.json every child must get, SPELLED OUT HERE rather than read
+#: from the constant production writes.
+#:
+#: These assertions once pinned this literal; they were changed to compare
+#: against ``prime_agent._FIXED_SETTINGS`` itself, which cannot fail -- the
+#: writer and the expectation became the same object, so any wrong change to
+#: that constant stays green. This file is the only thing standing between a
+#: typo in those bytes and an OPSD run whose harness identity moved: the digest
+#: of these exact bytes is attested into the agent's frozen execution identity,
+#: and the provider ceiling inside them is what stops one wedged call eating an
+#: episode. 306000 is ``harness_call_ceiling_s(894.0) * 1000`` -- if the
+#: arithmetic behind it changes deliberately, change this literal deliberately
+#: too, and know that the sealed identity moved with it.
+_EXPECTED_SETTINGS = (
+    b'{"autoRefine":{"enabled":false,"compact":false},'
+    b'"telemetry":{"enabled":false,"noticeShown":true},'
+    b'"retry":{"enabled":false,"maxRetries":0,"provider":'
+    b'{"timeoutMs":306000,"maxRetries":0,"maxRetryDelayMs":60000}}}\n'
+)
+
+
 def _source(tmp_path: Path) -> Path:
     source = tmp_path / "source-harness"
     (source / "skills").mkdir(parents=True, exist_ok=True)
@@ -166,10 +187,7 @@ def test_snapshot_digest_is_canonical_and_children_are_private(tmp_path):
             assert first.environment["PRIME_AGENT_KERNEL_VENV"].endswith("kernel-venv")
             assert first.harness_sha256 == second.harness_sha256 == snapshot.harness_sha256
             assert (first.harness_dir / "skills" / "opsd.md").read_text() == "fixed tactic\n"
-            assert first.settings_path.read_text() == (
-                '{"autoRefine":{"enabled":false,"compact":false},'
-                '"telemetry":{"enabled":false,"noticeShown":true}}\n'
-            )
+            assert first.settings_path.read_bytes() == _EXPECTED_SETTINGS
             assert not (first.settings_path.stat().st_mode & 0o222)
             assert not ((first.harness_dir / "harness_state.json").stat().st_mode & 0o222)
             snapshot.attest_child(first)
@@ -257,10 +275,7 @@ def test_supervisor_environment_is_stable_and_contains_no_ambient_secrets(
             assert name not in env
         assert env["HOME"] != str(Path.home())
         agent_dir = Path(env["PRIME_AGENT_CODING_AGENT_DIR"])
-        assert (agent_dir / "settings.json").read_text() == (
-            '{"autoRefine":{"enabled":false,"compact":false},'
-            '"telemetry":{"enabled":false,"noticeShown":true}}\n'
-        )
+        assert (agent_dir / "settings.json").read_bytes() == _EXPECTED_SETTINGS
         assert snapshot.daemon_working_directory.is_dir()
         assert list(snapshot.daemon_working_directory.iterdir()) == []
         assert snapshot.daemon_working_directory != tmp_path
@@ -618,10 +633,9 @@ def test_command_discovery_uses_and_attests_the_same_isolated_harness(
         seen["agent_dir"] = env["PRIME_AGENT_CODING_AGENT_DIR"]
         state = Path(seen["agent_dir"]) / "harness" / "harness_state.json"
         assert state.read_text() == '{"schema":1,"entries":{}}'
-        assert (Path(seen["agent_dir"]) / "settings.json").read_text() == (
-            '{"autoRefine":{"enabled":false,"compact":false},'
-            '"telemetry":{"enabled":false,"noticeShown":true}}\n'
-        )
+        assert (
+            Path(seen["agent_dir"]) / "settings.json"
+        ).read_bytes() == _EXPECTED_SETTINGS
         return DiscoveredAgent(agent_name="prime", framework="prime")
 
     monkeypatch.setattr(fw, "warm_up_command", _warm)

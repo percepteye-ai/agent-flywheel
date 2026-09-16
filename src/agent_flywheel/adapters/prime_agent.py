@@ -36,6 +36,13 @@ from ..event_stream import (
     parse_tool_calls_with_omissions,
 )
 
+# The TRANSLATION LAYER, and only that. The adapter asks core how long one
+# blocking call may take for an episode of a given length; core knows nothing
+# about Prime, settings.json, or any harness. Delete this adapter's ceiling and
+# the runner still delivers every outcome; delete the runner's arithmetic and
+# no adapter's ceiling saves goose, incident-lens, or a harness not yet written.
+from ..runner import harness_call_ceiling_s
+
 __all__ = [
     "PRIME_TOOL_FORMAT",
     "PrimeAgentOutputAdapter",
@@ -49,9 +56,107 @@ _ARTIFACT_DIGEST_DOMAIN = b"percepteye-prime-execution-artifact-v1\0"
 _SETTINGS_DIGEST_DOMAIN = b"percepteye-prime-fixed-settings-v1\0"
 _ROUTE_CONFIG_DIGEST_DOMAIN = b"percepteye-prime-route-config-v1\0"
 _BUFFER_BYTES = 1 << 20
+#: The settings EVERY Prime child runs under -- the daemon supervisor, the
+#: discovery warm-up and every rollout -- written read-only and attested, so
+#: the scaffold's configuration is part of its identity rather than ambient.
+#:
+#: ``retry`` is a BUDGET, not a preference. Prime routes completions through
+#: the bundled OpenAI/Anthropic client, whose own default request timeout is
+#: 600000ms (in the shipped bundle: ``TIMEOUT = 6e5``) and whose retries
+#: multiply it. So a gateway that ACCEPTS the connection and then never
+#: answers parks one completion for ten minutes, and a single retry carries it
+#: past any episode budget this platform mints -- the agent is not slow, it is
+#: stopped, and nothing in Prime's flag surface says otherwise.
+#:
+#: Measured 2026-09-15 against a loopback endpoint that accepted and never
+#: replied: the rollout child emitted its session line, produced nothing more,
+#: spent its ENTIRE budget in that one request, and was killed by the runner as
+#: ``deadline_exceeded`` with no completion finished -- a wedged agent
+#: indistinguishable from an idle one. With the ceiling below the same child
+#: returns in one timeout and still has most of the episode left to report what
+#: happened. That is a mechanism this deployment can reach; it is NOT a reading
+#: of the three production rows of the same day, which are ``status=abandoned``
+#: (reaper-written, so no report landed) and have no session line at all. See
+#: the ``on_event`` comment in examples/prime_agent/serve_prime.py.
+#:
+#: ``--autonomous-timeout-ms`` is NOT this bound and must not be mistaken for
+#: it. It is evaluated between turns, so it never fires while a turn is
+#: blocked in the provider call: measured at 20000ms against the same endpoint,
+#: the child still ran to the full budget. This setting is the only ceiling
+#: that applies to the request itself.
+#:
+#: ONE generous attempt, and no multiplication. The ceiling is DERIVED, not
+#: typed: ``runner.harness_call_ceiling_s`` divides the reference episode
+#: budget the way the runner divides every real one and returns the share of
+#: the child's window one blocking call may take. So this adapter holds a
+#: reference budget -- a fact about this deployment -- and no arithmetic, and
+#: raising the runner's delivery reserve tightens this ceiling instead of
+#: silently invalidating it. Retries are OFF at both levels deliberately:
+#: retrying a call that
+#: already spent the whole ceiling re-hangs on the same wedged gateway and
+#: multiplies straight through the episode, and a rollout that cannot reach
+#: its provider is not made better by spending more of the episode finding
+#: that out again. What was MEASURED at an 8000ms ceiling is that the child
+#: ends its run cleanly on the first timeout and the runner reports it with a
+#: complete Prime lifecycle -- an excluded rollout that SAYS WHY, in a tenth
+#: of the budget, rather than a SIGKILL that says nothing in all of it.
+#:
+#: THE CEILING IS INERT BELOW A 894s EPISODE, and this deployment has minted
+#: shorter ones -- run 08e40b36's rollouts had a 300s budget (see
+#: examples/prime_agent/serve_prime.py). Below that floor the runner's own
+#: child window is short enough that one wedged call can still consume the
+#: episode. The floor is re-derived from the runner's arithmetic in
+#: tests/test_a_wedged_provider_call_cannot_eat_the_episode.py, so it cannot
+#: drift silently when either side moves -- and, since 2026-09-16, the runner
+#: also SAYS SO AT RUNTIME: ``worst_case_call_s`` below is read by
+#: ``RolloutRunner._warn_if_call_ceiling_is_inert``, which compares it against
+#: the episode actually minted and warns on rollout #1. A floor in a comment
+#: was only ever a promise about episodes nobody was checking.
+#:
+#: It CANNOT be made per-rollout, and that is not an omission. These bytes are
+#: a frozen constant: their digest is ``prime.fixed_settings`` in
+#: ``execution_components``, which the control plane freezes as the agent's
+#: ``agent_execution_sha256`` before dispatch and matches on every claim, and
+#: ``_attest_fixed_settings`` re-reads them byte-for-byte around every rollout.
+#: A ceiling that varied with the budget would change the identity per rollout
+#: and make the agent unclaimable. DERIVED-AT-IMPORT and per-rollout are not
+#: the same thing: this is still one frozen constant, computed once from the
+#: runner's constants rather than copied out of them by hand.
+#:
+#: What protects a sub-floor episode is not this setting at all. It is the
+#: runner: the deadline path reports the child's stderr, and every outcome is
+#: spooled and redelivered, so the rollout is still lost but it SAYS WHY on the
+#: row instead of being swept with no trace.
+#:
+#: The ceiling is deliberately generous for a HEALTHY call, because it bounds
+#: the whole streamed response and not time-to-first-byte (measured: a 25s
+#: response is cut by a 10s ceiling). A value near the real generation time
+#: would throw away finished work, which is the worse failure -- 4096
+#: ``max_tokens`` at a pessimistic 20 tok/s is ~205s, and the derived value
+#: must stay well above it (asserted in the wedged-call test).
+#:
+#: Deliberately spelled ``provider.maxRetryDelayMs`` and never the legacy
+#: ``retry.maxDelayMs``: Prime migrates the latter into the former on load,
+#: and a settings file this adapter seals must not be one Prime rewrites.
+#:
+#: The episode budget these SEALED bytes are sized against. OBSERVED, on the
+#: OPSD queue on 2026-09-15: ``budget_at_creation_s = 894.0``. It lives here
+#: and not in core because it is a fact about what this deployment mints, and
+#: core must never carry one deployment's numbers.
+PRIME_REFERENCE_EPISODE_BUDGET_S = 894.0
+
+#: What one blocking provider call may cost, in milliseconds, for an episode
+#: that long -- asked of the runner rather than decided here.
+PRIME_PROVIDER_TIMEOUT_MS = int(
+    harness_call_ceiling_s(PRIME_REFERENCE_EPISODE_BUDGET_S)
+) * 1000
+
 _FIXED_SETTINGS = (
     b'{"autoRefine":{"enabled":false,"compact":false},'
-    b'"telemetry":{"enabled":false,"noticeShown":true}}\n'
+    b'"telemetry":{"enabled":false,"noticeShown":true},'
+    b'"retry":{"enabled":false,"maxRetries":0,"provider":'
+    b'{"timeoutMs":' + str(PRIME_PROVIDER_TIMEOUT_MS).encode("ascii")
+    + b',"maxRetries":0,"maxRetryDelayMs":60000}}}\n'
 )
 _FIXED_SETTINGS_SHA256 = hashlib.sha256(
     _SETTINGS_DIGEST_DOMAIN + _FIXED_SETTINGS
@@ -872,6 +977,23 @@ class PrimeHarnessSnapshot:
     def adapter_name(self) -> str:
         """Stable diagnostic name used by generic SDK lifecycle errors."""
         return "Prime"
+
+    @property
+    def worst_case_call_s(self) -> float:
+        """The longest ONE blocking model call can hold a Prime child.
+
+        DERIVED FROM THE SEALED BYTES rather than restated, so a ceiling that
+        was edited without this moving is not expressible. Read (optionally,
+        via ``getattr``) by ``RolloutRunner``, which compares it against the
+        episode actually minted and warns when the ceiling cannot fire inside
+        it. Retries are counted from ``maxRetries`` whatever ``enabled`` says:
+        turning them back on without re-deriving must not pass by accident.
+        """
+        retry = json.loads(_FIXED_SETTINGS)["retry"]
+        provider = retry["provider"]
+        attempts = (provider["maxRetries"] + 1) * (retry["maxRetries"] + 1)
+        backoff_ms = 2000 * retry["maxRetries"]  # Prime's documented 2s base delay
+        return (provider["timeoutMs"] * attempts + backoff_ms) / 1000.0
 
     @property
     def harness_sha256(self) -> str:

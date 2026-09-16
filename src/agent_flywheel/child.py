@@ -34,7 +34,6 @@ def main(argv: list[str] | None = None) -> int:
     spec: str = payload["spec"]
     rollout = RolloutRequest.from_wire(payload["rollout"])
     trajectory_dir: str = payload["trajectory_dir"]
-    timeout_s: float = float(payload.get("timeout_s") or 900.0)
     input_shape = payload.get("input_shape") or "text"
 
     # Import inside the child so the agent is constructed with the child's
@@ -42,7 +41,18 @@ def main(argv: list[str] | None = None) -> int:
     # LLM clients at construction, not at call time. Building the agent in the
     # parent and shipping it here is exactly the ordering bug that made an
     # earlier SDK's configuration channel useless.
-    from .runner import build_agent, run_rollout_in_process
+    from .runner import (
+        DEFAULT_ROLLOUT_TIMEOUT_S,
+        build_agent,
+        run_rollout_in_process,
+    )
+
+    # THE CONSTANT, not a third copy of 900.0. The parent always sends
+    # ``timeout_s`` (it is the episode plan's ``child_s``), so this fallback is
+    # for a payload that lost it -- and a fallback that silently disagreed with
+    # the budget the parent computes is how a child outlives the window the
+    # parent reserved delivery time inside.
+    timeout_s: float = float(payload.get("timeout_s") or DEFAULT_ROLLOUT_TIMEOUT_S)
 
     resolved = resolve_entrypoint(
         build_agent(spec), input_shape=input_shape, method=payload.get("method")

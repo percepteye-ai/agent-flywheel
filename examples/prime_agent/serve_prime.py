@@ -255,6 +255,18 @@ class _RunOwnedPrimeDaemon:
 SignalHandler = signal.Handlers | int | Callable[[int, FrameType | None], Any] | None
 
 
+def _log_event(kind: str, payload: dict[str, Any]) -> None:
+    """Print the SDK's rollout events, unbuffered, one line each.
+
+    A server that claims work and then loses it is indistinguishable from an
+    idle one unless these are visible. Deliberately plain and total-failure
+    free: the SDK guards this callback because it is invoked from the
+    heartbeat thread, where a raising hook once stopped lease renewal for the
+    whole process.
+    """
+    print(f"[percepteye] {kind}: {payload}", flush=True)
+
+
 def _install_cleanup_signal_handlers() -> dict[int, SignalHandler]:
     """Turn service-manager termination into the normal cleanup path.
 
@@ -424,6 +436,22 @@ ARGV = [
     # derived `test -s <file>` form returns instantly, and a model-authored
     # one that runs the deliverable should too. 30s is generous for both and
     # leaves the budget to the actual work.
+    #
+    # THE GATE WAS ONLY HALF OF THAT PREDICATE. The same sentence is true of
+    # the COMPLETION: Prime's provider client defaults to a 600000ms request
+    # timeout with retries on top, so one hanging completion also consumes the
+    # entire rollout and the agent also never gets to report. Reproduced
+    # locally on 2026-09-15 against an endpoint that accepted and never
+    # answered. That ceiling is NOT an argv flag; it is `retry.provider` in the
+    # attested settings written by ``PrimeHarnessSnapshot``, which is also why
+    # it reaches the discovery warm-up and the daemon and not just this argv.
+    # See ``_FIXED_SETTINGS`` in adapters/prime_agent.py for the arithmetic.
+    #
+    # `--autonomous-timeout-ms` is not a substitute and is deliberately NOT
+    # set here: it is evaluated between turns, so it never fires while a turn
+    # is blocked in the provider call. Measured at 20000ms against an endpoint
+    # that accepted and never answered, the child still ran to its full
+    # budget. Setting it would look like a bound and be none.
     "--autonomous-gate-timeout-ms", "30000",
 ]
 
@@ -545,6 +573,34 @@ def main() -> int:
             command_output_adapter=PrimeAgentOutputAdapter(),
             # The socket path is per-process; see VOLATILE_COMMAND_VALUES.
             volatile_command_values=VOLATILE_COMMAND_VALUES,
+            # Without this the SDK's own diagnostics go nowhere, and a server
+            # that claims work and then silently loses it looks identical to an
+            # idle one: on 2026-09-15 three rollouts were claimed within half a
+            # second of being created and every one expired `deadline_exceeded`
+            # with nothing in this log but the three registration lines. The
+            # events that were being discarded are exactly the ones that tell
+            # the two apart -- `claim_empty` (the queue is empty) against
+            # `claim_failed` (the claim route is broken), `rollout_start`
+            # against `rollout_crash`, and `lease_lost`/`heartbeat_failed`,
+            # which report a lease this process is no longer renewing.
+            #
+            # AND THEY ARE STILL NEEDED, because the provider ceiling does not
+            # account for all of what those three rows show. Two things it does
+            # not explain: they carry `status=abandoned`, which only the control
+            # plane's reaper writes, so the SDK's report never landed at all;
+            # and the harness logs hold NO session for them, while a child
+            # wedged in a completion writes its session line first. Whatever
+            # else is happening, these events are what will name it on the next
+            # run instead of leaving another week to inference.
+            #
+            # STILL WORTH WIRING, but no longer load-bearing. Since 2026-09-16
+            # the SDK does not depend on anyone having wired this hook: every
+            # outcome is spooled to an outbox before the first network call and
+            # redelivered until the control plane answers, and a refusal it
+            # cannot answer differently is raised as a RuntimeWarning naming the
+            # control plane's own sentence. That is what a hook nobody wired
+            # cost here, and it is not a mistake worth being able to repeat.
+            on_event=_log_event,
         )
     finally:
         # Ignore repeated stop requests while the daemon and its attested

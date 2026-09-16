@@ -19,10 +19,52 @@ from ._version import __version__
 from .contract import CONTRACT_VERSION
 from .errors import LeaseLost, TransportError
 
-__all__ = ["ControlPlaneClient"]
+__all__ = ["ControlPlaneClient", "default_delivery_envelope_s", "delivery_envelope_s"]
 
 #: Transient. Retry these, honouring Retry-After when present.
 _RETRY_STATUS = frozenset({408, 429, 500, 502, 503, 504})
+
+#: The client's own defaults, named so the time they can SPEND is derivable by
+#: whoever has to RESERVE it. Before this they were literals in a signature and
+#: the runner's delivery margin was an unrelated literal ten seconds -- the
+#: producer of the deadline and the consumer of the time never met, and the
+#: reserve was 12x short of one worst-case report.
+DEFAULT_TIMEOUT_S = 30.0
+DEFAULT_MAX_ATTEMPTS = 4
+
+#: Ceiling on ONE backoff sleep, and therefore on a server-supplied
+#: ``Retry-After``. Honouring an uncapped header let a proxy answering
+#: ``Retry-After: 3600`` park a report for an hour inside a path the runner
+#: believed cost seconds.
+_MAX_BACKOFF_S = 8.0
+
+#: A deadline shorter than one attempt must still permit ONE attempt. Clamping
+#: an attempt to zero would stop delivering exactly the small-budget rollouts
+#: this machinery exists to deliver.
+_MIN_ATTEMPT_TIMEOUT_S = 1.0
+
+
+def delivery_envelope_s(timeout: float, max_attempts: int) -> float:
+    """Worst-case wall clock ONE request can take, retries and backoff included.
+
+    Inferred from the retry loop below rather than measured: it is the sum of
+    every attempt's read timeout plus every backoff sleep's CAP, so a real
+    request is normally far quicker. It is the number a caller must reserve
+    if it wants the call to finish, which is the only use it has.
+    """
+    attempts = max(1, int(max_attempts))
+    sleeps = sum(min(_MAX_BACKOFF_S, 0.5 * (2 ** (a - 1))) for a in range(1, attempts))
+    return float(timeout) * attempts + sleeps
+
+
+def default_delivery_envelope_s() -> float:
+    """The envelope for a client built with this module's own defaults.
+
+    Every serve-path ``ControlPlaneClient`` takes them, so this is the number
+    an identity-sealed adapter setting -- which cannot read a live client --
+    must be sized against.
+    """
+    return delivery_envelope_s(DEFAULT_TIMEOUT_S, DEFAULT_MAX_ATTEMPTS)
 
 #: Failures where the connection was never established, so the server cannot
 #: have seen the request. Everything else -- a read timeout above all -- may
@@ -40,8 +82,8 @@ class ControlPlaneClient:
         base_url: str,
         api_key: str,
         *,
-        timeout: float = 30.0,
-        max_attempts: int = 4,
+        timeout: float = DEFAULT_TIMEOUT_S,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         client: httpx.Client | None = None,
     ) -> None:
         if not base_url:
@@ -55,6 +97,9 @@ class ControlPlaneClient:
             )
         self.base_url = base_url.rstrip("/")
         self._max_attempts = max(1, max_attempts)
+        #: Kept, not merely handed to httpx. It is half of what one call can
+        #: cost, and the runner has to reserve that cost before it spends it.
+        self._timeout = float(timeout)
         self._client = client or httpx.Client(
             timeout=timeout,
             headers={
@@ -64,6 +109,17 @@ class ControlPlaneClient:
                 "Accept": "application/json",
             },
         )
+
+    @property
+    def delivery_envelope_s(self) -> float:
+        """Worst case for ONE call THROUGH THIS CLIENT, from its own settings.
+
+        The producer half of the runner's delivery reserve. A client built with
+        a different timeout or attempt count moves this number, and the runner
+        hands the agent correspondingly less or more of the episode -- which is
+        what makes the reserve a bound rather than a hopeful constant.
+        """
+        return delivery_envelope_s(self._timeout, self._max_attempts)
 
     def close(self) -> None:
         self._client.close()
@@ -82,6 +138,7 @@ class ControlPlaneClient:
         json_body: Mapping[str, Any] | None = None,
         idempotency_key: str | None = None,
         timeout: float | None = None,
+        deadline: float | None = None,
         retry_if_ambiguous: bool = True,
         headers: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
@@ -91,6 +148,15 @@ class ControlPlaneClient:
         request provably never reached the server. Use it for any call whose
         server side has a side effect and no replay protection: retrying a
         request that MAY have been processed performs it twice.
+
+        ``deadline`` is an ABSOLUTE ``time.time()`` value and bounds the whole
+        call -- every attempt's read timeout and every backoff sleep is clamped
+        to what is left of it, and no new attempt starts past it. It exists so
+        the time a caller RESERVED and the time this loop may SPEND are the
+        same number. Without it a report attempted with ten seconds left ran a
+        four-attempt, two-minute envelope against a rollout the server was
+        about to sweep. One attempt is always permitted, however little is
+        left: refusing to try at all loses exactly the results this bounds.
         """
         url = f"{self.base_url}{path}"
         request_headers: dict[str, str] = dict(headers or {})
@@ -99,11 +165,36 @@ class ControlPlaneClient:
 
         last_err: str | None = None
         for attempt in range(1, self._max_attempts + 1):
+            # NEVER `None`. httpx reads an explicit ``timeout=None`` as NO
+            # TIMEOUT AT ALL -- its "use the client's" value is a sentinel, not
+            # None -- so passing the caller's None straight through disabled
+            # timeouts on every route that did not name one: report, heartbeat,
+            # abandon, register_artifact, health, register. Only `claim` named
+            # one. VERIFIED against a loopback socket that accepts and never
+            # answers: `timeout=None` never returns, while the same request
+            # with the client's own 30s value raises ReadTimeout.
+            #
+            # That is the shape of the incident this SDK was being read for. A
+            # heartbeat parked forever stops the SINGLE heartbeat thread, so
+            # EVERY in-flight lease stops being renewed and the control plane's
+            # reaper writes abandoned/deadline_exceeded over all of them.
+            attempt_timeout = self._timeout if timeout is None else timeout
+            if deadline is not None:
+                remaining = deadline - time.time()
+                if attempt > 1 and remaining <= 0.0:
+                    last_err = (
+                        f"{last_err or 'no attempt succeeded'}; gave up with "
+                        f"{attempt - 1} attempt(s) at the delivery deadline"
+                    )
+                    break
+                attempt_timeout = max(
+                    _MIN_ATTEMPT_TIMEOUT_S, min(attempt_timeout, remaining)
+                )
             try:
                 resp = self._client.request(
                     method, url, json=json_body,
                     headers=request_headers or None,
-                    timeout=timeout,
+                    timeout=attempt_timeout,
                 )
             except httpx.HTTPError as exc:
                 last_err = f"{type(exc).__name__}: {exc}"
@@ -111,7 +202,7 @@ class ControlPlaneClient:
                     retry_if_ambiguous or isinstance(exc, _NEVER_SENT)
                 ):
                     break
-                time.sleep(_backoff(attempt))
+                time.sleep(_bounded(_backoff(attempt), deadline))
                 continue
 
             if resp.status_code == 410:
@@ -123,14 +214,17 @@ class ControlPlaneClient:
                 last_err = f"HTTP {resp.status_code}: {_detail(resp)}"
                 if attempt == self._max_attempts:
                     break
-                time.sleep(_retry_after(resp) or _backoff(attempt))
+                time.sleep(
+                    _bounded(_retry_after(resp) or _backoff(attempt), deadline)
+                )
                 continue
 
             if resp.status_code >= 400:
                 # Terminal. A 4xx that is not 408/429 will not become a 2xx by
                 # being sent again; retrying it only delays the error.
                 raise TransportError(
-                    f"{method} {path} -> HTTP {resp.status_code}: {_detail(resp)}"
+                    f"{method} {path} -> HTTP {resp.status_code}: {_detail(resp)}",
+                    status_code=resp.status_code,
                 )
 
             if not resp.content:
@@ -148,12 +242,25 @@ class ControlPlaneClient:
         )
 
 
+def _bounded(delay: float, deadline: float | None) -> float:
+    """Never sleep past the deadline the caller reserved."""
+    if deadline is None:
+        return delay
+    return max(0.0, min(delay, deadline - time.time()))
+
+
 def _retry_after(resp: httpx.Response) -> float | None:
+    """The server's own backoff, CAPPED at the same ceiling as our jitter.
+
+    Uncapped, a ``Retry-After: 3600`` from a proxy -- not necessarily from the
+    control plane at all -- turns one report into an hour of sleeping, three
+    times over, inside a call path the runner has reserved seconds for.
+    """
     raw = resp.headers.get("Retry-After")
     if not raw:
         return None
     try:
-        return max(0.0, float(raw))
+        return max(0.0, min(_MAX_BACKOFF_S, float(raw)))
     except ValueError:
         return None
 
@@ -162,7 +269,7 @@ def _backoff(attempt: int) -> float:
     """Exponential with full jitter, capped. Jitter matters: a fleet of
     flywheels that all retry on the same schedule reconverges into the spike
     that caused the backoff."""
-    return random.uniform(0.0, min(8.0, 0.5 * (2 ** (attempt - 1))))
+    return random.uniform(0.0, min(_MAX_BACKOFF_S, 0.5 * (2 ** (attempt - 1))))
 
 
 def _detail(resp: httpx.Response) -> str:

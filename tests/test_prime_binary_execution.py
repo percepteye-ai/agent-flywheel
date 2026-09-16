@@ -1,0 +1,372 @@
+"""Run the real prime-agent harness, locally, and require it to PRODUCE.
+
+The failure these guard is "claims work, produces nothing, expires". Every
+existing test in ``test_prime_agent_example.py`` mocks ``fw.serve`` and checks
+the argv, so all of them stayed green through a week of rollouts that claimed
+within half a second and then returned nothing at all. Checking the command is
+built correctly proves the command is built correctly and no more.
+
+So these start the run-owned daemon, snapshot the harness, and execute the
+example's own ARGV against a local endpoint, asserting that a completion came
+back -- and, against an endpoint that accepts the connection and never
+answers, that the child hands control back long before its budget instead of
+being killed on it.
+
+THE SKIP RULE is the one already written down in ``tests/node_sdk.py``, and
+the two cases are not the same case. AUTO-DISCOVERY MAY SKIP: a developer who
+has not installed prime-agent has nothing to execute, and turning that into a
+red suite teaches everyone to ignore the failure. AN EXPLICIT
+``PRIME_AGENT_PACKAGE_ROOT`` IS A PROMISE: somebody said the harness is there,
+so a launcher that cannot start is a broken environment and FAILS. ``test-full``
+fails the build on any skip, so a deployment that serves prime-agent -- which
+sets that variable to serve at all -- cannot turn these into a green no-op.
+
+``test_a_wedged_provider_call_cannot_eat_the_episode.py`` holds the same
+claims in a form that always runs, so the fix cannot be deleted silently on a
+machine where this file skips.
+"""
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import tempfile
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import pytest
+
+from agent_flywheel import RolloutRequest
+from agent_flywheel.adapters import prime_agent
+from agent_flywheel.adapters.prime_agent import (
+    PrimeAgentOutputAdapter,
+    PrimeHarnessSnapshot,
+)
+from agent_flywheel.isolation import build_child_env
+from agent_flywheel.runner import run_rollout_as_command
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+#: Ceiling used for the wedged-gateway case only. The SHIPPED value has to be
+#: generous enough for a real generation (see ``_FIXED_SETTINGS``), which would
+#: make this a five-minute test; the value proves the mechanism, and the
+#: shipped one is asserted to fit the episode in the always-running file.
+WEDGED_CEILING_MS = 8_000
+
+
+def _package_root() -> tuple[pathlib.Path | None, bool]:
+    """``(root, was_named)``. ``root`` is None only when nobody named one."""
+    raw = os.environ.get("PRIME_AGENT_PACKAGE_ROOT", "").strip()
+    if raw:
+        return pathlib.Path(raw).expanduser(), True
+    launcher = shutil.which("prime-agent")
+    if launcher is None:
+        return None, False
+    resolved = pathlib.Path(launcher).resolve()
+    for parent in resolved.parents:
+        if (parent / "package.json").is_file() and (parent / "dist").is_dir():
+            return parent, False
+    return None, False
+
+
+def _starts(argv: list[str]) -> str | None:
+    """``--version`` output, or None if that command cannot run at all."""
+    try:
+        probe = subprocess.run(
+            [*argv, "--version"], stdin=subprocess.DEVNULL,
+            capture_output=True, timeout=60, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if probe.returncode != 0:
+        return None
+    return (probe.stdout + probe.stderr).decode("utf-8", "replace").strip()
+
+
+def _runnable_launcher() -> list[str]:
+    """The launcher, invoked EXACTLY as serve_prime invokes it.
+
+    Through its own ``#!/usr/bin/env node`` shebang, deliberately: running it
+    under some other interpreter the test picked would prove a launch
+    production never performs. A box whose ``node`` cannot start the launcher
+    cannot serve prime-agent either, which is why naming
+    ``PRIME_AGENT_PACKAGE_ROOT`` turns that into a failure rather than a skip.
+    """
+    package_root, named = _package_root()
+    if package_root is None:
+        pytest.skip(
+            "prime-agent is not installed here, so the harness was not "
+            "EXECUTED: the launch command, the run-owned daemon and the "
+            "attested provider ceiling go unproven against the real binary "
+            "on this machine. Set PRIME_AGENT_PACKAGE_ROOT to require them."
+        )
+    launcher = package_root / "dist" / "bundle" / "cli.js"
+    if not launcher.is_file():
+        message = f"prime-agent at {package_root} has no dist/bundle/cli.js"
+        pytest.fail(message) if named else pytest.skip(message)
+    if _starts([str(launcher)]) is not None:
+        return [str(launcher)]
+    message = (
+        f"{launcher} could not start, so the harness was not EXECUTED. A "
+        f"broken `node` on PATH does exactly this -- the launcher is a "
+        f"#!/usr/bin/env node script, and it is why the example preflights "
+        f"the runtime before serving."
+    )
+    pytest.fail(message) if named else pytest.skip(message)
+    raise AssertionError("unreachable")  # pragma: no cover -- both of those raise
+
+
+class _Gateway:
+    """An OpenAI-compatible endpoint that either answers or never does."""
+
+    def __init__(self, *, answer: bool):
+        self.requests: list[dict] = []
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):
+                pass
+
+            def _send(self, payload):
+                raw = json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def do_GET(self):
+                self._send({"data": [{"id": "policy", "object": "model"}]})
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                outer.requests.append(json.loads(self.rfile.read(n) or b"{}"))
+                if not answer:
+                    # Accepted, read, and never replied: the shape a gateway
+                    # waiting on a dead upstream presents to its client.
+                    outer._wedged.wait()
+                    return
+                self._send({
+                    "id": "chatcmpl-test", "object": "chat.completion",
+                    "created": int(time.time()), "model": "policy",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant",
+                                    "content": "hello from the policy"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1,
+                              "total_tokens": 2},
+                })
+
+        self._wedged = threading.Event()
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self._server.server_address[1]}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._wedged.set()
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def _example():
+    spec = importlib.util.spec_from_file_location(
+        "_executed_serve_prime", ROOT / "examples" / "prime_agent" / "serve_prime.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _run_one_rollout(tmp_path, launch, gateway, *, budget_s: float):
+    """One rollout through the example's own ARGV and run-owned daemon."""
+    module = _example()
+    launcher = pathlib.Path(launch[-1])
+    package_root = launcher.parents[2]
+    source = tmp_path / "empty-harness"
+    source.mkdir()
+    kernel = tmp_path / "kernel-venv"
+    kernel.mkdir()
+    harness = PrimeHarnessSnapshot(
+        source,
+        workspace_dir=tmp_path / "_harness_runs",
+        kernel_venv=kernel,
+        execution_artifacts={
+            "prime_distribution": package_root / "dist",
+            "prime_package_manifest": package_root / "package.json",
+            "route_extension": ROOT / "examples" / "prime_agent" / "route.ts",
+        },
+        route_configuration={"model_id": "policy", "context_window": "65536",
+                             "max_tokens": "4096"},
+    )
+    # Short path: a macOS AF_UNIX socket path is capped near 104 bytes, and a
+    # pytest tmp_path is already past it.
+    socket_path = str(pathlib.Path(tempfile.gettempdir())
+                      / f"pe-test-{os.getpid()}-{time.monotonic_ns()}.sock")
+    daemon = module._RunOwnedPrimeDaemon(
+        socket_path, harness.daemon_environment(),
+        cwd=harness.daemon_working_directory, executable=str(launcher),
+    )
+    child = None
+    try:
+        daemon.start()
+        child = harness.prepare_child("test")
+        trajectory = tmp_path / "trajectory"
+        trajectory.mkdir()
+        rollout = RolloutRequest(
+            rollout_id="rl_executed",
+            turn_input="Reply with the word hello. Do not use any tools.",
+            llm_url=gateway.base_url, api_key="perk_test",
+            artifacts_dir=str(trajectory),
+            deadline_ts=time.time() + budget_s,
+            metadata={"completion_gate": "true"},
+        )
+        argv = list(launch) + [
+            socket_path if arg == module._DAEMON_SOCKET else arg
+            for arg in module.ARGV[1:]
+        ]
+        env = build_child_env(
+            rollout_id=rollout.rollout_id, llm_url=gateway.base_url,
+            api_key="perk_test", trajectory_dir=str(trajectory),
+            extra={"PERCEPTEYE_TURN_INPUT": rollout.turn_input, **child.environment},
+        )
+        started = time.monotonic()
+        out = run_rollout_as_command(
+            argv, rollout, trajectory_dir=str(trajectory), timeout_s=budget_s,
+            gate_flag="--autonomous-gate", env=env,
+            output_adapter=PrimeAgentOutputAdapter(), cwd=str(trajectory),
+        )
+        return out, time.monotonic() - started
+    finally:
+        if child is not None:
+            harness.release_child(child)
+        try:
+            daemon.close()
+        finally:
+            harness.close()
+
+
+def _ci_pinned_prime_version() -> str:
+    """The version CI installs, read out of the workflow that installs it.
+
+    READ, not restated. The pin has to live in ``ci.yml`` -- it is an argument
+    to ``npm install`` -- so a constant here would be a second declaration of
+    it, and the two would drift the first time somebody bumped one. This is the
+    consumer of that single declaration.
+    """
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    found = re.findall(r"npm install -g prime-agent@(\S+)", workflow)
+    assert len(found) == 1, (
+        f"ci.yml must install prime-agent at exactly one pinned version, found "
+        f"{found}"
+    )
+    assert re.fullmatch(r"\d+\.\d+\.\d+", found[0]), (
+        f"the prime-agent install is not pinned to an exact version: {found[0]!r}. "
+        f"The installed dist/ tree is hashed into agent_execution_sha256, so a "
+        f"floating install executes a binary the deployment does not attest."
+    )
+    return found[0]
+
+
+def test_the_harness_on_this_machine_is_the_version_ci_pins(tmp_path):
+    """The pin is a claim about the binary; this is what makes it one.
+
+    ``.github/workflows/ci.yml`` installs a pinned ``prime-agent`` so the
+    real-binary tests below execute SOMETHING rather than skipping -- and the
+    pin matters beyond reproducibility: the installed ``dist/`` tree is hashed
+    into ``agent_execution_sha256``, which is the identity a sealed OPSD
+    rollout is claimed under. A comment saying "pinned to what the deployment
+    attests" is not a mechanism and cannot be checked from this repo; what CAN
+    be checked, and is, is that the harness actually on PATH is the one the
+    workflow said it would install. An `npm install` that resolved to something
+    else fails here instead of silently changing the attested identity.
+    """
+    launcher = _runnable_launcher()
+    reported = _starts(launcher)
+    assert reported is not None, f"{launcher} stopped being runnable"
+    pinned = _ci_pinned_prime_version()
+    assert reported.splitlines()[-1].strip() == pinned, (
+        f"ci.yml pins prime-agent@{pinned} but the harness being executed here "
+        f"reports {reported!r}. Bump the pin, or install the pinned version: "
+        f"the dist/ tree is hashed into the sealed execution identity."
+    )
+
+
+def test_the_example_argv_actually_produces_a_completion(tmp_path):
+    """The whole point of claiming a rollout: something comes back.
+
+    Executes the example's real launch command against the real binary. An
+    ARGV that parses but cannot reach a provider, a daemon that never yields a
+    session, an extension that throws on load -- every one of those fails here
+    and none of them fails a test that inspects the argv.
+    """
+    launch = _runnable_launcher()
+    with _Gateway(answer=True) as gateway:
+        out, elapsed = _run_one_rollout(tmp_path, launch, gateway, budget_s=120.0)
+
+    assert gateway.requests, (
+        "the harness claimed the rollout and never reached the gateway"
+    )
+    assert out.exclusion_reason != "deadline_exceeded", out.exclusion_detail
+    assert out.llm_call_count and out.llm_call_count >= 1, (
+        f"no assistant message observed on the event stream: {out.exclusion_detail}"
+    )
+    assert elapsed < 120.0
+
+
+def test_a_gateway_that_never_answers_does_not_consume_the_whole_budget(tmp_path):
+    """The 2026-09-15 failure, against the real binary.
+
+    Prime's provider client has no argv flag for this; the ceiling is
+    ``retry.provider.timeoutMs`` in the settings the adapter writes into every
+    child. Without it the child sits in one request for Prime's own 600000ms
+    default and the runner kills it with nothing to report.
+    """
+    launch = _runnable_launcher()
+    shipped = json.loads(prime_agent._FIXED_SETTINGS)
+    assert shipped.get("retry", {}).get("provider", {}).get("timeoutMs"), (
+        "the attested settings carry no provider request ceiling, so nothing "
+        "bounds a wedged completion"
+    )
+    shipped["retry"]["provider"]["timeoutMs"] = WEDGED_CEILING_MS
+    body = (json.dumps(shipped, separators=(",", ":")) + "\n").encode()
+
+    import hashlib
+    original, original_sha = (
+        prime_agent._FIXED_SETTINGS, prime_agent._FIXED_SETTINGS_SHA256)
+    prime_agent._FIXED_SETTINGS = body
+    prime_agent._FIXED_SETTINGS_SHA256 = hashlib.sha256(
+        prime_agent._SETTINGS_DIGEST_DOMAIN + body).hexdigest()
+    budget_s = 150.0
+    try:
+        with _Gateway(answer=False) as gateway:
+            out, elapsed = _run_one_rollout(
+                tmp_path, launch, gateway, budget_s=budget_s)
+    finally:
+        prime_agent._FIXED_SETTINGS = original
+        prime_agent._FIXED_SETTINGS_SHA256 = original_sha
+
+    assert gateway.requests, "the child never reached the wedged gateway"
+    # It came back on the CEILING, not on the runner's kill.
+    assert elapsed < budget_s / 2, (
+        f"the child spent {elapsed:.0f}s of a {budget_s:.0f}s budget inside a "
+        f"request the gateway never answered"
+    )
+    assert out.exclusion_reason != "deadline_exceeded", (
+        f"killed on the deadline rather than returning on the ceiling: "
+        f"{out.exclusion_detail}"
+    )

@@ -103,7 +103,7 @@ from .prompt import (
     PromptDecision,
     prompt_decision,
 )
-from .runner import RolloutRunner
+from .runner import DEFAULT_ROLLOUT_TIMEOUT_S, RolloutRunner
 from .transport import AttachTransport, FlywheelTransport
 
 #: This package's logger. It has no handler and never installs one -- it
@@ -697,7 +697,14 @@ def serve(
     artifacts_dir: str | None = None,
     isolation: Literal["subprocess", "inprocess"] = "subprocess",
     concurrency: int = 1,
-    rollout_timeout_s: float = 900.0,
+    #: THE RUNNER'S CONSTANT, not a copy of its value. This is the number an
+    #: identity-sealed adapter setting is sized against, and while it was
+    #: spelled here as a literal there were two of them: an adapter derived its
+    #: frozen ceiling from the runner's constant, every production rollout was
+    #: bounded by this one, and changing either left the agent's sealed
+    #: identity sized against arithmetic the runner no longer performed --
+    #: silently, because nothing compared them.
+    rollout_timeout_s: float = DEFAULT_ROLLOUT_TIMEOUT_S,
     #: How this agent's CLI spells its completion-gate option, e.g.
     #: ``"--autonomous-gate"``. Required before any gate is passed: the flag is
     #: a fact about the binary and cannot be guessed, and handing an unknown

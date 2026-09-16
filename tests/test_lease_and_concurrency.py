@@ -6,6 +6,7 @@ this: the defects live in the loop AROUND one rollout, not inside it.
 """
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import threading
@@ -126,10 +127,20 @@ def test_a_long_rollout_heartbeats_its_lease(tmp_path):
     )
 
 
-def test_losing_the_lease_kills_the_child_and_reports_nothing(tmp_path):
-    """A lost lease means the server already handed the work to someone else.
-    Running on burns the customer's compute for a result nothing will take,
-    and reporting into it only earns a 410."""
+def test_losing_the_lease_kills_the_child_and_does_not_race_the_new_holder(tmp_path):
+    """A lost lease means the server may already have handed the work on.
+
+    Running on burns the customer's compute for a result nothing will take, and
+    sending our result immediately would OVERWRITE the live holder's: for an
+    ordinary rollout the control plane's report route performs no ownership
+    check at all. (The docstring here used to say reporting "only earns a 410".
+    That is true only for an OPSD-sealed rollout, whose fence is the one that
+    checks the lease; for every other rollout the stale report is accepted.)
+
+    So the canonical predicate is not "reports nothing". It is: NOT SENT WHILE
+    ANOTHER WORKER COULD HOLD IT, and NEVER SILENTLY DROPPED -- held durably,
+    and delivered once the rollout's deadline makes a new claim impossible.
+    """
     tr = FakeTransport(
         [[_req(tmp_path)]], lease_ms=3_000, heartbeat_raises=LeaseLost("gone")
     )
@@ -145,9 +156,16 @@ def test_losing_the_lease_kills_the_child_and_reports_nothing(tmp_path):
     elapsed = time.time() - started
 
     assert elapsed < 20, f"the child was not killed on lease loss ({elapsed:.1f}s)"
-    assert tr.reported == []
+    assert tr.reported == [], "a live holder's result would have been overwritten"
     assert tr.abandoned == [], "we do not hold the lease; there is nothing to hand back"
     assert "lease_lost" in events
+    # The half that was missing: the outcome exists somewhere. Before this it
+    # was discarded in memory and the trajectory was then deleted, so a rollout
+    # that lost its lease left no trace on the row, on disk, or in the log.
+    spool = pathlib.Path(tmp_path) / "_percepteye" / "_outbox"
+    held = sorted(spool.rglob("*.json"))
+    assert len(held) == 1, f"the outcome was dropped on the lease-lost path: {held}"
+    assert json.loads(held[0].read_text())["rollout_id"] == "rl_1"
 
 
 def test_heartbeat_failure_is_transient_and_does_not_kill_the_rollout(tmp_path):
@@ -266,8 +284,15 @@ def test_a_class_entrypoint_is_instantiated(tmp_path):
 # ── housekeeping ───────────────────────────────────────────────────────────
 
 
-def test_the_trajectory_directory_is_purged_after_serving(tmp_path):
-    """One directory per rollout accumulated for the life of the process."""
+def test_the_trajectory_directory_is_purged_after_a_DELIVERED_rollout(tmp_path):
+    """One directory per rollout accumulated for the life of the process.
+
+    Narrowed deliberately: the purge used to be unconditional, including on
+    the paths where the report did NOT land, which destroyed the only local
+    copy of the evidence exactly when it was the only copy left. The purge is
+    now conditional on delivery being settled -- see
+    tests/test_an_outcome_is_never_silently_dropped.py for the other half.
+    """
     tr = FakeTransport([[_req(tmp_path)]])
     runner = _runner(tmp_path, tr)
 

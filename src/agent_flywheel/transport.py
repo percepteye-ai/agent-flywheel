@@ -44,7 +44,15 @@ __all__ = ["AttachTransport", "FlywheelTransport"]
 
 @runtime_checkable
 class FlywheelTransport(Protocol):
-    """How work arrives and results leave. The runner never learns which."""
+    """How work arrives and results leave. The runner never learns which.
+
+    Two OPTIONAL extensions, both read with a ``getattr`` default so an
+    implementation that predates them keeps working unchanged:
+    ``delivery_envelope_s`` (how long one call can take, so the runner can
+    reserve it) and ``accepts_delivery_deadline`` (whether ``report`` and
+    ``register_artifact`` take a ``deadline=`` keyword). A transport that
+    declares neither is served with the runner's floor margin.
+    """
 
     def claim(self, max_rollouts: int) -> tuple[list[RolloutRequest], int]:
         """Return (rollouts, poll_after_ms). An empty list is normal."""
@@ -68,6 +76,13 @@ class AttachTransport:
     backoff information and leaves the client to invent a fixed sleep.
     """
 
+    #: DECLARED, never probed. ``FlywheelTransport`` is a Protocol a third
+    #: party may implement, and calling ``report(..., deadline=...)`` on one
+    #: that predates the keyword is a TypeError at the last step of a rollout.
+    #: The runner reads this flag and passes the deadline only to a transport
+    #: that says it takes one.
+    accepts_delivery_deadline = True
+
     def __init__(
         self,
         client: ControlPlaneClient,
@@ -84,6 +99,17 @@ class AttachTransport:
         # servers/SDK clients naturally leave it absent and can continue to
         # serve ordinary, unbound rollouts.
         self.agent_execution_sha256: str | None = None
+
+    @property
+    def delivery_envelope_s(self) -> float:
+        """Forwarded verbatim from the client that will spend it.
+
+        The runner talks to a transport and never to the HTTP client, so the
+        number it reserves has to arrive through here. Forwarded rather than
+        recomputed: two copies of this arithmetic is exactly how a reserve and
+        the cost it reserves for drift apart.
+        """
+        return self._c.delivery_envelope_s
 
     def health(self) -> dict[str, Any]:
         """Called at startup. Misconfiguration must fail here, not on rollout 1."""
@@ -177,7 +203,13 @@ class AttachTransport:
             "POST", f"/rollouts/{rollout.rollout_id}/heartbeat", json_body=payload
         )
 
-    def report(self, rollout: RolloutRequest, output: RolloutOutput) -> dict[str, Any]:
+    def report(
+        self,
+        rollout: RolloutRequest,
+        output: RolloutOutput,
+        *,
+        deadline: float | None = None,
+    ) -> dict[str, Any]:
         headers = (
             {"X-Percepteye-Lease-Token": rollout.lease_token}
             if rollout.lease_token else None
@@ -190,6 +222,11 @@ class AttachTransport:
             # acknowledged as a duplicate rather than double-counted.
             idempotency_key=f"result-{rollout.rollout_id}",
             headers=headers,
+            # Bounded by what the runner RESERVED for delivery. This call used
+            # to pass no timeout at all -- unlike claim, one line above -- so a
+            # report attempted with the runner's ten-second margin left ran the
+            # client's full four-attempt envelope instead.
+            deadline=deadline,
         )
 
     def capture_current(self, agent_id: str) -> dict[str, Any]:
@@ -306,6 +343,7 @@ class AttachTransport:
         self, rollout: RolloutRequest, *, name: str, size_bytes: int,
         sha256: str, content_type: str = "application/octet-stream",
         role: str = "output",
+        deadline: float | None = None,
     ) -> dict[str, Any]:
         return self._c.request(
             "POST",
@@ -315,6 +353,10 @@ class AttachTransport:
                 "size_bytes": size_bytes, "sha256": sha256, "role": role,
             },
             idempotency_key=f"art-{rollout.rollout_id}-{sha256[:16]}-{name}",
+            # One registration per file, BEFORE the report, out of the same
+            # reserve. Unbounded, N artifacts were N four-attempt envelopes
+            # spent ahead of the only call that matters.
+            deadline=deadline,
         )
 
 

@@ -108,6 +108,13 @@ def test_main_requires_explicit_harness_kernel_and_package_paths(monkeypatch, tm
     module = _load_example(monkeypatch, tmp_path)
     monkeypatch.delenv("PERCEPTEYE_PRIME_HARNESS_SOURCE", raising=False)
     monkeypatch.delenv("PRIME_AGENT_KERNEL_VENV", raising=False)
+    # All THREE, not two of the three. Any machine that actually serves
+    # prime-agent has this one exported -- and so does CI now, which installs
+    # the package and names its root for the real-binary tests. Left ambient,
+    # the third `raises` below falls straight through to `fw.serve` and the
+    # test fails on a missing control plane, so the check that this example
+    # demands an explicit package root was passing only where nobody had one.
+    monkeypatch.delenv("PRIME_AGENT_PACKAGE_ROOT", raising=False)
     with pytest.raises(RuntimeError, match="PRIME_HARNESS_SOURCE"):
         module.main()
 

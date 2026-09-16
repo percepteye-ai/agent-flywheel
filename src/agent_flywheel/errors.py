@@ -76,11 +76,31 @@ class ContractViolation(FlywheelError):
 
 
 class TransportError(FlywheelError):
-    """The control plane could not be reached, or answered unusably."""
+    """The control plane could not be reached, or answered unusably.
+
+    ``status_code`` is the HTTP status when there WAS one, and ``None`` when
+    the request never produced a response at all. Callers need the difference:
+    a 403 will refuse the identical payload forever, while a connection reset
+    will not, and a caller deciding whether to keep a result for redelivery
+    cannot tell those apart from the message text without parsing English.
+    """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class LeaseLost(TransportError):
-    """Another attempt holds this rollout's lease; stop work and discard."""
+    """This rollout's lease is gone: stop working on it.
+
+    STOP WORK, NOT DISCARD THE WORK -- this used to say "stop work and
+    discard", and the delivery path read it literally, deleting a spooled
+    result the moment the control plane answered 410. Only an identity-sealed
+    rollout's report route answers 410 at all, and it answers it forever once
+    the reaper has cleared the lease, so "discard" named the one case where the
+    local copy was the last one. The ROW is lost; the result is kept, named,
+    and reported out loud (see ``RolloutRunner._settle``).
+    """
 
 
 class ModeNotAvailable(ConfigurationError):

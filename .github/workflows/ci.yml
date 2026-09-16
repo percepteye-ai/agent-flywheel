@@ -65,6 +65,34 @@ jobs:
           path: agent-flywheel-node
           token: ${{ secrets.NODE_SDK_READ_TOKEN }}
       - run: pip install -e ".[dev,adapters-test,otel,otel-test]"
+      # THE PRIME EXAMPLE'S TESTS EXECUTE THE REAL BINARY, for the same reason
+      # the Node SDK is checked out above: "everything present" is this job's
+      # premise, and tests/test_prime_binary_execution.py is the only thing in
+      # the suite that proves the example's launch command, its run-owned
+      # daemon and its attested provider ceiling actually PRODUCE a completion.
+      # Everything else about that example mocks fw.serve and inspects the
+      # argv, which is exactly what stayed green through a week of rollouts
+      # that claimed work and returned nothing.
+      #
+      # Without this install those two tests skip, and the zero-skip step below
+      # then fails the build on every push -- red for a reason unrelated to the
+      # change, while the proof it exists for goes unrun.
+      #
+      # PINNED, and this line is the repo's ONLY declaration of which version:
+      # the installed `dist/` tree is hashed into agent_execution_sha256, which
+      # is the identity a sealed OPSD rollout is claimed under, so a floating
+      # install would execute a binary production does not run and would turn
+      # main red on somebody else's release.
+      #
+      # WHAT IS CHECKED AND WHAT IS NOT. Nothing in this repo can read the
+      # deployed version, so this pin is maintained by hand and must be bumped
+      # with the deployment -- saying more than that in a comment would be a
+      # claim nobody verifies. What IS verified is that the harness actually on
+      # PATH reports this version: tests/test_prime_binary_execution.py reads
+      # the pin back out of this line and asserts `--version` against it, so an
+      # install that resolved to something else fails the suite rather than
+      # silently changing the attested identity.
+      - run: npm install -g prime-agent@0.7.2
       - name: every optional framework is genuinely importable
         # Checked BEFORE pytest, so a framework that failed to install is a
         # legible error here rather than 72 tests quietly turning into skips.
@@ -77,6 +105,14 @@ jobs:
               importlib.import_module(mod)
               print("ok", mod)
           PY
+      - name: name the prime-agent package root, so a bad install FAILS
+        # NAMED for the same reason PERCEPTEYE_NODE_SDK is: auto-discovery may
+        # skip, an explicit path is a promise. With this set, an `npm install`
+        # that succeeded but put nothing usable there is a test failure here
+        # rather than two tests quietly turning back into skips. `npm root -g`
+        # is asked rather than assumed -- the global prefix differs between
+        # runners and between setup-node versions.
+        run: echo "PRIME_AGENT_PACKAGE_ROOT=$(npm root -g)/prime-agent" >> "$GITHUB_ENV"
       - run: pytest -q --junitxml=report.xml
         env:
           # NAMED, not guessed. scripts/cross_language_abi_check.sh is the one
