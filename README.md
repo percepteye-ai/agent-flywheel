@@ -57,13 +57,13 @@ Ship one line. Your agent keeps running in your process, behind your firewall, o
      requires every published copy to match it, here and on the docs site, so
      editing one copy alone turns the suite red. Re-derive by hand with:
        .venv/bin/python -m pytest tests/ --collect-only -q -p no:warnings \
-         | awk -F': ' '/^tests\/.*: [0-9]+$/{n+=$2} END{print n}'   # -> 1041 -->
+         | awk -F': ' '/^tests\/.*: [0-9]+$/{n+=$2} END{print n}'   # -> 1138 -->
 [![pypi](https://img.shields.io/pypi/v/agent-flywheel?style=for-the-badge&logo=pypi&logoColor=white&label=pypi&color=3b82f6)](https://pypi.org/project/agent-flywheel/)
 [![python](https://img.shields.io/badge/python-3.10%20→%203.13-3b82f6?style=for-the-badge&logo=python&logoColor=white)](pyproject.toml)
 <br/>
 [![runtime dependencies](https://img.shields.io/badge/runtime_deps-1-f59e0b?style=for-the-badge)](pyproject.toml)
 [![lines changed in your agent](https://img.shields.io/badge/lines_changed_in_your_agent-0-ec4899?style=for-the-badge)](#-zero-instrumentation-concretely)
-[![tests](https://img.shields.io/badge/tests-1041_·_0_skips-22c55e?style=for-the-badge)](#-development)
+[![tests](https://img.shields.io/badge/tests-1138_·_0_skips-22c55e?style=for-the-badge)](#-development)
 [![license](https://img.shields.io/badge/license-MIT-14b8a6?style=for-the-badge)](LICENSE)
 
 <img src="docs/assets/flywheel-overview.gif" width="1040"
@@ -165,13 +165,43 @@ The command adapter is explicit and optional. Capture from it survives clean exi
 | beat | what happens | who does the work |
 |:--|:--|:--|
 | **⓪ Onboard** | the SDK describes your agent from inside its own process and registers it — once, before the first rollout | automatic; `introspect=False` opts out |
-| **① Claim** | your process long-polls for a rollout; leases heartbeat, crashed workers redeliver | you dial out |
+| **① Claim** | your process long-polls for a rollout; leases heartbeat, and held results are delivered before more work is claimed | you dial out |
 | **② Run** | fresh child process, own environment, single-use credential, own trajectory | your agent, unchanged |
 | **③ Record** | every tool call lands as `ok` / `failed` / `unknown`; artifacts collected on every path | adapters, from the outside |
 | **④ Score & train** | tasks generated from your real tool surface, graded against compiled checks, then trained | **PerceptEye — you build none of it** |
 | **⑤ Improve** | your production agent picks up the promoted policy; the next lap runs on the better agent | one call at startup |
 
 That last beat is what makes it a flywheel rather than a pipeline: **the better agent generates the better evidence.**
+
+### 🧷 An outcome is never silently lost
+
+A rollout that ran must leave a record, or say why it could not. Both halves of
+that are mechanisms, not intentions:
+
+- **Spooled before the first send.** The outcome is written to a durable outbox
+  under your `artifacts_dir` *before* the result is POSTed, so a process killed
+  mid-request still delivers. The next process over the same directory drains
+  it, and **that drain runs before the next claim** — so a held result can
+  never be starved by new work.
+- **A permanent refusal is retired, never deleted.** If the control plane
+  refuses in a way redelivery cannot fix, the reason is written into the record
+  and the file is renamed out of the retry set — it is not unlinked, and the
+  rollout's trajectory is kept beside it. You are told, in one line, where both
+  are. Retired names are uniquified, so a second refusal of the same rollout
+  cannot overwrite the first.
+- **Your agent's turn is bounded well inside the episode.** `serve()` derives a
+  per-call ceiling from the episode budget and leaves a delivery reserve, so a
+  provider that accepts a connection and never answers costs you one timeout
+  instead of the whole episode. Adapters translate that ceiling into whatever
+  their harness understands; the arithmetic lives in one place.
+- **No bearer credential is written to disk.** The outbox sits inside the
+  directory your agent runs in, so the lease token is held only in memory.
+
+The reason this is spelled out: a delivery path that fails silently is
+indistinguishable from an idle queue. `on_event` is how you tell them apart —
+`claim_empty` is an empty queue, `claim_failed` is a broken route, and
+`outcome_spooled` / `outcome_undeliverable` name a result that is being held or
+has been retired.
 
 Beat ⓪ is why you never write a task list. Tasks come from **the tool surface you actually have** — read after templating and conditional registration, so it is the prompt your agent really assembled, the tools it really registered, the sub-agents it really built. A CLI agent with no object to read is warmed up once, well under a second, and described from that.
 
@@ -320,7 +350,9 @@ record_tool_call("charge_card", {"amount": 4200}, outcome="ok", status_code=201)
 | `PERCEPTEYE_INTROSPECT` | `0` disables agent discovery |
 | `PERCEPTEYE_TRAJECTORY_DIR` | one explicit trajectory directory, for a single run |
 
-Two of them change behaviour; the rest are an address, a credential and a location, and the first two are overridable in code as `control_plane_url=` and `api_key=`. `serve()` also takes `isolation` (`"subprocess"` is the default and the only mode with a real timeout), `concurrency`, `method`, `rollout_timeout_s`, `execution_snapshot` (a generic adapter-owned prepare/attest/release lifecycle), `attested_execution_components` (opaque adapter-owned SHA-256 evidence for exact OPSD execution identity), and `on_event` for a synchronous event callback — `claim_empty` versus `claim_failed` is how you tell an empty queue from a broken route.
+Two of them change behaviour; the rest are an address, a credential and a location, and the first two are overridable in code as `control_plane_url=` and `api_key=`. `serve()` also takes `isolation` (`"subprocess"` is the default and the only mode with a real timeout), `concurrency`, `method`, `rollout_timeout_s`, `execution_snapshot` (a generic adapter-owned prepare/attest/release lifecycle), `attested_execution_components` (opaque adapter-owned SHA-256 evidence for exact OPSD execution identity), `volatile_command_values` (command options whose VALUE is transport rather than identity — name `--daemon-socket` and a restart that moves the socket keeps the same `execution_sha256`, which matters because an OPSD run refuses every episode attested with a different one), and `on_event` for a synchronous event callback — `claim_empty` versus `claim_failed` is how you tell an empty queue from a broken route.
+
+**Wire `on_event` in production.** It is the only way the delivery path is visible: without it, a claim loop that is failing every request, a heartbeat that has stopped renewing, and an idle queue all look identical from the outside. That is not hypothetical — it is how a week of rollouts that produced nothing at all went unnoticed.
 
 **Your agent must sample through an OpenAI-compatible client**, because the per-rollout gateway speaks that API. Provider variables we cannot point at it are stripped from the child, and `serve()` warns at startup if it finds any.
 
@@ -329,7 +361,7 @@ Two of them change behaviour; the rest are an address, a credential and a locati
 
 <br/>
 
-Once at startup the SDK reads the *shape* of the agent you handed `serve()`: system prompt (the registration projection is truncated at 20k, while an available full observation is hashed before projection), tool names/descriptions/JSON Schemas, provider and model name, sub-agents to depth 4, and the framework matched. **Never sent:** your tools' source or return values, your credentials, your data, or anything observed during a rollout. Turn it off with `fw.serve(..., introspect=False)` or `PERCEPTEYE_INTROSPECT=0` — and only a deliberate value (`0`, `false`, `no`, `off`) disables it, so a typo leaves it on. Disabled, unreadable, or lossy discovery produces no affirmative `agent_fingerprint.execution_sha256`, so an OPSD consumer fails closed.
+Once at startup the SDK reads the *shape* of the agent you handed `serve()`: system prompt (the registration projection is truncated at 20k, while an available full observation is hashed before projection), tool names/descriptions/JSON Schemas, provider and model name, sub-agents to depth 4, and the framework matched. **Never sent:** your tools' source or return values, your credentials, your data, or anything observed during a rollout. An agent nothing can read — a custom class, no framework the SDK knows — declares itself with `describe={"system_prompt": ..., "tools": [...]}` (the tools you already send the model); what you declare wins over reflection, and it never anchors an execution identity. Turn it off with `fw.serve(..., introspect=False)` or `PERCEPTEYE_INTROSPECT=0` — and only a deliberate value (`0`, `false`, `no`, `off`) disables it, so a typo leaves it on. Disabled, unreadable, or lossy discovery produces no affirmative `agent_fingerprint.execution_sha256`, so an OPSD consumer fails closed.
 </details>
 
 <details>
@@ -351,7 +383,7 @@ python -m venv .venv
 
 The last one is **not** the Node package's own suite — that lives in the [Node repository](https://github.com/percepteye-ai/agent-flywheel-node) and runs there with `npm test`. This drives records through the Node writer and asserts the Python `Trajectory` reads them back with the same meaning, which is the half only this repo can check. **It needs a Node checkout**: point `PERCEPTEYE_NODE_SDK` at one, or keep it as a sibling directory. Without one it prints `SKIPPED` and exits 0, and the cross-language tests in the suite above skip with it.
 
-1041 tests, and CI permits **zero skips** — a skipped test and a passing test look identical in a green check mark. CI names `PERCEPTEYE_NODE_SDK` and `PRIME_AGENT_PACKAGE_ROOT` and installs both, so neither the cross-language half nor the tests that execute the real `prime-agent` binary can go green by skipping there. Other jobs assert that a bare install still works on Python 3.10→3.13, that the runtime dependency list never grows past `httpx`, and that the Node plugins never drift from the Python reader.
+1138 tests, and CI permits **zero skips** — a skipped test and a passing test look identical in a green check mark. CI names `PERCEPTEYE_NODE_SDK` and `PRIME_AGENT_PACKAGE_ROOT` and installs both, so neither the cross-language half nor the tests that execute the real `prime-agent` binary can go green by skipping there. Other jobs assert that a bare install still works on Python 3.10→3.13, that the runtime dependency list never grows past `httpx`, and that the Node plugins never drift from the Python reader.
 
 [`schema/flywheel-1.json`](schema/flywheel-1.json) is the wire contract and this repository owns it. Absence is never collapsed into zero: `tool_calls=None` means "I did not report tool calls"; `[]` means "I observed zero", a positive claim. The animations above are generated, not drawn — [`docs/assets/render.sh`](docs/assets/render.sh) rebuilds them.
 

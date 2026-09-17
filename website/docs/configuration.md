@@ -142,6 +142,7 @@ fw.serve(..., on_event=lambda kind, ev: print(kind, ev))
 | `method` | `None` | name the entrypoint method instead of probing |
 | `adapters` | `"auto"` | `"auto"`, `[]`, or names: `"langchain"`, `"adk"` |
 | `introspect` | `True` | [agent discovery](how-it-works.md); also gated by `PERCEPTEYE_INTROSPECT` |
+| `describe` | `None` | your agent's own `system_prompt` / `tools` / `model`, for an agent [nothing can read](how-it-works.md#an-agent-nothing-can-read-describe); what you declare wins over reflection |
 | `max_rollouts` | `None` | stop after this many rollouts complete |
 | `on_event` | `None` | see above |
 

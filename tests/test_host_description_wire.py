@@ -109,6 +109,19 @@ def test_the_wire_cannot_see_annotations_and_says_so(tmp_path):
     assert "tool_annotations" in described.incomplete
 
 
+def test_a_read_only_on_a_request_is_not_a_declaration(tmp_path):
+    """A flat request tool may carry any key, ``read_only`` included -- the
+    model API ignores it. Reading it asserted a declared read from a vantage
+    point that sees no declaration; only describe= may say it."""
+    tools = [{"name": "delete_everything", "read_only": True, "input_schema": {}}]
+    argv = _agent(tmp_path, "ro", f"""
+        post({{"model": "m", "messages": [], "tools": {tools!r}}})
+    """)
+    described = warm_up_command(argv, trajectory_dir=tmp_path / "t", timeout_s=30)
+    assert described is not None
+    assert described.tool_definitions[0].read_only is None
+
+
 # ── the Anthropic dialect ───────────────────────────────────────────────────
 
 
@@ -224,6 +237,78 @@ def test_the_host_written_file_beats_the_wire(tmp_path):
     assert described.framework == "openclaw"
     assert [t.name for t in described.tool_definitions] == ["only_in_file"]
     assert described.tool_definitions[0].read_only is True
+
+
+def _file_then_request(tmp_path: Path, payload: dict, *, system: str = "wire prompt") -> list[str]:
+    """An agent whose host writes ``payload`` and whose request carries tools."""
+    return _agent(tmp_path, "file_then_request", f"""
+        import pathlib
+        d = pathlib.Path(os.environ["PERCEPTEYE_TRAJECTORY_DIR"])
+        d.mkdir(parents=True, exist_ok=True)
+        (d / {DISCOVERED_AGENT_FILENAME!r}).write_text({json.dumps(payload)!r})
+        post({{"model": "m",
+               "messages": [{{"role": "system", "content": {system!r}}}],
+               "tools": {json.dumps([_openai_tool("read_file"), _openai_tool("write_file")])}}})
+    """)
+
+
+def test_a_file_that_saw_no_tools_takes_them_from_the_wire(tmp_path):
+    """Current OpenClaw writes ``tool_definitions: null`` -- its hook event
+    carries no tool list -- while its completion request carries every tool.
+    The file used to win outright, so the agent registered with no catalogue
+    and the tools we had just watched go past were thrown away.
+
+    The file still wins on what it DID observe (framework, prompt); the wire
+    fills only the gap, says its tools carry no annotations, and the file's
+    identity digest -- which covered the file alone -- is not carried over.
+    """
+    # What the plugin actually writes (describe.js): null tools, AND the
+    # part it could not read named in `incomplete`.
+    payload = {"agent_name": "from-the-file", "framework": "openclaw",
+               "system_prompt": "the host's own prompt", "tool_definitions": None,
+               "incomplete": ["tool_definitions"]}
+    described = warm_up_command(
+        _file_then_request(tmp_path, payload), trajectory_dir=tmp_path / "t", timeout_s=30)
+    assert described is not None
+    assert described.framework == "openclaw"
+    assert described.system_prompt == "the host's own prompt"
+    assert [t.name for t in described.tool_definitions] == ["read_file", "write_file"]
+    # The wire read the part the file could not, and cannot read annotations.
+    assert described.incomplete == ["tool_annotations"]
+    assert described.exact_observation_sha256 is None
+
+
+def test_a_file_with_no_prompt_takes_the_wires(tmp_path):
+    payload = {"agent_name": "from-the-file", "framework": "openclaw",
+               "tool_definitions": [{"name": "only_in_file", "read_only": True}]}
+    described = warm_up_command(
+        _file_then_request(tmp_path, payload, system="assembled on the wire"),
+        trajectory_dir=tmp_path / "t", timeout_s=30)
+    assert described is not None
+    assert described.system_prompt == "assembled on the wire"
+    # Tools the file observed are the file's, annotations and all.
+    assert [t.name for t in described.tool_definitions] == ["only_in_file"]
+    assert described.tool_definitions[0].read_only is True
+
+
+def test_nothing_from_the_wire_is_grafted_onto_a_graph_file(tmp_path):
+    """A root with sub-agents is a GRAPH: its None is structural, and the
+    request the wire saw came from SOME node -- not ours to attribute. Neither
+    the tools nor the prompt may land on the root, at any depth."""
+    payload = {"agent_name": "graph", "framework": "langgraph",
+               "tool_definitions": None,
+               "sub_agents": [{"agent_name": "team", "framework": "langgraph",
+                               "tool_definitions": None,
+                               "sub_agents": [{"agent_name": "worker",
+                                               "framework": "langgraph",
+                                               "tool_definitions": None}]}]}
+    described = warm_up_command(
+        _file_then_request(tmp_path, payload, system="You research."),
+        trajectory_dir=tmp_path / "t", timeout_s=30)
+    assert described is not None
+    assert described.tool_definitions is None
+    assert described.system_prompt is None
+    assert described.sub_agents[0].sub_agents[0].tool_definitions is None
 
 
 def test_the_observer_never_answers_with_a_tool_call(tmp_path):

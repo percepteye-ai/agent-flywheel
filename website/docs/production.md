@@ -199,10 +199,13 @@ px.record_answer(turn_id, reply)          # after the scope closes — the answe
 | `execution_entrypoint` | `None` | the live Python agent/import spec to describe for exact execution identity |
 | `execution_input_shape` · `execution_method` | `"text"` · `None` | the declared call surface of `execution_entrypoint` |
 | `attested_execution_components` | `None` | opaque exact adapter evidence for implementation/state discovery cannot observe |
+| `describe` | `None` | the agent's own `system_prompt` / `tools` / `model` — without `execution_entrypoint`, the whole description this registration sends ([`describe=`](how-it-works.md#an-agent-nothing-can-read-describe)) |
 
 **`trajectory_root` is required and that is deliberate.** Every captured turn lands there as a directory, and it is your copy: uploading does not delete it, and without `retention_turns` nothing does. Naming the directory is how **retention becomes a decision somebody made** rather than a surprise. It is yours.
 
 With `register=True` the call makes exactly two outbound requests, once, at startup: `POST /agents` then `GET /policy/current`. It registers as `mode: "production"` — `serve()` sends `"rollout"`, and a training donor versus a production reader is the one distinction a `mode` on a registration exists to draw. `register=False` skips both, for a process that should make no outbound connection at all.
+
+**Without `execution_entrypoint` there is no agent object to describe, and the registration says so:** `discovered_agent: null` — unless you declared one with `describe=`. A declaration that leaves `tools` out does not erase the tools your `serve()` registration stored: the control plane keeps a catalogue that a later description did not observe. Either way the registration does not omit the key — the control plane reads an absent key as you opting out of introspection, records the agent as `disabled`, and a description your `serve()` registration stored stops driving workflow generation. Your real opt-out, `PERCEPTEYE_INTROSPECT=0`, still omits it.
 
 **Everything fails open.** An unreachable control plane yields an attachment with `policy == {}` and costs you nothing else; a framework that cannot be bound yields `adapters_bound == ()` rather than a process that will not start. (`serve()` raises there instead, and correctly: a rollout with no capture is a wasted rollout, while a production turn with no capture is still a served user.) A registration the control plane *refuses* while the policy read succeeds emits a `RuntimeWarning` and nothing more — the two calls no longer share one `except`, so a payload intake dislikes cannot also demote you to the untrained policy.
 
