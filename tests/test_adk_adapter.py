@@ -159,6 +159,19 @@ def test_a_raised_tool_is_a_real_failure(bound, tmp_path):
     assert "upstream" in (call.error or "")
 
 
+def test_a_failure_message_is_kept_whole(bound, tmp_path):
+    """No size limitation: both failure paths cut the message at 500
+    characters, and it reaches the span's status description as recorded."""
+    long = "denied " + "x" * 2_000
+    pm = PluginManager()
+    with _RolloutScope("rl_adk", str(tmp_path)):
+        asyncio.run(_one_call(pm, _Tool(), _Ctx(), result={"error": long}))
+        asyncio.run(_one_call(pm, _Tool(), _Ctx(), error=RuntimeError(long)))
+    returned, raised = _calls(tmp_path)
+    assert returned.error == long
+    assert raised.error == f"RuntimeError: {long}"
+
+
 def test_the_agent_name_comes_from_adk_itself(bound, tmp_path):
     """ToolContext.agent_name is native here. Attributing every call to one
     agent would train a planner on a coder's tool calls."""

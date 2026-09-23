@@ -81,6 +81,7 @@ from .execution_identity import normalize_attested_components
 from .outcomes import (
     AGENT_FINGERPRINT_FILENAME,
     CONVERSATION_ID_FILENAME,
+    TURNS_FILENAME,
     Trajectory,
     _normalize_task_id,
     _read_execution_fingerprint,
@@ -247,6 +248,25 @@ def _started_at(d: Path) -> float:
         return d.stat().st_mtime
     except OSError:
         return 0.0
+
+
+def _turn_opened_at_ms(d: Path) -> float | None:
+    """When this turn OPENED, in epoch milliseconds, or ``None``.
+
+    Both files are written at scope entry -- the task record when
+    ``input_text`` was passed, the conversation sidecar when a conversation
+    was -- and neither is touched again before the answer, so the earlier of
+    their mtimes is the moment the turn began. Nothing new is written to know
+    it. ``None`` when neither exists (an answer-only turn), and the span then
+    starts where it ends rather than at an invented time.
+    """
+    stamps = []
+    for name in (TURNS_FILENAME, CONVERSATION_ID_FILENAME):
+        try:
+            stamps.append((d / name).stat().st_mtime * 1000.0)
+        except OSError:
+            continue
+    return min(stamps) if stamps else None
 
 
 #: How ``_http.ControlPlaneClient.request`` spells a terminal 403. It formats
@@ -488,6 +508,12 @@ class Attachment:
         for the same reason :meth:`turn` yields its id: an outcome can arrive
         later than the turn does.
 
+        THE TURN'S SPAN IS EMITTED HERE, once, because this is when the turn
+        is whole: one ``invoke_agent`` span carrying what was asked and what
+        was answered, from the moment the turn opened to now. A turn whose
+        answer is never recorded emits no turn span -- its tool spans still
+        carry its turn and conversation ids.
+
         Returns whether anything was written, and never raises -- a capture bug
         costs the observation and never the turn.
         """
@@ -506,11 +532,47 @@ class Attachment:
             if not path.exists() or sidecar.exists()
             else None
         )
-        return record_turn_text(
+        # Read BEFORE the answer is appended: afterwards the turn file's mtime
+        # is the answer's, not the turn's.
+        opened_at_ms = _turn_opened_at_ms(path)
+        conversation_id = read_conversation_id(path)
+        written = record_turn_text(
             path, "answer", text, turn_id=safe_turn_id,
+            # The same ids the task record carries -- this half of the turn
+            # used to be written without its conversation.
+            conversation_id=conversation_id or "",
             task_id=read_task_id(path) or "",
             execution_sha256=execution_sha256 or "",
         )
+        if written:
+            self._emit_turn_span(path, safe_turn_id, conversation_id,
+                                 opened_at_ms)
+        return written
+
+    def _emit_turn_span(self, path: Path, turn_id: str,
+                        conversation_id: str | None,
+                        opened_at_ms: float | None) -> None:
+        """The turn's one ``invoke_agent`` span, read back from what was
+        recorded, so the span and the upload say the same thing."""
+        try:
+            from .tracing import record_turn_span
+
+            text = read_turn_text(path) or {}
+            identity = _read_execution_fingerprint(path)
+            record_turn_span(
+                input_text=text.get("task"),
+                output_text=text.get("answer"),
+                turn_id=turn_id,
+                conversation_id=conversation_id,
+                task_id=read_task_id(path),
+                agent_name=self.agent_id,
+                execution_sha256=(identity or {}).get("execution_sha256"),
+                start_time_ms=opened_at_ms,
+            )
+        except Exception:
+            # A capture bug costs the observation and never the turn -- and
+            # the answer is already on disk, so it cannot cost that either.
+            pass
 
     def read_turn(self, turn_id: str) -> dict[str, str] | None:
         """The task and answer recorded for one turn, or ``None``.

@@ -156,7 +156,7 @@ def _build_plugin_cls() -> type:
                 record_tool_call(
                     state["name"], state["arguments"],
                     outcome="failed", status_code=None,
-                    error=f"{type(error).__name__}: {error}"[:500],
+                    error=f"{type(error).__name__}: {error}",
                     error_class=type(error).__name__,
                     latency_ms=(time.perf_counter() - state["t0"]) * 1000.0,
                     agent_name=state.get("agent_name"),
@@ -199,7 +199,7 @@ def _classify(result: Any) -> tuple[str, str | None]:
     if isinstance(result, dict):
         err = result.get("error")
         if err:
-            return "failed", str(err)[:500]
+            return "failed", str(err)
     return "unknown", None
 
 

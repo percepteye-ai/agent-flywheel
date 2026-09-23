@@ -314,15 +314,21 @@ pip install "agent-flywheel[otel]"
 
 The extra is `opentelemetry-api>=1.20` — **the API only, never the SDK.** This package emits into whatever `TracerProvider` you already registered and **never installs one**. `set_tracer_provider` is once-only, so calling it would either lose all our spans (if yours was configured first) or silently kill your entire GenAI telemetry (if we won). With no provider configured, the API's no-op tracer swallows everything, which is the correct outcome for a library.
 
-Every recorded outcome is additionally emitted as a span named `execute_tool <tool name>`.
+Spans follow the [OpenTelemetry GenAI semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai), pinned at commit `8ffdf568e1`. Content attributes are JSON text in the shapes the conventions' JSON schemas define, and **nothing is truncated** — a bound belongs in your exporter or collector, where it applies to every instrumentation alike. The Node package emits the same spans for the same facts; both suites render one shared golden fixture, byte for byte, and this one validates every content value against the conventions' schemas.
+
+Every recorded outcome is emitted as an `INTERNAL` span named `execute_tool <tool name>`, starting `latency_ms` before it ends.
 
 | attribute | value |
 |:--|:--|
 | `gen_ai.operation.name` | `"execute_tool"` |
 | `gen_ai.tool.name` | the tool name |
+| `gen_ai.tool.type` | `"function"` |
 | `gen_ai.tool.call.id` | the model-assigned call id, when there is one |
-| `gen_ai.tool.call.arguments` | JSON, truncated at 2000 chars |
+| `gen_ai.tool.call.arguments` | the arguments, as a JSON object (a JSON string argument is parsed) |
+| `gen_ai.tool.call.result` | the result as a JSON object — only when the call did not fail and the result is an object |
+| `error.type` | on a reported failure: the error class, else the status code, else `_OTHER` |
 | `gen_ai.agent.name` | the sub-agent that made the call, when known |
+| `gen_ai.conversation.id` | the conversation passed to `attach().turn(conversation_id=...)`; also as `percepteye.conversation.id` for one release |
 | `percepteye.tool.outcome` | `ok` · `failed` · `unknown` |
 | `percepteye.tool.status_code` | when there is one |
 | `percepteye.tool.latency_ms` | when measured |
@@ -330,6 +336,8 @@ Every recorded outcome is additionally emitted as a span named `execute_tool <to
 | `percepteye.turn.id` | set inside `attach().turn()` — never stamped as a rollout id, or your own telemetry could not answer "how much of my traffic was training" |
 | `percepteye.task.id` | optional caller-supplied task/case/work-item correlation from `attach().turn(task_id=...)`; evidence only, never training authority |
 | `percepteye.agent.execution_sha256` | exact SDK-reconciled execution identity, only when discovery and adapter evidence were complete |
+
+Each `attach()` turn whose answer is recorded is one `INTERNAL` span named `invoke_agent <agent_id>`, emitted by `record_answer()` and spanning the turn from the moment it opened. It carries `gen_ai.input.messages` (what was asked) and `gen_ai.output.messages` (what was answered) in the conventions' message shape, plus the same `gen_ai.conversation.id` and `percepteye.*` correlation as its tool spans. `tracing.record_turn_span()` accepts richer content directly — `system_instructions`, the full `input_messages` history including tool calls and tool responses, and `output_messages` with a `finish_reason`, which is also collected into `gen_ai.response.finish_reasons`.
 
 **Only a reported failure sets the span status to error. An `unknown` leaves the span status unset** — marking it OK would assert a success nobody observed, and marking it ERROR would assert a failure nobody observed. The GenAI conventions have no attribute for "the result of this call was never observed", which is why the tri-state lives under `percepteye.*` rather than being bent into a standard attribute that means something else to every other consumer.
 

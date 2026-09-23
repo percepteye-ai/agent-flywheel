@@ -185,7 +185,7 @@ def _classify_output(output: Any, tool_message_cls: type) -> tuple[str, str | No
     if isinstance(output, tool_message_cls):
         status = getattr(output, "status", None)
         if status == "error":
-            return "failed", str(getattr(output, "content", ""))[:500] or None
+            return "failed", str(getattr(output, "content", "")) or None
         if status == "success":
             return "ok", None
     return "unknown", None

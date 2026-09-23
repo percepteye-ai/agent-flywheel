@@ -16,7 +16,7 @@ from .evidence import extract_entity_ids
 
 __all__ = [
     "FORMATS",
-    "OTEL_GENAI",
+    "GENERIC_TOOL_EVENTS",
     "CommandOutputAdapter",
     "CommandOutputProjection",
     "StreamFormat",
@@ -79,20 +79,28 @@ class ToolCallParseResult:
     omitted_count: int = 0
 
 
-# A standards vocabulary is safe as the inspection helper's default. The
+# A vendor-neutral vocabulary is safe as the inspection helper's default. The
 # rollout runner does not apply even this automatically: a command must opt in
 # with a CommandOutputAdapter before stdout is interpreted as telemetry.
-OTEL_GENAI = StreamFormat(
-    name="otel-genai",
+#
+# NOT AN OPENTELEMETRY FORMAT, and it used to be labelled as one. The OTel
+# GenAI conventions define no tool start/end EVENTS at all -- a tool call is
+# one `execute_tool` span -- so `gen_ai.tool.start` / `gen_ai.tool.end` are
+# this SDK's own event types, and so were the `gen_ai.tool.input` /
+# `gen_ai.tool.output` fields. The fields now read the convention's real
+# attribute names first (`gen_ai.tool.call.arguments`,
+# `gen_ai.tool.call.result`), with the old spellings still accepted.
+GENERIC_TOOL_EVENTS = StreamFormat(
+    name="generic-tool-events",
     start_type="gen_ai.tool.start",
     end_type="gen_ai.tool.end",
     call_id=("gen_ai.tool.call.id", "toolCallId", "id"),
     tool_name=("gen_ai.tool.name", "toolName", "name"),
-    args=("gen_ai.tool.input", "args", "arguments"),
-    result=("gen_ai.tool.output", "result", "output"),
+    args=("gen_ai.tool.call.arguments", "gen_ai.tool.input", "args", "arguments"),
+    result=("gen_ai.tool.call.result", "gen_ai.tool.output", "result", "output"),
     error_flag=("error.type", "isError", "is_error"),
 )
-FORMATS: tuple[StreamFormat, ...] = (OTEL_GENAI,)
+FORMATS: tuple[StreamFormat, ...] = (GENERIC_TOOL_EVENTS,)
 
 _MAX_OUTPUT_CHARS = 4000
 _MAX_ERROR_CHARS = 1000

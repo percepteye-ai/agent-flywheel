@@ -519,6 +519,7 @@ def _emit_span(rec: ToolCallOutcome, scope_id: str, kind: CaptureScope) -> None:
             outcome=rec.outcome,
             status_code=rec.status_code,
             error=rec.error,
+            error_class=rec.error_class,
             latency_ms=rec.latency_ms,
             agent_name=rec.agent_name,
             rollout_id=scope_id if kind == "rollout" else None,
@@ -527,6 +528,7 @@ def _emit_span(rec: ToolCallOutcome, scope_id: str, kind: CaptureScope) -> None:
             task_id=_current_task.get(),
             tool_call_id=rec.tool_call_id,
             execution_sha256=_current_execution_sha256.get(),
+            result=rec.output,
         )
     except Exception:
         return
@@ -536,8 +538,6 @@ def record_turn_text(
     trajectory_dir: str | os.PathLike[str],
     kind: str,
     text: str,
-    *,
-    max_chars: int = 20_000,
     **ids: str,
 ) -> bool:
     """Append one turn record. Returns whether anything was written.
@@ -549,12 +549,19 @@ def record_turn_text(
     Empty text writes NOTHING rather than an empty record: "the agent answered
     with silence" and "we were not given the answer" are different claims, and
     only the second is true here.
+
+    NO LENGTH CAP. A turn cut at a fixed length is a different turn from the
+    one the agent served, and a conversation is rebuilt from exactly this text.
+
+    NO SPAN. A span per half-turn described neither half; the turn's
+    ``invoke_agent`` span is emitted once, when the turn is whole, by
+    :meth:`~agent_flywheel.production.Attachment.record_answer`.
     """
     if kind not in TURN_KINDS:
         raise ValueError(f"turn kind must be one of {TURN_KINDS}, got {kind!r}")
     if not isinstance(text, str) or not text.strip():
         return False
-    record: dict[str, Any] = {"kind": kind, "text": text.strip()[:max_chars]}
+    record: dict[str, Any] = {"kind": kind, "text": text.strip()}
     for key, value in ids.items():
         if key == "execution_sha256":
             continue
@@ -568,30 +575,6 @@ def record_turn_text(
     except (OSError, TypeError, ValueError):
         return False
     _write_execution_fingerprint(path, ids.get("execution_sha256"))
-
-    # The OTel projection rides the SAME call that writes the file, for the
-    # same reason the tool-call path does: two call sites for one fact drift,
-    # and a turn that reached the trajectory but not the customer's traces is
-    # the drift nobody notices until they are comparing the two.
-    #
-    # Imported here, not at module scope: `tracing` reaches for the OTel API,
-    # and a customer who never installed the extra should not pay an import for
-    # a projection that will be a no-op.
-    try:
-        from .tracing import record_turn_span
-
-        record_turn_span(
-            **{("input_text" if kind == "task" else "output_text"): record["text"]},
-            turn_id=ids.get("turn_id"),
-            conversation_id=ids.get("conversation_id"),
-            task_id=ids.get("task_id"),
-            rollout_id=ids.get("rollout_id"),
-            execution_sha256=ids.get("execution_sha256"),
-        )
-    except Exception:
-        # A capture bug costs the observation and never the turn -- and the
-        # file is already written, so this cannot cost that either.
-        pass
     return True
 
 

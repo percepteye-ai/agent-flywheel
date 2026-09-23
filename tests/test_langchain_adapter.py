@@ -98,6 +98,15 @@ def test_an_explicit_error_status_is_failed():
     assert "boom" in (err or "")
 
 
+def test_an_error_status_keeps_the_whole_message():
+    """No size limitation: the message was cut at 500 characters."""
+    from langchain_core.messages.tool import ToolMessage
+
+    long = "boom " + "x" * 2_000
+    assert _classify_output(_tm(status="error", content=long), ToolMessage) == (
+        "failed", long)
+
+
 def test_an_explicit_success_status_is_ok():
     from langchain_core.messages.tool import ToolMessage
 

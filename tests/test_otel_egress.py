@@ -90,12 +90,20 @@ def test_a_success_is_not_marked_error(spans):
 
 
 def test_it_uses_gen_ai_attributes_where_the_convention_names_them(spans):
+    import json
+
+    from opentelemetry.trace import SpanKind
+
     record_tool_call_span("lookup", {"q": "x"}, outcome="ok", agent_name="planner")
-    a = _only(spans).attributes
+    span = _only(spans)
+    a = span.attributes
+    assert span.kind == SpanKind.INTERNAL
     assert a["gen_ai.operation.name"] == "execute_tool"
     assert a["gen_ai.tool.name"] == "lookup"
+    assert a["gen_ai.tool.type"] == "function"
     assert a["gen_ai.agent.name"] == "planner"
-    assert "q" in a["gen_ai.tool.call.arguments"]
+    # An OBJECT, as JSON text -- the convention's shape for arguments.
+    assert json.loads(a["gen_ai.tool.call.arguments"]) == {"q": "x"}
 
 
 def test_percepteye_attributes_carry_what_the_convention_cannot(spans):
@@ -112,12 +120,45 @@ def test_percepteye_attributes_carry_what_the_convention_cannot(spans):
     assert a["percepteye.tool.latency_ms"] == pytest.approx(12.5)
 
 
-def test_large_arguments_are_truncated(spans):
-    """Attributes are telemetry, not payloads — one huge tool argument must not
-    bloat every span in the customer's backend."""
+def test_large_arguments_are_carried_whole_as_valid_json(spans):
+    """No size limitation. The 2,000-character cut that stood here ended the
+    argument in ``...[truncated]``, which is not JSON at all -- a consumer
+    parsing it got an error, not a shorter argument."""
+    import json
+
     record_tool_call_span("upload", {"blob": "x" * 50_000}, outcome="ok")
     val = _only(spans).attributes["gen_ai.tool.call.arguments"]
-    assert len(val) < 3_000 and val.endswith("...[truncated]")
+    assert json.loads(val) == {"blob": "x" * 50_000}
+
+
+def test_a_failure_carries_error_type_and_no_result(spans):
+    """``error.type`` is Conditionally Required on a failed operation, and the
+    result is recorded only when execution succeeded."""
+    record_tool_call_span("charge_card", {}, outcome="failed", status_code=402,
+                          error="declined", error_class="CardDeclined",
+                          result={"code": "declined"})
+    a = _only(spans).attributes
+    assert a["error.type"] == "CardDeclined"
+    assert "gen_ai.tool.call.result" not in a
+
+
+def test_a_success_carries_its_result_as_an_object(spans):
+    import json
+
+    record_tool_call_span("lookup", {}, outcome="ok",
+                          result='{"hits": 3, "next": null}')
+    a = _only(spans).attributes
+    assert json.loads(a["gen_ai.tool.call.result"]) == {"hits": 3, "next": None}
+
+
+def test_the_span_covers_the_call(spans):
+    """Its start is ``latency_ms`` before its end, not the instant it was
+    written down."""
+    record_tool_call_span("lookup", {}, outcome="ok", latency_ms=250,
+                          end_time_ms=1_700_000_000_000)
+    span = _only(spans)
+    assert span.end_time == 1_700_000_000_000 * 1_000_000
+    assert span.end_time - span.start_time == 250 * 1_000_000
 
 
 # ── it never touches the customer's telemetry ──────────────────────────────
@@ -176,7 +217,7 @@ def test_a_telemetry_failure_never_reaches_the_caller(spans, monkeypatch):
     import agent_flywheel.tracing as mod
 
     class _Exploding:
-        def start_as_current_span(self, *a, **kw):
+        def start_span(self, *a, **kw):
             raise RuntimeError("collector down")
 
     monkeypatch.setattr(mod, "_TRACER", _Exploding())
@@ -201,6 +242,33 @@ def test_recording_an_outcome_still_writes_the_trajectory_and_also_emits(spans, 
     assert _only(spans).attributes["percepteye.tool.outcome"] == "unknown"
 
 
+def test_a_recorded_outcome_reaches_its_span_with_result_and_error_class(
+    spans, tmp_path,
+):
+    """The wiring, not the renderer: ``record_tool_call`` hands the span the
+    output and the classified error it recorded."""
+    import json
+
+    with _RolloutScope("rl_y", str(tmp_path)):
+        record_tool_call("lookup", {"q": "x"}, outcome="ok", status_code=200,
+                         output={"hits": 2})
+        record_tool_call("charge", {}, outcome="failed", status_code=402,
+                         error="declined", error_class="CardDeclined")
+    ok, failed = spans.get_finished_spans()
+    assert json.loads(ok.attributes["gen_ai.tool.call.result"]) == {"hits": 2}
+    assert failed.attributes["error.type"] == "CardDeclined"
+
+
+def test_turn_text_is_stored_whole(tmp_path):
+    """No size limitation on the turn record either: the span is built from
+    it, and the 20,000-character cut made both carry a different turn."""
+    from agent_flywheel.outcomes import read_turn_text, record_turn_text
+
+    text = "x" * 20_500 + "\U0001F4E6" * 5_000
+    assert record_turn_text(tmp_path, "task", text)
+    assert read_turn_text(tmp_path)["task"] == text
+
+
 def test_tracing_available_reports_the_api_not_the_provider():
     assert isinstance(tracing_available(), bool)
 
@@ -212,17 +280,28 @@ def test_a_turn_span_carries_the_prompt_and_the_completion(spans):
     """THE CAPTURE the four trainable algorithms need. SFT wants the messages;
     OPSD wants them plus a reference; RAFT plus a reward and a proven success;
     DPO wants two to pair. None reads a sampled logprob, which is why a span
-    suffices here where it would not for offline GRPO."""
+    suffices here where it would not for offline GRPO.
+
+    In the convention's message shape, as JSON text -- plain text in these
+    attributes is not what the schema says they hold."""
+    import json
+
     from agent_flywheel.tracing import record_turn_span
 
     record_turn_span(input_text="summarise the incident",
                      output_text="Three services timed out.",
                      turn_id="t1", conversation_id="c1", model="gpt-4o")
     span = _only(spans)
-    assert span.attributes["gen_ai.operation.name"] == "chat"
-    assert span.attributes["gen_ai.input.messages"] == "summarise the incident"
-    assert span.attributes["gen_ai.output.messages"] == "Three services timed out."
+    assert span.name == "invoke_agent"
+    assert span.attributes["gen_ai.operation.name"] == "invoke_agent"
+    assert json.loads(span.attributes["gen_ai.input.messages"]) == [
+        {"role": "user",
+         "parts": [{"type": "text", "content": "summarise the incident"}]}]
+    assert json.loads(span.attributes["gen_ai.output.messages"]) == [
+        {"role": "assistant",
+         "parts": [{"type": "text", "content": "Three services timed out."}]}]
     assert span.attributes["gen_ai.request.model"] == "gpt-4o"
+    assert span.attributes["gen_ai.conversation.id"] == "c1"
 
 
 def test_a_turn_with_no_content_emits_no_span(spans):
@@ -241,7 +320,7 @@ def test_half_a_turn_still_emits(spans):
 
     record_turn_span(input_text="just the question", turn_id="t3")
     span = _only(spans)
-    assert span.attributes["gen_ai.input.messages"] == "just the question"
+    assert "just the question" in span.attributes["gen_ai.input.messages"]
     assert "gen_ai.output.messages" not in span.attributes
 
 
@@ -266,24 +345,25 @@ def test_a_rollout_turn_IS_stamped_so_ingest_can_exclude_it(spans):
     assert span.attributes["percepteye.rollout.id"] == "r9"
 
 
-def test_turn_content_is_bounded(spans):
-    """One span must not dominate the customer's export, and an exporter that
-    drops an oversized span costs the whole turn rather than its tail."""
-    from agent_flywheel.tracing import _MAX_TURN_CHARS, record_turn_span
+def test_turn_content_is_carried_whole(spans):
+    """No size limitation: the 20,000-character cut that stood here made the
+    span carry a different turn from the one the agent served."""
+    import json
 
-    record_turn_span(input_text="x" * (_MAX_TURN_CHARS + 5_000), turn_id="t5")
-    assert len(_only(spans).attributes["gen_ai.input.messages"]) == _MAX_TURN_CHARS
+    from agent_flywheel.tracing import record_turn_span
+
+    record_turn_span(input_text="x" * 25_000, turn_id="t5")
+    content = json.loads(_only(spans).attributes["gen_ai.input.messages"])
+    assert content[0]["parts"][0]["content"] == "x" * 25_000
 
 
-def test_recording_a_turn_emits_the_span_from_the_same_call(spans, tmp_path):
-    """One call site for one fact. A turn that reached the trajectory but not
-    the customer's traces is the drift nobody notices until they compare."""
+def test_writing_half_a_turn_emits_no_span_of_its_own(spans, tmp_path):
+    """A span per half-turn described neither half. The turn's one span is
+    emitted by ``record_answer``, when the turn is whole."""
     from agent_flywheel.outcomes import record_turn_text
 
-    record_turn_text(tmp_path, "task", "asked", turn_id="t6")
-    span = _only(spans)
-    assert span.attributes["gen_ai.input.messages"] == "asked"
-    assert span.attributes["percepteye.turn.id"] == "t6"
+    assert record_turn_text(tmp_path, "task", "asked", turn_id="t6")
+    assert spans.get_finished_spans() == ()
 
 
 # ── the same guard on the TOOL span ────────────────────────────────────────
@@ -317,57 +397,78 @@ def test_a_rollout_tool_call_IS_stamped_so_ingest_can_exclude_it(spans):
     assert "percepteye.turn.id" not in span.attributes
 
 
-# ── one span per turn TEXT, which is the shape the ingest converter reads ──
+# ── one span per TURN, carrying both halves ────────────────────────────────
 
 
-def test_a_turn_writes_one_span_per_turn_text_not_one_per_turn(spans, tmp_path):
-    """The emission ORDER is a cross-repo contract, so it is pinned here.
+def test_a_turn_is_one_invoke_agent_span_carrying_both_halves(spans, tmp_path):
+    """The turn's ``invoke_agent`` span, emitted once the answer exists.
 
-    ``record_turn_text`` emits the OTel projection from the same call that
-    writes the file, and it is called twice per turn — once for the task, once
-    for the answer. So a turn produces an INPUT span when it starts and an
-    OUTPUT span when the answer is recorded, with any tool spans between them.
-
-    That ordering is what lets a consumer attribute a tool call to the turn it
-    belongs to: at tool time the count of assistant messages so far is exactly
-    the index the closing answer will take. A single span carrying both halves
-    would put every tool call after the whole turn, and the consumer would have
-    no turn to attach them to.
-
-    Pinned from this side only. The consumer is in another repository and this
-    package imports nothing from it.
+    It REPLACED two ``chat`` spans, one per half, which described neither half
+    as what it was -- no model call happened on either -- and which a consumer
+    had to pair by position. Now the turn is one span from the moment it
+    opened to its answer, so its tool spans fall inside it in time, and all of
+    them name the same turn and conversation.
     """
+    import json
+
     from agent_flywheel.outcomes import record_tool_call
     from agent_flywheel.production import attach
 
-    px = attach(agent_id="a", trajectory_root=str(tmp_path), register=False)
+    px = attach(agent_id="support-bot", trajectory_root=str(tmp_path),
+                register=False)
     try:
-        with px.turn(turn_id="t1", input_text="book a flight"):
+        with px.turn(turn_id="t1", input_text="book a flight",
+                     conversation_id="conv-1"):
             record_tool_call(name="book", arguments={}, outcome="ok",
-                             status_code=201)
+                             status_code=201, latency_ms=0.0)
         px.record_answer("t1", "Booked.")
     finally:
         px.close()
 
     got = spans.get_finished_spans()
-    chat = [s for s in got
-            if s.attributes.get("gen_ai.operation.name") == "chat"]
-    assert len(chat) == 2, (
-        f"expected an input span and an output span, got {len(chat)}: "
-        f"{[dict(s.attributes) for s in chat]}"
-    )
-    first, second = sorted(chat, key=lambda s: s.start_time)
-    # NEVER both halves on one span.
-    assert "gen_ai.input.messages" in first.attributes
-    assert "gen_ai.output.messages" not in first.attributes
-    assert "gen_ai.output.messages" in second.attributes
-    assert "gen_ai.input.messages" not in second.attributes
+    turns = [s for s in got
+             if s.attributes.get("gen_ai.operation.name") == "invoke_agent"]
+    tools = [s for s in got
+             if s.attributes.get("gen_ai.operation.name") == "execute_tool"]
+    assert len(turns) == 1 and len(tools) == 1
+    assert not [s for s in got
+                if s.attributes.get("gen_ai.operation.name") == "chat"]
+    turn, tool = turns[0], tools[0]
+    assert turn.name == "invoke_agent support-bot"
+    a = turn.attributes
+    assert json.loads(a["gen_ai.input.messages"])[0]["parts"][0]["content"] == \
+        "book a flight"
+    assert json.loads(a["gen_ai.output.messages"])[0]["parts"][0]["content"] == \
+        "Booked."
+    # THE GAP THIS CLOSED: the answer half was recorded without its
+    # conversation, so the span carrying it had none.
+    assert a["gen_ai.conversation.id"] == "conv-1"
+    assert a["percepteye.conversation.id"] == "conv-1"
+    assert tool.attributes["gen_ai.conversation.id"] == "conv-1"
+    # A served turn is the customer's own traffic, never a rollout.
+    assert all("percepteye.rollout.id" not in s.attributes for s in got)
+    assert {s.attributes["percepteye.turn.id"] for s in got} == {"t1"}
+    # The turn spans its tool call.
+    assert turn.start_time <= tool.start_time <= tool.end_time <= turn.end_time
 
-    tool = [s for s in got if s.attributes.get("gen_ai.tool.name")]
-    assert len(tool) == 1
-    # And the tool span falls BETWEEN them, which is what makes it
-    # attributable to the turn the second span closes.
-    assert first.start_time <= tool[0].start_time <= second.start_time
+
+def test_the_answer_record_names_its_conversation_like_the_task_record(tmp_path):
+    """One format, two SDKs: Node writes the answer record with the turn's
+    conversation id, so Python must too."""
+    import json
+
+    from agent_flywheel.production import attach
+
+    px = attach(agent_id="a", trajectory_root=str(tmp_path), register=False)
+    try:
+        with px.turn(turn_id="t1", input_text="q", conversation_id="conv-2"):
+            pass
+        px.record_answer("t1", "a")
+    finally:
+        px.close()
+    records = [json.loads(line) for line in
+               (tmp_path / "t1" / "turns.jsonl").read_text().splitlines()]
+    assert [r.get("conversation_id") for r in records] == ["conv-2", "conv-2"]
 
 
 def test_exact_attached_execution_identity_reaches_turn_and_tool_spans(
@@ -416,14 +517,14 @@ def test_exact_attached_execution_identity_reaches_turn_and_tool_spans(
         px.close()
 
     got = spans.get_finished_spans()
-    assert len(got) == 3
+    assert len(got) == 2
     assert {
         span.attributes.get("percepteye.agent.execution_sha256")
         for span in got
     } == {digest}
 
 
-def test_task_correlation_reaches_input_answer_and_tool_spans(spans, tmp_path):
+def test_task_correlation_reaches_turn_and_tool_spans(spans, tmp_path):
     """Upload and OTLP paths carry the same neutral exact-join candidate."""
     from agent_flywheel.outcomes import record_tool_call
     from agent_flywheel.production import attach
@@ -439,7 +540,7 @@ def test_task_correlation_reaches_input_answer_and_tool_spans(spans, tmp_path):
         px.close()
 
     got = spans.get_finished_spans()
-    assert len(got) == 3
+    assert len(got) == 2
     assert {
         span.attributes.get("percepteye.task.id") for span in got
     } == {"case-7"}
@@ -474,17 +575,19 @@ def test_conflicting_task_correlation_is_omitted_from_later_spans(
     try:
         with px.turn(turn_id="same", task_id="case-a", input_text="first"):
             pass
+        px.record_answer("same", "one")
         with px.turn(turn_id="same", task_id="case-b", input_text="second"):
             record_tool_call(
                 name="book", arguments={}, outcome="ok", status_code=201,
             )
+        px.record_answer("same", "two")
     finally:
         px.close()
 
     got = spans.get_finished_spans()
     first = next(
         span for span in got
-        if span.attributes.get("gen_ai.input.messages") == "first"
+        if '"one"' in span.attributes.get("gen_ai.output.messages", "")
     )
     assert first.attributes["percepteye.task.id"] == "case-a"
     later = [span for span in got if span is not first]
@@ -522,6 +625,8 @@ def test_the_tool_span_carries_the_conversation_too(spans, tmp_path):
             if s.attributes.get("gen_ai.tool.name")]
     assert len(tool) == 1
     assert tool[0].attributes.get("percepteye.conversation.id") == "conv-7"
+    # And under the convention's own name, which is what a consumer reads.
+    assert tool[0].attributes.get("gen_ai.conversation.id") == "conv-7"
     # And the turn id is still there — this adds a key, it does not swap one.
     assert tool[0].attributes.get("percepteye.turn.id") == "t1"
 
@@ -544,3 +649,4 @@ def test_a_turn_with_no_conversation_sets_no_conversation_attribute(spans, tmp_p
             if s.attributes.get("gen_ai.tool.name")]
     assert len(tool) == 1
     assert "percepteye.conversation.id" not in tool[0].attributes
+    assert "gen_ai.conversation.id" not in tool[0].attributes

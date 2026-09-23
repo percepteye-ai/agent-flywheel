@@ -253,10 +253,10 @@ def test_an_empty_assertion_of_zero_calls_is_preserved():
 # ── the vocabulary is data, not a parser ────────────────────────────────────
 
 
-def test_an_otel_instrumented_agent_is_read_with_no_new_code():
-    """The generality claim, made concrete. A process agent that already emits
-    GenAI spans as JSON lines gets outcome capture for free — supporting the
-    next CLI agent is an entry in FORMATS, not a parser."""
+def test_the_generic_vocabulary_is_read_with_no_new_code():
+    """The generality claim, made concrete. A process agent that prints the
+    generic tool events as JSON lines gets outcome capture for free --
+    supporting the next CLI agent is an entry in FORMATS, not a parser."""
     stream = _stream(
         {"type": "gen_ai.tool.start", "gen_ai.tool.call.id": "c1",
          "gen_ai.tool.name": "search", "gen_ai.tool.input": {"q": "x"}},
@@ -270,6 +270,30 @@ def test_an_otel_instrumented_agent_is_read_with_no_new_code():
     # No error.type on the span, and OTel omits it on success — but omission
     # is not an assertion of success, so this stays unknown.
     assert calls[0].outcome == "unknown"
+
+
+def test_the_generic_vocabulary_does_not_claim_to_be_opentelemetry():
+    """OTel GenAI defines no tool start/end events -- a tool call is one
+    ``execute_tool`` span -- so a vocabulary built on them must not be named
+    or exported as the OTel format."""
+    import agent_flywheel.event_stream as mod
+
+    assert not hasattr(mod, "OTEL_GENAI")
+    assert all("otel" not in f.name for f in mod.FORMATS)
+
+
+def test_the_conventions_real_attribute_names_are_read_first():
+    """``gen_ai.tool.call.arguments`` / ``.result`` are the convention's own
+    names; the old ``.input``/``.output`` spellings still parse."""
+    calls = parse_tool_calls(_stream(
+        {"type": "gen_ai.tool.end", "gen_ai.tool.call.id": "c1",
+         "gen_ai.tool.name": "search",
+         "gen_ai.tool.call.arguments": {"q": "real"},
+         "gen_ai.tool.input": {"q": "legacy"},
+         "gen_ai.tool.call.result": {"hits": 3}},
+    ))
+    assert calls[0].arguments == {"q": "real"}
+    assert calls[0].output == {"hits": 3}
 
 
 def test_the_otel_error_convention_is_read_as_a_failure():
@@ -295,7 +319,7 @@ def test_a_stream_is_matched_by_its_events_not_by_a_declared_name():
     agent's self-description."""
     from agent_flywheel.event_stream import FORMATS
 
-    assert {f.name for f in FORMATS} == {"otel-genai"}
+    assert {f.name for f in FORMATS} == {"generic-tool-events"}
     # Two vocabularies in one stream: the first seen wins and the other's
     # events are ignored rather than silently merged under one call id.
     mixed = _stream(_START, _END_OK,

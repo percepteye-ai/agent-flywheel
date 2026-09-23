@@ -47,10 +47,10 @@ The task arrives on **stdin** and as `PERCEPTEYE_TURN_INPUT`; ordinary **stdout*
 
 | vocabulary | events | you get it if |
 |:--|:--|:--|
-| `otel-genai` | `gen_ai.tool.start` / `gen_ai.tool.end` | your agent already logs OpenTelemetry GenAI events as JSON lines |
+| `generic-tool-events` | `gen_ai.tool.start` / `gen_ai.tool.end` | your agent prints one JSON line per tool start and end (this is the SDK's own vocabulary — OpenTelemetry defines no tool events) |
 | `prime-agent` | `tool_execution_start` / `tool_execution_end` | you run prime-agent under `--mode json` |
 
-The first row belongs to no vendor, so an agent instrumented for observability needs no work. Failing both, append a line per call to `$PERCEPTEYE_TRAJECTORY_DIR/tool_calls.jsonl`. A stream carrying no tool events leaves `tool_calls` as `None` — never `[]`. → [CLI and other languages](cli.md)
+The first row belongs to no vendor, so any agent can print it; an agent's OpenTelemetry spans are not read from stdout. Failing both, append a line per call to `$PERCEPTEYE_TRAJECTORY_DIR/tool_calls.jsonl`. A stream carrying no tool events leaves `tool_calls` as `None` — never `[]`. → [CLI and other languages](cli.md)
 
 ### Is it really one dependency?
 

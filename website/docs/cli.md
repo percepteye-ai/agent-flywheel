@@ -116,9 +116,9 @@ A modern CLI agent emits structured events because it needs them for its own UI.
 | adapter/helper | start / end | id · name · args · result · error |
 |:--|:--|:--|
 | optional Prime example adapter | `tool_execution_start` / `tool_execution_end` | `toolCallId` · `toolName` · `args` · `result` · `isError` |
-| generic `OTEL_GENAI` format helper | `gen_ai.tool.start` / `gen_ai.tool.end` | `gen_ai.tool.call.id` · `gen_ai.tool.name` · `gen_ai.tool.input` · `gen_ai.tool.output` · `error.type` |
+| generic `GENERIC_TOOL_EVENTS` format helper | `gen_ai.tool.start` / `gen_ai.tool.end` | `gen_ai.tool.call.id` · `gen_ai.tool.name` · `gen_ai.tool.call.arguments` (or `gen_ai.tool.input`) · `gen_ai.tool.call.result` (or `gen_ai.tool.output`) · `error.type` |
 
-The second row belongs to no vendor and can be reused by a small customer adapter. Field names are candidate tuples tried in order, because emitters disagree about camelCase versus snake_case far more often than they disagree about meaning. Adding the next CLI is an adapter-owned `StreamFormat` entry — a vocabulary, not a core branch.
+The second row belongs to no vendor and can be reused by a small customer adapter. It is **not** an OpenTelemetry format: the OTel GenAI conventions define no tool start/end events (a tool call is one `execute_tool` span), so its event types are this SDK's own; its fields borrow the convention's attribute names. Field names are candidate tuples tried in order, because emitters disagree about camelCase versus snake_case far more often than they disagree about meaning. Adding the next CLI is an adapter-owned `StreamFormat` entry — a vocabulary, not a core branch.
 
 **The verdict is tri-state by omission.**
 
