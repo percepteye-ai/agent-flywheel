@@ -61,6 +61,37 @@ CASES: dict[str, object] = {
     "a blank reason": {"capture": {"turns": False, "reason": "   "}},
     "a reason that is not a string": {"capture": {"turns": False, "reason": 7}},
 
+    # A padded sentence is the server's sentence: both sides trim it. Node
+    # used to pass it through untrimmed while Python stripped it.
+    "a padded reason": {"capture": {"turns": False,
+                                    "reason": "  scope missing \n"}},
+
+    # ── THE SECOND TIER: model content (system prompt, history, tool results)
+    "model content granted": {"capture": {"turns": True, "model_content": True}},
+    "model content withheld, with the server's sentence": {
+        "capture": {"turns": True, "model_content": False,
+                    "model_content_reason": "an operator has not enabled "
+                                            "model-content capture "}},
+    "model content withheld, no sentence": {
+        "capture": {"turns": True, "model_content": False}},
+    "model content absent from an older control plane": {
+        "capture": {"turns": True}},
+    "model content the string 'true'": {
+        "capture": {"turns": True, "model_content": "true"}},
+    "model content the number 1": {
+        "capture": {"turns": True, "model_content": 1}},
+    "model content true but turns refused": {
+        "capture": {"turns": False, "model_content": True,
+                    "reason": "the key lacks the scope"}},
+    "model content true but turns absent": {
+        "capture": {"model_content": True}},
+    "model content withheld, a blank sentence": {
+        "capture": {"turns": True, "model_content": False,
+                    "model_content_reason": "  "}},
+    "model content withheld, a sentence that is not a string": {
+        "capture": {"turns": True, "model_content": None,
+                    "model_content_reason": ["no"]}},
+
     # ── the control plane did not answer at all ──────────────────────────
     "no capture block": {},
     "capture is null": {"capture": None},
@@ -74,10 +105,14 @@ CASES: dict[str, object] = {
 
 def _python(body: object) -> dict:
     v = capture_verdict(body)
-    # The Node answer is `{mayUpload, reason}`; compared field for field under
-    # one spelling so a difference in either field is a failure here rather
-    # than a difference in how the two are read.
-    return {"mayUpload": v.may_upload, "reason": v.reason}
+    # The Node answer is `{mayUpload, reason, answered, mayCaptureModelContent,
+    # modelContentReason}`; compared field for field under one spelling so a
+    # difference in any field is a failure here rather than a difference in
+    # how the two are read.
+    return {"mayUpload": v.may_upload, "reason": v.reason,
+            "answered": v.answered,
+            "mayCaptureModelContent": v.may_capture_model_content,
+            "modelContentReason": v.model_content_reason}
 
 
 @pytest.fixture(scope="module")
@@ -127,6 +162,11 @@ def test_both_sdks_reach_the_same_capture_verdict(name, node_answers):
     """
     mine = _python(CASES[name])
     theirs = node_answers[name]
+    assert mine["mayCaptureModelContent"] == theirs["mayCaptureModelContent"], (
+        f"the two SDKs disagree about whether {name!r} is MODEL-CONTENT "
+        f"consent:\n  python: {json.dumps(mine, ensure_ascii=False)}\n"
+        f"  node  : {json.dumps(theirs, ensure_ascii=False)}"
+    )
     assert mine["mayUpload"] == theirs["mayUpload"], (
         f"the two SDKs disagree about whether {name!r} is consent:\n"
         f"  python: {json.dumps(mine, ensure_ascii=False)}\n"
@@ -192,3 +232,22 @@ def test_every_refusal_carries_a_sentence():
         assert (v.reason is None) == v.may_upload, name
         if not v.may_upload:
             assert v.reason and v.reason.strip(), name
+        # The second tier keeps the same promise, and never outruns the first.
+        assert (v.model_content_reason is None) == v.may_capture_model_content, name
+        if not v.may_capture_model_content:
+            assert v.model_content_reason and v.model_content_reason.strip(), name
+        assert not v.may_capture_model_content or v.may_upload, name
+
+
+def test_model_content_is_granted_only_by_the_exact_value_on_a_granted_turn():
+    """The second tier's own branches, so a table that drifted to one outcome
+    for it cannot stay green: one grant, and every way to be refused."""
+    granted = [n for n, b in CASES.items()
+               if capture_verdict(b).may_capture_model_content]
+    assert granted == ["model content granted"], granted
+    withheld = capture_verdict(
+        CASES["model content withheld, with the server's sentence"])
+    assert withheld.model_content_reason == (
+        "an operator has not enabled model-content capture")
+    riding = capture_verdict(CASES["model content true but turns refused"])
+    assert riding.model_content_reason == riding.reason == "the key lacks the scope"

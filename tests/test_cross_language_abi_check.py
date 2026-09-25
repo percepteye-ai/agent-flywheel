@@ -40,6 +40,9 @@ _EVIDENCE = (
     "volatile-value projection agrees",
     "both languages refuse",
     "node refuses the un-stringified argv python stringifies earlier",
+    "genai capture golden agrees",
+    "both languages spell the one asymmetry their own way",
+    "a node-recorded model boundary renders identically in python",
 )
 
 

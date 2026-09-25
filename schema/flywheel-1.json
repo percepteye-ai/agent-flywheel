@@ -185,6 +185,19 @@
           "description": "Optional RFC 3339 time at which the customer agent produced the turn. Receipt and retention clocks remain control-plane authored.",
           "type": "string",
           "format": "date-time"
+        },
+        "genai_trace": {
+          "description": "Optional. What this turn's model calls saw and said, as ONE OpenTelemetry GenAI trace: an OTLP/JSON ExportTraceServiceRequest with an invoke_agent span and its chat and execute_tool spans, content per the GenAI semantic conventions, and gen_ai.conversation.id equal to conversation_id (absent when the turn declared none). Sent only when the control plane granted the model-content consent tier (capture.model_content) and an adapter observed a model call during the turn; omitted otherwise, and never reconstructed from input_text or final_text. It is never truncated and never carries percepteye.rollout.id or a decision marker.",
+          "type": "object",
+          "required": [
+            "resourceSpans"
+          ],
+          "properties": {
+            "resourceSpans": {
+              "type": "array",
+              "minItems": 1
+            }
+          }
         }
       }
     },

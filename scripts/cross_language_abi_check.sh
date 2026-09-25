@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The TWO contracts the Node SDK and the Python SDK share, checked across the
-# language boundary by running both implementations.
+# The THREE contracts the Node SDK and the Python SDK share, checked across
+# the language boundary by running both implementations.
 #
 # 1. THE CAPTURE CONTRACT. Whatever a plugin appends to
 #    $PERCEPTEYE_TRAJECTORY_DIR/tool_calls.jsonl, `Trajectory` has to read back
@@ -17,6 +17,15 @@
 #    values, would make the SAME agent attest a DIFFERENT identity depending on
 #    which SDK registered it -- worse than the per-restart instability the
 #    projection was added to fix, because it is silent on both sides.
+#
+# 3. THE MODEL BOUNDARY. A production turn may carry what its model calls saw
+#    and said as ONE OTel GenAI trace, and Mission Control stores it by the
+#    digest of its canonical bytes and treats a DIFFERENT trace for the same
+#    turn as a conflict. Both SDKs render one shared golden
+#    (tests/fixtures/genai_capture_golden.json here, a byte-identical copy at
+#    test/fixtures/genai-capture-golden.json there) and must write the same
+#    bytes; and a turn the Node plugin records on disk must render, through
+#    THIS package's reader, to exactly the trace the plugin uploads.
 #
 # THIS FILE EXISTS SO CI AND A DEVELOPER RUN THE SAME CHECK. It used to live
 # inline in the workflow, and a local approximation of it passed while the real
@@ -542,4 +551,148 @@ print("volatile-value projection agrees:",
 print("both languages refuse:", ", ".join(sorted(vectors["refusals"])))
 print("node refuses the un-stringified argv python stringifies earlier:",
       ", ".join(sorted(vectors["node_only_refusals"])))
+PY
+
+# ─────────────────────────────────────────────────────────────────────────────
+# THE MODEL BOUNDARY: one golden, two renderers, one on-disk record.
+#
+# (a) THE GOLDEN IS ONE FILE, TWICE. Each suite renders its own copy, so the
+#     copies are compared byte for byte here -- two goldens that drifted would
+#     let each SDK pass against a different contract.
+# (b) BOTH RENDERERS, EVERY VECTOR. Node's output is compared to Python's by
+#     the bytes Mission Control stores (sorted keys, indent 2 -- the digest a
+#     retried upload must reproduce), and each to the golden's expectation.
+#     The one vector the runtimes spell differently is checked on both sides
+#     against its own expectation, and that the two really differ.
+# (c) THE ON-DISK RECORD. The Node plugin records a real OpenClaw run -- its
+#     llm_input and agent_end hooks, as the host fires them -- into a turn
+#     directory; this package's reader renders that directory, and the result
+#     must be exactly the trace the plugin itself uploads for the turn.
+echo
+echo "cross-language ABI check: the model boundary"
+
+PY_GOLDEN="$ROOT/tests/fixtures/genai_capture_golden.json"
+NODE_GOLDEN="$SDK/test/fixtures/genai-capture-golden.json"
+if ! cmp -s "$PY_GOLDEN" "$NODE_GOLDEN"; then
+  echo "✗ the two goldens differ:" >&2
+  echo "  $PY_GOLDEN" >&2
+  echo "  $NODE_GOLDEN" >&2
+  echo "  They are ONE contract; copy the Python repo's file over the Node one." >&2
+  exit 1
+fi
+
+TURN_DIR="$OUT/genai-turn/run-7"
+"$NODE" --input-type=module -e "
+import { readFileSync, writeFileSync } from 'node:fs';
+import { renderTurnTrace, observationFromLines } from '$PKG/genai-otlp.js';
+import { createTurnCapture } from '$PKG/capture.js';
+import { turnWire } from '$PKG/turns.js';
+
+const golden = JSON.parse(readFileSync('$NODE_GOLDEN', 'utf8'));
+const out = { vectors: {}, lines: {} };
+for (const v of golden.vectors) {
+  out.vectors[v.name] = renderTurnTrace(v.observation, {
+    agentName: v.agent_name, conversationId: v.conversation_id });
+}
+const a = golden.runtime_asymmetry;
+out.asymmetry = renderTurnTrace(a.observation, {
+  agentName: a.agent_name, conversationId: a.conversation_id });
+for (const v of golden.observation_lines) {
+  out.lines[v.name] = observationFromLines(v.lines);
+}
+
+// (c) a real OpenClaw run, recorded by the plugin's own turn store.
+const turns = createTurnCapture({ root: '$OUT/genai-turn' });
+turns.gateModelContent(() => true);
+const ctx = { runId: 'run-7', sessionKey: 'conv-é-7' };
+turns.onMessageReceived({ runId: 'run-7', content: 'Where is 4417?', sessionKey: 'conv-é-7' }, ctx);
+turns.onLlmInput({
+  runId: 'run-7', sessionId: 's', provider: 'anthropic', model: 'claude-sonnet-4-5',
+  systemPrompt: 'Be exact. ¿Sí?', prompt: 'Where is 4417?', imagesCount: 0,
+  historyMessages: [
+    { role: 'user', content: 'hi', timestamp: 1758000000000 },
+    { role: 'assistant', content: [{ type: 'text', text: 'hello \u{1f4e6}' }],
+      provider: 'anthropic', model: 'claude-sonnet-4-5', stopReason: 'stop', timestamp: 1758000000001 },
+  ],
+  tools: [{ name: 'lookup', description: 'Look it up.',
+            parameters: { type: 'object', properties: { id: { type: 'string' } } } }],
+}, ctx);
+turns.onAgentEnd({ runId: 'run-7', success: true, messages: [
+  { role: 'user', content: 'hi', timestamp: 1758000000000 },
+  { role: 'assistant', content: [{ type: 'text', text: 'hello \u{1f4e6}' }], stopReason: 'stop', timestamp: 1758000000001 },
+  { role: 'user', content: 'Where is 4417?', timestamp: 1758000000002 },
+  { role: 'assistant', stopReason: 'toolUse', provider: 'anthropic', model: 'claude-sonnet-4-5', timestamp: 1758000000050,
+    content: [{ type: 'thinking', thinking: 'look it up' },
+              { type: 'toolCall', id: 'toolu_1', name: 'lookup', arguments: { id: '4417', n: [1, 2, null] } }] },
+  { role: 'toolResult', toolCallId: 'toolu_1', toolName: 'lookup', isError: false, timestamp: 1758000000090,
+    content: [{ type: 'text', text: 'shipped\ttoday \"now\"' }] },
+  { role: 'assistant', stopReason: 'stop', provider: 'anthropic', model: 'claude-sonnet-4-5', timestamp: 1758000000120,
+    content: [{ type: 'text', text: 'It shipped today.' }] },
+] }, ctx);
+out.onDisk = turnWire('$TURN_DIR', { modelContentAgent: 'acme-support' }).genai_trace;
+writeFileSync('$OUT/node-genai.json', JSON.stringify(out));
+"
+
+"$PYTHON" - "$PY_GOLDEN" "$OUT/node-genai.json" "$TURN_DIR" <<'PY'
+import hashlib
+import json
+import sys
+
+from agent_flywheel.genai_otlp import observation_from_lines, render_turn_trace
+from agent_flywheel.outcomes import read_conversation_id, read_model_boundary
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    golden = json.load(fh)
+with open(sys.argv[2], encoding="utf-8") as fh:
+    node = json.load(fh)
+
+
+def stored(value):
+    """The bytes Mission Control stores for a turn's trace."""
+    return json.dumps(value, sort_keys=True, default=str, indent=2).encode()
+
+
+digests = {}
+for v in golden["vectors"]:
+    mine = render_turn_trace(v["observation"], agent_name=v["agent_name"],
+                             conversation_id=v["conversation_id"])
+    theirs = node["vectors"][v["name"]]
+    assert stored(mine) == stored(theirs), (
+        f"the two renderers wrote different bytes for {v['name']}:\n"
+        f"  python {stored(mine)[:400]!r}\n  node   {stored(theirs)[:400]!r}")
+    assert stored(mine) == stored(v["genai_trace"]), (
+        f"both renderers agree on {v['name']} but not with the golden")
+    digests[v["name"]] = hashlib.sha256(stored(mine)).hexdigest()[:12]
+
+a = golden["runtime_asymmetry"]
+mine = render_turn_trace(a["observation"], agent_name=a["agent_name"],
+                         conversation_id=a["conversation_id"])
+assert mine == a["genai_trace_python"], "python moved its side of the asymmetry"
+assert node["asymmetry"] == a["genai_trace_node"], "node moved its side of the asymmetry"
+assert stored(mine) != stored(node["asymmetry"]), (
+    "the one runtime asymmetry no longer differs -- move the vector into "
+    "`vectors`, where both renderers must agree")
+
+for v in golden["observation_lines"]:
+    assert observation_from_lines(v["lines"]) == v["observation"], v["name"]
+    assert node["lines"][v["name"]] == v["observation"], v["name"]
+
+# (c) the plugin's record, read by this package's reader
+turn_dir = sys.argv[3]
+from_disk = render_turn_trace(read_model_boundary(turn_dir),
+                              agent_name="acme-support",
+                              conversation_id=read_conversation_id(turn_dir))
+assert from_disk is not None, "python read no model boundary from the plugin's turn"
+assert stored(from_disk) == stored(node["onDisk"]), (
+    "the Node plugin uploads a different trace than its own turn directory "
+    f"renders to here:\n  python {stored(from_disk)[:400]!r}\n"
+    f"  node   {stored(node['onDisk'])[:400]!r}")
+ops = [a["value"]["stringValue"]
+       for s in from_disk["resourceSpans"][0]["scopeSpans"][0]["spans"]
+       for a in s["attributes"] if a["key"] == "gen_ai.operation.name"]
+assert ops == ["invoke_agent", "chat", "execute_tool", "chat"], ops
+
+print("genai capture golden agrees:", digests)
+print("both languages spell the one asymmetry their own way")
+print("a node-recorded model boundary renders identically in python")
 PY

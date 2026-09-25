@@ -384,15 +384,20 @@ def test_no_warning_when_everything_deleted_was_already_sent(
 class _LateConsent(_Transport):
     """Says no at registration, yes once an operator flips it."""
 
-    def __init__(self):
+    def __init__(self, *, model_content=True):
         super().__init__(capture=False)
         self.enabled = False
         self.verdict_reads = 0
+        #: The second tier (model content), granted with the first unless a
+        #: test withholds it.
+        self.model_content = model_content
 
     def capture_current(self, agent_id):
         self.verdict_reads += 1
         if self.enabled:
-            return {"agent_id": agent_id, "capture": {"turns": True}}
+            return {"agent_id": agent_id,
+                    "capture": {"turns": True,
+                                "model_content": self.model_content}}
         return {"agent_id": agent_id,
                 "capture": {"turns": False, "reason": "opt-in per agent"}}
 
@@ -424,7 +429,12 @@ def test_consent_granted_after_startup_is_noticed_without_a_restart(
 
 
 def test_it_only_asks_while_the_answer_is_no(monkeypatch, tmp_path):
-    """One request per cadence at most, and none once permission is granted."""
+    """One request per cadence at most, and none once permission is granted.
+
+    "Granted" is BOTH tiers now: while model content is withheld the verdict
+    is still re-read once per flush, so an operator's later grant is noticed
+    (the next test pins that bound). Once both are yes, nothing is asked.
+    """
     tr = _LateConsent()
     tr.enabled = True
     with _attached(monkeypatch, tmp_path, tr) as px:
@@ -441,6 +451,23 @@ def test_it_only_asks_while_the_answer_is_no(monkeypatch, tmp_path):
         assert tr.verdict_reads == asked, (
             "the verdict is still being polled after permission was granted"
         )
+
+
+def test_while_model_content_is_withheld_it_asks_once_per_flush(
+        monkeypatch, tmp_path):
+    """The second tier is re-asked at the same bound as the first: one read
+    per flush while it is no -- never one per turn."""
+    tr = _LateConsent(model_content=False)
+    tr.enabled = True
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _serve(px, _FLUSH_EVERY)
+        assert _until(lambda: tr.batches)
+        asked = tr.verdict_reads
+        _serve(px, _FLUSH_EVERY, start=100)
+        assert _until(lambda: len(tr.batches) > 1), "no second flush happened"
+        assert tr.verdict_reads == asked + 1, (
+            f"{tr.verdict_reads - asked} verdict reads for one flush")
+        assert px.may_capture_model_content is False
 
 
 def test_an_unreachable_control_plane_is_not_read_as_consent(
