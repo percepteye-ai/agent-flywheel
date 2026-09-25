@@ -219,6 +219,18 @@ def capture_verdict(body: Any) -> CaptureVerdict:
 #: consent (the control plane's ``governance.MODEL_CONTENT_NOT_ENABLED``).
 _MODEL_CONTENT_REFUSED = "model_content_capture_not_enabled"
 
+#: Every name the turn intake refuses a trace by that means "stop recording
+#: model content": no consent, or a turn attributed to no Product (a shared
+#: or undeclared agent, ``turn_genai_trace.GENAI_TRACE_TURN_NOT_ATTRIBUTED``),
+#: whose trace the intake never keeps. The capture verdict withholds the tier
+#: for both, and a re-read picks it back up when either is fixed. A
+#: non-conformant trace is not here: that one is this renderer's bug, not a
+#: decision anyone made about this agent.
+_MODEL_CONTENT_REFUSALS = frozenset({
+    _MODEL_CONTENT_REFUSED,
+    "genai_trace_turn_not_attributed_to_a_product",
+})
+
 #: The model-content refusal when the control plane granted turns, withheld
 #: model content and sent no sentence of its own.
 _MODEL_CONTENT_NOT_ENABLED = (
@@ -1119,11 +1131,13 @@ class Attachment:
         """Stop recording model content the intake says it may not take.
 
         THE REVOCATION PATH for the second tier. The intake keeps a turn and
-        refuses its trace BY NAME (``model_content_capture_not_enabled``) when
-        an operator has withdrawn model-content consent, so the turn itself is
-        not a failure and this is the only place the refusal is visible. Left
-        unread, every later turn would record the customer's prompt and tool
-        results to disk and send them to be discarded. Never raises.
+        refuses its trace BY NAME (:data:`_MODEL_CONTENT_REFUSALS`) when an
+        operator has withdrawn model-content consent, or when the agent's
+        turns are attributed to no Product (it became shared, or no Product
+        declares it) -- so the turn itself is not a failure and this is the
+        only place the refusal is visible. Left unread, every later turn
+        would record the customer's prompt and tool results to disk and send
+        them to be discarded. Never raises.
         """
         try:
             results = reply.get("turns") if isinstance(reply, Mapping) else None
@@ -1131,7 +1145,7 @@ class Attachment:
                 trace = result.get("genai_trace") if isinstance(
                     result, Mapping) else None
                 if (isinstance(trace, Mapping)
-                        and trace.get("error") == _MODEL_CONTENT_REFUSED):
+                        and trace.get("error") in _MODEL_CONTENT_REFUSALS):
                     detail = trace.get("detail")
                     self.may_capture_model_content = False
                     self.model_content_refusal = (

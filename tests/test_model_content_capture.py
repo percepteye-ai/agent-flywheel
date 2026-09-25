@@ -72,10 +72,14 @@ class _Transport:
         for t in turns:
             r = {"turn_id": t["turn_id"], "accepted": True}
             if "genai_trace" in t and self.refuse_traces:
+                # ``True`` is the consent refusal; a ``(code, detail)`` pair
+                # is any other refusal the intake names.
+                code, detail = (
+                    self.refuse_traces if isinstance(self.refuse_traces, tuple)
+                    else ("model_content_capture_not_enabled",
+                          "an operator withdrew model-content capture"))
                 r["genai_trace"] = {
-                    "stored": False,
-                    "error": "model_content_capture_not_enabled",
-                    "detail": "an operator withdrew model-content capture",
+                    "stored": False, "error": code, "detail": detail,
                 }
             results.append(r)
         return {"agent_id": agent_id, "turns": results}
@@ -538,6 +542,36 @@ def test_a_named_refusal_from_the_intake_stops_recording(monkeypatch, tmp_path):
         assert px.may_capture_model_content is False
         _one_langchain_turn(px, "t2")
         assert not (tmp_path / "t2" / OBSERVATION_FILENAME).exists()
+
+
+def test_a_turn_attributed_to_no_product_stops_recording_until_bound(
+        monkeypatch, tmp_path):
+    """The agent became SHARED after the tier was granted: the intake keeps no
+    trace of a turn attributed to no Product and refuses it by name. Read only
+    as a consent refusal, every later turn's prompt and tool results were
+    recorded and sent to be discarded. The SDK stops, and picks the tier back
+    up when the verdict grants it again -- one Product declares the agent."""
+    unattributed = ("genai_trace_turn_not_attributed_to_a_product",
+                    "this agent's production turns are attributed to no "
+                    "Product (ambiguous_shared_agent)")
+    tr = _Transport(refuse_traces=unattributed)
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _one_langchain_turn(px, "t1")
+        tr.model_content, tr.reason = False, unattributed[1]
+        with pytest.warns(RuntimeWarning, match="attributed to no Product"):
+            px.flush()
+        assert px.may_capture_model_content is False
+        assert px.model_content_refusal == unattributed[1]
+        _one_langchain_turn(px, "t2")
+        assert not (tmp_path / "t2" / OBSERVATION_FILENAME).exists()
+        px.flush()
+        assert px.may_capture_model_content is False
+        # COMPLETES: the operator retires the second Product.
+        tr.model_content, tr.refuse_traces = True, False
+        px.flush()
+        assert px.may_capture_model_content is True
+        _one_langchain_turn(px, "t3")
+        assert (tmp_path / "t3" / OBSERVATION_FILENAME).exists()
 
 
 def test_a_refused_turn_upload_refuses_its_model_content_too(monkeypatch, tmp_path):
