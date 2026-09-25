@@ -89,6 +89,7 @@ from .outcomes import (
     _write_execution_fingerprint,
     _write_task_id,
     read_conversation_id,
+    read_model_boundary,
     read_task_id,
     read_turn_text,
     record_turn_text,
@@ -118,6 +119,20 @@ class CaptureVerdict:
     #: startup ("this key lacks the scope") with the generic one, just because
     #: one poll came back empty during a blip.
     answered: bool = True
+    #: THE SECOND CONSENT TIER: may a turn ALSO carry what its model calls
+    #: saw and said -- the system prompt, the whole conversation history, the
+    #: tool definitions and every tool result -- as its ``genai_trace``?
+    #: Separate from ``may_upload`` because it is a different grant: the end
+    #: user's message and the answer are one thing, the customer's prompt and
+    #: everything their tools returned are another. True only where
+    #: ``may_upload`` is, since the trace rides on the turn. Off by default,
+    #: like the first tier: the control plane's ``capture.model_content`` must
+    #: be exactly ``true``.
+    may_capture_model_content: bool = False
+    #: The sentence explaining a ``False`` above; ``None`` exactly when it is
+    #: ``True``.
+    model_content_reason: str | None = (
+        "the control plane did not say this agent may upload model content.")
 
 
 def capture_verdict(body: Any) -> CaptureVerdict:
@@ -148,31 +163,81 @@ def capture_verdict(body: Any) -> CaptureVerdict:
     all, yields ``False`` with a sentence saying so -- ``upload_refusal`` is
     documented as "the sentence explaining a False", and a ``None`` there names
     no cause for the two commonest refusals there are.
+
+    THE SECOND TIER, ``capture.model_content``, is read by the same rules: the
+    exact value, only where turns may flow, and the server's own sentence
+    (``model_content_reason``) when it withheld it. It decides whether the
+    adapters RECORD what a model call saw at all -- not merely whether it is
+    uploaded -- because that content is the customer's own prompt and
+    everything their tools returned, and recording it before anyone consented
+    would make a later grant retroactive.
     """
     cap = body.get("capture") if isinstance(body, Mapping) else None
     if not isinstance(cap, Mapping):
+        unanswered = (
+            "the control plane did not answer whether this agent may "
+            "upload production turns, so nothing is uploaded. Turns are "
+            "still captured locally."
+        )
         return CaptureVerdict(
-            may_upload=False,
-            reason=(
-                "the control plane did not answer whether this agent may "
-                "upload production turns, so nothing is uploaded. Turns are "
-                "still captured locally."
-            ),
-            answered=False,
+            may_upload=False, reason=unanswered, answered=False,
+            model_content_reason=unanswered,
         )
     if cap.get("turns") is True:
-        return CaptureVerdict(may_upload=True, reason=None)
+        # THE SECOND TIER, asked the way the first is: the exact value, and
+        # never granted by anything the server did not say. `"true"` is not
+        # consent here either.
+        if cap.get("model_content") is True:
+            return CaptureVerdict(
+                may_upload=True, reason=None,
+                may_capture_model_content=True, model_content_reason=None,
+            )
+        served = cap.get("model_content_reason")
+        return CaptureVerdict(
+            may_upload=True, reason=None,
+            model_content_reason=(
+                served.strip()
+                if isinstance(served, str) and served.strip()
+                else _MODEL_CONTENT_NOT_ENABLED
+            ),
+        )
     served = cap.get("reason")
-    return CaptureVerdict(
-        may_upload=False,
-        # The server's own sentence when it sent one -- it names the switch and
-        # who can flip it, which anything written here could only paraphrase.
-        reason=(
-            served.strip()
-            if isinstance(served, str) and served.strip()
-            else "production capture is not enabled for this agent."
-        ),
+    # The server's own sentence when it sent one -- it names the switch and
+    # who can flip it, which anything written here could only paraphrase.
+    reason = (
+        served.strip()
+        if isinstance(served, str) and served.strip()
+        else "production capture is not enabled for this agent."
     )
+    # A trace rides on a turn, so a refused turn refuses its trace for the
+    # same reason -- and says THAT reason, not a second one.
+    return CaptureVerdict(may_upload=False, reason=reason,
+                          model_content_reason=reason)
+
+
+#: How the turn intake names a trace it refused for want of model-content
+#: consent (the control plane's ``governance.MODEL_CONTENT_NOT_ENABLED``).
+_MODEL_CONTENT_REFUSED = "model_content_capture_not_enabled"
+
+#: Every name the turn intake refuses a trace by that means "stop recording
+#: model content": no consent, or a turn attributed to no Product (a shared
+#: or undeclared agent, ``turn_genai_trace.GENAI_TRACE_TURN_NOT_ATTRIBUTED``),
+#: whose trace the intake never keeps. The capture verdict withholds the tier
+#: for both, and a re-read picks it back up when either is fixed. A
+#: non-conformant trace is not here: that one is this renderer's bug, not a
+#: decision anyone made about this agent.
+_MODEL_CONTENT_REFUSALS = frozenset({
+    _MODEL_CONTENT_REFUSED,
+    "genai_trace_turn_not_attributed_to_a_product",
+})
+
+#: The model-content refusal when the control plane granted turns, withheld
+#: model content and sent no sentence of its own.
+_MODEL_CONTENT_NOT_ENABLED = (
+    "model-content capture is not enabled for this agent, so the system "
+    "prompt, the conversation history and the tool results its model calls "
+    "saw are neither recorded nor uploaded."
+)
 
 
 #: How many turns pass between automatic prunes when `retention_turns` is set.
@@ -289,9 +354,11 @@ def _recorded_anything(
     """Did this turn capture anything at all?
 
     ONE ANSWER, TWO ASKERS. ``_turn_wire`` returns ``None`` when this is False
-    -- there is nothing to upload -- and ``prune`` uses it to tell a deleted
-    directory that held DATA nobody sent from one that could never have been
-    sent at all. Asked twice with two spellings, the second asker charges an
+    and the turn recorded no model boundary either -- there is nothing to
+    upload -- and ``prune`` (through ``_holds_a_record``, which asks the same
+    two questions) uses it to tell a deleted directory that held DATA nobody
+    sent from one that could never have been sent at all. Asked twice with
+    two spellings, the second asker charges an
     empty directory as lost end-user data and sends the operator hunting for a
     broken upload path.
     """
@@ -324,6 +391,8 @@ class Attachment:
         may_upload: bool = False,
         upload_refusal: str | None = None,
         agent_fingerprint: Mapping[str, str] | None = None,
+        may_capture_model_content: bool = False,
+        model_content_refusal: str | None = None,
     ) -> None:
         self.agent_id = agent_id
         self.trajectory_root = trajectory_root
@@ -364,6 +433,19 @@ class Attachment:
         self.may_upload = may_upload
         #: Why not, in a sentence, when it is False and the control plane said.
         self.upload_refusal = upload_refusal
+        #: THE SECOND CONSENT TIER, as the control plane last said it: may a
+        #: turn also carry what its model calls saw and said -- the system
+        #: prompt, the whole conversation history, the tool definitions and
+        #: every tool result -- as one OTel GenAI trace? It decides whether the
+        #: adapters RECORD that content at all, turn by turn, and whether a
+        #: recorded turn uploads it. Off by default, like the first tier.
+        self.may_capture_model_content = bool(
+            may_capture_model_content and may_upload)
+        #: Why not, in a sentence, when it is False.
+        self.model_content_refusal = (
+            None if self.may_capture_model_content
+            else (model_content_refusal or upload_refusal)
+        )
         #: Exact SDK-reconciled execution identity, when attach() was given
         #: enough behavior observation and opaque adapter evidence to prove
         #: one. It is persisted per turn; absent stays absent.
@@ -407,12 +489,20 @@ class Attachment:
 
         ``input_text`` records what the user ASKED, and :meth:`record_answer`
         records what the agent finally said. Both are OPTIONAL and both must be
-        passed by the caller, because nothing here can see them: the adapters
-        declare ``reports_outcomes=True`` and observe tool calls, not turn
-        content, so a prompt and a completion are facts only the customer's own
-        code holds. Without them a turn records its tool calls and nothing
-        else, which is exactly what it did before -- and is why tool outcomes
-        stay zero-instrumentation while turn text is opt-in.
+        passed by the caller: they are the END USER's message and the answer
+        the customer's code returned, which no adapter can tell apart from the
+        rest of a model call. Without them a turn records its tool calls and
+        nothing else, which is exactly what it did before -- and is why tool
+        outcomes stay zero-instrumentation while turn text is opt-in.
+
+        WHAT THE MODEL SAW is a different fact and a different consent. When
+        the control plane grants this agent the model-content tier
+        (:attr:`may_capture_model_content`), the adapters also OBSERVE every
+        model call inside this scope -- its system instructions, its whole
+        input, the tool definitions it was offered, what it answered, and each
+        tool's result -- and the turn uploads that as one OTel GenAI trace
+        (:mod:`agent_flywheel.genai_otlp`). Observe-only: no call, response or
+        result is changed. Without the grant nothing of it is recorded at all.
 
         ``task_id`` is an optional opaque correlation supplied by the caller.
         The SDK persists and forwards it but never interprets it: it is not a
@@ -474,10 +564,14 @@ class Attachment:
         if flush_due:
             self._flush_soon()
 
+        # The model-content tier is read HERE, once per turn: a grant or a
+        # revocation that lands mid-turn applies from the next turn, so one
+        # turn's model boundary is never half recorded.
         with _RolloutScope(tid, str(path), kind="turn",
                            conversation_id=effective_conversation_id,
                            task_id=effective_task_id,
-                           execution_sha256=self._execution_sha256):
+                           execution_sha256=self._execution_sha256,
+                           model_content=self.may_capture_model_content):
             yield tid
 
     def record_answer(self, turn_id: str, text: str) -> bool:
@@ -751,7 +845,7 @@ class Attachment:
                 read_turn_text(d) or {},
                 Trajectory(d).read(),
                 task_id=read_task_id(d),
-            )
+            ) or read_model_boundary(d) is not None
         except Exception:
             return True
 
@@ -773,7 +867,24 @@ class Attachment:
         calls = traj.read()
         answer = text.get("answer")
         task_id = read_task_id(d)
-        if not _recorded_anything(text, calls, task_id=task_id):
+        cid = _production_identifier(read_conversation_id(d))
+        # WHAT THE MODEL SAW AND SAID, when an adapter observed it -- and
+        # only while the control plane still says this agent may upload it.
+        # Rendered from the turn's own record every time, never cached: the
+        # record is the one source, so a retried upload of this turn carries
+        # the same trace (the intake reads a different one as a conflict).
+        # Its conversation id is the wire's, read from the same file, because
+        # the intake refuses a trace that names any other.
+        genai_trace = None
+        if self.may_capture_model_content:
+            from .genai_otlp import render_turn_trace
+
+            genai_trace = render_turn_trace(
+                read_model_boundary(d), agent_name=self.agent_id,
+                conversation_id=cid,
+            )
+        if (not _recorded_anything(text, calls, task_id=task_id)
+                and genai_trace is None):
             return None
         # THE TRI-STATE, asked of the trajectory FILE rather than inferred.
         # ``[] if self.adapters_bound else None`` answered a different
@@ -798,7 +909,6 @@ class Attachment:
             "tool_calls": tool_calls,
             "tool_calls_omitted_count": traj.malformed,
         }
-        cid = _production_identifier(read_conversation_id(d))
         if cid:
             wire["conversation_id"] = cid
             wire["turn_index"] = self._turn_index(d, cid)
@@ -807,6 +917,10 @@ class Attachment:
         fingerprint = _read_execution_fingerprint(d)
         if fingerprint is not None:
             wire["agent_fingerprint"] = fingerprint
+        if genai_trace is not None:
+            # OMITTED, never null, when there is none: a turn that observed no
+            # model call keeps exactly the bytes it always had.
+            wire["genai_trace"] = genai_trace
         return wire
 
     def _turn_index(self, turn_dir: Path, conversation_id: str) -> int:
@@ -937,6 +1051,10 @@ class Attachment:
         """
         self.may_upload = False
         self.upload_refusal = reason
+        # A trace rides on a turn: a refused turn refuses its model content
+        # too, for the same reason.
+        self.may_capture_model_content = False
+        self.model_content_refusal = reason
         try:
             warnings.warn(
                 f"agent-flywheel: the control plane refused this agent's captured "
@@ -978,7 +1096,17 @@ class Attachment:
                 AttachTransport(client, self.agent_id).capture_current(self.agent_id))
             if verdict.may_upload:
                 self._grant_upload()
-            elif verdict.answered:
+            if verdict.answered:
+                # The second tier is read off the same answer, both ways: this
+                # is a verdict the control plane GAVE, not a blip, so a grant
+                # turns model-content recording on from the next turn and a
+                # refusal keeps it off with the server's current sentence.
+                self.may_capture_model_content = (
+                    verdict.may_capture_model_content and self.may_upload)
+                self.model_content_refusal = (
+                    None if self.may_capture_model_content
+                    else verdict.model_content_reason)
+            if not verdict.may_upload and verdict.answered:
                 # Keep the reason current even while the answer stays no: an
                 # operator who fixes consent but not the key's scope should see
                 # the second sentence, not the first one from startup.
@@ -998,6 +1126,44 @@ class Attachment:
                     client.close()
                 except Exception:
                     pass
+
+    def _note_model_content_refusal(self, reply: Any) -> None:
+        """Stop recording model content the intake says it may not take.
+
+        THE REVOCATION PATH for the second tier. The intake keeps a turn and
+        refuses its trace BY NAME (:data:`_MODEL_CONTENT_REFUSALS`) when an
+        operator has withdrawn model-content consent, or when the agent's
+        turns are attributed to no Product (it became shared, or no Product
+        declares it) -- so the turn itself is not a failure and this is the
+        only place the refusal is visible. Left unread, every later turn
+        would record the customer's prompt and tool results to disk and send
+        them to be discarded. Never raises.
+        """
+        try:
+            results = reply.get("turns") if isinstance(reply, Mapping) else None
+            for result in results or ():
+                trace = result.get("genai_trace") if isinstance(
+                    result, Mapping) else None
+                if (isinstance(trace, Mapping)
+                        and trace.get("error") in _MODEL_CONTENT_REFUSALS):
+                    detail = trace.get("detail")
+                    self.may_capture_model_content = False
+                    self.model_content_refusal = (
+                        detail if isinstance(detail, str) and detail.strip()
+                        else _MODEL_CONTENT_NOT_ENABLED)
+                    try:
+                        warnings.warn(
+                            "agent-flywheel: the control plane refused this "
+                            "agent's model content, so it is no longer "
+                            "recorded or uploaded: "
+                            f"{self.model_content_refusal}",
+                            RuntimeWarning, stacklevel=2,
+                        )
+                    except Exception:  # -W error turns the line into a raise
+                        pass
+                    return
+        except Exception:
+            return
 
     def flush(self, *, include_unanswered: bool = False,
               batch_size: int = 64) -> dict[str, int]:
@@ -1040,6 +1206,14 @@ class Attachment:
         refused = False
         if not self._cp_url or not self._api_key:
             return {"sent": 0, "skipped": 0, "failed": 0, "not_permitted": 1}
+        if self.may_upload and not self.may_capture_model_content:
+            # THE SECOND TIER IS RE-ASKED THE SAME WAY, and for the same
+            # reason: an operator may grant model content to an agent that is
+            # already uploading turns, and nothing else would tell this
+            # process. One read per flush while the answer is no, and none
+            # once it is yes. A revocation is learned from the intake's own
+            # refusal instead (`_note_model_content_refusal`).
+            self._recheck_capture()
         if not self.may_upload:
             # AN OPERATOR MAY HAVE SAID YES SINCE STARTUP. Consent is a human
             # decision made in Mission Control, on their clock, not ours -- and
@@ -1112,7 +1286,7 @@ class Attachment:
             for i in range(0, len(pending), wire_batch_size):
                 chunk = pending[i:i + wire_batch_size]
                 try:
-                    tr.report_turns(self.agent_id, [w for _, w in chunk])
+                    reply = tr.report_turns(self.agent_id, [w for _, w in chunk])
                 except Exception as exc:
                     refusal = _capture_refusal(exc)
                     if refusal is not None:
@@ -1135,6 +1309,7 @@ class Attachment:
                     continue
                 self._mark_uploaded([d.name for d, _ in chunk])
                 sent += len(chunk)
+                self._note_model_content_refusal(reply)
         except Exception:
             failed += len(pending) - sent
         finally:
@@ -1301,6 +1476,16 @@ def attach(
     they simply accumulate. :attr:`Attachment.may_upload` is the live answer
     and :attr:`Attachment.upload_refusal` is the sentence explaining a False.
 
+    MODEL CONTENT IS A SECOND, SEPARATE CONSENT. What a turn's model calls saw
+    and said -- the system prompt, the conversation history, the tool
+    definitions and every tool result -- is observed by the LangChain and ADK
+    adapters, and recorded and uploaded as the turn's ``genai_trace``, only
+    while the control plane grants the model-content tier.
+    :attr:`Attachment.may_capture_model_content` is the live answer and
+    :attr:`Attachment.model_content_refusal` the sentence explaining a False.
+    Off until an operator turns it on; a later grant is noticed on the flush
+    cadence, and a revocation the intake names stops it at once.
+
     ``retention_turns=N`` keeps only the N most recently written turns, pruning
     on an interval so it costs one directory scan per 256 turns rather than one
     per turn. Unset, NOTHING is deleted and the trajectory grows without bound:
@@ -1460,6 +1645,8 @@ def attach(
     url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL)
     key = api_key or os.environ.get(ENV_API_KEY)
     may_upload = False
+    may_capture_model_content = False
+    model_content_refusal: str | None = None
     # NAMED, not None. `upload_refusal` is documented as "the sentence
     # explaining a False", and the ways to get here without ever asking the
     # control plane are distinct problems with distinct remedies. One message
@@ -1540,6 +1727,8 @@ def attach(
                 verdict = capture_verdict(reg)
                 may_upload = verdict.may_upload
                 upload_refusal = verdict.reason
+                may_capture_model_content = verdict.may_capture_model_content
+                model_content_refusal = verdict.model_content_reason
             except Exception as exc:
                 # A REFUSED registration must not cost the last mile.
                 #
@@ -1601,6 +1790,8 @@ def attach(
         may_upload=may_upload,
         upload_refusal=upload_refusal,
         agent_fingerprint=agent_fingerprint,
+        may_capture_model_content=may_capture_model_content,
+        model_content_refusal=model_content_refusal,
     )
     if may_upload:
         # Through the same seam late consent goes through, so the hook is

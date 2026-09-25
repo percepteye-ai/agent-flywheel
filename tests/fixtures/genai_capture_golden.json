@@ -1,0 +1,2377 @@
+{
+  "schema": "percepteye.genai_capture_golden/v1",
+  "about": "Observation -> OTel GenAI trace vectors. The Python SDK's genai_otlp.py and the Node SDK's genai-otlp.js must render every `observation` to exactly its `genai_trace` (null: no trace). The mc_golden_* expected traces are Mission Control's own golden turns, verbatim. Written in each value's own key order, never sorted: content is JSON in the order the agent's runtime sent it.",
+  "vectors": [
+    {
+      "name": "mc_golden_turn_0",
+      "agent_name": "acme-support",
+      "conversation_id": "7d0c2a8e-4b1f-4c3e-9a57-2f1e6b8d9c10",
+      "observation": {
+        "trace_id": "9bd1f1c343830252d32351fea2e5ee55",
+        "span_id": "ce4655c982507b29",
+        "start_time_unix_nano": "1758000000000000000",
+        "end_time_unix_nano": "1758000000170000000",
+        "operations": [
+          {
+            "operation": "chat",
+            "span_id": "610b363888f52406",
+            "start_time_unix_nano": "1758000000010000000",
+            "end_time_unix_nano": "1758000000060000000",
+            "provider_name": "openai",
+            "request_model": "gpt-4o-mini-2024-07-18",
+            "response_model": "gpt-4o-mini-2024-07-18",
+            "finish_reasons": [
+              "tool_calls"
+            ],
+            "system_instructions": [
+              {
+                "type": "text",
+                "content": "You are Acme's order-support agent. Look orders up before answering, and refund only damaged items."
+              }
+            ],
+            "input_messages": [
+              {
+                "role": "user",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "Where is my order 4417?"
+                  }
+                ]
+              }
+            ],
+            "output_messages": [
+              {
+                "role": "assistant",
+                "parts": [
+                  {
+                    "type": "tool_call",
+                    "id": "call_lookup_4417",
+                    "name": "lookup_order",
+                    "arguments": {
+                      "order_id": "4417"
+                    }
+                  }
+                ],
+                "finish_reason": "tool_call"
+              }
+            ],
+            "tool_definitions": [
+              {
+                "type": "function",
+                "name": "lookup_order",
+                "description": "Look up an order's shipping status.",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "order_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "order_id"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              {
+                "type": "function",
+                "name": "refund_order",
+                "description": "Refund an order.",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "order_id": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "order_id",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            ]
+          },
+          {
+            "operation": "execute_tool",
+            "span_id": "577ff419cb6ed5cd",
+            "start_time_unix_nano": "1758000000070000000",
+            "end_time_unix_nano": "1758000000100000000",
+            "tool_name": "lookup_order",
+            "tool_type": "function",
+            "tool_call_id": "call_lookup_4417",
+            "arguments": {
+              "order_id": "4417"
+            },
+            "result": {
+              "status": "shipped",
+              "eta": "Friday"
+            }
+          },
+          {
+            "operation": "chat",
+            "span_id": "94629b6937a46761",
+            "start_time_unix_nano": "1758000000110000000",
+            "end_time_unix_nano": "1758000000160000000",
+            "provider_name": "openai",
+            "request_model": "gpt-4o-mini-2024-07-18",
+            "response_model": "gpt-4o-mini-2024-07-18",
+            "finish_reasons": [
+              "stop"
+            ],
+            "system_instructions": [
+              {
+                "type": "text",
+                "content": "You are Acme's order-support agent. Look orders up before answering, and refund only damaged items."
+              }
+            ],
+            "input_messages": [
+              {
+                "role": "user",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "Where is my order 4417?"
+                  }
+                ]
+              },
+              {
+                "role": "assistant",
+                "parts": [
+                  {
+                    "type": "tool_call",
+                    "id": "call_lookup_4417",
+                    "name": "lookup_order",
+                    "arguments": {
+                      "order_id": "4417"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "parts": [
+                  {
+                    "type": "tool_call_response",
+                    "id": "call_lookup_4417",
+                    "response": {
+                      "status": "shipped",
+                      "eta": "Friday"
+                    }
+                  }
+                ]
+              }
+            ],
+            "output_messages": [
+              {
+                "role": "assistant",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "Order 4417 has shipped and arrives Friday."
+                  }
+                ],
+                "finish_reason": "stop"
+              }
+            ],
+            "tool_definitions": [
+              {
+                "type": "function",
+                "name": "lookup_order",
+                "description": "Look up an order's shipping status.",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "order_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "order_id"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              {
+                "type": "function",
+                "name": "refund_order",
+                "description": "Refund an order.",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "order_id": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "order_id",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "genai_trace": {
+        "resourceSpans": [
+          {
+            "resource": {
+              "attributes": [
+                {
+                  "key": "service.name",
+                  "value": {
+                    "stringValue": "acme-support"
+                  }
+                }
+              ]
+            },
+            "scopeSpans": [
+              {
+                "scope": {
+                  "name": "percepteye.agent_flywheel"
+                },
+                "spans": [
+                  {
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "invoke_agent"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "openai"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.agent.name",
+                        "value": {
+                          "stringValue": "acme-support"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.conversation.id",
+                        "value": {
+                          "stringValue": "7d0c2a8e-4b1f-4c3e-9a57-2f1e6b8d9c10"
+                        }
+                      }
+                    ],
+                    "endTimeUnixNano": "1758000000170000000",
+                    "kind": 1,
+                    "name": "invoke_agent acme-support",
+                    "spanId": "ce4655c982507b29",
+                    "startTimeUnixNano": "1758000000000000000",
+                    "status": {},
+                    "traceId": "9bd1f1c343830252d32351fea2e5ee55"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "chat"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "openai"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.request.model",
+                        "value": {
+                          "stringValue": "gpt-4o-mini-2024-07-18"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.model",
+                        "value": {
+                          "stringValue": "gpt-4o-mini-2024-07-18"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.conversation.id",
+                        "value": {
+                          "stringValue": "7d0c2a8e-4b1f-4c3e-9a57-2f1e6b8d9c10"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.finish_reasons",
+                        "value": {
+                          "arrayValue": {
+                            "values": [
+                              {
+                                "stringValue": "tool_calls"
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      {
+                        "key": "gen_ai.system_instructions",
+                        "value": {
+                          "stringValue": "[{\"type\":\"text\",\"content\":\"You are Acme's order-support agent. Look orders up before answering, and refund only damaged items.\"}]"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.input.messages",
+                        "value": {
+                          "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Where is my order 4417?\"}]}]"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.output.messages",
+                        "value": {
+                          "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_lookup_4417\",\"name\":\"lookup_order\",\"arguments\":{\"order_id\":\"4417\"}}],\"finish_reason\":\"tool_call\"}]"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.tool.definitions",
+                        "value": {
+                          "stringValue": "[{\"type\":\"function\",\"name\":\"lookup_order\",\"description\":\"Look up an order's shipping status.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"order_id\":{\"type\":\"string\"}},\"required\":[\"order_id\"],\"additionalProperties\":false}},{\"type\":\"function\",\"name\":\"refund_order\",\"description\":\"Refund an order.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"order_id\":{\"type\":\"string\"},\"reason\":{\"type\":\"string\"}},\"required\":[\"order_id\",\"reason\"],\"additionalProperties\":false}}]"
+                        }
+                      }
+                    ],
+                    "endTimeUnixNano": "1758000000060000000",
+                    "kind": 3,
+                    "name": "chat gpt-4o-mini-2024-07-18",
+                    "parentSpanId": "ce4655c982507b29",
+                    "spanId": "610b363888f52406",
+                    "startTimeUnixNano": "1758000000010000000",
+                    "status": {},
+                    "traceId": "9bd1f1c343830252d32351fea2e5ee55"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "execute_tool"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.tool.name",
+                        "value": {
+                          "stringValue": "lookup_order"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.tool.type",
+                        "value": {
+                          "stringValue": "function"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.tool.call.id",
+                        "value": {
+                          "stringValue": "call_lookup_4417"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.tool.call.arguments",
+                        "value": {
+                          "stringValue": "{\"order_id\":\"4417\"}"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.tool.call.result",
+                        "value": {
+                          "stringValue": "{\"status\":\"shipped\",\"eta\":\"Friday\"}"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.conversation.id",
+                        "value": {
+                          "stringValue": "7d0c2a8e-4b1f-4c3e-9a57-2f1e6b8d9c10"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.agent.name",
+                        "value": {
+                          "stringValue": "acme-support"
+                        }
+                      }
+                    ],
+                    "endTimeUnixNano": "1758000000100000000",
+                    "kind": 1,
+                    "name": "execute_tool lookup_order",
+                    "parentSpanId": "ce4655c982507b29",
+                    "spanId": "577ff419cb6ed5cd",
+                    "startTimeUnixNano": "1758000000070000000",
+                    "status": {},
+                    "traceId": "9bd1f1c343830252d32351fea2e5ee55"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "chat"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "openai"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.request.model",
+                        "value": {
+                          "stringValue": "gpt-4o-mini-2024-07-18"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.model",
+                        "value": {
+                          "stringValue": "gpt-4o-mini-2024-07-18"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.conversation.id",
+                        "value": {
+                          "stringValue": "7d0c2a8e-4b1f-4c3e-9a57-2f1e6b8d9c10"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.finish_reasons",
+                        "value": {
+                          "arrayValue": {
+                            "values": [
+                              {
+                                "stringValue": "stop"
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      {
+                        "key": "gen_ai.system_instructions",
+                        "value": {
+                          "stringValue": "[{\"type\":\"text\",\"content\":\"You are Acme's order-support agent. Look orders up before answering, and refund only damaged items.\"}]"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.input.messages",
+                        "value": {
+                          "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Where is my order 4417?\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_lookup_4417\",\"name\":\"lookup_order\",\"arguments\":{\"order_id\":\"4417\"}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"call_lookup_4417\",\"response\":{\"status\":\"shipped\",\"eta\":\"Friday\"}}]}]"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.output.messages",
+                        "value": {
+                          "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"Order 4417 has shipped and arrives Friday.\"}],\"finish_reason\":\"stop\"}]"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.tool.definitions",
+                        "value": {
+                          "stringValue": "[{\"type\":\"function\",\"name\":\"lookup_order\",\"description\":\"Look up an order's shipping status.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"order_id\":{\"type\":\"string\"}},\"required\":[\"order_id\"],\"additionalProperties\":false}},{\"type\":\"function\",\"name\":\"refund_order\",\"description\":\"Refund an order.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"order_id\":{\"type\":\"string\"},\"reason\":{\"type\":\"string\"}},\"required\":[\"order_id\",\"reason\"],\"additionalProperties\":false}}]"
+                        }
+                      }
+                    ],
+                    "endTimeUnixNano": "1758000000160000000",
+                    "kind": 3,
+                    "name": "chat gpt-4o-mini-2024-07-18",
+                    "parentSpanId": "ce4655c982507b29",
+                    "spanId": "94629b6937a46761",
+                    "startTimeUnixNano": "1758000000110000000",
+                    "status": {},
+                    "traceId": "9bd1f1c343830252d32351fea2e5ee55"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "mc_golden_turn_1",
+      "agent_name": "acme-support",
+      "conversation_id": "7d0c2a8e-4b1f-4c3e-9a57-2f1e6b8d9c10",
+      "observation": {
+        "trace_id": "17fe6f303311c0b164b937e419518c1f",
+        "span_id": "d0b6b951d3132943",
+        "start_time_unix_nano": "1758000010000000000",
+        "end_time_unix_nano": "1758000010170000000",
+        "operations": [
+          {
+            "operation": "chat",
+            "span_id": "f9cc8a6cb73e87bf",
+            "start_time_unix_nano": "1758000010010000000",
+            "end_time_unix_nano": "1758000010060000000",
+            "provider_name": "openai",
+            "request_model": "gpt-4o-mini-2024-07-18",
+            "response_model": "gpt-4o-mini-2024-07-18",
+            "finish_reasons": [
+              "tool_calls"
+            ],
+            "system_instructions": [
+              {
+                "type": "text",
+                "content": "You are Acme's order-support agent. Look orders up before answering, and refund only damaged items."
+              }
+            ],
+            "input_messages": [
+              {
+                "role": "user",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "Where is my order 4417?"
+                  }
+                ]
+              },
+              {
+                "role": "assistant",
+                "parts": [
+                  {
+                    "type": "tool_call",
+                    "id": "call_lookup_4417",
+                    "name": "lookup_order",
+                    "arguments": {
+                      "order_id": "4417"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "parts": [
+                  {
+                    "type": "tool_call_response",
+                    "id": "call_lookup_4417",
+                    "response": {
+                      "status": "shipped",
+                      "eta": "Friday"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "assistant",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "Order 4417 has shipped and arrives Friday."
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "It arrived damaged. Can I get a refund?"
+                  }
+                ]
+              }
+            ],
+            "output_messages": [
+              {
+                "role": "assistant",
+                "parts": [
+                  {
+                    "type": "tool_call",
+                    "id": "call_refund_4417",
+                    "name": "refund_order",
+                    "arguments": {
+                      "order_id": "4417",
+                      "reason": "damaged"
+                    }
+                  }
+                ],
+                "finish_reason": "tool_call"
+              }
+            ],
+            "tool_definitions": [
+              {
+                "type": "function",
+                "name": "lookup_order",
+                "description": "Look up an order's shipping status.",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "order_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "order_id"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              {
+                "type": "function",
+                "name": "refund_order",
+                "description": "Refund an order.",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "order_id": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "order_id",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            ]
+          },
+          {
+            "operation": "execute_tool",
+            "span_id": "050df61c7564bc61",
+            "start_time_unix_nano": "1758000010070000000",
+            "end_time_unix_nano": "1758000010100000000",
+            "tool_name": "refund_order",
+            "tool_type": "function",
+            "tool_call_id": "call_refund_4417",
+            "arguments": {
+              "order_id": "4417",
+              "reason": "damaged"
+            },
+            "result": {
+              "refund_id": "R-88",
+              "amount": "42.00"
+            }
+          },
+          {
+            "operation": "chat",
+            "span_id": "5b6a492e07381897",
+            "start_time_unix_nano": "1758000010110000000",
+            "end_time_unix_nano": "1758000010160000000",
+            "provider_name": "openai",
+            "request_model": "gpt-4o-mini-2024-07-18",
+            "response_model": "gpt-4o-mini-2024-07-18",
+            "finish_reasons": [
+              "stop"
+            ],
+            "system_instructions": [
+              {
+                "type": "text",
+                "content": "You are Acme's order-support agent. Look orders up before answering, and refund only damaged items."
+              }
+            ],
+            "input_messages": [
+              {
+                "role": "user",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "Where is my order 4417?"
+                  }
+                ]
+              },
+              {
+                "role": "assistant",
+                "parts": [
+                  {
+                    "type": "tool_call",
+                    "id": "call_lookup_4417",
+                    "name": "lookup_order",
+                    "arguments": {
+                      "order_id": "4417"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "parts": [
+                  {
+                    "type": "tool_call_response",
+                    "id": "call_lookup_4417",
+                    "response": {
+                      "status": "shipped",
+                      "eta": "Friday"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "assistant",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "Order 4417 has shipped and arrives Friday."
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "It arrived damaged. Can I get a refund?"
+                  }
+                ]
+              },
+              {
+                "role": "assistant",
+                "parts": [
+                  {
+                    "type": "tool_call",
+                    "id": "call_refund_4417",
+                    "name": "refund_order",
+                    "arguments": {
+                      "order_id": "4417",
+                      "reason": "damaged"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "parts": [
+                  {
+                    "type": "tool_call_response",
+                    "id": "call_refund_4417",
+                    "response": {
+                      "refund_id": "R-88",
+                      "amount": "42.00"
+                    }
+                  }
+                ]
+              }
+            ],
+            "output_messages": [
+              {
+                "role": "assistant",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "Refund R-88 for 42.00 is on its way."
+                  }
+                ],
+                "finish_reason": "stop"
+              }
+            ],
+            "tool_definitions": [
+              {
+                "type": "function",
+                "name": "lookup_order",
+                "description": "Look up an order's shipping status.",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "order_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "order_id"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              {
+                "type": "function",
+                "name": "refund_order",
+                "description": "Refund an order.",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "order_id": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "order_id",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "genai_trace": {
+        "resourceSpans": [
+          {
+            "resource": {
+              "attributes": [
+                {
+                  "key": "service.name",
+                  "value": {
+                    "stringValue": "acme-support"
+                  }
+                }
+              ]
+            },
+            "scopeSpans": [
+              {
+                "scope": {
+                  "name": "percepteye.agent_flywheel"
+                },
+                "spans": [
+                  {
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "invoke_agent"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "openai"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.agent.name",
+                        "value": {
+                          "stringValue": "acme-support"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.conversation.id",
+                        "value": {
+                          "stringValue": "7d0c2a8e-4b1f-4c3e-9a57-2f1e6b8d9c10"
+                        }
+                      }
+                    ],
+                    "endTimeUnixNano": "1758000010170000000",
+                    "kind": 1,
+                    "name": "invoke_agent acme-support",
+                    "spanId": "d0b6b951d3132943",
+                    "startTimeUnixNano": "1758000010000000000",
+                    "status": {},
+                    "traceId": "17fe6f303311c0b164b937e419518c1f"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "chat"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "openai"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.request.model",
+                        "value": {
+                          "stringValue": "gpt-4o-mini-2024-07-18"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.model",
+                        "value": {
+                          "stringValue": "gpt-4o-mini-2024-07-18"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.conversation.id",
+                        "value": {
+                          "stringValue": "7d0c2a8e-4b1f-4c3e-9a57-2f1e6b8d9c10"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.finish_reasons",
+                        "value": {
+                          "arrayValue": {
+                            "values": [
+                              {
+                                "stringValue": "tool_calls"
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      {
+                        "key": "gen_ai.system_instructions",
+                        "value": {
+                          "stringValue": "[{\"type\":\"text\",\"content\":\"You are Acme's order-support agent. Look orders up before answering, and refund only damaged items.\"}]"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.input.messages",
+                        "value": {
+                          "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Where is my order 4417?\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_lookup_4417\",\"name\":\"lookup_order\",\"arguments\":{\"order_id\":\"4417\"}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"call_lookup_4417\",\"response\":{\"status\":\"shipped\",\"eta\":\"Friday\"}}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"Order 4417 has shipped and arrives Friday.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"It arrived damaged. Can I get a refund?\"}]}]"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.output.messages",
+                        "value": {
+                          "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_refund_4417\",\"name\":\"refund_order\",\"arguments\":{\"order_id\":\"4417\",\"reason\":\"damaged\"}}],\"finish_reason\":\"tool_call\"}]"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.tool.definitions",
+                        "value": {
+                          "stringValue": "[{\"type\":\"function\",\"name\":\"lookup_order\",\"description\":\"Look up an order's shipping status.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"order_id\":{\"type\":\"string\"}},\"required\":[\"order_id\"],\"additionalProperties\":false}},{\"type\":\"function\",\"name\":\"refund_order\",\"description\":\"Refund an order.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"order_id\":{\"type\":\"string\"},\"reason\":{\"type\":\"string\"}},\"required\":[\"order_id\",\"reason\"],\"additionalProperties\":false}}]"
+                        }
+                      }
+                    ],
+                    "endTimeUnixNano": "1758000010060000000",
+                    "kind": 3,
+                    "name": "chat gpt-4o-mini-2024-07-18",
+                    "parentSpanId": "d0b6b951d3132943",
+                    "spanId": "f9cc8a6cb73e87bf",
+                    "startTimeUnixNano": "1758000010010000000",
+                    "status": {},
+                    "traceId": "17fe6f303311c0b164b937e419518c1f"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "execute_tool"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.tool.name",
+                        "value": {
+                          "stringValue": "refund_order"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.tool.type",
+                        "value": {
+                          "stringValue": "function"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.tool.call.id",
+                        "value": {
+                          "stringValue": "call_refund_4417"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.tool.call.arguments",
+                        "value": {
+                          "stringValue": "{\"order_id\":\"4417\",\"reason\":\"damaged\"}"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.tool.call.result",
+                        "value": {
+                          "stringValue": "{\"refund_id\":\"R-88\",\"amount\":\"42.00\"}"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.conversation.id",
+                        "value": {
+                          "stringValue": "7d0c2a8e-4b1f-4c3e-9a57-2f1e6b8d9c10"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.agent.name",
+                        "value": {
+                          "stringValue": "acme-support"
+                        }
+                      }
+                    ],
+                    "endTimeUnixNano": "1758000010100000000",
+                    "kind": 1,
+                    "name": "execute_tool refund_order",
+                    "parentSpanId": "d0b6b951d3132943",
+                    "spanId": "050df61c7564bc61",
+                    "startTimeUnixNano": "1758000010070000000",
+                    "status": {},
+                    "traceId": "17fe6f303311c0b164b937e419518c1f"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "chat"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "openai"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.request.model",
+                        "value": {
+                          "stringValue": "gpt-4o-mini-2024-07-18"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.model",
+                        "value": {
+                          "stringValue": "gpt-4o-mini-2024-07-18"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.conversation.id",
+                        "value": {
+                          "stringValue": "7d0c2a8e-4b1f-4c3e-9a57-2f1e6b8d9c10"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.finish_reasons",
+                        "value": {
+                          "arrayValue": {
+                            "values": [
+                              {
+                                "stringValue": "stop"
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      {
+                        "key": "gen_ai.system_instructions",
+                        "value": {
+                          "stringValue": "[{\"type\":\"text\",\"content\":\"You are Acme's order-support agent. Look orders up before answering, and refund only damaged items.\"}]"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.input.messages",
+                        "value": {
+                          "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Where is my order 4417?\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_lookup_4417\",\"name\":\"lookup_order\",\"arguments\":{\"order_id\":\"4417\"}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"call_lookup_4417\",\"response\":{\"status\":\"shipped\",\"eta\":\"Friday\"}}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"Order 4417 has shipped and arrives Friday.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"It arrived damaged. Can I get a refund?\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_refund_4417\",\"name\":\"refund_order\",\"arguments\":{\"order_id\":\"4417\",\"reason\":\"damaged\"}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"call_refund_4417\",\"response\":{\"refund_id\":\"R-88\",\"amount\":\"42.00\"}}]}]"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.output.messages",
+                        "value": {
+                          "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"Refund R-88 for 42.00 is on its way.\"}],\"finish_reason\":\"stop\"}]"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.tool.definitions",
+                        "value": {
+                          "stringValue": "[{\"type\":\"function\",\"name\":\"lookup_order\",\"description\":\"Look up an order's shipping status.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"order_id\":{\"type\":\"string\"}},\"required\":[\"order_id\"],\"additionalProperties\":false}},{\"type\":\"function\",\"name\":\"refund_order\",\"description\":\"Refund an order.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"order_id\":{\"type\":\"string\"},\"reason\":{\"type\":\"string\"}},\"required\":[\"order_id\",\"reason\"],\"additionalProperties\":false}}]"
+                        }
+                      }
+                    ],
+                    "endTimeUnixNano": "1758000010160000000",
+                    "kind": 3,
+                    "name": "chat gpt-4o-mini-2024-07-18",
+                    "parentSpanId": "d0b6b951d3132943",
+                    "spanId": "5b6a492e07381897",
+                    "startTimeUnixNano": "1758000010110000000",
+                    "status": {},
+                    "traceId": "17fe6f303311c0b164b937e419518c1f"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "mc_golden_turn_2",
+      "agent_name": "acme-support",
+      "conversation_id": "7d0c2a8e-4b1f-4c3e-9a57-2f1e6b8d9c10",
+      "observation": {
+        "trace_id": "da62c78ef08080958f79ea5d8ab7e490",
+        "span_id": "a7bc10190b9ab97f",
+        "start_time_unix_nano": "1758000020000000000",
+        "end_time_unix_nano": "1758000020070000000",
+        "operations": [
+          {
+            "operation": "chat",
+            "span_id": "57ece29961514267",
+            "start_time_unix_nano": "1758000020010000000",
+            "end_time_unix_nano": "1758000020060000000",
+            "provider_name": "openai",
+            "request_model": "gpt-4o-mini-2024-07-18",
+            "response_model": "gpt-4o-mini-2024-07-18",
+            "finish_reasons": [
+              "stop"
+            ],
+            "system_instructions": [
+              {
+                "type": "text",
+                "content": "You are Acme's order-support agent. Look orders up before answering, and refund only damaged items."
+              }
+            ],
+            "input_messages": [
+              {
+                "role": "user",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "Where is my order 4417?"
+                  }
+                ]
+              },
+              {
+                "role": "assistant",
+                "parts": [
+                  {
+                    "type": "tool_call",
+                    "id": "call_lookup_4417",
+                    "name": "lookup_order",
+                    "arguments": {
+                      "order_id": "4417"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "parts": [
+                  {
+                    "type": "tool_call_response",
+                    "id": "call_lookup_4417",
+                    "response": {
+                      "status": "shipped",
+                      "eta": "Friday"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "assistant",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "Order 4417 has shipped and arrives Friday."
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "It arrived damaged. Can I get a refund?"
+                  }
+                ]
+              },
+              {
+                "role": "assistant",
+                "parts": [
+                  {
+                    "type": "tool_call",
+                    "id": "call_refund_4417",
+                    "name": "refund_order",
+                    "arguments": {
+                      "order_id": "4417",
+                      "reason": "damaged"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "parts": [
+                  {
+                    "type": "tool_call_response",
+                    "id": "call_refund_4417",
+                    "response": {
+                      "refund_id": "R-88",
+                      "amount": "42.00"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "assistant",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "Refund R-88 for 42.00 is on its way."
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "Thanks, that's all."
+                  }
+                ]
+              }
+            ],
+            "output_messages": [
+              {
+                "role": "assistant",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "You're welcome. Have a good day!"
+                  }
+                ],
+                "finish_reason": "stop"
+              }
+            ],
+            "tool_definitions": [
+              {
+                "type": "function",
+                "name": "lookup_order",
+                "description": "Look up an order's shipping status.",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "order_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "order_id"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              {
+                "type": "function",
+                "name": "refund_order",
+                "description": "Refund an order.",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "order_id": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "order_id",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "genai_trace": {
+        "resourceSpans": [
+          {
+            "resource": {
+              "attributes": [
+                {
+                  "key": "service.name",
+                  "value": {
+                    "stringValue": "acme-support"
+                  }
+                }
+              ]
+            },
+            "scopeSpans": [
+              {
+                "scope": {
+                  "name": "percepteye.agent_flywheel"
+                },
+                "spans": [
+                  {
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "invoke_agent"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "openai"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.agent.name",
+                        "value": {
+                          "stringValue": "acme-support"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.conversation.id",
+                        "value": {
+                          "stringValue": "7d0c2a8e-4b1f-4c3e-9a57-2f1e6b8d9c10"
+                        }
+                      }
+                    ],
+                    "endTimeUnixNano": "1758000020070000000",
+                    "kind": 1,
+                    "name": "invoke_agent acme-support",
+                    "spanId": "a7bc10190b9ab97f",
+                    "startTimeUnixNano": "1758000020000000000",
+                    "status": {},
+                    "traceId": "da62c78ef08080958f79ea5d8ab7e490"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "chat"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "openai"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.request.model",
+                        "value": {
+                          "stringValue": "gpt-4o-mini-2024-07-18"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.model",
+                        "value": {
+                          "stringValue": "gpt-4o-mini-2024-07-18"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.conversation.id",
+                        "value": {
+                          "stringValue": "7d0c2a8e-4b1f-4c3e-9a57-2f1e6b8d9c10"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.finish_reasons",
+                        "value": {
+                          "arrayValue": {
+                            "values": [
+                              {
+                                "stringValue": "stop"
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      {
+                        "key": "gen_ai.system_instructions",
+                        "value": {
+                          "stringValue": "[{\"type\":\"text\",\"content\":\"You are Acme's order-support agent. Look orders up before answering, and refund only damaged items.\"}]"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.input.messages",
+                        "value": {
+                          "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Where is my order 4417?\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_lookup_4417\",\"name\":\"lookup_order\",\"arguments\":{\"order_id\":\"4417\"}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"call_lookup_4417\",\"response\":{\"status\":\"shipped\",\"eta\":\"Friday\"}}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"Order 4417 has shipped and arrives Friday.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"It arrived damaged. Can I get a refund?\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_refund_4417\",\"name\":\"refund_order\",\"arguments\":{\"order_id\":\"4417\",\"reason\":\"damaged\"}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"call_refund_4417\",\"response\":{\"refund_id\":\"R-88\",\"amount\":\"42.00\"}}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"Refund R-88 for 42.00 is on its way.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Thanks, that's all.\"}]}]"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.output.messages",
+                        "value": {
+                          "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"You're welcome. Have a good day!\"}],\"finish_reason\":\"stop\"}]"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.tool.definitions",
+                        "value": {
+                          "stringValue": "[{\"type\":\"function\",\"name\":\"lookup_order\",\"description\":\"Look up an order's shipping status.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"order_id\":{\"type\":\"string\"}},\"required\":[\"order_id\"],\"additionalProperties\":false}},{\"type\":\"function\",\"name\":\"refund_order\",\"description\":\"Refund an order.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"order_id\":{\"type\":\"string\"},\"reason\":{\"type\":\"string\"}},\"required\":[\"order_id\",\"reason\"],\"additionalProperties\":false}}]"
+                        }
+                      }
+                    ],
+                    "endTimeUnixNano": "1758000020060000000",
+                    "kind": 3,
+                    "name": "chat gpt-4o-mini-2024-07-18",
+                    "parentSpanId": "a7bc10190b9ab97f",
+                    "spanId": "57ece29961514267",
+                    "startTimeUnixNano": "1758000020010000000",
+                    "status": {},
+                    "traceId": "da62c78ef08080958f79ea5d8ab7e490"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "anthropic_with_errors_reasoning_blob_and_no_conversation",
+      "agent_name": "support-bot été",
+      "conversation_id": null,
+      "observation": {
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "span_id": "00f067aa0ba902b7",
+        "start_time_unix_nano": "1758100000000000000",
+        "end_time_unix_nano": "1758100000900000000",
+        "operations": [
+          {
+            "operation": "chat",
+            "span_id": "53995c3f42cd8ad8",
+            "start_time_unix_nano": "1758100000010000000",
+            "end_time_unix_nano": "1758100000200000000",
+            "provider_name": "anthropic",
+            "request_model": "claude-sonnet-4-5",
+            "response_model": "claude-sonnet-4-5-20250929",
+            "finish_reasons": [
+              "tool_use"
+            ],
+            "system_instructions": [
+              {
+                "type": "text",
+                "content": "Réponds en français.\nSois bref,\tet \"exact\" \\ toujours."
+              }
+            ],
+            "input_messages": [
+              {
+                "role": "user",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "¿dónde está mi pedido? 📦"
+                  },
+                  {
+                    "type": "blob",
+                    "modality": "image",
+                    "mime_type": "image/png",
+                    "content": "iVBORw0KGgo="
+                  }
+                ]
+              }
+            ],
+            "output_messages": [
+              {
+                "role": "assistant",
+                "parts": [
+                  {
+                    "type": "reasoning",
+                    "content": "The order id is A-1."
+                  },
+                  {
+                    "type": "tool_call",
+                    "id": "toolu_01",
+                    "name": "track",
+                    "arguments": {
+                      "order": "A-1",
+                      "deep": {
+                        "list": [
+                          1,
+                          2,
+                          {
+                            "x": null
+                          }
+                        ],
+                        "flag": true
+                      }
+                    }
+                  }
+                ],
+                "finish_reason": "tool_call"
+              }
+            ]
+          },
+          {
+            "operation": "execute_tool",
+            "span_id": "a2fb4a1d1a96d312",
+            "start_time_unix_nano": "1758100000210000000",
+            "end_time_unix_nano": "1758100000500000000",
+            "tool_name": "track",
+            "tool_type": "function",
+            "tool_call_id": "toolu_01",
+            "arguments": {
+              "order": "A-1",
+              "deep": {
+                "list": [
+                  1,
+                  2,
+                  {
+                    "x": null
+                  }
+                ],
+                "flag": true
+              }
+            },
+            "error_type": "TimeoutError"
+          },
+          {
+            "operation": "chat",
+            "span_id": "0af7651916cd43dd",
+            "start_time_unix_nano": "1758100000510000000",
+            "end_time_unix_nano": "1758100000800000000",
+            "provider_name": "anthropic",
+            "request_model": "claude-sonnet-4-5",
+            "input_messages": [
+              {
+                "role": "user",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "¿dónde está mi pedido? 📦"
+                  }
+                ]
+              },
+              {
+                "role": "assistant",
+                "parts": [
+                  {
+                    "type": "tool_call",
+                    "id": "toolu_01",
+                    "name": "track",
+                    "arguments": {
+                      "order": "A-1",
+                      "deep": {
+                        "list": [
+                          1,
+                          2,
+                          {
+                            "x": null
+                          }
+                        ],
+                        "flag": true
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "parts": [
+                  {
+                    "type": "tool_call_response",
+                    "id": "toolu_01",
+                    "response": "Error: TimeoutError('upstream took 30s')"
+                  }
+                ]
+              }
+            ],
+            "error_type": "RateLimitError"
+          }
+        ]
+      },
+      "genai_trace": {
+        "resourceSpans": [
+          {
+            "resource": {
+              "attributes": [
+                {
+                  "key": "service.name",
+                  "value": {
+                    "stringValue": "support-bot été"
+                  }
+                }
+              ]
+            },
+            "scopeSpans": [
+              {
+                "scope": {
+                  "name": "percepteye.agent_flywheel"
+                },
+                "spans": [
+                  {
+                    "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+                    "spanId": "00f067aa0ba902b7",
+                    "name": "invoke_agent support-bot été",
+                    "kind": 1,
+                    "startTimeUnixNano": "1758100000000000000",
+                    "endTimeUnixNano": "1758100000900000000",
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "invoke_agent"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "anthropic"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.agent.name",
+                        "value": {
+                          "stringValue": "support-bot été"
+                        }
+                      }
+                    ],
+                    "status": {}
+                  },
+                  {
+                    "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+                    "spanId": "53995c3f42cd8ad8",
+                    "parentSpanId": "00f067aa0ba902b7",
+                    "name": "chat claude-sonnet-4-5",
+                    "kind": 3,
+                    "startTimeUnixNano": "1758100000010000000",
+                    "endTimeUnixNano": "1758100000200000000",
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "chat"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "anthropic"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.request.model",
+                        "value": {
+                          "stringValue": "claude-sonnet-4-5"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.model",
+                        "value": {
+                          "stringValue": "claude-sonnet-4-5-20250929"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.finish_reasons",
+                        "value": {
+                          "arrayValue": {
+                            "values": [
+                              {
+                                "stringValue": "tool_use"
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      {
+                        "key": "gen_ai.system_instructions",
+                        "value": {
+                          "stringValue": "[{\"type\":\"text\",\"content\":\"Réponds en français.\\nSois bref,\\tet \\\"exact\\\" \\\\ toujours.\"}]"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.input.messages",
+                        "value": {
+                          "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"¿dónde está mi pedido? 📦\"},{\"type\":\"blob\",\"modality\":\"image\",\"mime_type\":\"image/png\",\"content\":\"iVBORw0KGgo=\"}]}]"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.output.messages",
+                        "value": {
+                          "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"reasoning\",\"content\":\"The order id is A-1.\"},{\"type\":\"tool_call\",\"id\":\"toolu_01\",\"name\":\"track\",\"arguments\":{\"order\":\"A-1\",\"deep\":{\"list\":[1,2,{\"x\":null}],\"flag\":true}}}],\"finish_reason\":\"tool_call\"}]"
+                        }
+                      }
+                    ],
+                    "status": {}
+                  },
+                  {
+                    "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+                    "spanId": "a2fb4a1d1a96d312",
+                    "parentSpanId": "00f067aa0ba902b7",
+                    "name": "execute_tool track",
+                    "kind": 1,
+                    "startTimeUnixNano": "1758100000210000000",
+                    "endTimeUnixNano": "1758100000500000000",
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "execute_tool"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.tool.name",
+                        "value": {
+                          "stringValue": "track"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.tool.type",
+                        "value": {
+                          "stringValue": "function"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.tool.call.id",
+                        "value": {
+                          "stringValue": "toolu_01"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.tool.call.arguments",
+                        "value": {
+                          "stringValue": "{\"order\":\"A-1\",\"deep\":{\"list\":[1,2,{\"x\":null}],\"flag\":true}}"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.agent.name",
+                        "value": {
+                          "stringValue": "support-bot été"
+                        }
+                      },
+                      {
+                        "key": "error.type",
+                        "value": {
+                          "stringValue": "TimeoutError"
+                        }
+                      }
+                    ],
+                    "status": {
+                      "code": 2
+                    }
+                  },
+                  {
+                    "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+                    "spanId": "0af7651916cd43dd",
+                    "parentSpanId": "00f067aa0ba902b7",
+                    "name": "chat claude-sonnet-4-5",
+                    "kind": 3,
+                    "startTimeUnixNano": "1758100000510000000",
+                    "endTimeUnixNano": "1758100000800000000",
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "chat"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "anthropic"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.request.model",
+                        "value": {
+                          "stringValue": "claude-sonnet-4-5"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.input.messages",
+                        "value": {
+                          "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"¿dónde está mi pedido? 📦\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"toolu_01\",\"name\":\"track\",\"arguments\":{\"order\":\"A-1\",\"deep\":{\"list\":[1,2,{\"x\":null}],\"flag\":true}}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"toolu_01\",\"response\":\"Error: TimeoutError('upstream took 30s')\"}]}]"
+                        }
+                      },
+                      {
+                        "key": "error.type",
+                        "value": {
+                          "stringValue": "RateLimitError"
+                        }
+                      }
+                    ],
+                    "status": {
+                      "code": 2
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "a_turn_that_observed_no_model_call_renders_nothing",
+      "agent_name": "acme-support",
+      "conversation_id": "c-1",
+      "observation": {
+        "trace_id": "5b8efff798038103d269b633813fc60c",
+        "span_id": "eee19b7ec3c1b174",
+        "start_time_unix_nano": "1758200000000000000",
+        "end_time_unix_nano": "1758200000100000000",
+        "operations": [
+          {
+            "operation": "execute_tool",
+            "span_id": "eee19b7ec3c1b175",
+            "start_time_unix_nano": "1758200000010000000",
+            "end_time_unix_nano": "1758200000020000000",
+            "tool_name": "lookup",
+            "arguments": {},
+            "result": "ok"
+          }
+        ]
+      },
+      "genai_trace": null
+    },
+    {
+      "name": "an_operation_it_cannot_encode_is_skipped_never_guessed",
+      "agent_name": "acme-support",
+      "conversation_id": "c-2",
+      "observation": {
+        "trace_id": "6b8efff798038103d269b633813fc60c",
+        "span_id": "aee19b7ec3c1b174",
+        "start_time_unix_nano": "1758300000000000000",
+        "end_time_unix_nano": "1758300000100000000",
+        "operations": [
+          {
+            "operation": "chat",
+            "span_id": "NOT-A-SPAN-ID",
+            "start_time_unix_nano": "1758300000010000000",
+            "end_time_unix_nano": "1758300000020000000",
+            "provider_name": "openai",
+            "request_model": "gpt-4o-mini",
+            "input_messages": [
+              {
+                "role": "user",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "lost"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "operation": "chat",
+            "span_id": "dee19b7ec3c1b175",
+            "start_time_unix_nano": "1758300000021000000",
+            "end_time_unix_nano": "1758300000022000000",
+            "provider_name": "openai",
+            "input_messages": [
+              {
+                "role": "user",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "no model named"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "operation": "chat",
+            "span_id": "bee19b7ec3c1b175",
+            "start_time_unix_nano": "1758300000030000000",
+            "end_time_unix_nano": "1758300000040000000",
+            "provider_name": "openai",
+            "request_model": "gpt-4o-mini",
+            "input_messages": [
+              {
+                "role": "user",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "kept"
+                  }
+                ]
+              }
+            ],
+            "output_messages": [
+              {
+                "role": "assistant",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "yes"
+                  }
+                ],
+                "finish_reason": "stop"
+              }
+            ],
+            "finish_reasons": [
+              "stop"
+            ]
+          },
+          {
+            "operation": "compaction",
+            "span_id": "cee19b7ec3c1b175",
+            "start_time_unix_nano": "1758300000050000000",
+            "end_time_unix_nano": "1758300000060000000"
+          }
+        ]
+      },
+      "genai_trace": {
+        "resourceSpans": [
+          {
+            "resource": {
+              "attributes": [
+                {
+                  "key": "service.name",
+                  "value": {
+                    "stringValue": "acme-support"
+                  }
+                }
+              ]
+            },
+            "scopeSpans": [
+              {
+                "scope": {
+                  "name": "percepteye.agent_flywheel"
+                },
+                "spans": [
+                  {
+                    "traceId": "6b8efff798038103d269b633813fc60c",
+                    "spanId": "aee19b7ec3c1b174",
+                    "name": "invoke_agent acme-support",
+                    "kind": 1,
+                    "startTimeUnixNano": "1758300000000000000",
+                    "endTimeUnixNano": "1758300000100000000",
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "invoke_agent"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "openai"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.agent.name",
+                        "value": {
+                          "stringValue": "acme-support"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.conversation.id",
+                        "value": {
+                          "stringValue": "c-2"
+                        }
+                      }
+                    ],
+                    "status": {}
+                  },
+                  {
+                    "traceId": "6b8efff798038103d269b633813fc60c",
+                    "spanId": "bee19b7ec3c1b175",
+                    "parentSpanId": "aee19b7ec3c1b174",
+                    "name": "chat gpt-4o-mini",
+                    "kind": 3,
+                    "startTimeUnixNano": "1758300000030000000",
+                    "endTimeUnixNano": "1758300000040000000",
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "chat"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "openai"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.request.model",
+                        "value": {
+                          "stringValue": "gpt-4o-mini"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.conversation.id",
+                        "value": {
+                          "stringValue": "c-2"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.finish_reasons",
+                        "value": {
+                          "arrayValue": {
+                            "values": [
+                              {
+                                "stringValue": "stop"
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      {
+                        "key": "gen_ai.input.messages",
+                        "value": {
+                          "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"kept\"}]}]"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.output.messages",
+                        "value": {
+                          "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"yes\"}],\"finish_reason\":\"stop\"}]"
+                        }
+                      }
+                    ],
+                    "status": {}
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "runtime_asymmetry": {
+    "name": "an_integer_like_key_and_an_integral_float_are_spelled_by_each_runtime",
+    "why": "JavaScript enumerates integer-like object keys first and spells 1.0 as 1; Python keeps insertion order and spells it 1.0. Each SDK renders what its own runtime would have sent the model.",
+    "agent_name": "acme-support",
+    "conversation_id": "c-3",
+    "observation": {
+      "trace_id": "7b8efff798038103d269b633813fc60c",
+      "span_id": "fee19b7ec3c1b174",
+      "start_time_unix_nano": "1758400000000000000",
+      "end_time_unix_nano": "1758400000100000000",
+      "operations": [
+        {
+          "operation": "chat",
+          "span_id": "fee19b7ec3c1b175",
+          "start_time_unix_nano": "1758400000010000000",
+          "end_time_unix_nano": "1758400000020000000",
+          "provider_name": "openai",
+          "request_model": "gpt-4o-mini",
+          "input_messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "pay"
+                }
+              ]
+            }
+          ],
+          "output_messages": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "c1",
+                  "name": "pay",
+                  "arguments": {
+                    "b": 1,
+                    "10": 2,
+                    "amount": 1.0
+                  }
+                }
+              ],
+              "finish_reason": "tool_call"
+            }
+          ],
+          "finish_reasons": [
+            "tool_calls"
+          ]
+        }
+      ]
+    },
+    "genai_trace_python": {
+      "resourceSpans": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "acme-support"
+                }
+              }
+            ]
+          },
+          "scopeSpans": [
+            {
+              "scope": {
+                "name": "percepteye.agent_flywheel"
+              },
+              "spans": [
+                {
+                  "traceId": "7b8efff798038103d269b633813fc60c",
+                  "spanId": "fee19b7ec3c1b174",
+                  "name": "invoke_agent acme-support",
+                  "kind": 1,
+                  "startTimeUnixNano": "1758400000000000000",
+                  "endTimeUnixNano": "1758400000100000000",
+                  "attributes": [
+                    {
+                      "key": "gen_ai.operation.name",
+                      "value": {
+                        "stringValue": "invoke_agent"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.provider.name",
+                      "value": {
+                        "stringValue": "openai"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.agent.name",
+                      "value": {
+                        "stringValue": "acme-support"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.conversation.id",
+                      "value": {
+                        "stringValue": "c-3"
+                      }
+                    }
+                  ],
+                  "status": {}
+                },
+                {
+                  "traceId": "7b8efff798038103d269b633813fc60c",
+                  "spanId": "fee19b7ec3c1b175",
+                  "parentSpanId": "fee19b7ec3c1b174",
+                  "name": "chat gpt-4o-mini",
+                  "kind": 3,
+                  "startTimeUnixNano": "1758400000010000000",
+                  "endTimeUnixNano": "1758400000020000000",
+                  "attributes": [
+                    {
+                      "key": "gen_ai.operation.name",
+                      "value": {
+                        "stringValue": "chat"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.provider.name",
+                      "value": {
+                        "stringValue": "openai"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.request.model",
+                      "value": {
+                        "stringValue": "gpt-4o-mini"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.conversation.id",
+                      "value": {
+                        "stringValue": "c-3"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.response.finish_reasons",
+                      "value": {
+                        "arrayValue": {
+                          "values": [
+                            {
+                              "stringValue": "tool_calls"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "key": "gen_ai.input.messages",
+                      "value": {
+                        "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"pay\"}]}]"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.output.messages",
+                      "value": {
+                        "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"c1\",\"name\":\"pay\",\"arguments\":{\"b\":1,\"10\":2,\"amount\":1.0}}],\"finish_reason\":\"tool_call\"}]"
+                      }
+                    }
+                  ],
+                  "status": {}
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "genai_trace_node": {
+      "resourceSpans": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "acme-support"
+                }
+              }
+            ]
+          },
+          "scopeSpans": [
+            {
+              "scope": {
+                "name": "percepteye.agent_flywheel"
+              },
+              "spans": [
+                {
+                  "traceId": "7b8efff798038103d269b633813fc60c",
+                  "spanId": "fee19b7ec3c1b174",
+                  "name": "invoke_agent acme-support",
+                  "kind": 1,
+                  "startTimeUnixNano": "1758400000000000000",
+                  "endTimeUnixNano": "1758400000100000000",
+                  "attributes": [
+                    {
+                      "key": "gen_ai.operation.name",
+                      "value": {
+                        "stringValue": "invoke_agent"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.provider.name",
+                      "value": {
+                        "stringValue": "openai"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.agent.name",
+                      "value": {
+                        "stringValue": "acme-support"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.conversation.id",
+                      "value": {
+                        "stringValue": "c-3"
+                      }
+                    }
+                  ],
+                  "status": {}
+                },
+                {
+                  "traceId": "7b8efff798038103d269b633813fc60c",
+                  "spanId": "fee19b7ec3c1b175",
+                  "parentSpanId": "fee19b7ec3c1b174",
+                  "name": "chat gpt-4o-mini",
+                  "kind": 3,
+                  "startTimeUnixNano": "1758400000010000000",
+                  "endTimeUnixNano": "1758400000020000000",
+                  "attributes": [
+                    {
+                      "key": "gen_ai.operation.name",
+                      "value": {
+                        "stringValue": "chat"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.provider.name",
+                      "value": {
+                        "stringValue": "openai"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.request.model",
+                      "value": {
+                        "stringValue": "gpt-4o-mini"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.conversation.id",
+                      "value": {
+                        "stringValue": "c-3"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.response.finish_reasons",
+                      "value": {
+                        "arrayValue": {
+                          "values": [
+                            {
+                              "stringValue": "tool_calls"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "key": "gen_ai.input.messages",
+                      "value": {
+                        "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"pay\"}]}]"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.output.messages",
+                      "value": {
+                        "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"c1\",\"name\":\"pay\",\"arguments\":{\"10\":2,\"b\":1,\"amount\":1}}],\"finish_reason\":\"tool_call\"}]"
+                      }
+                    }
+                  ],
+                  "status": {}
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "observation_lines": [
+    {
+      "name": "operations_are_ordered_by_start_and_the_root_covers_them_all",
+      "lines": [
+        "{\"record\":\"trace\",\"trace_id\":\"8b8efff798038103d269b633813fc60c\",\"span_id\":\"1ee19b7ec3c1b174\",\"start_time_unix_nano\":\"1758500000050000000\"}",
+        "{\"record\":\"operation\",\"operation\":\"execute_tool\",\"span_id\":\"1ee19b7ec3c1b176\",\"start_time_unix_nano\":\"1758500000300000000\",\"end_time_unix_nano\":\"1758500000400000000\",\"tool_name\":\"b\",\"result\":\"B\"}",
+        "{\"record\":\"operation\",\"operation\":\"execute_tool\",\"span_id\":\"1ee19b7ec3c1b177\",\"start_time_unix_nano\":\"1758500000200000000\",\"end_time_unix_nano\":\"1758500000450000000\",\"tool_name\":\"a\",\"result\":\"A\"}",
+        "{\"record\":\"trace\",\"trace_id\":\"9b8efff798038103d269b633813fc60c\",\"span_id\":\"2ee19b7ec3c1b174\",\"start_time_unix_nano\":\"1758500000000000000\"}",
+        "{\"record\":\"operation\",\"operation\":\"chat\",\"span_id\":\"1ee19b7ec3c1b175\",\"start_time_unix_nano\":\"1758500000010000000\",\"end_time_unix_nano\":\"1758500000100000000\",\"provider_name\":\"openai\",\"request_model\":\"gpt-4o-mini\",\"input_messages\":[]}",
+        "{\"record\":\"operation\",\"operation\":\"chat\",\"span_id\":\"1ee19b7ec3c1b17",
+        "",
+        "{\"record\":\"end\",\"end_time_unix_nano\":\"1758500000900000000\"}",
+        "{\"record\":\"end\",\"end_time_unix_nano\":\"1758500000800000000\"}"
+      ],
+      "observation": {
+        "trace_id": "8b8efff798038103d269b633813fc60c",
+        "span_id": "1ee19b7ec3c1b174",
+        "start_time_unix_nano": "1758500000010000000",
+        "end_time_unix_nano": "1758500000900000000",
+        "operations": [
+          {
+            "operation": "chat",
+            "span_id": "1ee19b7ec3c1b175",
+            "start_time_unix_nano": "1758500000010000000",
+            "end_time_unix_nano": "1758500000100000000",
+            "provider_name": "openai",
+            "request_model": "gpt-4o-mini",
+            "input_messages": []
+          },
+          {
+            "operation": "execute_tool",
+            "span_id": "1ee19b7ec3c1b177",
+            "start_time_unix_nano": "1758500000200000000",
+            "end_time_unix_nano": "1758500000450000000",
+            "tool_name": "a",
+            "result": "A"
+          },
+          {
+            "operation": "execute_tool",
+            "span_id": "1ee19b7ec3c1b176",
+            "start_time_unix_nano": "1758500000300000000",
+            "end_time_unix_nano": "1758500000400000000",
+            "tool_name": "b",
+            "result": "B"
+          }
+        ]
+      }
+    },
+    {
+      "name": "no_trace_record_is_no_observation",
+      "lines": [
+        "{\"record\":\"operation\",\"operation\":\"chat\",\"span_id\":\"1ee19b7ec3c1b175\",\"start_time_unix_nano\":\"1758500000010000000\",\"end_time_unix_nano\":\"1758500000100000000\",\"provider_name\":\"openai\",\"input_messages\":[]}"
+      ],
+      "observation": null
+    },
+    {
+      "name": "a_trace_with_no_operation_is_no_observation",
+      "lines": [
+        "{\"record\":\"trace\",\"trace_id\":\"8b8efff798038103d269b633813fc60c\",\"span_id\":\"1ee19b7ec3c1b174\",\"start_time_unix_nano\":\"1758500000050000000\"}",
+        "{\"record\":\"end\",\"end_time_unix_nano\":\"1758500000900000000\"}"
+      ],
+      "observation": null
+    }
+  ]
+}

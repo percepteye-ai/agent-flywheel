@@ -221,11 +221,14 @@ def record_turn_span(
     sampled logprob, which is why a span suffices here where it would not for
     offline GRPO.
 
-    OPT-IN, and the caller decides. Nothing in this package can see a prompt or
-    a completion on its own -- the adapters observe tool calls, not turn content
-    -- so this is only ever called with text the customer handed over
-    deliberately. That asymmetry with :func:`record_tool_call_span` is the
-    point: a tool name is telemetry, a prompt is the user's own words.
+    OPT-IN, and the caller decides: this is only ever called with the turn
+    text the customer handed over deliberately (``input_text``,
+    ``record_answer``). That asymmetry with :func:`record_tool_call_span` is
+    the point: a tool name is telemetry, a prompt is the user's own words.
+    (What the adapters observe at the model boundary, under the model-content
+    consent tier, never reaches the customer's TracerProvider; it goes to the
+    control plane as the turn's ``genai_trace``, see
+    :mod:`agent_flywheel.genai_otlp`.)
 
     Never raises, like everything else here.
 

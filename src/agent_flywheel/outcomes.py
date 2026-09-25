@@ -135,6 +135,15 @@ _current_task: ContextVar[str | None] = ContextVar(
 _current_execution_sha256: ContextVar[str | None] = ContextVar(
     "percepteye_current_execution_sha256", default=None
 )
+#: When the open scope is a production TURN whose agent the control plane
+#: said may upload MODEL CONTENT (the second consent tier, see
+#: :func:`~agent_flywheel.production.capture_verdict`): the turn's start, as
+#: OTLP decimal nanoseconds. ``None`` everywhere else -- every rollout, every
+#: turn without that consent, and outside any scope -- which is what makes the
+#: adapters' model-boundary callbacks record NOTHING there.
+_current_model_capture: ContextVar[str | None] = ContextVar(
+    "percepteye_current_model_capture", default=None
+)
 _warned_no_destination = False
 
 
@@ -285,6 +294,100 @@ def record_tool_call(
         return
     line = json.dumps(rec.to_wire(), default=str, ensure_ascii=False)
     _append(path, line)
+
+
+def model_capture_active() -> bool:
+    """Whether a model call observed NOW belongs in a turn's model boundary.
+
+    True only inside ``attach().turn()`` for an agent the control plane said
+    may upload model content. The adapters ask this FIRST, on every model
+    callback, and return at once when it is false -- so a rollout, and a turn
+    without that consent, pay one context-variable read and record nothing.
+    """
+    return _current_model_capture.get() is not None
+
+
+#: Serializes appends to model-boundary files. ONE lock, not one per file like
+#: the tool-call sinks: a model call takes seconds, so these writes are
+#: nowhere near a hot path, and a record here can be megabytes -- which a
+#: buffered write may split into several ``write(2)`` calls that a concurrent
+#: writer (parallel tool calls finishing together) could interleave with.
+_model_boundary_lock = threading.Lock()
+
+
+def record_model_boundary(operation: dict[str, Any]) -> bool:
+    """Append one observed model call or tool execution to the open turn.
+
+    ``operation`` is one record of the model-boundary observation
+    (:mod:`agent_flywheel.genai_otlp`): a ``chat`` with the messages the call
+    was sent and what it answered, or an ``execute_tool`` with the arguments
+    and the result, each with its own span id and clocks. The first record of
+    a turn also writes the turn's trace id and its start.
+
+    A NO-OP unless :func:`model_capture_active`. Returns whether anything was
+    written, and NEVER raises: it runs inside a customer's model callback, and
+    a capture bug costs the observation, never the call.
+    """
+    start = _current_model_capture.get()
+    base = _current_trajectory_dir.get()
+    if start is None or not base:
+        return False
+    from .genai_otlp import (
+        OBSERVATION_FILENAME,
+        new_span_id,
+        new_trace_id,
+        operation_record,
+        trace_record,
+    )
+
+    try:
+        line = operation_record(operation)
+        path = Path(base) / OBSERVATION_FILENAME
+        with _model_boundary_lock:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            head = "" if path.exists() else trace_record(
+                trace_id=new_trace_id(), span_id=new_span_id(), start=start,
+            ) + "\n"
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(head + line + "\n")
+    except (OSError, TypeError, ValueError):
+        return False
+    _write_execution_fingerprint(Path(base), _current_execution_sha256.get())
+    return True
+
+
+def _record_model_boundary_end(trajectory_dir: str) -> None:
+    """Close the turn's model boundary: when its scope ended. Never raises.
+
+    Only a turn that already recorded something gets the line, so a turn whose
+    agent called no model still leaves no file behind.
+    """
+    from .genai_otlp import OBSERVATION_FILENAME, end_record, now_unix_nano
+
+    path = Path(trajectory_dir) / OBSERVATION_FILENAME
+    try:
+        with _model_boundary_lock:
+            if path.exists():
+                with path.open("a", encoding="utf-8") as fh:
+                    fh.write(end_record(now_unix_nano()) + "\n")
+    except OSError:
+        return
+
+
+def read_model_boundary(trajectory_dir: Any) -> dict[str, Any] | None:
+    """The turn's observed model boundary, or ``None`` when none was recorded.
+
+    Read back through the ONE reader both SDKs share
+    (:func:`agent_flywheel.genai_otlp.observation_from_lines`).
+    """
+    from .genai_otlp import OBSERVATION_FILENAME, observation_from_lines
+
+    try:
+        raw = (Path(trajectory_dir) / OBSERVATION_FILENAME).read_text(
+            encoding="utf-8")
+    except OSError:
+        return None
+    return observation_from_lines(raw.splitlines())
 
 
 
@@ -793,7 +896,8 @@ class _RolloutScope:
                  conversation_id: str | None = None,
                  task_id: str | None = None,
                  execution_sha256: str | None = None,
-                 kind: CaptureScope = "rollout") -> None:
+                 kind: CaptureScope = "rollout",
+                 model_content: bool = False) -> None:
         self._rid = rollout_id
         self._trajectory_dir = str(trajectory_dir)
         self._kind = kind
@@ -802,9 +906,18 @@ class _RolloutScope:
         self._execution_sha256 = (
             execution_sha256 if is_lower_sha256(execution_sha256) else None
         )
+        #: A PRODUCTION TURN's model boundary, and only with consent. A
+        #: rollout never records one, whatever it is passed: it is claimed
+        #: work on the SDK rollout lane, whose report is its own contract.
+        self._model_content = bool(model_content) and kind == "turn"
         self._tokens: list[Any] = []
 
     def __enter__(self) -> str:
+        started: str | None = None
+        if self._model_content:
+            from .genai_otlp import now_unix_nano
+
+            started = now_unix_nano()
         self._tokens = [
             _current_rollout.set(self._rid),
             _current_trajectory_dir.set(self._trajectory_dir),
@@ -812,6 +925,7 @@ class _RolloutScope:
             _current_conversation.set(self._conversation_id),
             _current_task.set(self._task_id),
             _current_execution_sha256.set(self._execution_sha256),
+            _current_model_capture.set(started),
         ]
         return self._rid
 
@@ -823,7 +937,10 @@ class _RolloutScope:
             _current_conversation.reset(self._tokens[3])
             _current_task.reset(self._tokens[4])
             _current_execution_sha256.reset(self._tokens[5])
+            _current_model_capture.reset(self._tokens[6])
             self._tokens = []
+        if self._model_content:
+            _record_model_boundary_end(self._trajectory_dir)
         # The handle lives exactly as long as the scope that writes through it.
         # Without this the sink registry would grow one entry per turn for the
         # life of the process, which is the leak that holding a handle open
