@@ -371,8 +371,10 @@ def test_nothing_a_client_raises_escapes_the_upload():
 @pytest.mark.parametrize(("rules", "says"), [
     (RULE_A, "a single string is one rule"),
     ({RULE_A, RULE_B}, "got set"),
-    ([RULE_A, 7], "rule 1 must be a string; got int"),
-    ([RULE_A, None], "rule 1 must be a string; got NoneType"),
+    ([RULE_A, 7], "rule 1 must be a string; got number"),
+    ([RULE_A, None], "rule 1 must be a string; got null"),
+    ({"rules": [RULE_A]}, "one rule per string; got object"),
+    ([RULE_A, [RULE_B]], "rule 1 must be a string; got array"),
 ])
 def test_rules_that_are_not_a_list_of_strings_refuse_at_startup(
         cp, attached, tmp_path, rules, says):

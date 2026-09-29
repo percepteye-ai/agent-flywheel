@@ -16,6 +16,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, fields
 from typing import Any, Literal
 
+#: The one vocabulary a refusal names a value's type in, shared with
+#: ``describe=`` and with the Node SDK's ``jsonType`` -- ``got null``, never
+#: ``got NoneType``: an operator configuring rules in JSON wrote no Python.
+from .declaration import _json_type
 from .errors import ContractViolation
 
 #: Imported rather than restated so the contract validates against exactly
@@ -447,12 +451,12 @@ class RulebookRequest:
             )
             raise ContractViolation(
                 "rules must be a list of strings, one rule per string; got "
-                f"{type(rules).__name__}{hint}"
+                f"{_json_type(rules)}{hint}"
             )
         for index, rule in enumerate(rules):
             if not isinstance(rule, str):
                 raise ContractViolation(
-                    f"rule {index} must be a string; got {type(rule).__name__}"
+                    f"rule {index} must be a string; got {_json_type(rule)}"
                 )
         object.__setattr__(self, "rules", tuple(rules))
 
