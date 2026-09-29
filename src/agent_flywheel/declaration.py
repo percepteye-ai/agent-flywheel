@@ -94,6 +94,22 @@ def _json_type(value: Any) -> str:
     return type(value).__name__
 
 
+def _json_whole_number(value: Any) -> int | None:
+    """``value`` as the whole number a JSON reader sees, or ``None`` when it
+    is none. ``2.0`` counts: JSON Schema's ``integer`` admits it, and a
+    JavaScript reader -- the Node SDK -- cannot tell it from ``2``. A bool is
+    never one, and neither is a non-finite float. The one answer to "is this a
+    JSON integer" -- ``describe=``'s ``max_tokens`` and a rulebook receipt's
+    counts both ask it."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        return int(value)
+    return None
+
+
 def _key_list(keys: Any) -> str:
     """Key names as a JSON array, sorted by code point: one rendering both SDKs
     produce, whatever quotes, escapes or scripts a key contains."""
@@ -271,13 +287,12 @@ def _max_tokens(value: Any) -> int | None:
     plugin reads the same JSON and cannot tell it from ``1024``."""
     if value is None:
         return None
-    whole = (isinstance(value, int) and not isinstance(value, bool)) or (
-        isinstance(value, float) and math.isfinite(value) and value.is_integer())
-    if not whole or not 1 <= value <= _MAX_EXACT_INT:
+    whole = _json_whole_number(value)
+    if whole is None or not 1 <= whole <= _MAX_EXACT_INT:
         raise ConfigurationError(
             "describe['model']['max_tokens'] must be a whole number from 1 to "
             f"{_MAX_EXACT_INT}")
-    return int(value)
+    return whole
 
 
 def apply(

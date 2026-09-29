@@ -19,7 +19,7 @@ from typing import Any, Literal
 #: The one vocabulary a refusal names a value's type in, shared with
 #: ``describe=`` and with the Node SDK's ``jsonType`` -- ``got null``, never
 #: ``got NoneType``: an operator configuring rules in JSON wrote no Python.
-from .declaration import _json_type
+from .declaration import _json_type, _json_whole_number
 from .errors import ContractViolation
 
 #: Imported rather than restated so the contract validates against exactly
@@ -505,16 +505,24 @@ class RulebookReceipt:
             wrong.append("product_id")
         if d["version_id"] is not None and not isinstance(d["version_id"], str):
             wrong.append("version_id")
-        version = d["version"]
-        if version is not None and (type(version) is not int or version < 1):
+        # WHOLE NUMBERS AS JSON HAS THEM: `2.0` is the schema's integer and
+        # the Node SDK's `2`, so it is read -- and kept -- as `2`. Refusing it
+        # made the same answer a receipt there and "cannot read" here.
+        version = (None if d["version"] is None
+                   else _json_whole_number(d["version"]))
+        if d["version"] is not None and (version is None or version < 1):
             wrong.append("version")
         for name in ("content_sha256", "parent_sha256"):
             if d[name] is not None and not is_lower_sha256(d[name]):
                 wrong.append(name)
-        if type(d["rule_count"]) is not int or d["rule_count"] < 0:
+        rule_count = _json_whole_number(d["rule_count"])
+        if rule_count is None or rule_count < 0:
             wrong.append("rule_count")
         if wrong:
             raise ContractViolation(
                 f"RulebookReceipt carries invalid field(s): {wrong}"
             )
-        return cls(**{f.name: d[f.name] for f in fields(cls)})
+        return cls(**{
+            **{f.name: d[f.name] for f in fields(cls)},
+            "version": version, "rule_count": rule_count,
+        })

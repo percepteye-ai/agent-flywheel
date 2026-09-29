@@ -108,9 +108,11 @@ from .prompt import (
 )
 from .runner import DEFAULT_ROLLOUT_TIMEOUT_S, RolloutRunner
 from .transport import (
+    RULEBOOK_SETTLE_GRACE_S,
     AttachTransport,
     FlywheelTransport,
     RulebookUpload,
+    declare_rulebook_in_background,
     declared_rulebook,
 )
 
@@ -713,7 +715,9 @@ def _rulebook_line(upload: RulebookUpload) -> str:
     """
     receipt, refusal = upload
     if receipt is None:
-        return f"[percepteye] rulebook NOT registered — {refusal}"
+        # NOT "not registered": the sentence says whether that is known, and
+        # a failure after the rules may have landed says it is not.
+        return f"[percepteye] rulebook NOT confirmed — {refusal}"
     if receipt.status == "unchanged":
         what = "unchanged, already in force"
     else:
@@ -879,7 +883,9 @@ def serve(
             list of strings raises :class:`ConfigurationError` here; anything
             the control plane refuses (a rule it will not accept, named by
             cause and index; an agent no single Product declares) or cannot
-            hear is printed in one line and never stops the flywheel. Rules
+            hear is printed in one line and never stops the flywheel. They
+            are declared in the background, so a slow rulebook route holds
+            back neither the policy read nor the first claim. Rules
             never ride ``describe=``: a declaration withholds the agent's
             execution identity, and these are the Product's rules, not the
             agent's description.
@@ -1164,11 +1170,19 @@ def serve(
     # ── the Product's workflow rules, when the code declares them ───────────
     # Once, after the registration and never inside it: a registration is
     # persisted whole on every restart, and rules are the Product's, not the
-    # agent's. The upload never raises (a rulebook that did not register
-    # must not stop a donor), so the line below is the whole of what it can
-    # do to this process: say what happened.
+    # agent's. IN THE BACKGROUND: a slow or hung rulebook route must cost the
+    # rules and nothing else, and inline it held the policy read and the claim
+    # loop for its whole retry envelope. The declaration never raises (a
+    # rulebook that did not register must not stop a donor), so the line it
+    # prints -- one write, so it cannot interleave with another line -- is the
+    # whole of what it can do to this process: say what happened.
+    declaring = None
     if rulebook is not None:
-        print(_rulebook_line(tr.register_rulebook(rulebook)), flush=True)
+        declaring = declare_rulebook_in_background(
+            tr, rulebook,
+            lambda upload: print(f"{_rulebook_line(upload)}\n", end="",
+                                 flush=True),
+        )
 
     # ── the last mile ───────────────────────────────────────────────────────
     # Training produces a better model; this is where the agent finds out.
@@ -1205,4 +1219,8 @@ def serve(
     try:
         return runner.serve_forever(max_rollouts=max_rollouts)
     finally:
+        # The declaration shares this client: give an answer still on its way
+        # a bounded moment before closing it, rather than cutting it off.
+        if declaring is not None:
+            declaring.join(RULEBOOK_SETTLE_GRACE_S)
         client.close()

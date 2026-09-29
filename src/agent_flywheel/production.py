@@ -96,7 +96,12 @@ from .outcomes import (
     record_turn_text,
 )
 from .policy import missing_credentials_cause
-from .transport import declared_rulebook
+from .transport import (
+    RULEBOOK_SETTLE_GRACE_S,
+    RulebookUpload,
+    declare_rulebook_in_background,
+    declared_rulebook,
+)
 
 __all__ = ["Attachment", "CaptureVerdict", "attach", "capture_verdict"]
 
@@ -282,6 +287,13 @@ _FLUSH_EVERY = 32
 #: next process to attach uploads it.
 _CLOSE_FLUSH_GRACE_S = 5.0
 
+#: What :attr:`Attachment.rulebook_refusal` says while the control plane has
+#: not yet answered ``attach(rules=...)``.
+_RULEBOOK_PENDING = (
+    "the control plane has not answered the rules passed as rules= yet; "
+    "Attachment.wait_for_rulebook() waits for its answer."
+)
+
 
 def _started_at(d: Path) -> float:
     """When this turn STARTED, for ordering a conversation.
@@ -450,16 +462,14 @@ class Attachment:
             None if self.may_capture_model_content
             else (model_content_refusal or upload_refusal)
         )
-        #: What the control plane did with ``attach(rules=...)``: its receipt
-        #: (``status``, ``version``, ``content_sha256``, ``rule_count``), or
-        #: ``None`` when no rules were passed or none registered.
-        self.rulebook = rulebook
-        #: Why the rules passed as ``rules=`` are not confirmed in force, in a
-        #: sentence -- the control plane's refusal naming its cause, an
-        #: unreachable control plane, or a call that never asked it. ``None``
-        #: when they registered (``rulebook`` says how) or none were passed.
-        #: Read once, at startup: ``attach()`` declares rules exactly once.
-        self.rulebook_refusal = rulebook_refusal
+        #: What ``attach(rules=...)`` came to, as ONE value -- read through
+        #: :attr:`rulebook` and :attr:`rulebook_refusal`, and replaced whole
+        #: when the declaration settles in the background, so neither
+        #: attribute is ever read half-updated against the other.
+        self._rulebook_upload = RulebookUpload(rulebook, rulebook_refusal)
+        #: The declaration in flight, or ``None`` -- see
+        #: :meth:`wait_for_rulebook`.
+        self._rulebook_declaration: threading.Thread | None = None
         #: Exact SDK-reconciled execution identity, when attach() was given
         #: enough behavior observation and opaque adapter evidence to prove
         #: one. It is persisted per turn; absent stays absent.
@@ -472,6 +482,60 @@ class Attachment:
         #: at startup OR later, and can be taken away and re-granted, so the
         #: hook is claimed once rather than once per grant.
         self._exit_flush_registered = False
+
+    @property
+    def rulebook(self) -> RulebookReceipt | None:
+        """What the control plane did with ``attach(rules=...)``: its receipt
+        (``status``, ``version``, ``content_sha256``, ``rule_count``), or
+        ``None`` when no rules were passed, none registered, or the control
+        plane has not answered yet (:meth:`wait_for_rulebook`)."""
+        return self._rulebook_upload.receipt
+
+    @property
+    def rulebook_refusal(self) -> str | None:
+        """Why the rules passed as ``rules=`` are not confirmed in force, in a
+        sentence -- the control plane's refusal naming its cause, a failure
+        that leaves it unknown, a call that never asked it, or an answer still
+        on its way. ``None`` when they registered (:attr:`rulebook` says how)
+        or none were passed. ``attach()`` declares rules exactly once."""
+        return self._rulebook_upload.refusal
+
+    def wait_for_rulebook(self, timeout: float | None = None) -> bool:
+        """Wait up to ``timeout`` seconds (``None``: as long as it takes) for
+        the control plane's answer to ``attach(rules=...)``.
+
+        True once :attr:`rulebook` and :attr:`rulebook_refusal` say what it
+        did -- at once when no declaration is in flight. ``attach()`` returns
+        WITHOUT waiting, so that a slow rulebook route costs the rules and
+        nothing else; this is for the caller who wants the answer anyway.
+        """
+        declaration = self._rulebook_declaration
+        if declaration is None:
+            return True
+        declaration.join(timeout)
+        return not declaration.is_alive()
+
+    def _declare_rulebook(self, transport: Any, request: Any,
+                          client: ControlPlaneClient) -> None:
+        """Declare ``attach(rules=...)`` in the background; the one caller is
+        :func:`attach`, once this attachment exists to hold the answer.
+
+        The declaration OWNS ``client`` from here and closes it when the
+        control plane answers. Until then :attr:`rulebook_refusal` says the
+        answer is on its way -- never ``None``, which would read as
+        "registered".
+        """
+        self._rulebook_upload = RulebookUpload(None, _RULEBOOK_PENDING)
+
+        def _settle(upload: RulebookUpload) -> None:
+            self._rulebook_upload = upload
+            try:
+                client.close()
+            except Exception:
+                pass
+
+        self._rulebook_declaration = declare_rulebook_in_background(
+            transport, request, _settle)
 
     @contextmanager
     def turn(self, *, turn_id: str | None = None,
@@ -1384,6 +1448,11 @@ class Attachment:
                 pass
             finally:
                 self._flush_lock.release()
+        # The rules' declaration, if the control plane has not answered it
+        # yet: a process closing moments after attach() would otherwise kill
+        # it with the interpreter. Bounded the same way, and for the same
+        # reason; rules it does not settle are declared by the next start.
+        self.wait_for_rulebook(RULEBOOK_SETTLE_GRACE_S)
         for u in unbinds:
             try:
                 u()
@@ -1541,12 +1610,15 @@ def attach(
     ``POST /agents/{agent_id}/rulebook``, and filed by the control plane under
     the one active Product that declares this agent. ``None`` sends nothing;
     ``[]`` retracts the rulebook in force; the same rules on the next start
-    register nothing, and the last writer wins. :attr:`Attachment.rulebook` is
-    the control plane's receipt and :attr:`Attachment.rulebook_refusal` the
-    sentence explaining why there is none. A refused or undeliverable upload
-    costs the rules and nothing else -- never the registration, the capture
-    verdict or the policy read. Not a list of strings raises
-    :class:`ConfigurationError`.
+    register nothing, and the last writer wins. They are declared IN THE
+    BACKGROUND, after the policy read, and this returns without waiting for
+    the answer: a refused, undeliverable or slow upload costs the rules and
+    nothing else -- never the registration, the capture verdict, the policy
+    read or the time this call takes. :attr:`Attachment.rulebook` is the
+    control plane's receipt and :attr:`Attachment.rulebook_refusal` the
+    sentence explaining why there is none (yet, until it answers);
+    :meth:`Attachment.wait_for_rulebook` waits for the answer. Not a list of
+    strings raises :class:`ConfigurationError`.
 
     Nothing here raises on a control-plane failure. ``agent_id`` missing or
     ``trajectory_root`` missing raise -- those are configuration mistakes in
@@ -1705,8 +1777,8 @@ def attach(
         # true one for every such path. The successful path overwrites it.
         upload_refusal = capture_verdict(None).reason
     # The same rule for the rules: NAMED for every way they can go unsent,
-    # each with its own remedy, and overwritten by what the upload did.
-    rulebook: RulebookReceipt | None = None
+    # each with its own remedy, and replaced by what the declaration did when
+    # one runs (`Attachment._declare_rulebook`).
     rulebook_refusal: str | None = None
     if rulebook_request is not None:
         if not register:
@@ -1724,6 +1796,10 @@ def attach(
                 "the control plane client could not be built, so the rules "
                 "passed as rules= were never sent to it."
             )
+    #: The transport the rules are declared through and the client it owns,
+    #: once the Attachment exists to hold the answer -- set only when the
+    #: policy read is done.
+    declare_through: tuple[Any, ControlPlaneClient] | None = None
     if register and url and key:
         client: ControlPlaneClient | None = None
         try:
@@ -1792,17 +1868,18 @@ def attach(
                 # production to the untrained policy.
                 register_error = exc
             policy = tr.policy_current() or {}
-            # After the policy read, and through a method that never raises:
-            # rules the control plane refuses, or cannot hear, must cost the
-            # rules and nothing else -- the `except` below would otherwise
-            # read their failure as the policy's.
+            # The rules go AFTER the policy read and OFF this call's return
+            # path (below, once the Attachment exists): rules the control
+            # plane refuses, or cannot hear, or answers slowly, must cost the
+            # rules and nothing else -- not the policy already read, not the
+            # capture verdict, not the customer's startup.
             if rulebook_request is not None:
-                rulebook, rulebook_refusal = tr.register_rulebook(
-                    rulebook_request)
+                declare_through = (tr, client)
         except Exception:
             policy = {}
         finally:
-            if client is not None:
+            # A declaration still to run OWNS the client and closes it itself.
+            if client is not None and declare_through is None:
                 try:
                     client.close()
                 except Exception:
@@ -1850,13 +1927,15 @@ def attach(
         agent_fingerprint=agent_fingerprint,
         may_capture_model_content=may_capture_model_content,
         model_content_refusal=model_content_refusal,
-        rulebook=rulebook,
         rulebook_refusal=rulebook_refusal,
     )
     if may_upload:
         # Through the same seam late consent goes through, so the hook is
         # registered by exactly one rule: "may_upload just became True".
         px._grant_upload()
+    if declare_through is not None:
+        transport, owned = declare_through
+        px._declare_rulebook(transport, rulebook_request, owned)
     return px
 
 

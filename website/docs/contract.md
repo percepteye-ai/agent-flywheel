@@ -37,7 +37,8 @@ what a rule may be, so the schema states the shape and nothing more.
 with the version and its digest. `contract.py`'s `RulebookRequest` and
 `RulebookReceipt` match them, held to the schema in both directions by
 `tests/test_rulebook_upload.py`, and `tests/test_rulebook_parity.py` holds the
-Node package to the same request, byte for byte, and to this file's bytes.
+Node package to the same request (route, JSON body and idempotency key), and
+to this file's bytes.
 
 ## The Python types are hand-written to match
 

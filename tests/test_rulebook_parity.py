@@ -3,10 +3,17 @@
 A customer runs one package or the other, and may move between them. The
 control plane answers rules equal to the ones in force ``unchanged``, so the
 same rules must reach it as the same request from either SDK: the same route
-(the agent id encoded the same way), the same body bytes, and the same
+(the agent id encoded the same way), the same JSON body, and the same
 idempotency key -- the turn batch's derivation over the body, which the Node
 side reproduces with ``stableStringify``. And what each tells its customer
 about the answer must be the same sentence.
+
+The body is compared as JSON, not as bytes. Python's bytes are httpx's
+encoder's, and the floor this package declares (``httpx>=0.27``) spaces and
+escapes them differently from 0.28 -- the control plane reads the JSON, and
+the key is this package's own digest of the body, so neither depends on it.
+The ANSWER each side is handed is the same bytes, so the sentences they build
+from it can be compared exactly.
 
 Both halves are driven through their REAL transport and REAL HTTP client:
 Python's ``ControlPlaneClient`` over ``httpx.MockTransport``, Node's over an
@@ -47,24 +54,44 @@ RECEIPT = {
     "version_id": "v-2", "version": 2, "content_sha256": "b" * 64,
     "parent_sha256": "a" * 64, "rule_count": 2,
 }
-#: `(name, rules, status, answer body)`. The refusals carry the control
-#: plane's structured detail; the 409's is longer than both clients keep, so
-#: the cut is compared as well.
+#: `(name, rules, status, answer body, what the refusal says)`. The
+#: refusals carry the control plane's structured detail; the 409's is longer
+#: than both clients keep, so the cut is compared as well. The keyless and
+#: array bodies are what a proxy or an older control plane may answer; the 502
+#: may come after the rules landed, the 503 says they did not.
 CASES = [
-    ("registered", RULES, 200, RECEIPT),
+    ("registered", RULES, 200, RECEIPT, None),
     ("retracted", [], 200, {**RECEIPT, "status": "retracted",
-                            "rule_count": 0, "version": 3}),
+                            "rule_count": 0, "version": 3}, None),
+    # JSON Schema's integer and JavaScript's number: a receipt on both sides.
+    ("integral_floats", RULES, 200, {**RECEIPT, "version": 2.0,
+                                     "rule_count": 2.0}, None),
     ("unattributed", RULES, 409, {"detail": {
         "error": "rulebook_unattributed", "status": "ambiguous",
         "detail": ("agent 'desk (eu)-ü' is attributed to no Product "
                    "(ambiguous: exactly one active Product must declare the "
                    "agent in its Flywheel spec), so its rules would belong to "
                    "no Product and nothing was registered. Declare the agent "
-                   "on exactly one Product.")}}),
+                   "on exactly one Product.")}}, "rulebook_unattributed"),
     ("invalid", RULES, 422, {"detail": {
         "error": "rulebook_invalid", "cause": "rule_too_short", "index": 1,
-        "detail": "la règle 1 est trop courte"}}),
+        "detail": "la règle 1 est trop courte"}}, "rulebook_invalid"),
+    ("keyless", RULES, 409, {"code": "gateway_busy", "hint": None},
+     '{"code":"gateway_busy","hint":null}'),
+    ("array", RULES, 403, ["x", 1], '["x",1]'),
+    ("store_unavailable", RULES, 503, {"detail": {
+        "error": "product_rulebook_store_failed",
+        "detail": "the artifact store did not answer"}},
+     "this agent's rules were not registered"),
+    ("answer_lost", RULES, 502, {"detail": "upstream closed the connection"},
+     "whether this agent's rules were registered is unknown"),
 ]
+
+
+def _answer(body) -> str:
+    """The bytes both fakes answer with -- ``JSON.stringify``'s spelling, so
+    a floating ``2.0`` stays ``2.0`` on the wire for both readers."""
+    return json.dumps(body, ensure_ascii=False, separators=(",", ":"))
 
 
 def _python(rules, status, body) -> dict:
@@ -78,7 +105,9 @@ def _python(rules, status, body) -> dict:
             "key": request.headers["Idempotency-Key"],
             "body": request.content.decode("utf-8"),
         })
-        return httpx.Response(status, json=body)
+        return httpx.Response(
+            status, content=_answer(body).encode("utf-8"),
+            headers={"content-type": "application/json"})
 
     client = ControlPlaneClient(BASE, "pefw_test", max_attempts=1, client=(
         httpx.Client(transport=httpx.MockTransport(handler))))
@@ -96,14 +125,14 @@ let raw = '';
 for await (const chunk of process.stdin) raw += chunk;
 const { base, agent, cases } = JSON.parse(raw);
 const out = {};
-for (const [name, rules, status, body] of cases) {
+for (const [name, rules, status, answer] of cases) {
   const seen = [];
   const client = new ControlPlaneClient(base, 'pefw_test', {
     maxAttempts: 1,
     fetchImpl: async (url, init) => {
       seen.push({ method: init.method, path: url.slice(base.length),
                   key: init.headers['Idempotency-Key'], body: init.body });
-      return new Response(JSON.stringify(body), {
+      return new Response(answer, {
         status, headers: { 'content-type': 'application/json' } });
     },
   });
@@ -120,7 +149,9 @@ process.stdout.write(JSON.stringify(out));
 @pytest.fixture(scope="module")
 def node() -> dict:
     sdk, binary = require_node_sdk()
-    stdin = json.dumps({"base": BASE, "agent": AGENT, "cases": CASES})
+    stdin = json.dumps({"base": BASE, "agent": AGENT, "cases": [
+        [name, rules, status, _answer(body)]
+        for name, rules, status, body, _ in CASES]})
     return json.loads(run_node(sdk, binary, _NODE, stdin=stdin))
 
 
@@ -129,10 +160,12 @@ def test_both_sdks_send_one_request_for_one_declaration(node, case):
     """Mutations (Python side): key over the rules list instead of the body,
     ``ensure_ascii=False`` in the digest, or ``quote(..., safe="()")`` in the
     route -> red against the Node side's derivation."""
-    name, rules, status, body = case
+    name, rules, status, body, _ = case
     python = _python(rules, status, body)
     (mine,), (theirs,) = python["seen"], node[name]["seen"]
-    assert theirs == mine, f"{name}:\n  python: {mine}\n  node  : {theirs}"
+    assert {**theirs, "body": json.loads(theirs["body"])} == {
+        **mine, "body": json.loads(mine["body"])}, (
+        f"{name}:\n  python: {mine}\n  node  : {theirs}")
     assert mine["path"] == "/agents/desk%20%28eu%29-%C3%BC/rulebook"
     assert json.loads(mine["body"]) == {"rules": rules}
 
@@ -142,13 +175,13 @@ def test_both_sdks_tell_the_customer_the_same_thing(node, case):
     """The same answer is the same receipt, or the same refusal sentence --
     the control plane's own cause in the same spelling, never a Python repr
     on one side and ``[object Object]`` on the other."""
-    name, rules, status, body = case
+    name, rules, status, body, says = case
     python = _python(rules, status, body)
     assert node[name]["refusal"] == python["refusal"], name
     assert node[name]["receipt"] == python["receipt"], name
     if status >= 400:
         assert python["receipt"] is None
-        assert body["detail"]["error"] in python["refusal"]
+        assert says in python["refusal"], (says, python["refusal"])
     else:
         assert python["refusal"] is None
         assert python["receipt"]["status"] == body["status"]

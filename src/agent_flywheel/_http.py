@@ -72,6 +72,19 @@ def default_delivery_envelope_s() -> float:
 #: have been processed, and is only safe to resend if the endpoint is replayable.
 _NEVER_SENT = (httpx.ConnectError, httpx.ConnectTimeout)
 
+
+def _may_have_performed(status: int) -> bool:
+    """Might a request answered with this status have been PERFORMED?
+
+    A 4xx is the server refusing it and a 503 the server saying it was not
+    handled -- the control plane's own store failures answer 503 and register
+    nothing. Any other 5xx may come after the work was done: a 500 raised
+    after a commit, a 502 or 504 from a proxy whose upstream finished the
+    request and lost the answer. Read by :attr:`TransportError.ambiguous`.
+    """
+    return status >= 500 and status != 503
+
+
 _SDK_UA = f"agent-flywheel-python/{__version__}"
 
 
@@ -165,6 +178,10 @@ class ControlPlaneClient:
             request_headers["Idempotency-Key"] = idempotency_key
 
         last_err: str | None = None
+        #: Whether ANY attempt so far may have been performed -- see
+        #: ``TransportError.ambiguous``. Over every attempt, not the last:
+        #: a retry that was never sent says nothing about the one before it.
+        ambiguous = False
         for attempt in range(1, self._max_attempts + 1):
             # NEVER `None`. httpx reads an explicit ``timeout=None`` as NO
             # TIMEOUT AT ALL -- its "use the client's" value is a sentinel, not
@@ -199,6 +216,7 @@ class ControlPlaneClient:
                 )
             except httpx.HTTPError as exc:
                 last_err = f"{type(exc).__name__}: {exc}"
+                ambiguous = ambiguous or not isinstance(exc, _NEVER_SENT)
                 if attempt == self._max_attempts or not (
                     retry_if_ambiguous or isinstance(exc, _NEVER_SENT)
                 ):
@@ -207,7 +225,9 @@ class ControlPlaneClient:
                 continue
 
             if resp.status_code == 410:
-                raise LeaseLost(_detail(resp) or "lease lost")
+                raise LeaseLost(_detail(resp) or "lease lost",
+                                ambiguous=ambiguous)
+            ambiguous = ambiguous or _may_have_performed(resp.status_code)
 
             if resp.status_code == 429 or (
                 resp.status_code in _RETRY_STATUS and retry_if_ambiguous
@@ -226,6 +246,7 @@ class ControlPlaneClient:
                 raise TransportError(
                     f"{method} {path} -> HTTP {resp.status_code}: {_detail(resp)}",
                     status_code=resp.status_code,
+                    ambiguous=ambiguous,
                 )
 
             if not resp.content:
@@ -233,13 +254,17 @@ class ControlPlaneClient:
             try:
                 body = resp.json()
             except ValueError as exc:
+                # PERFORMED: the control plane answered 2xx. What it did is
+                # unreadable, not undone.
                 raise TransportError(
-                    f"{method} {path} -> HTTP {resp.status_code} with unparseable body: {exc}"
+                    f"{method} {path} -> HTTP {resp.status_code} with unparseable body: {exc}",
+                    ambiguous=True,
                 ) from exc
             return body if isinstance(body, dict) else {"data": body}
 
         raise TransportError(
-            f"{method} {path} failed after {self._max_attempts} attempts: {last_err}"
+            f"{method} {path} failed after {self._max_attempts} attempts: {last_err}",
+            ambiguous=ambiguous,
         )
 
 
@@ -282,8 +307,8 @@ def _detail(resp: httpx.Response) -> str:
         for key in ("detail", "error", "message", "reason"):
             if key in body:
                 value = body[key]
-                # A STRUCTURED detail is rendered as the JSON it arrived as,
-                # never as a Python repr. The control plane answers many
+                # A STRUCTURED detail is rendered as JSON, never as a Python
+                # repr. The control plane answers many
                 # refusals with an object -- `{error, cause, index, detail}`
                 # for a refused rule, `{error, status, detail}` for an agent
                 # attributed to no Product -- and the Node SDK renders the same
@@ -292,4 +317,9 @@ def _detail(resp: httpx.Response) -> str:
                 text = value if isinstance(value, str) else json.dumps(
                     value, ensure_ascii=False, separators=(",", ":"))
                 return text[:300]
-    return str(body)[:300]
+    # ANYTHING ELSE IS THE ANSWER'S OWN TEXT -- an object with none of those
+    # keys, an array, a bare scalar -- exactly as the Node client keeps it
+    # (`cut(String(text))`). It used to be ``str(body)``, a Python repr of what
+    # the text parsed to (``{'code': 'x', 'hint': None}``), so the same answer
+    # read differently in the two packages and in neither as it was sent.
+    return (resp.text or "")[:300]

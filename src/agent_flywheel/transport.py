@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 from urllib.parse import quote
 
@@ -46,6 +47,7 @@ __all__ = [
     "AttachTransport",
     "FlywheelTransport",
     "RulebookUpload",
+    "declare_rulebook_in_background",
     "declared_rulebook",
     "rulebook_refusal",
 ]
@@ -74,7 +76,8 @@ class RulebookUpload(NamedTuple):
 
 
 def rulebook_refusal(exc: BaseException) -> str:
-    """The sentence saying why a rulebook declaration registered nothing.
+    """The sentence saying why a rulebook declaration came back with no
+    receipt.
 
     ONE BUILDER, and the Node SDK's ``rulebookRefusal`` builds the same
     sentence from the same error, so a customer reads one answer whichever
@@ -85,11 +88,80 @@ def rulebook_refusal(exc: BaseException) -> str:
     attributes the agent to no single Product, a key without the scope -- or,
     when no answer came at all, the transport failure. One message for every
     cause would send an operator to fix the wrong thing.
+
+    "NOT REGISTERED" ONLY WHEN IT IS KNOWN. A failure after the request may
+    have landed -- a read timeout, a dropped connection, a 502 from a proxy
+    whose upstream finished -- is :attr:`TransportError.ambiguous`, and the
+    rules may be in force: saying the rulebook is unchanged would send an
+    operator to believe the old one still is. That failure is named as
+    unknown, with the one remedy that is safe either way.
     """
+    if isinstance(exc, TransportError) and exc.ambiguous:
+        return (
+            f"whether this agent's rules were registered is unknown: {exc}. "
+            f"The control plane may have received them before the failure; "
+            f"declaring the same rules again is safe, because rules equal to "
+            f"the ones in force are answered unchanged."
+        )
     return (
         f"this agent's rules were not registered: {exc}. The rulebook in "
         f"force, if any, is unchanged."
     )
+
+
+#: How long a caller about to close the client a declaration is using waits
+#: for its answer: ``serve()`` when its loop returns, :meth:`Attachment.close`.
+#: BOUNDED for the reason ``close()``'s flush grace is: an unresponsive
+#: control plane must not hold a customer's process open at exit. Rules not
+#: declared by then are declared by the next start, which re-declares them.
+RULEBOOK_SETTLE_GRACE_S = 5.0
+
+
+def declare_rulebook_in_background(
+    transport: AttachTransport,
+    request: RulebookRequest,
+    settle: Callable[[RulebookUpload], None],
+) -> threading.Thread | None:
+    """Declare ``request`` OFF the caller's startup path, and hand what
+    happened to ``settle``.
+
+    THE ONE WAY ``serve()`` and ``attach()`` declare rules. A rulebook route
+    that is slow or hung -- the client's four attempts of up to 30s each --
+    must cost the rules and nothing else: not ``attach()`` returning the
+    policy it has already read, not ``serve()``'s policy read or claim loop,
+    not a customer's startup. Declared inline, it cost all of those for up to
+    two minutes. The Node plugin declares them off every chain its other
+    startup reads wait on, for the same reason.
+
+    On a DAEMON thread, so it never holds an interpreter open at exit; a
+    caller that is about to close the client this uses joins the returned
+    thread for :data:`RULEBOOK_SETTLE_GRACE_S` first. Returns ``None`` when
+    the interpreter can no longer start threads (it is shutting down): the
+    declaration then runs here, and has settled by the time this returns.
+
+    Never raises, like :meth:`AttachTransport.register_rulebook`; a
+    ``settle`` that raises is swallowed at the thread boundary, which must
+    not print a traceback under this package's name for a failure that cost
+    only the report of the rules.
+    """
+    def _run() -> None:
+        try:
+            upload = transport.register_rulebook(request)
+        except Exception as exc:  # backstop; the method never raises
+            upload = RulebookUpload(None, rulebook_refusal(exc))
+        try:
+            settle(upload)
+        except Exception:
+            pass
+
+    thread = threading.Thread(
+        target=_run, name="percepteye-rulebook", daemon=True)
+    try:
+        thread.start()
+    except RuntimeError:
+        _run()
+        return None
+    return thread
 
 
 def declared_rulebook(rules: Any) -> RulebookRequest | None:

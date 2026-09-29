@@ -185,7 +185,7 @@ The operator declares the Product's workflow rules in the plugin's config, and t
 ] } } } }
 ```
 
-- **The same request, byte for byte** — route, body and idempotency key, non-ASCII rules and awkward agent ids included — and the same receipt or refusal sentence for the same answer. `tests/test_rulebook_parity.py`, in this repository, drives both packages' real transports and HTTP clients to prove it, and holds the two copies of `schema/flywheel-1.json` to the same bytes.
+- **The same request** — route, JSON body and idempotency key, non-ASCII rules and awkward agent ids included — and the same receipt or refusal sentence for the same answer. `tests/test_rulebook_parity.py`, in this repository, drives both packages' real transports and HTTP clients to prove it, and holds the two copies of `schema/flywheel-1.json` to the same bytes.
 - **Unset sends nothing; `[]` retracts;** the last writer wins, exactly as for `rules=`.
 - **Never fatal.** A refused or undeliverable declaration is logged with the control plane's cause and costs nothing else. One difference, forced by the host as `describe`'s is: a value that is not a list of strings makes the Python SDK refuse to start, but a throw from an OpenClaw plugin's `register()` fails the plugin load, so the plugin logs the refusal naming what is wrong with the value — the same shape check, in the same words — and declares no rules.
 

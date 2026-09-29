@@ -83,11 +83,24 @@ class TransportError(FlywheelError):
     a 403 will refuse the identical payload forever, while a connection reset
     will not, and a caller deciding whether to keep a result for redelivery
     cannot tell those apart from the message text without parsing English.
+
+    ``ambiguous`` is True when the control plane MAY HAVE PERFORMED the
+    request although this error was raised: some attempt failed after the
+    request could have reached it -- a read timeout, a dropped connection, a
+    5xx other than 503 -- or it answered 2xx with a body that could not be
+    read. False means no attempt can have been performed: each was never sent,
+    or was refused (a 4xx, or a 503 saying it was not handled). ONLY THE CLIENT
+    KNOWS, because only it saw every attempt: a retried request whose LAST
+    attempt was never sent may have landed on the first, and the message names
+    the last one alone. A caller about to tell someone "that did not happen"
+    asks this.
     """
 
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(self, message: str, *, status_code: int | None = None,
+                 ambiguous: bool = False) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.ambiguous = ambiguous
 
 
 class LeaseLost(TransportError):

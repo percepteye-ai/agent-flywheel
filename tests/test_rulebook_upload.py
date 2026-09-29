@@ -13,12 +13,16 @@ socket is the real code: no transport or client is faked.
 Pinned:
 
 * the rules go once, after the registration, on their own route, with the
-  closed body the published schema declares and a key derived from it;
+  closed body the published schema declares and a key derived from it --
+  in the BACKGROUND, so a slow or hung rulebook route holds back neither
+  ``attach()``'s return nor ``serve()``'s policy read;
 * ``rules=None`` sends nothing, ``[]`` retracts, and the same rules on the
   next start register nothing;
 * a refused or undeliverable upload is RETURNED (``rulebook_refusal``, the
   line ``serve()`` prints) in the control plane's own words, never raised,
-  and costs neither the registration nor the policy read;
+  and costs neither the registration nor the policy read; "not registered"
+  is said only when that is known, and a failure after the rules may have
+  landed says it is unknown;
 * a value that is not a list of strings refuses at startup, before anything
   connects.
 
@@ -28,6 +32,8 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 from dataclasses import fields
 from pathlib import Path
 
@@ -36,7 +42,7 @@ import pytest
 from jsonschema import Draft202012Validator
 
 import agent_flywheel as fw
-from agent_flywheel import _http
+from agent_flywheel import _http, production
 from agent_flywheel.contract import (
     RulebookReceipt,
     RulebookRequest,
@@ -82,6 +88,12 @@ class ControlPlane:
         self.requests: list[httpx.Request] = []
         self.rulebook_answer = rulebook_answer
         self.rulebook_error = rulebook_error
+        #: Called before the rulebook route answers: a route that is slow.
+        self.rulebook_hold = None
+        #: Called when the policy is read, to see what it overtook.
+        self.on_policy_read = None
+        #: The route REGISTERS the rules, then its answer is lost.
+        self.lose_answer = False
         self.in_force: list[str] | None = None
         self.version = 0
 
@@ -96,11 +108,18 @@ class ControlPlane:
                 "agent_id": AGENT, "grade": "advisory", "grade_reasons": [],
                 "capture": {"turns": True}})
         if route == "GET /policy/current":
+            if self.on_policy_read is not None:
+                self.on_policy_read()
             return httpx.Response(200, json=POLICY)
         if route.endswith("/rulebook"):
+            if self.rulebook_hold is not None:
+                self.rulebook_hold()
             if self.rulebook_error is not None:
                 raise self.rulebook_error(
                     "connection refused", request=request)
+            if self.lose_answer:
+                self.receipt(json.loads(request.content)["rules"])
+                raise httpx.ReadTimeout("read timed out", request=request)
             if self.rulebook_answer is not None:
                 return self.rulebook_answer
             return httpx.Response(200, json=self.receipt(
@@ -185,16 +204,20 @@ def attached(tmp_path):
 def test_serve_declares_the_rules_once_after_registering(cp, tmp_path, capsys):
     """Mutations: upload before ``tr.register`` -> the order is wrong (red);
     drop the upload -> no rulebook request (red); send the rules inside the
-    registration -> the registration body carries them (red)."""
+    registration -> the registration body carries them (red).
+
+    The body is compared as JSON, not bytes: the bytes are httpx's encoder's,
+    and the declared floor (``httpx>=0.27``) spaces them differently from
+    0.28. The control plane reads JSON, and the key is this package's own
+    digest of the body, whichever httpx sent it."""
     assert _serve(tmp_path, rules=[RULE_A, RULE_B]) == 0
 
-    assert cp.routes() == [
-        "GET /health", "POST /agents", f"POST /agents/{AGENT}/rulebook",
-        "GET /policy/current",
-    ]
+    routes = cp.routes()
+    assert routes[:2] == ["GET /health", "POST /agents"]
+    assert sorted(routes[2:]) == sorted(
+        [f"POST /agents/{AGENT}/rulebook", "GET /policy/current"])
     (sent,) = cp.rulebook_requests()
-    assert sent.content == json.dumps(
-        {"rules": [RULE_A, RULE_B]}, separators=(",", ":")).encode()
+    assert json.loads(sent.content) == {"rules": [RULE_A, RULE_B]}
     assert re.fullmatch(rf"rulebook-{AGENT}-[0-9a-f]{{32}}",
                         sent.headers["Idempotency-Key"])
     registration = json.loads(cp.requests[1].content)
@@ -208,6 +231,7 @@ def test_attach_declares_the_rules_and_keeps_the_receipt(cp, attached):
     """Mutations: drop the upload from attach() -> ``rulebook`` is None
     (red); pass the receipt to the wrong attribute -> red."""
     px = attached(rules=[RULE_A, RULE_B])
+    assert px.wait_for_rulebook(5)
 
     assert cp.routes() == [
         "POST /agents", "GET /policy/current", f"POST /agents/{AGENT}/rulebook",
@@ -235,9 +259,22 @@ def test_the_same_rules_on_the_next_start_register_nothing(cp, tmp_path, capsys)
     assert first.headers["Idempotency-Key"] == second.headers["Idempotency-Key"]
 
 
-def test_an_empty_list_retracts(cp, attached):
+def test_an_empty_list_retracts(cp, attached, tmp_path, capsys):
+    """Through BOTH writers: ``[]`` is a declaration, not an absence.
+
+    Mutations: ``if rules:`` in place of ``is not None`` in serve() or
+    attach() -> no retraction is sent (red)."""
+    cp.in_force, cp.version = [RULE_A], 1
+    _serve(tmp_path, rules=[])
+    (sent,) = cp.rulebook_requests()
+    assert json.loads(sent.content) == {"rules": []}
+    assert (f"[percepteye] rulebook: retracted as version 2 — 0 rule(s) for "
+            f"Product {PRODUCT}") in capsys.readouterr().out
+
+    cp.requests.clear()
     cp.in_force, cp.version = [RULE_A], 1
     px = attached(rules=[])
+    assert px.wait_for_rulebook(5)
     (sent,) = cp.rulebook_requests()
     assert json.loads(sent.content) == {"rules": []}
     assert px.rulebook.status == "retracted"
@@ -274,12 +311,13 @@ def test_a_refusal_is_the_control_planes_own_words_and_never_raised(
 
     assert _serve(tmp_path, rules=[RULE_A, "too short"]) == 0
     line = capsys.readouterr().out
-    assert "[percepteye] rulebook NOT registered — this agent's rules were " \
+    assert "[percepteye] rulebook NOT confirmed — this agent's rules were " \
            "not registered: POST /agents/widget-helper/rulebook ->" in line
     for name in names:
         assert name in line, (name, line)
 
     px = attached(rules=[RULE_A, "too short"])
+    assert px.wait_for_rulebook(5)
     assert px.rulebook is None
     assert px.rulebook_refusal.startswith(
         "this agent's rules were not registered: ")
@@ -304,8 +342,191 @@ def test_an_unreachable_rulebook_route_costs_nothing_else(cp, attached, tmp_path
 
     px = attached(rules=[RULE_A])
     assert px.policy == POLICY
+    assert px.wait_for_rulebook(5)
     assert px.rulebook is None
     assert "ConnectError" in px.rulebook_refusal
+    # NEVER SENT, so this one is known: nothing registered.
+    assert px.rulebook_refusal.startswith(
+        "this agent's rules were not registered: ")
+
+
+# ── a slow route costs the rules, and nothing else ────────────────────────
+
+PENDING = ("the control plane has not answered the rules passed as rules= "
+           "yet; Attachment.wait_for_rulebook() waits for its answer.")
+
+
+def test_a_hung_rulebook_route_does_not_hold_back_attach(cp, attached):
+    """attach() returns the policy it has read, the capture verdict and the
+    customer's startup while the rulebook route has not answered; the answer
+    lands on the attachment when it comes.
+
+    Mutations: declare inline in attach()'s network block -> attach()
+    returns only when the route answers, after the hold (red); leave
+    ``rulebook_refusal`` None while pending -> red; ``wait_for_rulebook``
+    returning without joining -> the receipt is not there yet (red)."""
+    release = threading.Event()
+    cp.rulebook_hold = lambda: release.wait(3)
+
+    started = time.monotonic()
+    px = attached(rules=[RULE_A])
+    took = time.monotonic() - started
+
+    assert took < 2, f"attach() waited {took:.2f}s on the rulebook route"
+    assert px.policy == POLICY
+    assert px.may_upload is True
+    assert px.rulebook is None
+    assert px.rulebook_refusal == PENDING
+    assert px.wait_for_rulebook(0.05) is False
+
+    release.set()
+    assert px.wait_for_rulebook(5) is True
+    assert px.rulebook.status == "registered"
+    assert px.rulebook_refusal is None
+
+
+def test_a_hung_rulebook_route_does_not_hold_back_serves_policy_read(
+        cp, tmp_path, capsys):
+    """serve() reads its policy -- and would claim -- while the rulebook
+    route has not answered; the line still prints before serve() returns.
+
+    Mutations: declare inline before the policy read -> the route answers
+    before the policy is read (red); drop serve()'s join before closing the
+    client -> the line is not printed (red)."""
+    policy_read = threading.Event()
+    answered_after_the_policy_read = []
+    cp.on_policy_read = policy_read.set
+
+    def hold():
+        answered_after_the_policy_read.append(policy_read.wait(3))
+        # Still answering when serve()'s loop has returned: the join is what
+        # lets the line reach the console before the client closes.
+        time.sleep(0.3)
+
+    cp.rulebook_hold = hold
+
+    assert _serve(tmp_path, rules=[RULE_A]) == 0
+
+    assert answered_after_the_policy_read == [True]
+    assert (f"[percepteye] rulebook: registered as version 1 — 1 rule(s) for "
+            f"Product {PRODUCT}") in capsys.readouterr().out
+
+
+def test_close_gives_an_answer_on_its_way_a_bounded_moment(
+        cp, attached, monkeypatch):
+    """A process that closes moments after attach() does not kill its rules'
+    declaration with the interpreter -- and a route that never answers does
+    not hold the close open either.
+
+    Mutations: drop the wait in ``close()`` -> no receipt after it (red);
+    wait unbounded -> the second close takes the whole hold (red)."""
+    release = threading.Event()
+    cp.rulebook_hold = lambda: release.wait(3)
+    px = attached(rules=[RULE_A])
+    threading.Timer(0.2, release.set).start()
+    px.close()
+    assert px.rulebook is not None and px.rulebook.status == "registered"
+
+    monkeypatch.setattr(production, "RULEBOOK_SETTLE_GRACE_S", 0.1)
+    never = threading.Event()
+    cp.rulebook_hold = lambda: never.wait(3)
+    px = attached(rules=[RULE_B])
+    started = time.monotonic()
+    px.close()
+    assert time.monotonic() - started < 2
+    assert px.rulebook_refusal == PENDING
+    never.set()
+
+
+# ── "not registered" only when that is known ──────────────────────────────
+
+
+UNKNOWN = (
+    "whether this agent's rules were registered is unknown: POST "
+    "/agents/widget-helper/rulebook failed after 1 attempts: ReadTimeout: "
+    "read timed out. The control plane may have received them before the "
+    "failure; declaring the same rules again is safe, because rules equal to "
+    "the ones in force are answered unchanged."
+)
+
+
+def test_a_failure_after_the_rules_may_have_landed_is_named_unknown(
+        cp, attached, tmp_path, capsys):
+    """The control plane registers the rules, then its answer is lost. "Not
+    registered, the rulebook in force is unchanged" would be false -- the new
+    rules ARE in force -- and would send an operator to believe the old ones
+    still are.
+
+    Mutations: ``rulebook_refusal`` ignoring ``ambiguous`` -> "not
+    registered" (red); the client not marking a read timeout ambiguous ->
+    red; serve()'s line saying "NOT registered" -> red."""
+    cp.lose_answer = True
+
+    _serve(tmp_path, rules=[RULE_A])
+    assert cp.in_force == [RULE_A]
+    out = capsys.readouterr().out
+    assert f"[percepteye] rulebook NOT confirmed — {UNKNOWN}" in out
+    assert "NOT registered" not in out and "not registered" not in out
+
+    px = attached(rules=[RULE_B])
+    assert px.wait_for_rulebook(5)
+    assert cp.in_force == [RULE_B]
+    assert px.rulebook is None
+    assert px.rulebook_refusal == UNKNOWN
+
+
+def _attempts(*answers):
+    """A client whose attempts meet ``answers`` in order: an httpx exception
+    class (raised as that failure), or ``(status, body)``."""
+    queue = list(answers)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        answer = queue.pop(0)
+        if isinstance(answer, type):
+            raise answer("failed", request=request)
+        status, body = answer
+        return httpx.Response(status, content=body)
+
+    return _http.ControlPlaneClient(
+        BASE, "pefw_test", max_attempts=len(answers),
+        client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+
+@pytest.mark.parametrize(("answers", "ambiguous"), [
+    ((httpx.ConnectError,), False),
+    ((httpx.ConnectTimeout, httpx.ConnectError), False),
+    ((httpx.ReadTimeout,), True),
+    ((httpx.RemoteProtocolError,), True),
+    # OVER EVERY ATTEMPT: the last was never sent, the first may have landed.
+    ((httpx.ReadTimeout, httpx.ConnectError), True),
+    (((503, b'{"detail":"store unavailable"}'),) * 2, False),
+    (((429, b"{}"), (409, b'{"detail":"no"}')), False),
+    (((502, b"bad gateway"),), True),
+    (((500, b"{}"),), True),
+    (((504, b"{}"), (409, b'{"detail":"no"}')), True),
+    (((200, b"not json"),), True),
+    # The lease refusal carries it too: the first attempt may have landed.
+    ((httpx.ReadTimeout, (410, b'{"detail":"lease gone"}')), True),
+    (((410, b'{"detail":"lease gone"}'),), False),
+])
+def test_the_client_says_whether_any_attempt_may_have_been_performed(
+        monkeypatch, answers, ambiguous):
+    """The client is the one place that saw every attempt, so it is the one
+    that says. Mutations: judge the last attempt only -> the timeout-then-
+    refused case (red); count a 503 as performed -> red; an unparseable 2xx
+    as unperformed -> red; a read timeout as never sent -> red."""
+    monkeypatch.setattr(_http, "_backoff", lambda attempt: 0.0)
+    with pytest.raises(_http.TransportError) as caught:
+        _attempts(*answers).request("POST", "/agents/a/rulebook",
+                                    json_body={"rules": []})
+    assert caught.value.ambiguous is ambiguous
+
+    receipt, refusal = AttachTransport(
+        _attempts(*answers), AGENT).register_rulebook([RULE_A])
+    assert receipt is None
+    assert refusal.startswith(
+        "whether this agent's rules were registered is unknown: "
+        if ambiguous else "this agent's rules were not registered: ")
 
 
 def test_attach_names_why_the_rules_were_never_sent(cp, attached, monkeypatch):
@@ -462,8 +683,13 @@ def test_every_receipt_the_fake_answers_is_one_the_schema_admits():
     {"status": "accepted"},
     {"rule_count": -1},
     {"rule_count": True},
+    {"rule_count": 1.5},
     {"version": 0},
+    {"version": 2.5},
+    {"version": True},
+    {"version_id": 5},
     {"content_sha256": "ABC"},
+    {"parent_sha256": "ABC"},
     {"product_id": ""},
 ])
 def test_a_receipt_the_schema_refuses_is_refused_by_the_type(bad):
@@ -471,6 +697,23 @@ def test_a_receipt_the_schema_refuses_is_refused_by_the_type(bad):
     assert list(_validator("RulebookReceipt").iter_errors(answer))
     with pytest.raises(ContractViolation):
         RulebookReceipt.from_wire(answer)
+
+
+def test_an_integral_number_is_the_schemas_integer_and_nodes():
+    """``2.0`` is JSON Schema's integer and JavaScript's ``2``: the Node SDK
+    reads this answer as a receipt, so this one does too -- and keeps it as
+    ``2``, or the line serve() prints would say "version 2.0".
+
+    Mutations: ``type(x) is int`` again -> "cannot read" (red); keep the
+    float -> the type and the printed line (red)."""
+    answer = {**ControlPlane().receipt([RULE_A]), "version": 2.0,
+              "rule_count": 1.0}
+    assert not list(_validator("RulebookReceipt").iter_errors(answer))
+    receipt = RulebookReceipt.from_wire(answer)
+    assert (receipt.version, receipt.rule_count) == (2, 1)
+    assert type(receipt.version) is int and type(receipt.rule_count) is int
+    assert "as version 2 — 1 rule(s)" in fw._rulebook_line(
+        RulebookUpload(receipt, None))
 
 
 def _validator(name: str) -> Draft202012Validator:
@@ -494,3 +737,22 @@ def test_a_structured_detail_is_rendered_as_json_not_a_repr():
         '{"error":"rulebook_invalid","cause":"rule_too_short",'
         '"index":null,"detail":"règle"}')
     assert _http._detail(httpx.Response(403, json={"detail": "no"})) == "no"
+
+
+@pytest.mark.parametrize("text", [
+    '{"code":"gateway_busy","hint":null}',
+    '{"code": "spaced", "kept": "as sent"}',
+    '["x",1]',
+    "null",
+    '"just text"',
+    "7",
+])
+def test_an_answer_with_no_detail_key_is_its_own_text(text):
+    """What the Node client keeps (``cut(String(text))``): the answer as it
+    was sent -- never a Python repr of what it parsed to (``{'code': ...,
+    'hint': None}``, ``None``, ``just text`` unquoted).
+
+    Mutation: ``return str(body)[:300]`` again -> red."""
+    resp = httpx.Response(409, content=text.encode(),
+                          headers={"content-type": "application/json"})
+    assert _http._detail(resp) == text
