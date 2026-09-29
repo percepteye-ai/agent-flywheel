@@ -52,6 +52,15 @@ Describe = Mapping[str, Any] | Callable[[], Mapping[str, Any]]
 #: The keys a declaration may carry. Anything else is a typo that would
 #: otherwise declare nothing in silence -- ``prompt`` for ``system_prompt``,
 #: ``tool_definitions`` for ``tools`` -- so it refuses at startup instead.
+#:
+#: ``rules`` IS NOT ONE OF THEM, deliberately. A Product's workflow rules ride
+#: their own call -- ``serve(rules=...)`` / ``attach(rules=...)``, POSTed to
+#: the agent's rulebook route -- for two reasons. A declaration withholds the
+#: agent's execution identity (it is the customer's word, not an observation),
+#: so rules sent here would cost every identity-bound run its
+#: ``execution_sha256`` for a field that says nothing about what runs. And a
+#: description is the AGENT's, re-registered whole on every start, while the
+#: rules are its PRODUCT's, versioned and audited on their own.
 _KEYS = frozenset({"system_prompt", "tools", "model"})
 #: The keys ``model`` may carry as a mapping, refused otherwise for the same
 #: reason: ``{"model": "gpt-4.1"}`` inside it would register ``unknown``.

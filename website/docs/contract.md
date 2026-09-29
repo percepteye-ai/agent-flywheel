@@ -11,7 +11,7 @@ The wire between an agent you run and a control plane you don't. It is one JSON 
 | `$id` | `https://schemas.percepteye.ai/flywheel/1.json` |
 | `x-contract-version` | `flywheel/1` |
 | Python constant | `contract.CONTRACT_VERSION == "flywheel/1"` |
-| Types declared | `ToolCallRecord` · `ProductionTurn` · `ProductionTurnBatch` · `Exclusion` · `RolloutRequest` · `RolloutOutput` · `ClaimResponse` |
+| Types declared | `ToolCallRecord` · `ProductionTurn` · `ProductionTurnBatch` · `Exclusion` · `RolloutRequest` · `RolloutOutput` · `ClaimResponse` · `RulebookRequest` · `RulebookReceipt` |
 
 **Server implementations pin against the published schema; the schema is never generated from a server type.** The direction matters. Generate the schema from a server and the contract becomes whatever that server currently does — a field renamed in a handler silently redefines the wire for every customer-run agent already deployed against it. Pinning the other way means a server change that breaks the contract fails on the server.
 
@@ -27,6 +27,17 @@ and `agent_id` additionally forbid path separators and the `.` / `..` path
 segments because they cross storage or URL-path boundaries. A batch contains
 at most 64 turns; the SDK splits a larger requested flush into conforming
 chunks.
+
+`RulebookRequest` is the closed body sent to `POST /agents/{agent_id}/rulebook`
+by `serve(rules=...)` and `attach(rules=...)`: `{"rules": [...]}`, strings only,
+one prose rule per string, `[]` to retract. A rule's id is derived from its
+text by the control plane and never sent, and the control plane alone decides
+what a rule may be, so the schema states the shape and nothing more.
+`RulebookReceipt` is its answer — `registered`, `retracted` or `unchanged`,
+with the version and its digest. `contract.py`'s `RulebookRequest` and
+`RulebookReceipt` match them, held to the schema in both directions by
+`tests/test_rulebook_upload.py`, and `tests/test_rulebook_parity.py` holds the
+Node package to the same request, byte for byte, and to this file's bytes.
 
 ## The Python types are hand-written to match
 

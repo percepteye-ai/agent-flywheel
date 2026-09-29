@@ -440,6 +440,81 @@
           "minimum": 0
         }
       }
+    },
+    "RulebookRequest": {
+      "type": "object",
+      "description": "The body sent to POST /agents/{agent_id}/rulebook: the workflow rules this agent declares for the one Product it is attributed to, in force as a whole -- the last registration wins. One prose rule per string; a rule's id is derived from its text by the control plane and is never sent. [] retracts the rulebook in force. The control plane is the one validator of a rule's text: it refuses (422 rulebook_invalid, naming the cause and the rule's index) what its wire rule does not admit, and an agent attributed to no Product, or to more than one, is refused (409 rulebook_unattributed) with nothing registered.",
+      "additionalProperties": false,
+      "required": [
+        "rules"
+      ],
+      "properties": {
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "RulebookReceipt": {
+      "type": "object",
+      "description": "What POST /agents/{agent_id}/rulebook did. status is registered (a new version with rules), retracted (a new version with none) or unchanged (the rules equal the rulebook in force, so nothing was registered). content_sha256 is the version document's digest. Every version field is null only for an unchanged retraction of a Product that never had rules.",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "product_id",
+        "version_id",
+        "version",
+        "content_sha256",
+        "parent_sha256",
+        "rule_count"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "registered",
+            "retracted",
+            "unchanged"
+          ]
+        },
+        "product_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "content_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "parent_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "rule_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
     }
   }
 }

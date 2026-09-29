@@ -143,6 +143,7 @@ fw.serve(..., on_event=lambda kind, ev: print(kind, ev))
 | `adapters` | `"auto"` | `"auto"`, `[]`, or names: `"langchain"`, `"adk"` |
 | `introspect` | `True` | [agent discovery](how-it-works.md); also gated by `PERCEPTEYE_INTROSPECT` |
 | `describe` | `None` | your agent's own `system_prompt` / `tools` / `model`, for an agent [nothing can read](how-it-works.md#an-agent-nothing-can-read-describe); what you declare wins over reflection |
+| `rules` | `None` | [your Product's workflow rules](#a-products-workflow-rules-rules), one prose rule per string, declared once after registration; `None` sends nothing, `[]` retracts |
 | `max_rollouts` | `None` | stop after this many rollouts complete |
 | `on_event` | `None` | see above |
 
@@ -166,6 +167,27 @@ unbacked by attested implementation evidence means the key is absent, so OPSD re
 cannot see; it is a digest map, never a place for raw configuration or secrets.
 
 The claim long-poll (`wait_ms`, 25s), the requested lease (`lease_ms`, 30 min) and the HTTP timeout (30s) live on the transport and are **not exposed through `serve()`**.
+
+## A Product's workflow rules: `rules=`
+
+```python
+fw.serve("my_package.agent:build", agent_id="widget-helper", input_shape="text",
+         rules=[
+             "When the caller has not said which widget colour they want, ask "
+             "for the colour before placing any order.",
+         ])
+```
+
+A rule is one prose sentence about how your agent should work — the conditional kind a reviewer would write down. **It is training guidance**: when a rule applies to a decision in your agent's traces, training sees it beside that decision. Nothing your agent is served changes — not its prompt, not what its model is sent.
+
+`serve()` and [`attach()`](production.md#attach-evidence-from-live-turns) take the same `rules=`, and send it once, after the registration, to `POST /agents/{agent_id}/rulebook`:
+
+- **The rules are the Product's, not the agent's.** The wire carries no Product: the control plane files them under the one active Product that declares this agent, as that Product's rulebook in force. An agent no Product declares, or more than one does, is refused (`409 rulebook_unattributed`, naming which) and nothing is registered.
+- **`None` sends nothing; `[]` retracts.** Leaving `rules=` out leaves the rulebook in force alone, whoever registered it; an empty list takes it away.
+- **The last writer wins.** Code that declares rules re-declares them on every start: the same rules are answered `unchanged` and register nothing, different ones are a new version. The Product's own rulebook API (`PUT /api/v2/products/{product_id}/rulebook`) writes the same versions, so whichever of the two wrote last is in force, and every write is audited.
+- **The control plane decides what a rule may be** — its length, a duplicate, JSON text, a control character, a credential value, how many there are — and a refusal (`422 rulebook_invalid`) names the cause and the rule's index. The SDK restates none of it: a second copy of those bounds would only drift.
+- **Nothing it answers can stop your agent.** A refused or undeliverable upload costs the rules and nothing else — never the registration, the policy read or a rollout. `serve()` prints one line either way (`[percepteye] rulebook: registered as version 3 — 5 rule(s) for Product …`, or `rulebook NOT registered — …` in the control plane's own words); `attach()` keeps the receipt on `px.rulebook` and the sentence on `px.rulebook_refusal`. Only a value that is not a list of strings raises, `ConfigurationError`, at startup — a `set` included, because its order is not stable across processes.
+- **Not in `describe=`.** A declaration withholds the agent's execution identity, and these are the Product's rules, not a description of the agent — so they ride their own route. The [Node plugins](node.md#a-products-workflow-rules-rules) declare the same rules with the same request.
 
 ## Isolation
 

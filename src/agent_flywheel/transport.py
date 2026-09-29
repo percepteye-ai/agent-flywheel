@@ -16,7 +16,8 @@ import hashlib
 import json
 import time
 import uuid
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 from urllib.parse import quote
 
 # NOT imported at module scope. `_http` pulls in httpx, which is 83-87% of
@@ -31,15 +32,81 @@ from .contract import (
     _PRODUCTION_TURN_BATCH_MAX_ITEMS,
     RolloutOutput,
     RolloutRequest,
+    RulebookReceipt,
+    RulebookRequest,
     _production_agent_identifier,
     _production_identifier,
     _production_turn_identifier,
 )
-from .errors import ContractViolation, TransportError
+from .errors import ConfigurationError, ContractViolation, TransportError
 from .execution_identity import is_lower_sha256
 from .outcomes import _normalize_task_id
 
-__all__ = ["AttachTransport", "FlywheelTransport"]
+__all__ = [
+    "AttachTransport",
+    "FlywheelTransport",
+    "RulebookUpload",
+    "declared_rulebook",
+    "rulebook_refusal",
+]
+
+
+def _body_digest(value: Any) -> str:
+    """The digest an idempotency key carries for a request body.
+
+    ONE DERIVATION for every keyed body, and the Node SDK's twin reproduces it
+    byte for byte (``stableStringify``: sorted keys, Python's separators,
+    ``ensure_ascii`` escapes), so the same body gets the same key from either
+    package. A second spelling here is how the two would stop agreeing.
+    """
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()[:32]
+
+
+class RulebookUpload(NamedTuple):
+    """What :meth:`AttachTransport.register_rulebook` did. Exactly one field
+    is set: the control plane's receipt, or the sentence naming why there is
+    none."""
+
+    receipt: RulebookReceipt | None
+    refusal: str | None
+
+
+def rulebook_refusal(exc: BaseException) -> str:
+    """The sentence saying why a rulebook declaration registered nothing.
+
+    ONE BUILDER, and the Node SDK's ``rulebookRefusal`` builds the same
+    sentence from the same error, so a customer reads one answer whichever
+    package their agent runs. The error's message is kept whole because it
+    carries the ACTUAL cause: the client puts the route and status in it, then
+    the control plane's own refusal -- ``rulebook_invalid`` with the rule's
+    cause and index, ``rulebook_unattributed`` with the binding status that
+    attributes the agent to no single Product, a key without the scope -- or,
+    when no answer came at all, the transport failure. One message for every
+    cause would send an operator to fix the wrong thing.
+    """
+    return (
+        f"this agent's rules were not registered: {exc}. The rulebook in "
+        f"force, if any, is unchanged."
+    )
+
+
+def declared_rulebook(rules: Any) -> RulebookRequest | None:
+    """``rules=`` as ``serve()`` and ``attach()`` take it, checked at startup.
+
+    ``None`` sends nothing -- the rulebook in force, whoever registered it, is
+    left alone. Anything else must be a list of strings, and a value that is
+    not one is a configuration mistake in front of the person making it, so it
+    raises here, before anything connects, rather than surfacing later as rules
+    that never registered.
+    """
+    if rules is None:
+        return None
+    try:
+        return RulebookRequest(rules)
+    except ContractViolation as exc:
+        raise ConfigurationError(str(exc)) from None
 
 
 @runtime_checkable
@@ -125,6 +192,58 @@ class AttachTransport:
             execution_sha if is_lower_sha256(execution_sha) else None
         )
         return response
+
+    def register_rulebook(
+        self, request: RulebookRequest | Sequence[str],
+    ) -> RulebookUpload:
+        """Declare the workflow rules of the Product this agent belongs to:
+        ``POST /agents/{agent_id}/rulebook``. ``[]`` retracts them.
+
+        THE PRODUCT IS THE CONTROL PLANE'S TO NAME. The wire carries none: the
+        control plane attributes the rules to the one active Product that
+        declares this agent, and refuses when no Product does or more than one
+        does, rather than picking.
+
+        FAILS OPEN, like :meth:`policy_current`: rules that did not register
+        must not stop an agent from starting or serving, so nothing the
+        control plane does or fails to do raises from here. What happened is
+        RETURNED instead -- the receipt, or the sentence naming why there is
+        none (:func:`rulebook_refusal`). Only a ``request`` that is not a list
+        of strings raises, :class:`ContractViolation`, before anything is
+        sent: that is a caller's mistake, not the control plane's answer.
+
+        SAFE TO REPLAY. The control plane answers rules equal to the ones in
+        force ``unchanged`` and registers nothing, so the client's default
+        retry of an ambiguous failure -- a request that may already have
+        landed -- is left on. The idempotency key is the turn batch's
+        derivation (:func:`_body_digest`) over the body, so both SDKs send the
+        same key for the same rules; the route's own ``unchanged`` rule, not
+        the key, is what makes the replay harmless.
+        """
+        if not isinstance(request, RulebookRequest):
+            request = RulebookRequest(request)
+        body = request.to_wire()
+        agent = quote(self.agent_id, safe="-._~")
+        try:
+            reply = self._c.request(
+                "POST",
+                f"/agents/{agent}/rulebook",
+                json_body=body,
+                idempotency_key=f"rulebook-{agent}-{_body_digest(body)}",
+            )
+        except Exception as exc:  # see docstring
+            return RulebookUpload(None, rulebook_refusal(exc))
+        try:
+            return RulebookUpload(RulebookReceipt.from_wire(reply), None)
+        except ContractViolation as exc:
+            # The control plane ANSWERED 2xx, so "not registered" would be a
+            # guess. A receipt outside the published contract is named as
+            # what it is: an answer this package cannot read.
+            return RulebookUpload(None, (
+                f"the control plane answered this agent's rules with a receipt "
+                f"this SDK cannot read ({exc}), so whether they are in force "
+                f"is unknown."
+            ))
 
     def policy_current(self) -> dict[str, Any]:
         """What policy this agent should be running, per the control plane.
@@ -308,9 +427,7 @@ class AttachTransport:
                 raise ContractViolation(
                     f"production turn {index} has an invalid task_id"
                 )
-        digest = hashlib.sha256(
-            json.dumps(turns, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()[:32]
+        digest = _body_digest(turns)
         return self._c.request(
             "POST",
             "/turns",

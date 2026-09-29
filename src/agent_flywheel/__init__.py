@@ -58,6 +58,7 @@ from .contract import (
     Outcome,
     RolloutOutput,
     RolloutRequest,
+    RulebookReceipt,
     ToolCallOutcome,
 )
 from .declaration import Describe
@@ -106,7 +107,12 @@ from .prompt import (
     prompt_decision,
 )
 from .runner import DEFAULT_ROLLOUT_TIMEOUT_S, RolloutRunner
-from .transport import AttachTransport, FlywheelTransport
+from .transport import (
+    AttachTransport,
+    FlywheelTransport,
+    RulebookUpload,
+    declared_rulebook,
+)
 
 #: This package's logger. It has no handler and never installs one -- it
 #: emits into whatever logging the customer's process already configured,
@@ -147,6 +153,7 @@ __all__ = [
     "RolloutRequest",
     "RolloutRunner",
     "RoutingNotInstallable",
+    "RulebookReceipt",
     "ToolCallOutcome",
     "ToolDefinition",
     "Trajectory",
@@ -696,6 +703,29 @@ def _describe_via_host(
     return None
 
 
+def _rulebook_line(upload: RulebookUpload) -> str:
+    """The one line ``serve()`` prints about the rules it declared.
+
+    Printed, like the policy line, because a donor's console is where its
+    operator looks at startup -- and a refusal must be as visible as a
+    registration, or rules that never took effect look exactly like rules
+    that did.
+    """
+    receipt, refusal = upload
+    if receipt is None:
+        return f"[percepteye] rulebook NOT registered — {refusal}"
+    if receipt.status == "unchanged":
+        what = "unchanged, already in force"
+    else:
+        what = receipt.status
+    version = (f" as version {receipt.version}"
+               if receipt.version is not None else "")
+    return (
+        f"[percepteye] rulebook: {what}{version} — {receipt.rule_count} "
+        f"rule(s) for Product {receipt.product_id}"
+    )
+
+
 def serve(
     entrypoint: Any,
     *,
@@ -739,6 +769,7 @@ def serve(
     adapters: list[str] | str | None = "auto",
     introspect: bool = True,
     describe: Describe | None = None,
+    rules: Sequence[str] | None = None,
     max_rollouts: int | None = None,
     on_event: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> int:
@@ -834,6 +865,24 @@ def serve(
             observation. ``introspect=False`` with ``describe=`` is a
             contradiction and raises; ``PERCEPTEYE_INTROSPECT=0`` wins over
             it, with a warning.
+        rules: the workflow rules of the Product this agent belongs to, one
+            prose rule per string, sent once at startup, after registration,
+            to ``POST /agents/{agent_id}/rulebook``. The control plane files
+            them under the one active Product that declares this agent, as
+            that Product's rulebook in force -- training guidance for the
+            decisions a rule applies to; nothing this agent is served changes.
+            ``None`` (the default) sends nothing and leaves the rulebook in
+            force alone; ``[]`` RETRACTS it. Code that declares rules
+            re-declares them on every start -- the same rules register
+            nothing, different ones are a new version, and the last writer
+            wins, whether that is this call or the Product's own API. Not a
+            list of strings raises :class:`ConfigurationError` here; anything
+            the control plane refuses (a rule it will not accept, named by
+            cause and index; an agent no single Product declares) or cannot
+            hear is printed in one line and never stops the flywheel. Rules
+            never ride ``describe=``: a declaration withholds the agent's
+            execution identity, and these are the Product's rules, not the
+            agent's description.
         max_rollouts: stop after this many rollouts COMPLETE, and return. The
             only clean exit this function has: nothing in this package handles
             SIGINT or SIGTERM, so otherwise it runs until the process is
@@ -919,6 +968,9 @@ def serve(
         # A static declaration is checked NOW, before anything connects: a
         # typo here otherwise surfaces as a run that generated nothing.
         _declaration.resolve(describe)
+    # Checked NOW for the same reason: rules that are not a list of strings
+    # would otherwise surface as a rulebook that never registered.
+    rulebook = declared_rulebook(rules)
 
     url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL)
     if not url:
@@ -1108,6 +1160,15 @@ def serve(
         payload["agent_execution_sha256"] = runner.execution_sha256
 
     tr.register(payload)
+
+    # ── the Product's workflow rules, when the code declares them ───────────
+    # Once, after the registration and never inside it: a registration is
+    # persisted whole on every restart, and rules are the Product's, not the
+    # agent's. The upload never raises (a rulebook that did not register
+    # must not stop a donor), so the line below is the whole of what it can
+    # do to this process: say what happened.
+    if rulebook is not None:
+        print(_rulebook_line(tr.register_rulebook(rulebook)), flush=True)
 
     # ── the last mile ───────────────────────────────────────────────────────
     # Training produces a better model; this is where the agent finds out.

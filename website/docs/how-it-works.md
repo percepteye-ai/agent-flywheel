@@ -33,7 +33,8 @@
 | 8 | resolve the entrypoint and check isolation is compatible with it | `EntrypointError` on an object with no callable to drive; `ConfigurationError` on a bad spec or an isolation mismatch |
 | 9 | describe the agent (beat ⓪) | never — discovery cannot fail a startup |
 | 10 | `POST /agents` | `TransportError` |
-| 11 | `GET /policy/current`, printed and **not applied** | never — a failed read is `{}` |
+| 11 | `POST /agents/{agent_id}/rulebook`, only with [`rules=`](configuration.md#a-products-workflow-rules-rules) | never — a refusal is printed in the control plane's words |
+| 12 | `GET /policy/current`, printed and **not applied** | never — a failed read is `{}` |
 
 **Mode is resolved first, before any credential check and before any socket.** A production deployment therefore needs no control-plane URL and no key: turning training off must not require being configured for it. In `production`, `serve()` prints one line and returns `0`.
 
@@ -312,11 +313,11 @@ Lane ⓪ opens once, and lane ④ once from `attach()`. The rest repeat, and **e
 
 | lane | routes | opened |
 |:--|:--|:--|
-| **⓪ register** | `GET /health` · `POST /agents` | once, at startup |
+| **⓪ register** | `GET /health` · `POST /agents` · `POST /agents/{agent_id}/rulebook` (only with `rules=`) | once, at startup |
 | **① claim** | `POST /rollouts/claim` | in a loop, long-polled |
 | **② return the rollout** | `POST /rollouts/{id}/heartbeat` · `/artifacts` · `/result` · `/abandon` | per rollout |
 | **③ policy back** | `GET /policy/current` · `GET /prompt/current` | at startup, or on a TTL |
-| **④ live evidence** | `POST /agents` · `GET /policy/current` · capture to disk · `POST /turns` **with consent only** | at startup, then every 32 turns and at exit |
+| **④ live evidence** | `POST /agents` · `GET /policy/current` · `POST /agents/{agent_id}/rulebook` (only with `rules=`) · capture to disk · `POST /turns` **with consent only** | at startup, then every 32 turns and at exit |
 
 !!! note "There is no listening socket in this package"
 

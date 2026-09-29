@@ -8,6 +8,7 @@ bare ``except`` that also swallowed a real ``TypeError``.
 """
 from __future__ import annotations
 
+import json
 import random
 import time
 from collections.abc import Mapping
@@ -280,5 +281,15 @@ def _detail(resp: httpx.Response) -> str:
     if isinstance(body, dict):
         for key in ("detail", "error", "message", "reason"):
             if key in body:
-                return str(body[key])[:300]
+                value = body[key]
+                # A STRUCTURED detail is rendered as the JSON it arrived as,
+                # never as a Python repr. The control plane answers many
+                # refusals with an object -- `{error, cause, index, detail}`
+                # for a refused rule, `{error, status, detail}` for an agent
+                # attributed to no Product -- and the Node SDK renders the same
+                # object with `JSON.stringify`, so this is the spelling both
+                # packages share: compact separators, non-ASCII kept.
+                text = value if isinstance(value, str) else json.dumps(
+                    value, ensure_ascii=False, separators=(",", ":"))
+                return text[:300]
     return str(body)[:300]

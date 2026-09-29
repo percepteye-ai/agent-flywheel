@@ -52,7 +52,7 @@ import time
 import uuid
 import warnings
 import weakref
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +66,7 @@ from typing import TYPE_CHECKING, Any
 # forced it anyway.
 if TYPE_CHECKING:
     from ._http import ControlPlaneClient
+    from .contract import RulebookReceipt
 from . import declaration as _declaration
 from .contract import (
     _PRODUCTION_IDENTIFIER_MAX_CHARS,
@@ -95,6 +96,7 @@ from .outcomes import (
     record_turn_text,
 )
 from .policy import missing_credentials_cause
+from .transport import declared_rulebook
 
 __all__ = ["Attachment", "CaptureVerdict", "attach", "capture_verdict"]
 
@@ -393,6 +395,8 @@ class Attachment:
         agent_fingerprint: Mapping[str, str] | None = None,
         may_capture_model_content: bool = False,
         model_content_refusal: str | None = None,
+        rulebook: RulebookReceipt | None = None,
+        rulebook_refusal: str | None = None,
     ) -> None:
         self.agent_id = agent_id
         self.trajectory_root = trajectory_root
@@ -446,6 +450,16 @@ class Attachment:
             None if self.may_capture_model_content
             else (model_content_refusal or upload_refusal)
         )
+        #: What the control plane did with ``attach(rules=...)``: its receipt
+        #: (``status``, ``version``, ``content_sha256``, ``rule_count``), or
+        #: ``None`` when no rules were passed or none registered.
+        self.rulebook = rulebook
+        #: Why the rules passed as ``rules=`` are not confirmed in force, in a
+        #: sentence -- the control plane's refusal naming its cause, an
+        #: unreachable control plane, or a call that never asked it. ``None``
+        #: when they registered (``rulebook`` says how) or none were passed.
+        #: Read once, at startup: ``attach()`` declares rules exactly once.
+        self.rulebook_refusal = rulebook_refusal
         #: Exact SDK-reconciled execution identity, when attach() was given
         #: enough behavior observation and opaque adapter evidence to prove
         #: one. It is persisted per turn; absent stays absent.
@@ -1450,6 +1464,7 @@ def attach(
     execution_method: str | None = None,
     attested_execution_components: Mapping[str, str] | None = None,
     describe: Describe | None = None,
+    rules: Sequence[str] | None = None,
 ) -> Attachment:
     """Bind capture in THIS process, for an agent already serving users.
 
@@ -1521,6 +1536,18 @@ def attach(
     no execution identity; ``PERCEPTEYE_INTROSPECT=0`` wins over it, with a
     warning.
 
+    ``rules`` are the workflow rules of the Product this agent belongs to, as
+    for ``serve()``: sent once, after the registration, to
+    ``POST /agents/{agent_id}/rulebook``, and filed by the control plane under
+    the one active Product that declares this agent. ``None`` sends nothing;
+    ``[]`` retracts the rulebook in force; the same rules on the next start
+    register nothing, and the last writer wins. :attr:`Attachment.rulebook` is
+    the control plane's receipt and :attr:`Attachment.rulebook_refusal` the
+    sentence explaining why there is none. A refused or undeliverable upload
+    costs the rules and nothing else -- never the registration, the capture
+    verdict or the policy read. Not a list of strings raises
+    :class:`ConfigurationError`.
+
     Nothing here raises on a control-plane failure. ``agent_id`` missing or
     ``trajectory_root`` missing raise -- those are configuration mistakes in
     front of the person making them -- but an unreachable control plane yields
@@ -1558,6 +1585,10 @@ def attach(
         # nothing behind -- and whatever PERCEPTEYE_INTROSPECT says, as serve()
         # does, so lifting the opt-out cannot turn it into a refusal to start.
         _declaration.resolve(describe)
+    # The rules' SHAPE, checked with the rest of the configuration for the
+    # same reason. What the control plane thinks of them is its answer, and
+    # arrives as `rulebook_refusal`, never as a raise.
+    rulebook_request = declared_rulebook(rules)
     try:
         os.makedirs(trajectory_root, exist_ok=True)
     except OSError as exc:
@@ -1673,6 +1704,26 @@ def attach(
         # that would not build -- leaves this sentence standing, which is the
         # true one for every such path. The successful path overwrites it.
         upload_refusal = capture_verdict(None).reason
+    # The same rule for the rules: NAMED for every way they can go unsent,
+    # each with its own remedy, and overwritten by what the upload did.
+    rulebook: RulebookReceipt | None = None
+    rulebook_refusal: str | None = None
+    if rulebook_request is not None:
+        if not register:
+            rulebook_refusal = (
+                "attach(register=False) was asked for, so the rules passed as "
+                "rules= were never sent to the control plane."
+            )
+        elif cause:
+            rulebook_refusal = (
+                f"{cause}, so the rules passed as rules= were never sent to "
+                f"the control plane."
+            )
+        else:
+            rulebook_refusal = (
+                "the control plane client could not be built, so the rules "
+                "passed as rules= were never sent to it."
+            )
     if register and url and key:
         client: ControlPlaneClient | None = None
         try:
@@ -1741,6 +1792,13 @@ def attach(
                 # production to the untrained policy.
                 register_error = exc
             policy = tr.policy_current() or {}
+            # After the policy read, and through a method that never raises:
+            # rules the control plane refuses, or cannot hear, must cost the
+            # rules and nothing else -- the `except` below would otherwise
+            # read their failure as the policy's.
+            if rulebook_request is not None:
+                rulebook, rulebook_refusal = tr.register_rulebook(
+                    rulebook_request)
         except Exception:
             policy = {}
         finally:
@@ -1792,6 +1850,8 @@ def attach(
         agent_fingerprint=agent_fingerprint,
         may_capture_model_content=may_capture_model_content,
         model_content_refusal=model_content_refusal,
+        rulebook=rulebook,
+        rulebook_refusal=rulebook_refusal,
     )
     if may_upload:
         # Through the same seam late consent goes through, so the hook is

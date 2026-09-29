@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass, field, fields
 from typing import Any, Literal
 
 from .errors import ContractViolation
@@ -21,6 +22,7 @@ from .errors import ContractViolation
 #: the field set the extractor produces -- one definition, never a twin
 #: that can drift out from under the other half.
 from .evidence import IDENTITY_FIELDS as _IDENTITY_FIELDS
+from .execution_identity import is_lower_sha256
 
 __all__ = [
     "CONTRACT_VERSION",
@@ -28,6 +30,9 @@ __all__ = [
     "Outcome",
     "RolloutOutput",
     "RolloutRequest",
+    "RulebookReceipt",
+    "RulebookRequest",
+    "RulebookStatus",
     "ToolCallOutcome",
 ]
 
@@ -409,3 +414,103 @@ class RolloutOutput:
                 f"RolloutOutput would emit unknown key(s) {sorted(extra)}"
             )
         return d
+
+
+@dataclass(frozen=True)
+class RulebookRequest:
+    """The body of ``POST /agents/{agent_id}/rulebook``: the workflow rules of
+    the Product this agent belongs to, one prose rule per string, in force as a
+    whole. An empty list retracts them.
+
+    STRINGS ONLY, IN ORDER. A rule's id is derived from its text by the control
+    plane, never authored here, and the list is the rulebook as written. A
+    ``set`` is refused because its iteration order can change between
+    processes, and rules re-declared on every start in a different order would
+    register a new version each time.
+
+    SHAPE ONLY. What makes a rule acceptable -- its length, a duplicate, JSON
+    text, a control character, a credential value, how many there may be -- is
+    the control plane's to decide, and it refuses by cause and rule index. A
+    second copy of those bounds here would be one more thing to drift, so this
+    refuses only what cannot be a list of rules at all.
+    """
+
+    #: Stored as a tuple, whichever of a list or a tuple was passed.
+    rules: Sequence[str]
+
+    def __post_init__(self) -> None:
+        rules = self.rules
+        if not isinstance(rules, (list, tuple)):
+            hint = (
+                " (a single string is one rule: pass it inside a list)"
+                if isinstance(rules, str) else ""
+            )
+            raise ContractViolation(
+                "rules must be a list of strings, one rule per string; got "
+                f"{type(rules).__name__}{hint}"
+            )
+        for index, rule in enumerate(rules):
+            if not isinstance(rule, str):
+                raise ContractViolation(
+                    f"rule {index} must be a string; got {type(rule).__name__}"
+                )
+        object.__setattr__(self, "rules", tuple(rules))
+
+    def to_wire(self) -> dict[str, Any]:
+        return {"rules": list(self.rules)}
+
+
+#: What a rulebook registration did. The order is the schema's enum order.
+RulebookStatus = Literal["registered", "retracted", "unchanged"]
+_RULEBOOK_STATUSES: tuple[str, ...] = ("registered", "retracted", "unchanged")
+
+
+@dataclass(frozen=True)
+class RulebookReceipt:
+    """The control plane's answer to a :class:`RulebookRequest`.
+
+    ``status`` is ``registered`` (a new version carrying rules), ``retracted``
+    (a new version carrying none) or ``unchanged`` (the rules equal the ones in
+    force, so nothing was registered -- the answer every restart that
+    re-declares the same rules gets). ``content_sha256`` names the version's
+    bytes. The version fields are ``None`` only for an ``unchanged``
+    retraction of a Product that never had rules.
+    """
+
+    status: RulebookStatus
+    product_id: str
+    version_id: str | None
+    version: int | None
+    content_sha256: str | None
+    parent_sha256: str | None
+    rule_count: int
+
+    @classmethod
+    def from_wire(cls, d: Any) -> RulebookReceipt:
+        if not isinstance(d, dict):
+            raise ContractViolation("a rulebook receipt must be a JSON object")
+        missing = [f.name for f in fields(cls) if f.name not in d]
+        if missing:
+            raise ContractViolation(
+                f"RulebookReceipt missing required field(s): {missing}"
+            )
+        wrong = []
+        if d["status"] not in _RULEBOOK_STATUSES:
+            wrong.append("status")
+        if not isinstance(d["product_id"], str) or not d["product_id"]:
+            wrong.append("product_id")
+        if d["version_id"] is not None and not isinstance(d["version_id"], str):
+            wrong.append("version_id")
+        version = d["version"]
+        if version is not None and (type(version) is not int or version < 1):
+            wrong.append("version")
+        for name in ("content_sha256", "parent_sha256"):
+            if d[name] is not None and not is_lower_sha256(d[name]):
+                wrong.append(name)
+        if type(d["rule_count"]) is not int or d["rule_count"] < 0:
+            wrong.append("rule_count")
+        if wrong:
+            raise ContractViolation(
+                f"RulebookReceipt carries invalid field(s): {wrong}"
+            )
+        return cls(**{f.name: d[f.name] for f in fields(cls)})
