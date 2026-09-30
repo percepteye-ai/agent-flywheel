@@ -194,3 +194,41 @@ def test_serve_registers_as_a_rollout_and_attach_does_not(captured):
     spec = captured("tests.fixtures_agent:build", isolation="inprocess")
     assert spec["mode"] == "rollout"
     assert spec["entrypoint"]
+
+
+# ── an incompatible control plane is refused before registration ───────────
+
+
+class _OldControlPlane(_FakeTransport):
+    """A control plane that speaks only a contract this SDK does not."""
+
+    def health(self):
+        return {"contract_versions_supported": ["flywheel/0"]}
+
+
+def test_serve_refuses_an_incompatible_control_plane_before_registering(
+    monkeypatch, tmp_path,
+):
+    """The Node SDK pins this (rollout.test.js "refuses an incompatible
+    control plane before registration or claim"); the Python side stubbed a
+    matching version in every test, so the refusal ran nowhere.
+
+    Mutation: bypass the version check and serve() registers against a
+    control plane it cannot speak to."""
+    box: dict = {}
+
+    def _factory(client, agent_id):
+        tr = _OldControlPlane(client, agent_id)
+        box["tr"] = tr
+        return tr
+
+    monkeypatch.setattr(fw, "AttachTransport", _factory)
+    monkeypatch.setenv("PERCEPTEYE_CONTROL_PLANE_URL", "https://cp.invalid/v1")
+    monkeypatch.setenv("PERCEPTEYE_API_KEY", "perk_test")
+    with pytest.raises(fw.ConfigurationError, match="control plane speaks"):
+        fw.serve(
+            "tests.fixtures_agent:build", agent_id="a1", input_shape="text",
+            isolation="inprocess", artifacts_dir=str(tmp_path),
+            max_rollouts=0,
+        )
+    assert box["tr"].registered is None
