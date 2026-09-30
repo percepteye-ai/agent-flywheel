@@ -106,7 +106,7 @@ fw.serve(..., on_event=lambda kind, ev: print(kind, ev))
 | `rollout_reported` | the result was accepted | `rollout_id`, `grade`, `duplicate`, `exclusion` |
 | `rollout_crash` | the rollout raised; it was abandoned | `rollout_id`, `error` |
 | `report_failed` | the work happened, delivering it did not | `rollout_id`, `error` |
-| `artifact_failed` | one artifact registration failed; the rollout is fine | `rollout_id`, `name`, `error` |
+| `artifact_failed` | collecting the rollout's artifacts failed; the rollout is still reported, excluded from training | `rollout_id`, `name` (always `"*"`), `error` |
 | `lease_lost` | the lease lapsed or was taken back | `rollout_id` |
 | `heartbeat_failed` | a renewal could not be delivered; two more beats remain | `rollout_id`, `error` |
 
