@@ -21,7 +21,6 @@ class _T:
     def __init__(self):
         self.reported: list[str] = []
         self.abandoned: list[str] = []
-        self.artifacts: list[str] = []
 
     def claim(self, n):
         return [], 10
@@ -35,10 +34,6 @@ class _T:
 
     def abandon(self, r, *, reason, detail=""):
         self.abandoned.append(reason)
-
-    def register_artifact(self, r, *, name, size_bytes, sha256, **kw):
-        self.artifacts.append(name)
-        return {}
 
 
 def _script(tmp_path, body: str) -> str:

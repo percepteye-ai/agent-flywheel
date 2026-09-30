@@ -31,7 +31,6 @@ class _T:
     def __init__(self):
         self.reported: list = []
         self.abandoned: list = []
-        self.artifacts: list[str] = []
 
     def claim(self, n):
         return [], 10
@@ -45,10 +44,6 @@ class _T:
 
     def abandon(self, r, *, reason, detail=""):
         self.abandoned.append(reason)
-
-    def register_artifact(self, r, *, name, size_bytes, sha256, **kw):
-        self.artifacts.append(name)
-        return {}
 
 
 def _script(tmp_path, body: str) -> str:
@@ -87,7 +82,6 @@ def test_nonzero_exit_with_a_file_is_reported_not_abandoned(tmp_path):
     assert len(tr.reported) == 1
     out = tr.reported[0]
     assert "top_ips.sh" in out.artifacts, f"collected: {list(out.artifacts)}"
-    assert "top_ips.sh" in tr.artifacts, "artifact was never registered"
 
 
 def test_the_report_still_carries_the_exclusion(tmp_path):
@@ -141,45 +135,6 @@ def test_a_timeout_with_nothing_produced_is_also_reported(tmp_path):
 
 
 # ── the untouched happy path ────────────────────────────────────────────────
-
-
-class _RegistrationRefuses(_T):
-    """The server rejects artifact registration — the shape a rollout that has
-    already blown its deadline actually meets."""
-
-    def register_artifact(self, r, *, name, size_bytes, sha256, **kw):
-        from agent_flywheel.errors import TransportError
-
-        raise TransportError("410 gone: deadline passed")
-
-
-def _run_with(tr, tmp_path, body: str, *, timeout_s=30.0, deadline=60.0):
-    runner = RolloutRunner(["sh", _script(tmp_path, body)], transport=tr,
-                           input_shape="text", artifacts_dir=str(tmp_path),
-                           rollout_timeout_s=timeout_s)
-    runner._serve_one_inner(_req(deadline))
-    return tr
-
-
-def test_failed_registration_still_delivers_the_bytes(tmp_path):
-    """Registration is a server-side INDEX; the report body is what the grader
-    reads. Gating the record on registration meant the deliverable vanished in
-    exactly the case it mattered — measured on rl_umms7x7s, killed at 49s with
-    count_5xx.sh on disk and artifacts={} on the row."""
-    tr = _run_with(_RegistrationRefuses(), tmp_path, 'echo x > sol.sh\nexit 1')
-    assert not tr.abandoned, "registration failure must not turn into an abandon"
-    out = tr.reported[0]
-    assert "sol.sh" in out.artifacts, f"deliverable lost: {list(out.artifacts)}"
-
-
-def test_a_transport_without_registration_still_delivers(tmp_path):
-    """register_artifact is optional; its absence must not zero the report."""
-    class _NoRegistrar(_T):
-        register_artifact = None
-
-    tr = _run_with(_NoRegistrar(), tmp_path, 'echo x > sol.sh\necho done')
-    out = tr.reported[0]
-    assert "sol.sh" in out.artifacts
 
 
 def test_a_clean_run_reports_with_no_exclusion(tmp_path):

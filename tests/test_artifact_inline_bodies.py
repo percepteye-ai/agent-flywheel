@@ -28,9 +28,6 @@ from agent_flywheel.runner import (
 class _T:
     lease_ms = 1_800_000
 
-    def __init__(self):
-        self.artifacts: list[str] = []
-
     def claim(self, n):
         return [], 10
 
@@ -42,10 +39,6 @@ class _T:
 
     def abandon(self, r, *, reason, detail=""):
         pass
-
-    def register_artifact(self, r, *, name, size_bytes, sha256, **kw):
-        self.artifacts.append(name)
-        return {}
 
 
 def _script(tmp_path, body: str) -> str:
@@ -89,9 +82,8 @@ def test_a_file_the_agent_writes_to_its_cwd_is_an_artifact(tmp_path):
     """THE join. The agent writes `./triage.sh`; collection scans the
     per-rollout directory; these are now the same place. Before the cwd pin
     this test fails with zero artifacts — measured, not assumed."""
-    tr, out = _run(tmp_path, 'printf "#!/bin/sh\\ngrep ERROR *.log\\n" > triage.sh\necho done')
+    _tr, out = _run(tmp_path, 'printf "#!/bin/sh\\ngrep ERROR *.log\\n" > triage.sh\necho done')
     assert "triage.sh" in out.artifacts, f"collected: {list(out.artifacts)}"
-    assert "triage.sh" in tr.artifacts, "the artifact was never registered"
 
 
 def test_the_tool_calls_file_is_never_an_artifact(tmp_path):
@@ -110,7 +102,7 @@ def test_a_small_text_artifact_inlines_its_content(tmp_path):
     assert rec["content"] == "hello grader"
     assert rec["size_bytes"] == len("hello grader")
     assert rec["sha256"] == hashlib.sha256(b"hello grader").hexdigest(), (
-        "the inline body and the registered digest must describe the same bytes"
+        "the inline body and its digest must describe the same bytes"
     )
 
 
@@ -189,7 +181,7 @@ def test_a_symlink_is_named_and_never_read(tmp_path):
     follow links, so before the guard this inlined the target verbatim."""
     secret = tmp_path / "host_secret.txt"
     secret.write_text("AKIA-TOTALLY-REAL-CREDENTIAL")
-    tr, out = _run(tmp_path, f'ln -s "{secret}" creds.txt\necho done')
+    _tr, out = _run(tmp_path, f'ln -s "{secret}" creds.txt\necho done')
     assert out.artifacts.get("creds.txt") == "skipped:symlink", (
         f"symlink was collected: {out.artifacts.get('creds.txt')!r}"
     )
@@ -197,7 +189,6 @@ def test_a_symlink_is_named_and_never_read(tmp_path):
     assert "AKIA-TOTALLY-REAL-CREDENTIAL" not in body, (
         "the linked secret's CONTENT reached the report"
     )
-    assert "creds.txt" not in tr.artifacts, "a symlink must not be registered"
 
 
 def test_a_symlinked_directory_does_not_smuggle_its_files(tmp_path):

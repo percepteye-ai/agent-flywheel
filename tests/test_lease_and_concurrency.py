@@ -478,61 +478,81 @@ def test_the_work_deadline_is_not_the_lease(tmp_path):
 
 
 class ArtifactTransport(FakeTransport):
-    def __init__(self, *a, fail=False, **kw):
-        super().__init__(*a, **kw)
-        self.artifacts: list[dict] = []
-        self._fail = fail
+    """Keeps each report's artifacts, and every ``register_artifact`` call the
+    runner makes -- which must be none: the report is the only channel."""
 
-    def register_artifact(self, rollout, *, name, size_bytes, sha256,
-                          content_type="application/octet-stream", role="output"):
-        if self._fail:
-            raise TransportError("registry down")
-        self.artifacts.append({"name": name, "size": size_bytes, "sha256": sha256})
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.reported_artifacts: dict[str, dict] = {}
+        self.registrations: list[dict] = []
+
+    def report(self, rollout, output):
+        with self._lock:
+            self.reported_artifacts[rollout.rollout_id] = dict(output.artifacts)
+        return super().report(rollout, output)
+
+    def register_artifact(self, rollout, **kw):
+        self.registrations.append(kw)
         return {}
 
 
-def test_files_the_agent_wrote_are_registered_before_the_report(tmp_path):
-    """`register_artifact` was fully implemented with NO caller, so an agent
-    that produced a diff or a built binary reported only its commentary."""
+def _digest_of(value) -> str:
+    return value["sha256"] if isinstance(value, dict) else value
+
+
+def test_files_the_agent_wrote_ride_the_report(tmp_path):
+    """An agent that produced a diff or a built binary is graded on it: each
+    file reaches the control plane named, with its digest, in the report."""
     tr = ArtifactTransport([[_req(tmp_path)]])
     runner = _runner(tmp_path, tr, spec="fixture_agent:build_artifact_writer")
 
     runner.serve_forever(max_rollouts=1)
 
     assert tr.reported == ["rl_1"]
-    names = sorted(a["name"] for a in tr.artifacts)
-    assert names == ["out/patch.diff", "result.txt"], names
-    for a in tr.artifacts:
-        assert len(a["sha256"]) == 64 and a["size"] > 0
+    artifacts = tr.reported_artifacts["rl_1"]
+    assert sorted(artifacts) == ["out/patch.diff", "result.txt"], artifacts
+    for value in artifacts.values():
+        assert len(_digest_of(value)) == 64
 
 
-def test_the_trajectory_is_not_registered_as_an_artifact(tmp_path):
-    """It is our bookkeeping, sitting in the same directory. Registering it
+def test_the_trajectory_is_not_reported_as_an_artifact(tmp_path):
+    """It is our bookkeeping, sitting in the same directory. Reporting it
     would hand the customer's own capture back to them as a deliverable."""
     tr = ArtifactTransport([[_req(tmp_path)]])
     _runner(tmp_path, tr, spec="fixture_agent:build_artifact_writer").serve_forever(
         max_rollouts=1)
-    assert all("tool_calls.jsonl" not in a["name"] for a in tr.artifacts)
+    assert all("tool_calls.jsonl" not in name
+               for name in tr.reported_artifacts["rl_1"])
 
 
-def test_a_failed_registration_does_not_lose_the_rollout(tmp_path):
-    """The expensive half already ran. An artifact we could not register is
-    worth strictly less than the result it belongs to."""
-    tr = ArtifactTransport([[_req(tmp_path)]], fail=True)
+def test_no_artifact_route_is_called_and_no_artifact_fails(tmp_path):
+    """The SDK POSTed each file to ``/rollouts/{id}/artifacts``, a route
+    Mission Control never served, so every artifact of every rollout 404'd
+    into an ``artifact_failed`` event. The Node SDK never had the call and
+    the report already carries each file. Even a transport that still offers
+    the method is never asked.
+
+    Mutation: restore the registrar and this records one call per file."""
+    from agent_flywheel.transport import AttachTransport
+
+    assert not hasattr(AttachTransport, "register_artifact")
+    tr = ArtifactTransport([[_req(tmp_path)]])
     events: list[str] = []
     runner = _runner(tmp_path, tr, spec="fixture_agent:build_artifact_writer",
                      on_event=lambda k, p: events.append(k))
 
     runner.serve_forever(max_rollouts=1)
 
-    assert tr.reported == ["rl_1"], "the result was lost with the artifact"
-    assert "artifact_failed" in events
+    assert tr.reported == ["rl_1"]
+    assert tr.reported_artifacts["rl_1"], "the fixture wrote files"
+    assert tr.registrations == []
+    assert "artifact_failed" not in events
 
 
-def test_a_rollout_with_no_files_registers_nothing(tmp_path):
+def test_a_rollout_with_no_files_reports_none(tmp_path):
     tr = ArtifactTransport([[_req(tmp_path)]])
     _runner(tmp_path, tr).serve_forever(max_rollouts=1)
-    assert tr.artifacts == []
+    assert tr.reported_artifacts["rl_1"] == {}
 
 
 def test_an_empty_claim_is_announced_rather_than_silent(tmp_path):

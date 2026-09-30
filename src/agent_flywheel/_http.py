@@ -187,7 +187,7 @@ class ControlPlaneClient:
             # TIMEOUT AT ALL -- its "use the client's" value is a sentinel, not
             # None -- so passing the caller's None straight through disabled
             # timeouts on every route that did not name one: report, heartbeat,
-            # abandon, register_artifact, health, register. Only `claim` named
+            # abandon, health, register. Only `claim` named
             # one. VERIFIED against a loopback socket that accepts and never
             # answers: `timeout=None` never returns, while the same request
             # with the client's own 30s value raises ReadTimeout.
