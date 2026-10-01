@@ -181,7 +181,7 @@ run_one()  →  _collect_artifacts()  →  _mark_substrate_unavailable()  →  t
 
 **Every rollout is reported, whatever happened to it**, and the report carries its exclusion block. The SDK used to abandon when an exclusion carried no work product. That is a decision about *trainability*, and it is not the SDK's to make: abandon suppresses the record, so the control plane could not see the rollouts that went worst and never received the reason it would have judged them by. Whether a typed reason means retry, exclude or train is the control plane's call, and it now has the reason to make it with.
 
-The same reasoning applies one level down. Artifact **registration** is a separate network call to the same server that may have just expired the rollout, so the bytes are written into the report *before* registration is attempted — losing an index entry must not lose the deliverable.
+**The report is the only artifact channel.** Each file travels in it as a digest and a size, and a small UTF-8 file travels with its content. The SDK once also posted each file to `/rollouts/{id}/artifacts`, a route the control plane never served, and the Node SDK never had that call. A failure to collect the artifacts at all is emitted as `artifact_failed` (name `"*"`), and the rollout is still reported, excluded from training.
 
 ## `substrate_unavailable` is deliberately strict
 

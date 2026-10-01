@@ -188,8 +188,8 @@ class FlywheelTransport(Protocol):
     Two OPTIONAL extensions, both read with a ``getattr`` default so an
     implementation that predates them keeps working unchanged:
     ``delivery_envelope_s`` (how long one call can take, so the runner can
-    reserve it) and ``accepts_delivery_deadline`` (whether ``report`` and
-    ``register_artifact`` take a ``deadline=`` keyword). A transport that
+    reserve it) and ``accepts_delivery_deadline`` (whether ``report`` takes a
+    ``deadline=`` keyword). A transport that
     declares neither is served with the runner's floor margin.
     """
 
@@ -526,26 +526,6 @@ class AttachTransport:
                 "detail": detail[:2000],
             },
             idempotency_key=f"abandon-{rollout.rollout_id}",
-        )
-
-    def register_artifact(
-        self, rollout: RolloutRequest, *, name: str, size_bytes: int,
-        sha256: str, content_type: str = "application/octet-stream",
-        role: str = "output",
-        deadline: float | None = None,
-    ) -> dict[str, Any]:
-        return self._c.request(
-            "POST",
-            f"/rollouts/{rollout.rollout_id}/artifacts",
-            json_body={
-                "name": name, "content_type": content_type,
-                "size_bytes": size_bytes, "sha256": sha256, "role": role,
-            },
-            idempotency_key=f"art-{rollout.rollout_id}-{sha256[:16]}-{name}",
-            # One registration per file, BEFORE the report, out of the same
-            # reserve. Unbounded, N artifacts were N four-attempt envelopes
-            # spent ahead of the only call that matters.
-            deadline=deadline,
         )
 
 

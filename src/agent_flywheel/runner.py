@@ -1929,12 +1929,8 @@ class RolloutRunner:
             # trajectory while the row carried artifacts={}.
             #
             # Collected even when the lease is lost: the bytes travel INSIDE the
-            # report, so they are worth having whether or not the server-side
-            # index call is still allowed. Only the registration is skipped,
-            # because that one would spend the delivery reserve on 410s.
-            self._collect_artifacts(
-                rollout, out, register=not lease_lost, deadline=deadline
-            )
+            # report, which is the only place the control plane reads them.
+            self._collect_artifacts(rollout, out)
             _mark_substrate_unavailable(out)
         except Exception as exc:
             # Evidence collection must never decide whether a result is
@@ -2435,24 +2431,27 @@ class RolloutRunner:
 
     def _collect_artifacts(
         self, rollout: RolloutRequest, out: RolloutOutput,
-        *, register: bool = True, deadline: float | None = None,
     ) -> None:
-        """Register the files the agent produced, before the report goes out.
+        """Record the files the agent produced in the report that carries them.
 
         For a coding or REPL agent the ARTIFACT is the reward -- a diff, a
         built binary, a screenshot -- and a scorer that only sees final text is
-        grading the commentary rather than the work. ``register_artifact`` has
-        existed on the transport since the beginning with no caller, so this
-        capability was fully implemented and entirely unreachable.
+        grading the commentary rather than the work.
 
-        Registration carries a digest and a size, never the bytes. The REPORT
-        additionally inlines the content of SMALL TEXT artifacts — for a
-        coding or REPL agent the files are the deliverable, and a grader that
-        can verify a digest but never read a file can prove integrity while
-        grading nothing. Two caps bound it: per-file (utf-8, ≤64KB) and a
-        total per report, so a rollout that produced a 200MB core dump — or
-        two hundred small ones — cannot bloat the report. Anything over a cap
-        keeps today's digest-string value: registered, named, not inlined.
+        Every file is named with its digest (and size); the REPORT additionally
+        inlines the content of SMALL TEXT artifacts — for a coding or REPL
+        agent the files are the deliverable, and a grader that can verify a
+        digest but never read a file can prove integrity while grading
+        nothing. Two caps bound it: per-file (utf-8, ≤64KB) and a total per
+        report, so a rollout that produced a 200MB core dump — or two hundred
+        small ones — cannot bloat the report. Anything over a cap keeps the
+        digest-string value: named, not inlined.
+
+        The report is the ONLY artifact channel. This SDK once also POSTed
+        each file to ``/rollouts/{id}/artifacts``, a route Mission Control
+        never served (every call 404'd into an ``artifact_failed`` event), and
+        the Node SDK never had it; Mission Control's report already carries
+        each file's name, digest, size and small bytes.
         """
         # The LOCAL per-rollout directory, which is the one the child is told
         # about through PERCEPTEYE_TRAJECTORY_DIR and can therefore actually write
@@ -2461,20 +2460,6 @@ class RolloutRunner:
         root = Path(self._trajectory_dir(rollout.rollout_id))
         if not root.is_dir():
             return
-        # Registration is OPTIONAL. It is a server-side index; the report body
-        # is what the grader actually reads, so a transport without it (or one
-        # whose registration call fails) must still deliver the bytes.
-        registrar = getattr(self.transport, "register_artifact", None)
-        if not callable(registrar) or not register:
-            registrar = None
-        register_kwargs: dict[str, Any] = {}
-        if registrar is not None and deadline is not None and getattr(
-            self.transport, "accepts_delivery_deadline", False
-        ):
-            # Registration shares the SAME reserve as the report it precedes.
-            # Unbounded, N files meant N four-attempt envelopes spent before
-            # the one call that carries the result was even attempted.
-            register_kwargs["deadline"] = deadline
         inline_budget = MAX_INLINE_TOTAL_BYTES
         # Resolve the collection root ONCE so every candidate can be proven to
         # live under it. ``strict=False`` because the dir is ours and exists.
@@ -2513,7 +2498,7 @@ class RolloutRunner:
                 continue
             if size > MAX_ARTIFACT_BYTES:
                 # Named, not silently dropped: an artifact too large to
-                # register is a fact about the rollout, and a scorer expecting
+                # collect is a fact about the rollout, and a scorer expecting
                 # it deserves to know it existed.
                 out.artifacts[name] = f"skipped:too_large:{size}"
                 continue
@@ -2526,12 +2511,6 @@ class RolloutRunner:
                     content = path.read_text(encoding="utf-8", errors="strict")
                 except (OSError, UnicodeDecodeError):
                     content = None
-            # Recorded BEFORE registration is attempted. Registration is a
-            # network call to the same server that may have just expired this
-            # rollout, and it used to gate the assignment below — so on a
-            # deadline_exceeded rollout, the one case where the evidence
-            # matters most, registration 4xx'd and the deliverable vanished
-            # from the report. Losing an index entry must not lose the bytes.
             if content is not None:
                 inline_budget -= size
                 out.artifacts[name] = {
@@ -2539,20 +2518,6 @@ class RolloutRunner:
                 }
             else:
                 out.artifacts[name] = digest
-            if registrar is None:
-                continue
-            try:
-                registrar(
-                    rollout, name=name, size_bytes=size, sha256=digest,
-                    **register_kwargs,
-                )
-            except (TransportError, LeaseLost) as exc:
-                # The rollout itself is fine. Losing an artifact registration
-                # must not lose the result it belongs to.
-                self._emit("artifact_failed", {
-                    "rollout_id": rollout.rollout_id, "name": name,
-                    "error": str(exc),
-                })
 
     def _purge_trajectory(self, rollout_id: str) -> None:
         """Drop this rollout's trajectory directory once it is no longer needed.

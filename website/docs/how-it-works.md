@@ -234,7 +234,7 @@ For a CLI agent, tool calls are also recovered from its own [event stream](cli.m
 
 Reporting happens in a fixed order, and every step of it is deliberate.
 
-**Artifacts first, whatever the outcome.** For a coding or REPL agent the files *are* the deliverable, and collecting only on the clean-exit path meant a rollout could write a correct solution and have it discarded because the process did not terminate tidily. Registration carries a digest and a size; small UTF-8 files travel *with* the report, because a grader that can verify a digest but never read a file proves integrity while grading nothing.
+**Artifacts first, whatever the outcome.** For a coding or REPL agent the files *are* the deliverable, and collecting only on the clean-exit path meant a rollout could write a correct solution and have it discarded because the process did not terminate tidily. Each file is reported with a digest and a size, and small UTF-8 files travel *with* the report, because a grader that can verify a digest but never read a file proves integrity while grading nothing.
 
 | cap | value | over it |
 |:--|--:|:--|
@@ -315,7 +315,7 @@ Lane ⓪ opens once, and lane ④ once from `attach()`. The rest repeat, and **e
 |:--|:--|:--|
 | **⓪ register** | `GET /health` · `POST /agents` · `POST /agents/{agent_id}/rulebook` (only with `rules=`) | once, at startup |
 | **① claim** | `POST /rollouts/claim` | in a loop, long-polled |
-| **② return the rollout** | `POST /rollouts/{id}/heartbeat` · `/artifacts` · `/result` · `/abandon` | per rollout |
+| **② return the rollout** | `POST /rollouts/{id}/heartbeat` · `/result` · `/abandon` | per rollout |
 | **③ policy back** | `GET /policy/current` · `GET /prompt/current` | at startup, or on a TTL |
 | **④ live evidence** | `POST /agents` · `GET /policy/current` · `POST /agents/{agent_id}/rulebook` (only with `rules=`) · capture to disk · `POST /turns` **with consent only** | at startup, then every 32 turns and at exit |
 
