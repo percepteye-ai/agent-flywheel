@@ -114,20 +114,33 @@ def _as_content(text: str) -> dict:
     return {"content": [{"type": "text", "text": text}]}
 
 
-def test_a_failed_tool_call_reports_the_exception_line():
-    """Through the parser, not just the helper: the error a failed call
-    reports still ends in the exception, within the error budget, and its
-    output is bounded the same way."""
-    calls = parse_tool_calls(_failed_call(_as_content(_long_traceback())),
-                             formats=(_FORMAT,))
+# ── the parser, one test per place a body is read ──────────────────────────
+#
+# Each body path bounds the body once and a failed call's error IS that body.
+# A test that drives only one path proves that path: the content[] case alone
+# stayed green with the details.stdout bound reverted to a head cut.
+
+
+@pytest.mark.parametrize("result", [
+    pytest.param(_as_content(_long_traceback()), id="content[].text"),
+    pytest.param({"details": {"stdout": _long_traceback()}}, id="details.stdout"),
+    pytest.param(_long_traceback(), id="a result that is a bare string"),
+])
+def test_every_body_path_reports_the_exception_line(result):
+    """Through the parser, not just the helper: the output and the error a
+    failed call reports both end in the exception, within the bound, with
+    exactly one marker, whichever shape the result had."""
+    calls = parse_tool_calls(_failed_call(result), formats=(_FORMAT,))
     assert calls is not None and len(calls) == 1
     call = calls[0]
     assert call.outcome == "failed"
-    assert call.error is not None
-    assert call.error.endswith(_TRACEBACK_TAIL)
-    assert call.error.startswith("Traceback (most recent call last):")
-    assert len(call.error) <= _MAX_ERROR_CHARS
-    assert call.error.count("elided by the SDK capture bound") == 1
+    for body in (call.output, call.error):
+        assert isinstance(body, str)
+        assert body.startswith("Traceback (most recent call last):")
+        assert body.endswith(_TRACEBACK_TAIL)
+        assert len(body) == _MAX_ERROR_CHARS
+        assert body.count("elided by the SDK capture bound") == 1
+    assert call.error == _bounded(_long_traceback())
 
 
 def test_a_short_failure_is_reported_verbatim():

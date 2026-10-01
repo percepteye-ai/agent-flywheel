@@ -138,7 +138,7 @@ The rest of the extraction rules:
 - a call with no resolvable name is **dropped, not invented** — a fabricated name corrupts every join downstream
 - unparseable lines are skipped, because a CLI interleaves its own logging with its event stream
 - a stream carrying no tool events leaves `tool_calls` as `null`, never `[]`
-- a readable body is preferred (`content[].text`, then `details.stdout`); an output or error body over 4000 characters keeps both ends, with a marker between them stating how many characters it replaced (`…[N chars elided by the SDK capture bound]…`), because a traceback's exception line is at its end. Every producer of `error` in both SDKs — this parser, the LangChain and ADK adapters, the host recorder, and the Node SDK's OpenClaw and DeepSeek Harness classifiers — applies this one bound
+- a readable body is preferred (`content[].text`, then `details.stdout`, or the result itself when it is a string), and a failed call's `error` is that same body; a body over 4000 characters keeps both ends, with a marker between them stating how many characters it replaced (`…[N chars elided by the SDK capture bound]…`), because a traceback's exception line is at its end. Every producer of `error` in both SDKs — this parser, the LangChain and ADK adapters, the host recorder, and the Node SDK's OpenClaw and DeepSeek Harness classifiers — applies this one bound
 - `latency_ms` comes from `result.details.durationMs`; `entity_ids` are lifted from the **structured** result, never from rendered prose
 - **only stdout is read.** A CLI that logs its events to stderr reports nothing.
 

@@ -152,7 +152,16 @@ def _outcome_of(end_event: dict[str, Any], fmt: StreamFormat) -> Outcome:
 
 
 def _text_of(result: Any) -> Any:
-    """Readable bounded output body, or the raw JSON value."""
+    """The readable body, bounded, or the raw structured value.
+
+    Every readable body is bounded HERE, once, and a failed call's error is
+    that same body: an output and an error get one budget, so a second bound
+    at the error would cut nothing. A result that is itself a string (a
+    ``gen_ai.tool.output`` can be one) is a readable body too; its output
+    used to pass through unbounded.
+    """
+    if isinstance(result, str):
+        return bounded(result)
     if not isinstance(result, dict):
         return result
     content = result.get("content")
@@ -234,11 +243,10 @@ def parse_tool_calls_with_omissions(
         result = _first(event, fmt.result)
         outcome = _outcome_of(event, fmt)
 
+        output = _text_of(result)
         error: str | None = None
-        if outcome == "failed":
-            body = _text_of(result)
-            if isinstance(body, str) and body.strip():
-                error = bounded(body)
+        if outcome == "failed" and isinstance(output, str) and output.strip():
+            error = output
 
         latency = None
         details = result.get("details") if isinstance(result, dict) else None
@@ -256,7 +264,7 @@ def parse_tool_calls_with_omissions(
                 arguments=arguments,
                 outcome=outcome,
                 status_code=None,
-                output=_text_of(result),
+                output=output,
                 error=error,
                 latency_ms=latency,
                 tool_call_id=call_id or None,
