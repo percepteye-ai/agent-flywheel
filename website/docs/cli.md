@@ -138,7 +138,7 @@ The rest of the extraction rules:
 - a call with no resolvable name is **dropped, not invented** — a fabricated name corrupts every join downstream
 - unparseable lines are skipped, because a CLI interleaves its own logging with its event stream
 - a stream carrying no tool events leaves `tool_calls` as `null`, never `[]`
-- a readable body is preferred (`content[].text`, then `details.stdout`), truncated at 4000 characters; an error body at 1000
+- a readable body is preferred (`content[].text`, then `details.stdout`); an output or error body over 4000 characters keeps both ends, with a marker between them stating how many characters it replaced (`…[N chars elided by the SDK capture bound]…`), because a traceback's exception line is at its end
 - `latency_ms` comes from `result.details.durationMs`; `entity_ids` are lifted from the **structured** result, never from rendered prose
 - **only stdout is read.** A CLI that logs its events to stderr reports nothing.
 

@@ -95,7 +95,50 @@ OTEL_GENAI = StreamFormat(
 FORMATS: tuple[StreamFormat, ...] = (OTEL_GENAI,)
 
 _MAX_OUTPUT_CHARS = 4000
-_MAX_ERROR_CHARS = 1000
+
+#: Error bodies get the SAME budget as ordinary output, not a quarter of it.
+#: A raw traceback is the load-bearing signal for learned self-correction, and
+#: the error body is the one payload where the interesting part is reliably at
+#: the END: the exception class and its message, after however many frames.
+#: A 1000-char head-truncation deleted exactly that.
+_MAX_ERROR_CHARS = 4000
+
+#: Stamped into a body that had to be shortened. A fixed, greppable string
+#: with the removed count in it: it lets a downstream census tell "the tool
+#: printed 300 chars" from "the tool printed 300,000 and we kept a window"
+#: without a wire field every producer would have to learn to set.
+_ELISION = "\n…[{dropped} chars elided by the SDK capture bound]…\n"
+
+
+def _bounded(text: str, limit: int = _MAX_OUTPUT_CHARS) -> str:
+    """Shorten ``text`` to ``limit`` while keeping BOTH ends.
+
+    A traceback opens with a banner and closes with the exception type and
+    message; a REPL transcript opens with a command and closes with what it
+    produced. Head-truncation keeps the less informative half of both, and
+    does it silently. So: half the room from the front, the rest from the
+    back, with a marker between them stating how many chars of ``text`` it
+    replaced.
+    """
+    if len(text) <= limit:
+        return text
+    # The marker is part of the budget: a bound that its own annotation can
+    # push past is not a bound. So what goes is ``len(text) - room``, and room
+    # depends on the marker's length, which depends on the count's digits.
+    # The count only grows, so this settles in a step or two.
+    dropped = len(text) - limit
+    while True:
+        marker = _ELISION.format(dropped=dropped)
+        room = limit - len(marker)
+        if room <= 0:
+            # Too small to hold the marker: keep the tail, the half worth
+            # keeping.
+            return text[-limit:]
+        if len(text) - room == dropped:
+            break
+        dropped = len(text) - room
+    head = room // 2
+    return text[:head] + marker + text[len(text) - (room - head):]
 
 
 def iter_json_events(stdout: str):
@@ -165,10 +208,10 @@ def _text_of(result: Any) -> Any:
             if isinstance(item, dict) and isinstance(item.get("text"), str)
         ]
         if parts:
-            return "".join(parts)[:_MAX_OUTPUT_CHARS]
+            return _bounded("".join(parts))
     details = result.get("details")
     if isinstance(details, dict) and isinstance(details.get("stdout"), str):
-        return details["stdout"][:_MAX_OUTPUT_CHARS]
+        return _bounded(details["stdout"])
     return result
 
 
@@ -240,7 +283,7 @@ def parse_tool_calls_with_omissions(
         if outcome == "failed":
             body = _text_of(result)
             if isinstance(body, str) and body.strip():
-                error = body[:_MAX_ERROR_CHARS]
+                error = _bounded(body, _MAX_ERROR_CHARS)
 
         latency = None
         details = result.get("details") if isinstance(result, dict) else None
