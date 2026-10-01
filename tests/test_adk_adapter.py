@@ -159,6 +159,22 @@ def test_a_raised_tool_is_a_real_failure(bound, tmp_path):
     assert "upstream" in (call.error or "")
 
 
+def test_a_raised_traceback_keeps_its_exception_line(bound, tmp_path):
+    """A 500-char head cut deleted the end of a long exception message. The
+    raise gets the SDK's one body bound, as every producer of the field does."""
+    from agent_flywheel._body_bound import bounded
+
+    from .test_error_evidence_survives_capture import _TRACEBACK_TAIL, _long_traceback
+
+    pm = PluginManager()
+    with _RolloutScope("rl_adk", str(tmp_path)):
+        asyncio.run(_one_call(pm, _Tool(), _Ctx(),
+                              error=RuntimeError(_long_traceback())))
+    (call,) = _calls(tmp_path)
+    assert call.error.endswith(_TRACEBACK_TAIL)
+    assert call.error == bounded(f"RuntimeError: {_long_traceback()}")
+
+
 def test_the_agent_name_comes_from_adk_itself(bound, tmp_path):
     """ToolContext.agent_name is native here. Attributing every call to one
     agent would train a planner on a coder's tool calls."""

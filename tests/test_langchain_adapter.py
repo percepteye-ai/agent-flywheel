@@ -254,6 +254,27 @@ def test_tool_events_reach_the_trajectory_with_honest_outcomes(monkeypatch, tmp_
     assert all(c.status_code is None for c in calls)
 
 
+def test_a_raised_traceback_keeps_its_exception_line(monkeypatch, tmp_path):
+    """The raise was recorded whole while a returned error was cut to its
+    first 500 chars. Both get the SDK's one body bound now."""
+    from agent_flywheel._body_bound import bounded
+    from agent_flywheel.adapters.langchain import _build_handler_cls
+
+    from .test_error_evidence_survives_capture import _TRACEBACK_TAIL, _long_traceback
+
+    monkeypatch.setenv(ROLLOUT_ID_ENV, "rl_lc")
+    monkeypatch.setenv(TRAJECTORY_DIR_ENV, str(tmp_path))
+    unbind = LangChainAdapter().bind(llm_url="https://gw/x", api_key="k")
+    h = _build_handler_cls()()
+    h.on_tool_start({"name": "boom"}, "x", run_id="r1")
+    h.on_tool_error(RuntimeError(_long_traceback()), run_id="r1")
+    unbind()
+
+    (call,) = Trajectory(tmp_path).read() or []
+    assert call.error.endswith(_TRACEBACK_TAIL)
+    assert call.error == bounded(f"RuntimeError: {_long_traceback()}")
+
+
 def test_events_outside_a_binding_are_ignored():
     """The handler is registered process-wide once; only a bound context
     records. Otherwise a sub-agent or worker thread would attribute its tools

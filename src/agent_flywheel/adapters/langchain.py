@@ -31,6 +31,7 @@ import time
 from contextvars import ContextVar
 from typing import Any
 
+from .._body_bound import bounded
 from ..binding import AdapterCapabilities
 from ..errors import RoutingNotInstallable
 from ..genai_otlp import new_span_id, now_unix_nano
@@ -203,7 +204,7 @@ def _build_handler_cls() -> type:
                 state["name"], state["arguments"],
                 outcome="failed", status_code=None,
                 agent_name=state.get("agent_name"),
-                error=f"{type(error).__name__}: {error}",
+                error=bounded(f"{type(error).__name__}: {error}"),
                 latency_ms=(time.perf_counter() - state["t0"]) * 1000.0,
             )
             if model_capture_active():
@@ -467,7 +468,7 @@ def _classify_output(output: Any, tool_message_cls: type) -> tuple[str, str | No
     if isinstance(output, tool_message_cls):
         status = getattr(output, "status", None)
         if status == "error":
-            return "failed", str(getattr(output, "content", ""))[:500] or None
+            return "failed", bounded(str(getattr(output, "content", ""))) or None
         if status == "success":
             return "ok", None
     return "unknown", None

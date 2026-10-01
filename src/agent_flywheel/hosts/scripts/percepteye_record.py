@@ -79,8 +79,26 @@ _OFF = {"0", "false", "no", "off"}
 #: -- verifiers abstain on it rather than scoring a guess.
 _GOOSE_OUTCOME = {"PostToolUse": "ok", "PostToolUseFailure": "failed"}
 
+#: A TURN's text (the task, the answer) is cut at this. A tool call's output
+#: and error are NOT: they take the SDK's one body bound, below.
 _MAX_OUTPUT_CHARS = 4000
-_MAX_ERROR_CHARS = 1000
+
+#: The SDK's body bound, ``agent_flywheel/_body_bound.py``, located from this
+#: file's own place in the package. ONE definition: the event-stream parser,
+#: the adapters and this recorder shorten an output or an error the same way,
+#: or ``tool_calls[].error`` has a shape per producer, as it did when the
+#: parser kept both ends and this file still cut an error to its first 1000
+#: chars, deleting a traceback's exception line. It is loaded BY PATH, never
+#: imported: ``import agent_flywheel`` is the per-tool-call cost this file
+#: must not pay, and the module it loads imports nothing.
+_BODY_BOUND_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "_body_bound.py")
+
+#: When one line holding both bodies at the full bound will not fit one write,
+#: each is re-bounded at these limits in turn, output before error at every
+#: step: the error is the payload a model learns to correct from.
+_BODY_STEPS = (2000, 1000, 500, 250)
 
 #: Per-argument-value cap. A file-writing tool puts the ENTIRE file in
 #: `tool_input`, so an uncapped copy makes one call worth 200KB of trajectory
@@ -96,8 +114,12 @@ _MAX_ARG_CHARS = 1000
 _MAX_RECORD_BYTES = 7000
 
 
-def _text(value: object, limit: int) -> str | None:
-    """A displayable string for a result body, or None if there is none."""
+def _text(value: object) -> str | None:
+    """A displayable string for a result body, or None if there is none.
+
+    Whole, not bounded: ``_fit`` bounds a body, because only it can see
+    whether the line it is building fits one write.
+    """
     if value is None:
         return None
     if not isinstance(value, str):
@@ -106,7 +128,18 @@ def _text(value: object, limit: int) -> str | None:
         except (TypeError, ValueError):
             value = str(value)
     value = value.strip()
-    return value[:limit] if value else None
+    return value or None
+
+
+def _body_bound():
+    """The SDK's body-bound module, loaded from its file (see above)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_percepteye_body_bound", _BODY_BOUND_FILE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _clip(value: object, limit: int) -> object:
@@ -125,18 +158,43 @@ def _clip(value: object, limit: int) -> object:
     return text[:limit] + f"…[truncated, {len(text)} chars total]"
 
 
+def _fits(line: str) -> bool:
+    return len(line.encode("utf-8")) <= _MAX_RECORD_BYTES
+
+
 def _fit(record: dict) -> str:
-    """Serialise one record, clipping arguments until the line fits the cap."""
+    """Serialise one record within the single-write cap.
+
+    A tool call's bodies arrive whole and are bounded HERE, because the cap is
+    on the LINE: an output and an error can each be within the SDK's body
+    bound and still not fit one write together. Every re-bound starts from the
+    body the tool returned, so its marker counts what was removed from that,
+    never from a body this file had already shortened. Arguments are clipped
+    only after the bodies have given way, because retry detection keys on
+    name + arguments.
+    """
+    raw = {k: record[k] for k in ("output", "error") if k in record}
+    if raw:
+        bound = _body_bound().bounded
+        for key, text in raw.items():
+            record[key] = bound(text)
     line = json.dumps(record)
-    if len(line.encode("utf-8")) <= _MAX_RECORD_BYTES:
+    if _fits(line):
         return line
+    for limit in _BODY_STEPS if raw else ():
+        for key in ("output", "error"):
+            if key in raw:
+                record[key] = bound(raw[key], limit)
+                line = json.dumps(record)
+                if _fits(line):
+                    return line
     # Values were already clipped once; a line still over cap means many keys
     # or many medium ones, so clip harder before giving up on the values.
     for limit in (200, 40):
         record["arguments"] = {k: _clip(v, limit)
                                for k, v in record["arguments"].items()}
         line = json.dumps(record)
-        if len(line.encode("utf-8")) <= _MAX_RECORD_BYTES:
+        if _fits(line):
             return line
     # An enormous KEY set rather than enormous values. Say so rather than
     # emitting a line that breaks the append guarantee.
@@ -202,7 +260,7 @@ def _record(event: dict) -> dict | None:
         # returned normally -- an observation, so `ok` is honest here.
         err = response.get("error")
         outcome = "failed" if err else "ok"
-        error = _text(err, _MAX_ERROR_CHARS)
+        error = _text(err)
     else:
         outcome = "unknown"
 
@@ -226,8 +284,7 @@ def _record(event: dict) -> dict | None:
     # tool_input, tool_call_id and working_dir), so `output` is simply absent
     # there rather than empty. Gemini sends one, so it is recorded.
     if isinstance(response, dict):
-        output = _text(response.get("llmContent") or response.get("returnDisplay"),
-                       _MAX_OUTPUT_CHARS)
+        output = _text(response.get("llmContent") or response.get("returnDisplay"))
         if output:
             record["output"] = output
     if error:

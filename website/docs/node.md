@@ -83,7 +83,7 @@ One JSON object per executed tool call, appended to `$PERCEPTEYE_TRAJECTORY_DIR/
 | `arguments` | always | the arguments the tool **actually ran with** — OpenClaw resolves any `before_tool_call` adjustment before dispatch. `{}` when not an object. |
 | `outcome` | always | `ok` · `failed` · `unknown` |
 | `status_code` | always | **always `null` from Node.** Neither host's tool stream carries an HTTP status, and inventing one is the failure the tri-state exists to prevent. |
-| `error` | when the host stated one | truncated at 1000 characters |
+| `error` | when the host stated one | over 4000 characters, both ends are kept with a marker between them stating how many characters it replaced (`…[N chars elided by the SDK capture bound]…`) — the Python SDK's bound, character for character |
 | `error_class` | when known | `ToolError` · `ExitStatus:<n>` · `ExitStatusUnreadable` · `StillRunning` · `Aborted` · `TimedOut` · `Signal:<name>` · dsh's own `info` code |
 | `latency_ms` | OpenClaw only | host-measured `durationMs`, so it includes queueing and approval waits. `recordFor()` on the dsh path sets no latency. |
 | `agent_name` | when the host names one | `ctx.agentId` (OpenClaw) · `exec.agent.name` then `exec.agent.id` (dsh). Absent means unattributed — never a claim that one agent made everything. |
