@@ -56,9 +56,19 @@ def _published_files():
     excludes). Tracked files alone left out exactly the file a change adds: a
     new example naming an internal module stayed invisible to all three
     published-file guards until somebody staged it, so the run before the
-    commit -- the one that is supposed to stop it -- was green. A checkout
-    nested in the tree comes back from git as ONE directory entry, never its
-    files, so it is skipped below with every other non-file.
+    commit -- the one that is supposed to stop it -- was green.
+
+    WHAT GIT LISTS IS KEPT ONLY WHERE THE WALKER ALSO WALKS
+    (``tests/repo_files.py``), so one test decides what is this checkout's
+    source on both paths below, and git's listing never does. ``--others`` is
+    everything ``.gitignore`` does not name, which is not this checkout: a
+    Python 3.10-3.12 ``venv`` named anything but ``venv``/``.venv`` writes no
+    ``.gitignore`` of its own, so every installed package came back (pip's
+    vendored sources match a name above); and git descends into a nested
+    worktree whose ``.git`` names a gitdir that no longer exists, listing
+    another branch's files. The walker prunes both by the entry that defines
+    them -- ``pyvenv.cfg``, ``.git`` -- and drops no tracked file
+    (``test_the_walker_keeps_every_file_this_checkout_tracks``).
 
     OUTSIDE A GIT CHECKOUT THE TREE ITSELF IS THE ANSWER, and that case is not
     hypothetical: this suite ships in the sdist, so the standard downstream
@@ -79,11 +89,14 @@ def _published_files():
         cwd=ROOT, capture_output=True, text=True,
     )
     here = pathlib.Path(__file__).resolve()
+    walked = repo_files(ROOT)
     if proc.returncode == 0:
-        candidates = ((ROOT / rel) for rel in filter(None, proc.stdout.split("\0")))
+        own = set(walked)
+        candidates = [ROOT / rel for rel in filter(None, proc.stdout.split("\0"))
+                      if ROOT / rel in own]
         source = "git ls-files"
     else:
-        candidates = repo_files(ROOT)
+        candidates = walked
         source = f"the unpacked tree at {ROOT} (not a git checkout)"
     paths = []
     for p in candidates:

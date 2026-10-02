@@ -28,10 +28,12 @@ dependency licence files as leaks.
 
 UNTRACKED FILES ARE KEPT. This is a walk of the tree, not ``git ls-files``: the
 new module nobody has ``git add``-ed yet is exactly where a new offender lives,
-and it has to be caught on the run before the commit, not after. (The
-published-files scan asks ``git ls-files`` inside a git checkout -- for tracked
-and untracked files alike, minus what ``.gitignore`` excludes -- and comes here
-only outside one.)
+and it has to be caught on the run before the commit, not after. (Inside a
+git checkout the published-files scan also asks ``git ls-files`` -- tracked and
+untracked files alike, minus what ``.gitignore`` excludes -- and keeps only
+what this walker yields, so this module is what decides "this checkout's
+source" there too: git lists a virtualenv nobody gitignored, and every file of
+a nested worktree whose ``.git`` it cannot resolve.)
 """
 from __future__ import annotations
 

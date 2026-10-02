@@ -362,7 +362,8 @@ repository's CI checks the Node one out.
   and whatever a workflow printed.
 - **The current tree:** `tests/test_oss_boundary.py` checks every tracked file,
   and every untracked one `.gitignore` does not exclude, for internal system
-  names, internal details and local developer paths. It does not look at
+  names, internal details and local developer paths. A virtualenv or a nested
+  checkout in the tree is not scanned, gitignored or not. It does not look at
   history.
 - **History:** scan for secrets with a scanner such as `gitleaks detect` or
   `trufflehog git file://.`. Then search `git log -p --all` for the name lists

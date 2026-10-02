@@ -6,10 +6,11 @@ tests hold that from both sides, because each side alone is satisfied by a
 broken walker:
 
 * NOTHING NESTED IS READ. A worktree of another branch under
-  ``.claude/worktrees/`` (where a coding agent puts them) and a clone nested
-  inside the package itself, each holding an offender for every guard, leave
-  every guard green. In a sibling repo exactly this made two seam guards fail
-  on a clean merged main, over another branch's copy of the code.
+  ``.claude/worktrees/`` (where a coding agent puts them), a stale one beside
+  it, a clone nested inside the package itself and a virtualenv nobody
+  gitignored, each holding an offender for every guard, leave every guard
+  green. In a sibling repo exactly this made two seam guards fail on a clean
+  merged main, over another branch's copy of the code.
 * NOTHING OWN IS LOST. The same guards, given the same offenders in this
   checkout's own tree -- in files no git index has seen, as a new file is
   before anyone stages it -- go red, each naming its own planted file. A
@@ -18,8 +19,9 @@ broken walker:
 The guards run in a subprocess against a COPY whose ``src`` is the package
 they import, laid out both ways the published-files scan can meet it: a tree
 git has never seen, which it walks (as it walks an unpacked sdist), and a git
-checkout, which it asks ``git ls-files`` about -- with every planted file
-untracked, as a new one is before anyone stages it.
+checkout, which it asks ``git ls-files`` about and narrows to what the walker
+yields -- with every planted file untracked, as a new one is before anyone
+stages it.
 """
 from __future__ import annotations
 
@@ -103,24 +105,37 @@ def _copy_of_this_checkout(tmp_path: Path, git: bool) -> Path:
 
 
 def _plant_nested_checkouts(repo: Path, git: bool) -> None:
-    """Every offender, inside two trees that are not this checkout.
+    """Every offender, inside trees that are not this checkout.
 
     A linked worktree at the root (its ``.git`` is a FILE), and a clone nested
     inside the package (its ``.git`` is a directory), so the guards rooted at
-    the package meet one too. In a git checkout both are REAL: git descends
-    into a directory whose ``.git`` it cannot resolve, so a fake one there
-    would test git rather than the guards.
+    the package meet one too. In a git checkout both are REAL.
+
+    Beside them, in both layouts, a stale worktree whose ``.git`` names a
+    gitdir that no longer exists: git cannot resolve it, so ``git ls-files
+    --others`` lists every file under it, and a guard that took git's word for
+    where a checkout starts would read them all. And a virtualenv nobody
+    gitignored, known only by its ``pyvenv.cfg``:
+    Python 3.10-3.12's ``venv`` writes no ``.gitignore`` of its own, so
+    ``python -m venv env`` leaves every installed package for ``git ls-files
+    --others`` to list, and pip's own vendored sources match a name on the
+    boundary scan's list.
     """
-    worktree = repo / ".claude" / "worktrees" / "stale-branch"
+    worktree = repo / ".claude" / "worktrees" / "other-branch"
+    stale = repo / ".claude" / "worktrees" / "stale-branch"
+    venv = repo / ".fresh"
     clone = repo / _PACKAGE / "nested_clone"
     if git:
         _git(repo, "worktree", "add", "-q", "--detach", str(worktree))
         _git(repo, "init", "-q", str(clone))
     else:
-        _write(worktree / ".git", "gitdir: /elsewhere/.git/worktrees/stale-branch\n")
+        _write(worktree / ".git", "gitdir: /elsewhere/.git/worktrees/other-branch\n")
         _write(clone / ".git" / "HEAD", "ref: refs/heads/main\n")
+    _write(stale / ".git", f"gitdir: {repo / '.git' / 'worktrees' / 'stale-branch'}\n")
+    _write(venv / "pyvenv.cfg", f"home = /usr/bin\ncommand = python -m venv {venv}\n")
     for _, rel, text in GUARDS:
-        _write(worktree / _nested(rel), text)
+        for tree in (worktree, stale, venv):
+            _write(tree / _nested(rel), text)
         if rel.startswith(_PACKAGE):
             _write(clone / Path(_nested(rel)).name, text)
 
