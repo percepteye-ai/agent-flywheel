@@ -10,10 +10,12 @@ So these start the run-owned daemon, snapshot the harness, and execute the
 example's own ARGV against a local endpoint, asserting that a completion came
 back -- and, against an endpoint that accepts the connection and never
 answers, that the child hands control back long before its budget instead of
-being killed on it. Each rollout is then attested the way the runner attests
-it, because a completion produced while Prime deleted the kernel venv the
-snapshot sealed is a rollout production excludes: the kernel is a real one,
-provisioned once per module by Prime's own bootstrap, as the example requires.
+being killed on it. Each rollout first passes the example's runtime
+preflight, Prime's own kernel check included, and is then attested the way the
+runner attests it: the kernel is a real one, provisioned once per module by
+Prime's own bootstrap, as the example requires, and handed to Prime as the
+interpreter it uses as it is -- so a rollout during which Prime deleted or
+rebuilt the sealed venv fails here, as production excludes it.
 
 THE SKIP RULE is the one already written down in ``tests/node_sdk.py``, and
 the two cases are not the same case. AUTO-DISCOVERY MAY SKIP: a developer who
@@ -123,9 +125,14 @@ def _runnable_launcher() -> list[str]:
 
 
 class _Gateway:
-    """An OpenAI-compatible endpoint that either answers or never does."""
+    """An OpenAI-compatible endpoint that either answers or never does.
 
-    def __init__(self, *, answer: bool):
+    With ``ipython`` code, its first answer is a call to Prime's ``ipython``
+    tool running that code in the kernel, streamed as Prime requests it, and
+    the answers after that are text; ``tool_results`` is what came back.
+    """
+
+    def __init__(self, *, answer: bool, ipython: str | None = None):
         self.requests: list[dict] = []
         outer = self
 
@@ -154,6 +161,9 @@ class _Gateway:
                     # waiting on a dead upstream presents to its client.
                     outer._wedged.wait()
                     return
+                if ipython is not None and len(outer.requests) == 1:
+                    self._stream_tool_call(ipython)
+                    return
                 self._send({
                     "id": "chatcmpl-test", "object": "chat.completion",
                     "created": int(time.time()), "model": "policy",
@@ -167,9 +177,39 @@ class _Gateway:
                               "total_tokens": 2},
                 })
 
+            def _stream_tool_call(self, code):
+                chunk = {"id": "chatcmpl-tool", "object": "chat.completion.chunk",
+                         "created": int(time.time()), "model": "policy"}
+                call = {"index": 0, "id": "call_ipython", "type": "function",
+                        "function": {"name": "ipython",
+                                     "arguments": json.dumps({"code": code})}}
+                events = [
+                    {**chunk, "choices": [{"index": 0, "finish_reason": None,
+                                           "delta": {"role": "assistant",
+                                                     "tool_calls": [call]}}]},
+                    {**chunk, "choices": [{"index": 0, "delta": {},
+                                           "finish_reason": "tool_calls"}]},
+                    {**chunk, "choices": [], "usage": {
+                        "prompt_tokens": 1, "completion_tokens": 1,
+                        "total_tokens": 2}},
+                ]
+                raw = "".join(f"data: {json.dumps(e)}\n\n" for e in events)
+                raw = (raw + "data: [DONE]\n\n").encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
         self._wedged = threading.Event()
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def tool_results(self) -> list[str]:
+        return [str(message.get("content")) for request in self.requests
+                for message in request.get("messages", [])
+                if message.get("role") == "tool"]
 
     @property
     def base_url(self) -> str:
@@ -196,19 +236,19 @@ def _example():
 
 @pytest.fixture(scope="module")
 def provisioned_kernel(tmp_path_factory):
-    """A kernel venv Prime will use as it is, made by Prime's own bootstrap.
+    """A kernel venv Prime will use, made by Prime's own bootstrap.
 
-    The example requires a provisioned PRIME_AGENT_KERNEL_VENV, and the
-    snapshot refuses one whose interpreter cannot import ``ipykernel`` and
-    ``rlm``: Prime deletes and rebuilds such a venv at every session start.
-    Built here by the installed prime-agent itself rather than imitated, so
-    its readiness marker is the one this Prime checks. Prime needs ``uv`` to
-    build it, and the network on a cold uv cache; the skip rule is the one
-    ``_runnable_launcher`` applies.
+    The example requires a provisioned PRIME_AGENT_KERNEL_VENV, and refuses
+    one whose interpreter Prime would refuse. Built here by the installed
+    prime-agent itself rather than imitated: its bootstrap, run with
+    PRIME_AGENT_KERNEL_PYTHON unset, provisions the venv that the same file
+    later checks, with that variable set, in the example's preflight. Prime
+    needs ``uv`` to build it, and the network on a cold uv cache; the skip
+    rule is the one ``_runnable_launcher`` applies.
     """
     launcher = pathlib.Path(_runnable_launcher()[-1])
     _, named = _package_root()
-    bootstrap = launcher.parents[1] / "core" / "kernel" / "bootstrap-cli.js"
+    bootstrap = _example()._prime_kernel_check(launcher.parents[2])
     node = shutil.which("node")
     kernel = tmp_path_factory.mktemp("prime-kernel") / "kernel-venv"
     env = {k: v for k, v in os.environ.items() if k != "PRIME_AGENT_KERNEL_PYTHON"}
@@ -242,14 +282,16 @@ def provisioned_kernel(tmp_path_factory):
 def _path_without_uv(tmp_path) -> str:
     """PATH with a ``uv`` in front that refuses, as if none were installed.
 
-    The kernel venv is provisioned, so Prime should never reach for ``uv``.
-    If it ever judges that venv stale it ``rm -rf``s it FIRST and only then
-    looks for ``uv`` -- the refusal cannot save the venv, and is not meant
-    to. What it stops is the rebuild: without it, ``uv python install`` and
-    ``uv pip install`` run on in the background into the child's private HOME
-    after the session ends, still writing while the child is removed
-    (``Directory not empty``), and orphaned. With it, the venv is simply gone
-    and the attestation after the rollout says so on every machine.
+    Prime is handed the kernel as PRIME_AGENT_KERNEL_PYTHON, which it never
+    rebuilds, so it should never reach for ``uv``. If the hand-off ever goes
+    back to PRIME_AGENT_KERNEL_VENV alone, Prime ``rm -rf``s a venv it judges
+    stale FIRST and only then looks for ``uv`` -- the refusal cannot save the
+    venv, and is not meant to. What it stops is the rebuild: without it,
+    ``uv python install`` and ``uv pip install`` run on in the background into
+    the child's private HOME after the session ends, still writing while the
+    child is removed (``Directory not empty``), and orphaned. With it, the
+    venv is simply gone and the attestation after the rollout says so on
+    every machine.
     """
     bin_dir = tmp_path / "no-uv"
     bin_dir.mkdir(exist_ok=True)
@@ -262,8 +304,10 @@ def _path_without_uv(tmp_path) -> str:
 def _run_one_rollout(tmp_path, launch, gateway, kernel, *, budget_s: float):
     """One rollout through the example's own ARGV and run-owned daemon.
 
-    Attested before release, as ``RolloutRunner`` attests every rollout: a
-    drifted kernel, harness or settings fails here instead of passing.
+    Preflighted as ``main`` preflights before serving, and attested before
+    release, as ``RolloutRunner`` attests every rollout: a kernel Prime would
+    not use, or a drifted kernel, harness or settings, fails here instead of
+    passing.
     """
     module = _example()
     launcher = pathlib.Path(launch[-1])
@@ -294,6 +338,11 @@ def _run_one_rollout(tmp_path, launch, gateway, kernel, *, budget_s: float):
     )
     child = None
     try:
+        module._preflight_prime_runtime(
+            str(launcher), env=harness.daemon_environment(),
+            cwd=harness.daemon_working_directory,
+            kernel_check=module._prime_kernel_check(package_root),
+        )
         daemon.start()
         child = harness.prepare_child("test")
         trajectory = tmp_path / "trajectory"
@@ -459,3 +508,93 @@ def test_a_gateway_that_never_answers_does_not_consume_the_whole_budget(
         f"killed on the deadline rather than returning on the ceiling: "
         f"{out.exclusion_detail}"
     )
+
+
+def _kernel_copy(provisioned, destination: pathlib.Path) -> pathlib.Path:
+    """A private copy of the module's kernel, for a test that alters one."""
+    shutil.copytree(provisioned, destination, symlinks=True)
+    return destination
+
+
+#: What the policy runs in Prime's kernel: which interpreter, from which venv.
+_WHICH_KERNEL = "import sys; print('kernel-prefix=' + sys.prefix)"
+
+
+@pytest.mark.parametrize("provisioned_by", ["this prime-agent", "another prime-agent"])
+def test_the_sealed_kernel_runs_the_policy_code_as_it_is(
+    tmp_path, provisioned_kernel, provisioned_by,
+):
+    """Prime runs ipython in the sealed venv and never rebuilds it.
+
+    A venv another prime-agent version provisioned carries that version's
+    readiness marker. Handed over as PRIME_AGENT_KERNEL_VENV, Prime judged it
+    stale at the first kernel start, ``rm -rf``ed it and began rebuilding it
+    in place; the rollout completed anyway and only the attestation after it
+    saw the sealed kernel gone. Handed over as PRIME_AGENT_KERNEL_PYTHON --
+    Prime's documented way to use an existing environment without
+    auto-bootstrap -- the interpreter is checked and used as it is: the tool
+    call runs in the sealed venv, which is still there, unchanged, afterwards.
+    """
+    kernel = provisioned_kernel
+    if provisioned_by == "another prime-agent":
+        kernel = _kernel_copy(provisioned_kernel, tmp_path / "kernel-venv")
+        marker = kernel / ".bootstrap-version"
+        recorded = json.loads(marker.read_text())
+        assert recorded.get("runtime"), (
+            "Prime's bootstrap no longer records the runtime it installed; "
+            "this test no longer models a kernel another version provisioned")
+        # The runtime identity is what differs between prime-agent versions:
+        # a hash of the bundled prime-agent-runtime source.
+        recorded["runtime"] = "sha256:" + "0" * 64
+        marker.write_text(json.dumps(recorded, separators=(",", ":")) + "\n")
+    launch = _runnable_launcher()
+    with _Gateway(answer=True, ipython=_WHICH_KERNEL) as gateway:
+        out, _ = _run_one_rollout(
+            tmp_path, launch, gateway, kernel, budget_s=120.0)
+
+    assert out.exclusion_reason is None, out.exclusion_detail
+    assert gateway.tool_results, "the policy's ipython call never came back"
+    assert f"kernel-prefix={kernel.resolve()}" in gateway.tool_results[0], (
+        f"the ipython call did not run in the sealed kernel venv: "
+        f"{gateway.tool_results[0][:400]}")
+
+
+def test_a_kernel_prime_would_refuse_is_refused_before_serving(
+    tmp_path, provisioned_kernel,
+):
+    """Prime's own verdict, before the first rollout, in Prime's words.
+
+    PRIME_AGENT_KERNEL_PYTHON is used as it is or refused -- and a refused
+    kernel does not stop a session: it completes, with every ``ipython`` call
+    answered by the refusal, a rollout nothing excludes. The snapshot probes
+    only the two packages Prime's docs name for it, ``ipykernel`` and ``rlm``;
+    this kernel has both and lacks one of the default packages THIS release
+    requires, which only the installed prime-agent can say, so the example's
+    preflight asks it.
+    """
+    kernel = _kernel_copy(provisioned_kernel, tmp_path / "kernel-venv")
+    required = json.loads((kernel / ".bootstrap-version").read_text())["extraUvArgs"]
+    assert "tyro" in required, (
+        f"this prime-agent no longer installs tyro by default ({required}); "
+        f"remove another package it does")
+    site = next((kernel / "lib").glob("python*/site-packages"))
+    shutil.rmtree(site / "tyro")
+
+    module = _example()
+    launcher = pathlib.Path(_runnable_launcher()[-1])
+    source = tmp_path / "empty-harness"
+    source.mkdir()
+    harness = PrimeHarnessSnapshot(  # ipykernel and rlm import: accepted
+        source, workspace_dir=tmp_path / "_harness_runs", kernel_venv=kernel)
+    try:
+        with pytest.raises(RuntimeError) as refused:
+            module._preflight_prime_runtime(
+                str(launcher), env=harness.daemon_environment(),
+                cwd=harness.daemon_working_directory,
+                kernel_check=module._prime_kernel_check(launcher.parents[2]),
+            )
+    finally:
+        harness.close()
+    assert "prime-agent refuses the kernel PRIME_AGENT_KERNEL_VENV names" in str(
+        refused.value)
+    assert "tyro" in str(refused.value)

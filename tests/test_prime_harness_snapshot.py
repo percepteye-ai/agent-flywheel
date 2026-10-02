@@ -62,12 +62,12 @@ def _source(tmp_path: Path) -> Path:
 
 
 def _provisioned(kernel: Path, *, modules=("ipykernel", "rlm")) -> Path:
-    """A real venv whose interpreter imports what Prime's readiness check does.
+    """A real venv whose interpreter imports what every Prime kernel check does.
 
-    Prime deletes and rebuilds a kernel venv whose ``bin/python`` cannot import
-    ``ipykernel`` and ``rlm``, so the snapshot refuses one at construction.
-    Empty stand-in packages are enough: the probe asks the venv's own
-    interpreter, through its own ``site``, and nothing here runs them.
+    Prime refuses a PRIME_AGENT_KERNEL_PYTHON that cannot import ``ipykernel``
+    and ``rlm``, so the snapshot refuses such a venv at construction. Empty
+    stand-in packages are enough: the probe asks the venv's own interpreter,
+    through its own ``site``, and nothing here runs them.
     """
     venv.EnvBuilder(with_pip=False, symlinks=True).create(kernel)
     site = next((kernel / "lib").glob("python*/site-packages"))
@@ -203,6 +203,8 @@ def test_snapshot_digest_is_canonical_and_children_are_private(tmp_path):
                 first.agent_dir
             )
             assert first.environment["PRIME_AGENT_KERNEL_VENV"].endswith("kernel-venv")
+            assert first.environment["PRIME_AGENT_KERNEL_PYTHON"] == str(
+                (tmp_path / "kernel-venv").resolve() / "bin" / "python")
             assert first.harness_sha256 == second.harness_sha256 == snapshot.harness_sha256
             assert (first.harness_dir / "skills" / "opsd.md").read_text() == "fixed tactic\n"
             assert first.settings_path.read_bytes() == _EXPECTED_SETTINGS
@@ -351,10 +353,56 @@ def test_supervisor_environment_is_stable_and_contains_no_ambient_secrets(
         assert list(snapshot.daemon_working_directory.iterdir()) == []
         assert snapshot.daemon_working_directory != tmp_path
         assert env["PRIME_AGENT_KERNEL_VENV"].endswith("kernel-venv")
-        assert env["PRIME_AGENT_KERNEL_PYTHON"] == ""
+        assert env["PRIME_AGENT_KERNEL_PYTHON"] == str(
+            (tmp_path / "kernel-venv").resolve() / "bin" / "python")
         assert env["PYTHONDONTWRITEBYTECODE"] == "1"
     finally:
         snapshot.close()
+
+
+def test_prime_is_handed_the_sealed_interpreter_and_never_an_ambient_one(
+    tmp_path, monkeypatch,
+):
+    """PRIME_AGENT_KERNEL_PYTHON is how Prime uses a kernel without rebuilding.
+
+    Given the venv's interpreter there, Prime only checks it; given only
+    PRIME_AGENT_KERNEL_VENV, it deletes and rebuilds a venv its private
+    readiness marker does not recognise -- one another prime-agent version
+    provisioned, say -- and the seal reports a lost rollout as a mutated
+    kernel. Every process the adapter configures gets the sealed interpreter,
+    whatever the serving shell exported, and a snapshot without a kernel
+    clears an ambient one rather than let it stand in.
+    """
+    monkeypatch.setenv("PRIME_AGENT_KERNEL_PYTHON", "/ambient/bin/python")
+    monkeypatch.setenv("PRIME_AGENT_KERNEL_VENV", "/ambient/kernel-venv")
+    snapshot = _snapshot(tmp_path)
+    child = snapshot.prepare_child("sealed")
+    try:
+        sealed = str((tmp_path / "kernel-venv").resolve() / "bin" / "python")
+        rollout = build_child_env(
+            rollout_id="rl_sealed", llm_url="http://127.0.0.1:1/v1",
+            api_key="perk_test", trajectory_dir=str(tmp_path / "traj"),
+            extra=child.environment,
+        )
+        for env in (snapshot.daemon_environment(), child.environment,
+                    child.discovery_environment, rollout):
+            assert env["PRIME_AGENT_KERNEL_PYTHON"] == sealed
+            assert env["PRIME_AGENT_KERNEL_VENV"] == str(
+                (tmp_path / "kernel-venv").resolve())
+    finally:
+        snapshot.release_child(child)
+        snapshot.close()
+
+    bare = PrimeHarnessSnapshot(_source(tmp_path), workspace_dir=tmp_path / "bare")
+    try:
+        assert bare.daemon_environment()["PRIME_AGENT_KERNEL_PYTHON"] == ""
+        unsealed = bare.prepare_child("unsealed")
+        try:
+            assert unsealed.environment["PRIME_AGENT_KERNEL_PYTHON"] == ""
+        finally:
+            bare.release_child(unsealed)
+    finally:
+        bare.close()
 
 
 def test_concurrent_children_are_distinct_but_have_one_identity(tmp_path):
@@ -778,15 +826,15 @@ def test_kernel_external_directory_symlink_is_refused_but_lib64_alias_is_support
         )
 
 
-def test_a_kernel_venv_prime_would_rebuild_is_refused_for_that_reason(
+def test_a_kernel_venv_prime_would_refuse_is_refused_for_that_reason(
     tmp_path, monkeypatch,
 ):
-    """Refused at construction, naming the cause, not later as a mutation.
+    """Refused at construction, naming the cause, not in every rollout.
 
-    Prime ``rm -rf``s and rebuilds a PRIME_AGENT_KERNEL_VENV whose interpreter
-    cannot import ``ipykernel`` and ``rlm``. Accepted, an empty directory was
-    sealed, deleted by the first session, and reported on a lost rollout as
-    "run-scoped Prime kernel venv was mutated" -- the wrong cause, every time.
+    Prime refuses a PRIME_AGENT_KERNEL_PYTHON that cannot import ``ipykernel``
+    and ``rlm`` when a session starts its kernel, and the session goes on to
+    complete with every ``ipython`` call answered by that refusal. Accepted, an
+    empty directory would be sealed and served that way, rollout after rollout.
     """
     source = _source(tmp_path)
     workspace = tmp_path / "runs"
@@ -796,8 +844,8 @@ def test_a_kernel_venv_prime_would_rebuild_is_refused_for_that_reason(
             PrimeHarnessSnapshot(source, workspace_dir=workspace, kernel_venv=kernel)
         message = str(refused.value)
         assert "PRIME_AGENT_KERNEL_VENV is not a provisioned Prime kernel" in message
-        assert "Prime would delete and rebuild it" in message
-        assert "mutated kernel venv" in message
+        assert "Prime refuses that interpreter" in message
+        assert "every rollout's ipython call would fail" in message
         assert not list(workspace.glob("prime-harness-*")), (
             "a refused kernel leaked the run root it was refused in")
         return message

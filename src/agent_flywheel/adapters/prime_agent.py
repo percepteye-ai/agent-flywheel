@@ -178,19 +178,27 @@ MAX_HARNESS_BYTES = 64 * 1024 * 1024
 MAX_KERNEL_ENTRIES = 100_000
 MAX_KERNEL_BYTES = 4 * 1024 * 1024 * 1024
 
-#: What Prime itself imports before it will use a kernel venv. At every session
-#: start prime-agent (0.7.2, ``kernelReady``) runs ``<venv>/bin/python -c
-#: "import ipykernel"`` and then a runtime check that begins ``import rlm`` --
-#: the package prime-agent-runtime installs -- and when either fails it
-#: ``rm -rf``s the directory PRIME_AGENT_KERNEL_VENV names and rebuilds it in
-#: place with uv. Rebuilding a sealed venv is indistinguishable, from here,
-#: from any other write to it, so an unprovisioned venv used to surface only
-#: as "run-scoped Prime kernel venv was mutated" on a rollout that was already
-#: lost. Probing the same imports once, before the venv is sealed, refuses it
-#: at construction for the reason it will fail. This is Prime's import check
-#: and not its ``.bootstrap-version`` marker logic, which is private to the
-#: Prime release and changes with it: a venv another prime-agent version
-#: provisioned still imports, Prime still rebuilds it, and that remains drift.
+#: The sealed kernel reaches Prime as PRIME_AGENT_KERNEL_PYTHON, the variable
+#: prime-agent documents for using an existing Python environment instead of
+#: auto-bootstrapping one (README, 0.7.2). Given it, Prime only CHECKS the
+#: interpreter when a session first starts its kernel -- it imports
+#: ``ipykernel``, runs a runtime check that begins ``import rlm`` (the package
+#: prime-agent-runtime installs) and imports its default packages -- and
+#: refuses one that fails, writing nothing. It reads no ``.bootstrap-version``
+#: marker and never deletes or rebuilds anything. PRIME_AGENT_KERNEL_VENV, the
+#: variable this adapter used to hand over, is the opposite: Prime ``rm -rf``s
+#: and rebuilds a venv there that fails its private readiness check, including
+#: one a different prime-agent version provisioned, and the seal could report
+#: that only as a mutated kernel on a rollout already lost.
+#:
+#: An interpreter that cannot import ``ipykernel`` and ``rlm`` is therefore no
+#: longer rebuilt, but every rollout's kernel would still be refused, so the
+#: snapshot probes these imports once, before sealing, and refuses it at
+#: construction for that reason. These are the two packages Prime's docs name
+#: for that variable (``ipykernel``, and prime-agent-runtime, which provides
+#: ``rlm``). The rest of its check -- the runtime's API and "the default
+#: runtime packages", whose list is the installed release's -- the example's
+#: runtime preflight asks that prime-agent for, instead of restating it here.
 _KERNEL_IMPORT_PROBE = "import ipykernel, rlm"
 #: A cold import of ipykernel is a second or two; this only bounds a hung one.
 _KERNEL_PROBE_TIMEOUT_S = 60.0
@@ -229,21 +237,21 @@ def unix_socket_directory(relative_path: str) -> str:
 def _refuse_unprovisioned_kernel(
     venv: Path, *, env: Mapping[str, str], cwd: Path,
 ) -> None:
-    """Refuse a kernel venv Prime would delete and rebuild, naming why.
+    """Refuse a kernel venv whose interpreter Prime would refuse, naming why.
 
-    Runs ``<venv>/bin/python -c "import ipykernel, rlm"`` -- Prime's own
-    readiness imports -- under the scrubbed daemon environment, from the empty
-    run-owned working directory so a module beside the serving process cannot
-    answer for the venv. ``PYTHONDONTWRITEBYTECODE`` is part of that
-    environment, so the probe writes nothing into the venv it is about to seal.
+    Runs ``<venv>/bin/python -c "import ipykernel, rlm"`` -- the two packages
+    Prime's docs name for a PRIME_AGENT_KERNEL_PYTHON -- under the scrubbed
+    daemon environment, from the empty run-owned working
+    directory so a module beside the serving process cannot answer for the
+    venv. ``PYTHONDONTWRITEBYTECODE`` is part of that environment, so the
+    probe writes nothing into the venv it is about to seal.
     """
     def _refusal(reason: str) -> ConfigurationError:
         return ConfigurationError(
             f"PRIME_AGENT_KERNEL_VENV is not a provisioned Prime kernel: {reason}. "
-            "Prime would delete and rebuild it at the first session start, "
-            "which this snapshot could only report as a mutated kernel venv; "
-            "provision it with this prime-agent's own kernel bootstrap before "
-            "serving"
+            "Prime refuses that interpreter when a session starts its kernel, "
+            "so every rollout's ipython call would fail; provision the venv "
+            "with this prime-agent's own kernel bootstrap before serving"
         )
 
     python = venv / "bin" / "python"
@@ -943,10 +951,11 @@ class PrimeHarnessSnapshot:
     to bootstrap a separate runtime. It is runtime state, not continual
     harness state, so it receives its own ``kernel_sha256`` identity and a
     metadata seal checked before and after every child. A write poisons the
-    snapshot rather than silently changing later replicas. Construction
-    refuses a venv whose ``bin/python`` cannot import ``ipykernel`` and
-    ``rlm``: Prime deletes and rebuilds such a venv at its first session, and
-    that rebuild would otherwise be reported only as a mutation.
+    snapshot rather than silently changing later replicas. Prime receives it
+    as ``PRIME_AGENT_KERNEL_PYTHON=<venv>/bin/python``, which it uses as it
+    is and never rebuilds, so construction refuses a venv whose
+    ``bin/python`` cannot import ``ipykernel`` and ``rlm``: Prime would refuse
+    that interpreter in every rollout.
 
     ``execution_artifacts`` is an adapter-owned map of stable names to exact
     files or link-free trees, such as Prime's bundled package and the explicit
@@ -1186,9 +1195,10 @@ class PrimeHarnessSnapshot:
             # longest of those sockets, or no session ever starts.
             "TMPDIR": unix_socket_directory(_PRIME_WORKER_SOCKET.format(
                 uid=os.getuid() if hasattr(os, "getuid") else "user")),
-            # An ambient explicit interpreter takes precedence over the venv
-            # in Prime's bootstrapper. Clear it so the attested venv cannot be
-            # silently bypassed by the serving shell's configuration.
+            # Always set, so an interpreter from the serving shell's
+            # configuration can never stand in for the attested venv: Prime
+            # prefers this variable over any venv. Without a kernel it is
+            # empty, which Prime treats as unset.
             "PRIME_AGENT_KERNEL_PYTHON": "",
             # Import caches are runtime writes, not policy behavior. Suppress
             # them so a clean Python import cannot poison the shared kernel
@@ -1200,6 +1210,17 @@ class PrimeHarnessSnapshot:
             for name, value in self._route_configuration.items()
         })
         if self._kernel_venv is not None:
+            # Prime's documented way to use an existing environment without
+            # auto-bootstrap (see _KERNEL_IMPORT_PROBE): the sealed venv's own
+            # interpreter, which Prime checks and then uses as it is. This is
+            # the exact path Prime would derive from PRIME_AGENT_KERNEL_VENV,
+            # so the kernel process is the same one; what goes is Prime's
+            # private readiness marker and the delete-and-rebuild behind it.
+            env["PRIME_AGENT_KERNEL_PYTHON"] = str(self._kernel_venv / "bin" / "python")
+            # Prime reads this only to find a venv to manage, which it never
+            # does once the interpreter is given. It stays set to the same
+            # sealed tree so an ambient value cannot name a different one to
+            # anything that does read it.
             env["PRIME_AGENT_KERNEL_VENV"] = str(self._kernel_venv)
         return env
 

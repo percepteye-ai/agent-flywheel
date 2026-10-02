@@ -55,7 +55,8 @@ launcher's `#!/usr/bin/env node` also makes the order of `PATH` material, so pin
 and probe the intended Node runtime before starting the worker. Before polling,
 the example runs the resolved launcher's `--version` and `--help` under its
 scrubbed daemon environment and refuses a broken Node runtime or a Prime build
-that lacks any rollout flag this adapter uses.
+that lacks any rollout flag this adapter uses; it then runs that Prime's own
+kernel check against the sealed kernel (below).
 
 `PERCEPTEYE_PRIME_HARNESS_SOURCE` names the harness directory itself (normally
 `~/.prime/agent/harness`), not the whole agent directory. An empty directory is
@@ -123,25 +124,40 @@ venv; do not install or upgrade packages while a run is active. External
 dynamic libraries loaded by its interpreter remain host-runtime provenance,
 not part of this venv digest.
 
-Provision it with the installed prime-agent's own kernel bootstrap, with
-`PRIME_AGENT_KERNEL_PYTHON` unset, so the venv carries the readiness marker
-that same prime-agent checks. It needs `uv`, and the network on a cold uv
-cache:
+Provision it once with the installed prime-agent's own kernel bootstrap, with
+`PRIME_AGENT_KERNEL_PYTHON` unset so that the bootstrap builds the venv rather
+than checking an existing interpreter. It needs `uv`, and the network on a cold
+uv cache:
 
 ```bash
-PRIME_AGENT_KERNEL_VENV=/absolute/path/to/kernel-venv \
+env -u PRIME_AGENT_KERNEL_PYTHON PRIME_AGENT_KERNEL_VENV=/absolute/path/to/kernel-venv \
   node "$PRIME_AGENT_PACKAGE_ROOT/dist/core/kernel/bootstrap-cli.js"
 ```
 
-Prime decides at every session start whether it can use the venv. When it
-cannot, it deletes the directory and rebuilds it in place, which the seal can
-only report as a mutation of the kernel, on a rollout that is already lost. So
-the snapshot refuses at startup, and says why, a venv whose `bin/python` cannot
-import `ipykernel` and `rlm` (the package prime-agent-runtime installs). That
-check covers Prime's imports, not its private version marker. A venv that a
-different prime-agent version provisioned still imports, Prime still rebuilds
-it, and the result still shows up as kernel drift, so re-provision whenever
-prime-agent changes.
+Prime receives the venv as `PRIME_AGENT_KERNEL_PYTHON=<venv>/bin/python`, the
+variable prime-agent documents for using an existing Python environment instead
+of auto-bootstrapping one. Prime uses that interpreter as it is: it never reads
+the venv's bootstrap marker and never deletes or rebuilds it, so a venv that a
+different prime-agent version provisioned keeps running, under the
+`kernel_sha256` that names it. (Handed only `PRIME_AGENT_KERNEL_VENV`, Prime
+deletes and rebuilds in place any venv its private readiness marker does not
+recognise, at the first session -- which the seal can only report as a mutated
+kernel, on a rollout already lost.)
+
+What Prime still does, at every session start, is check the interpreter and
+refuse one that lacks `ipykernel`, a current prime-agent-runtime (`rlm`), or one
+of the default packages that release installs. A refused kernel does not stop
+the session: it completes, and every `ipython` call is answered with the
+refusal. So the example refuses such a kernel before serving, for the reason
+Prime gives. The snapshot refuses at startup a venv whose `bin/python` cannot
+import `ipykernel` and `rlm`, the two packages Prime's docs name for that
+variable, and the runtime preflight then runs the installed prime-agent's own check
+(`dist/core/kernel/bootstrap-cli.js`, which only checks when
+`PRIME_AGENT_KERNEL_PYTHON` is set) against the sealed interpreter under the
+daemon environment. Re-provision if that check refuses after a prime-agent
+upgrade. Prime's check starts one interpreter per default package each time a
+session starts its kernel: a few seconds per rollout, where its marker check
+took well under one.
 
 The example starts one run-owned Prime daemon under a separate scrubbed HOME
 and empty run-owned working directory, then explicitly shuts it down before

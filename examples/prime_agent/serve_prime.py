@@ -366,13 +366,43 @@ _REQUIRED_PRIME_FLAGS = (
 )
 
 
+def _prime_kernel_check(package_root: str | os.PathLike[str]) -> pathlib.Path:
+    """Prime's own kernel check, inside the installed package.
+
+    Compiled into the same ``dist/`` as the launcher, from the same source as
+    the check a session runs before it starts its kernel (``ensureKernelPython``).
+    With PRIME_AGENT_KERNEL_PYTHON set, which the snapshot does whenever it
+    has a kernel, it imports ``ipykernel``, runs Prime's runtime check and
+    imports Prime's default packages, then prints the interpreter, or exits 1
+    with the reason Prime would give a session. It writes nothing.
+    """
+    return pathlib.Path(package_root) / "dist" / "core" / "kernel" / "bootstrap-cli.js"
+
+
+#: Prime's kernel check imports a dozen packages (pandas and scipy among them),
+#: one interpreter each; tens of seconds on a cold disk. This bounds a hung one.
+_KERNEL_CHECK_TIMEOUT_S = 180
+
+
 def _preflight_prime_runtime(
     executable: str,
     *,
     env: dict[str, str],
     cwd: str | os.PathLike[str],
+    kernel_check: str | os.PathLike[str],
 ) -> str:
-    """Prove the pinned launcher can start and implements this adapter contract."""
+    """Prove the pinned launcher can start, implements this adapter contract,
+    and will use the snapshot's kernel.
+
+    The kernel reaches Prime as PRIME_AGENT_KERNEL_PYTHON, which Prime uses as
+    it is and never rebuilds -- but it refuses one that fails its check, and
+    a session that cannot start its kernel still completes, with every
+    ``ipython`` call answered by that refusal. The snapshot refuses an
+    interpreter without ``ipykernel`` and ``rlm`` at construction; the rest of
+    Prime's check (its runtime API and its default packages) belongs to the
+    installed release, so this asks that release, under the daemon
+    environment, rather than restating its list.
+    """
 
     def _run(option: str) -> subprocess.CompletedProcess[bytes]:
         try:
@@ -410,6 +440,42 @@ def _preflight_prime_runtime(
         raise RuntimeError(
             "prime-agent does not implement the required rollout flags: "
             + ", ".join(missing)
+        )
+
+    if not env.get("PRIME_AGENT_KERNEL_PYTHON"):
+        # Without it Prime's check is its bootstrap: it would build a kernel
+        # under the daemon HOME instead of checking the sealed one.
+        raise RuntimeError(
+            "the Prime daemon environment sets no PRIME_AGENT_KERNEL_PYTHON, "
+            "so there is no snapshot kernel to check"
+        )
+    check = pathlib.Path(kernel_check)
+    if not check.is_file():
+        raise RuntimeError(
+            f"prime-agent has no kernel check at {check}, so whether it will "
+            "use PRIME_AGENT_KERNEL_VENV cannot be confirmed before serving"
+        )
+    try:
+        # The node the launcher's own `#!/usr/bin/env node` resolves here.
+        kernel_probe = subprocess.run(
+            ["/usr/bin/env", "node", str(check)],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            cwd=cwd,
+            env=env,
+            timeout=_KERNEL_CHECK_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            f"prime-agent kernel preflight could not execute: {exc}"
+        ) from exc
+    if kernel_probe.returncode != 0:
+        detail = (kernel_probe.stderr + kernel_probe.stdout).decode(
+            "utf-8", "replace"
+        ).strip()[-500:] or f"exit {kernel_probe.returncode} without output"
+        raise RuntimeError(
+            f"prime-agent refuses the kernel PRIME_AGENT_KERNEL_VENV names: {detail}"
         )
     return version.splitlines()[0] if version else "version not reported"
 
@@ -543,6 +609,7 @@ def main() -> int:
             str(resolved_launcher),
             env=daemon_env,
             cwd=harness.daemon_working_directory,
+            kernel_check=_prime_kernel_check(package_root),
         )
         print(f"Prime runtime preflight passed: {version}", flush=True)
         daemon = _RunOwnedPrimeDaemon(
