@@ -93,6 +93,12 @@ jobs:
       # install that resolved to something else fails the suite rather than
       # silently changing the attested identity.
       - run: npm install -g prime-agent@0.7.2
+      # Those tests roll out against a REAL kernel venv, because the snapshot
+      # refuses one Prime would delete and rebuild, and the installed
+      # prime-agent builds it with its own bootstrap, which needs `uv`. Without
+      # uv the fixture cannot provision one, and the named package root below
+      # turns that into a failure, not a skip.
+      - run: pip install uv
       - name: every optional framework is genuinely importable
         # Checked BEFORE pytest, so a framework that failed to install is a
         # legible error here rather than 72 tests quietly turning into skips.

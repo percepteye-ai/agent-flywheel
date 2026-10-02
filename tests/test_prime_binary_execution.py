@@ -10,7 +10,10 @@ So these start the run-owned daemon, snapshot the harness, and execute the
 example's own ARGV against a local endpoint, asserting that a completion came
 back -- and, against an endpoint that accepts the connection and never
 answers, that the child hands control back long before its budget instead of
-being killed on it.
+being killed on it. Each rollout is then attested the way the runner attests
+it, because a completion produced while Prime deleted the kernel venv the
+snapshot sealed is a rollout production excludes: the kernel is a real one,
+provisioned once per module by Prime's own bootstrap, as the example requires.
 
 THE SKIP RULE is the one already written down in ``tests/node_sdk.py``, and
 the two cases are not the same case. AUTO-DISCOVERY MAY SKIP: a developer who
@@ -191,17 +194,62 @@ def _example():
     return module
 
 
+@pytest.fixture(scope="module")
+def provisioned_kernel(tmp_path_factory):
+    """A kernel venv Prime will use as it is, made by Prime's own bootstrap.
+
+    The example requires a provisioned PRIME_AGENT_KERNEL_VENV, and the
+    snapshot refuses one whose interpreter cannot import ``ipykernel`` and
+    ``rlm``: Prime deletes and rebuilds such a venv at every session start.
+    Built here by the installed prime-agent itself rather than imitated, so
+    its readiness marker is the one this Prime checks. Prime needs ``uv`` to
+    build it, and the network on a cold uv cache; the skip rule is the one
+    ``_runnable_launcher`` applies.
+    """
+    launcher = pathlib.Path(_runnable_launcher()[-1])
+    _, named = _package_root()
+    bootstrap = launcher.parents[1] / "core" / "kernel" / "bootstrap-cli.js"
+    node = shutil.which("node")
+    kernel = tmp_path_factory.mktemp("prime-kernel") / "kernel-venv"
+    env = {k: v for k, v in os.environ.items() if k != "PRIME_AGENT_KERNEL_PYTHON"}
+    env["PRIME_AGENT_KERNEL_VENV"] = str(kernel)
+    failure = None
+    if node is None or not bootstrap.is_file():
+        failure = f"no node on PATH or no {bootstrap} to provision a kernel with"
+    else:
+        try:
+            built = subprocess.run(
+                [node, str(bootstrap)], stdin=subprocess.DEVNULL, env=env,
+                capture_output=True, timeout=600, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            failure = f"Prime's kernel bootstrap did not finish: {exc}"
+        else:
+            if built.returncode != 0:
+                failure = "Prime's kernel bootstrap failed: " + (
+                    built.stdout + built.stderr).decode("utf-8", "replace")[-800:]
+    if failure is not None:
+        shutil.rmtree(kernel, ignore_errors=True)
+        message = (
+            f"{failure}. Without a provisioned kernel the example cannot "
+            f"serve, so the harness was not EXECUTED."
+        )
+        pytest.fail(message) if named else pytest.skip(message)
+    yield kernel
+    shutil.rmtree(kernel, ignore_errors=True)
+
+
 def _path_without_uv(tmp_path) -> str:
     """PATH with a ``uv`` in front that refuses, as if none were installed.
 
-    These rollouts get an EMPTY kernel venv; the example requires a
-    provisioned one, which is a few hundred megabytes. Prime prewarms its
-    Python kernel at every session start, so with ``uv`` on PATH it bootstraps
-    one in the background -- ``uv python install`` into the child's private
-    HOME -- and the session ending orphans that ``uv``, still writing while
-    the child is removed: ``Directory not empty`` on a machine with uv, not
-    on one without. A ``uv`` that fails gives every machine the second case:
-    the bootstrap stops at once, and this turn uses no tool.
+    The kernel venv is provisioned, so Prime should never reach for ``uv``.
+    If it ever judges that venv stale it ``rm -rf``s it FIRST and only then
+    looks for ``uv`` -- the refusal cannot save the venv, and is not meant
+    to. What it stops is the rebuild: without it, ``uv python install`` and
+    ``uv pip install`` run on in the background into the child's private HOME
+    after the session ends, still writing while the child is removed
+    (``Directory not empty``), and orphaned. With it, the venv is simply gone
+    and the attestation after the rollout says so on every machine.
     """
     bin_dir = tmp_path / "no-uv"
     bin_dir.mkdir(exist_ok=True)
@@ -211,15 +259,17 @@ def _path_without_uv(tmp_path) -> str:
     return f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
 
 
-def _run_one_rollout(tmp_path, launch, gateway, *, budget_s: float):
-    """One rollout through the example's own ARGV and run-owned daemon."""
+def _run_one_rollout(tmp_path, launch, gateway, kernel, *, budget_s: float):
+    """One rollout through the example's own ARGV and run-owned daemon.
+
+    Attested before release, as ``RolloutRunner`` attests every rollout: a
+    drifted kernel, harness or settings fails here instead of passing.
+    """
     module = _example()
     launcher = pathlib.Path(launch[-1])
     package_root = launcher.parents[2]
     source = tmp_path / "empty-harness"
     source.mkdir()
-    kernel = tmp_path / "kernel-venv"
-    kernel.mkdir()
     harness = PrimeHarnessSnapshot(
         source,
         workspace_dir=tmp_path / "_harness_runs",
@@ -272,7 +322,13 @@ def _run_one_rollout(tmp_path, launch, gateway, *, budget_s: float):
             gate_flag="--autonomous-gate", env=env,
             output_adapter=PrimeAgentOutputAdapter(), cwd=str(trajectory),
         )
-        return out, time.monotonic() - started
+        elapsed = time.monotonic() - started
+        assert kernel.is_dir(), (
+            "Prime deleted the kernel venv the snapshot sealed, as it does "
+            "one it judges not ready, to rebuild it; production excludes that "
+            "rollout as drift")
+        harness.attest_child(child)
+        return out, elapsed
     finally:
         # Each step runs whatever the one before it raised. A failed release
         # used to skip daemon.close(), and every such run left its run-owned
@@ -334,7 +390,9 @@ def test_the_harness_on_this_machine_is_the_version_ci_pins(tmp_path):
     )
 
 
-def test_the_example_argv_actually_produces_a_completion(tmp_path):
+def test_the_example_argv_actually_produces_a_completion(
+    tmp_path, provisioned_kernel,
+):
     """The whole point of claiming a rollout: something comes back.
 
     Executes the example's real launch command against the real binary. An
@@ -344,7 +402,8 @@ def test_the_example_argv_actually_produces_a_completion(tmp_path):
     """
     launch = _runnable_launcher()
     with _Gateway(answer=True) as gateway:
-        out, elapsed = _run_one_rollout(tmp_path, launch, gateway, budget_s=120.0)
+        out, elapsed = _run_one_rollout(
+            tmp_path, launch, gateway, provisioned_kernel, budget_s=120.0)
 
     assert gateway.requests, (
         "the harness claimed the rollout and never reached the gateway"
@@ -356,7 +415,9 @@ def test_the_example_argv_actually_produces_a_completion(tmp_path):
     assert elapsed < 120.0
 
 
-def test_a_gateway_that_never_answers_does_not_consume_the_whole_budget(tmp_path):
+def test_a_gateway_that_never_answers_does_not_consume_the_whole_budget(
+    tmp_path, provisioned_kernel,
+):
     """The 2026-09-15 failure, against the real binary.
 
     Prime's provider client has no argv flag for this; the ceiling is
@@ -383,7 +444,7 @@ def test_a_gateway_that_never_answers_does_not_consume_the_whole_budget(tmp_path
     try:
         with _Gateway(answer=False) as gateway:
             out, elapsed = _run_one_rollout(
-                tmp_path, launch, gateway, budget_s=budget_s)
+                tmp_path, launch, gateway, provisioned_kernel, budget_s=budget_s)
     finally:
         prime_agent._FIXED_SETTINGS = original
         prime_agent._FIXED_SETTINGS_SHA256 = original_sha

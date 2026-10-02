@@ -8,6 +8,7 @@ import shlex
 import stat
 import tempfile
 import time
+import venv
 from pathlib import Path
 
 import pytest
@@ -60,13 +61,29 @@ def _source(tmp_path: Path) -> Path:
     return source
 
 
+def _provisioned(kernel: Path, *, modules=("ipykernel", "rlm")) -> Path:
+    """A real venv whose interpreter imports what Prime's readiness check does.
+
+    Prime deletes and rebuilds a kernel venv whose ``bin/python`` cannot import
+    ``ipykernel`` and ``rlm``, so the snapshot refuses one at construction.
+    Empty stand-in packages are enough: the probe asks the venv's own
+    interpreter, through its own ``site``, and nothing here runs them.
+    """
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(kernel)
+    site = next((kernel / "lib").glob("python*/site-packages"))
+    for name in modules:
+        (site / name).mkdir(exist_ok=True)
+        (site / name / "__init__.py").write_text("")
+    return kernel
+
+
 def _snapshot(tmp_path: Path) -> PrimeHarnessSnapshot:
-    kernel = tmp_path / "kernel-venv"
-    kernel.mkdir(exist_ok=True)
+    kernel = _provisioned(tmp_path / "kernel-venv")
     (kernel / "runtime.txt").write_text("fixed runtime\n")
     (kernel / "lib").mkdir(exist_ok=True)
     (kernel / "lib" / "package.py").write_text("VERSION = 1\n")
-    (kernel / "lib64").symlink_to("lib", target_is_directory=True)
+    if not (kernel / "lib64").exists():  # venv makes it on 64-bit Linux
+        (kernel / "lib64").symlink_to("lib", target_is_directory=True)
     runtime = tmp_path / "prime-runtime"
     runtime.mkdir(exist_ok=True)
     (runtime / "bundle.js").write_text("export const version = 1;\n")
@@ -710,8 +727,7 @@ def test_command_discovery_uses_and_attests_the_same_isolated_harness(
 def test_source_links_fail_closed_and_generic_python_entrypoints_accept_adapter(tmp_path):
     source = _source(tmp_path)
     (source / "ambient").symlink_to(tmp_path)
-    kernel = tmp_path / "kernel"
-    kernel.mkdir()
+    kernel = _provisioned(tmp_path / "kernel")
     with pytest.raises(ConfigurationError, match="link"):
         PrimeHarnessSnapshot(
             source, workspace_dir=tmp_path / "runs", kernel_venv=kernel,
@@ -745,10 +761,9 @@ def test_kernel_external_directory_symlink_is_refused_but_lib64_alias_is_support
     tmp_path,
 ):
     source = _source(tmp_path)
-    kernel = tmp_path / "kernel"
-    kernel.mkdir()
-    (kernel / "lib").mkdir()
-    (kernel / "lib64").symlink_to("lib", target_is_directory=True)
+    kernel = _provisioned(tmp_path / "kernel")
+    if not (kernel / "lib64").exists():
+        (kernel / "lib64").symlink_to("lib", target_is_directory=True)
     supported = PrimeHarnessSnapshot(
         source, workspace_dir=tmp_path / "supported", kernel_venv=kernel,
     )
@@ -761,3 +776,54 @@ def test_kernel_external_directory_symlink_is_refused_but_lib64_alias_is_support
         PrimeHarnessSnapshot(
             source, workspace_dir=tmp_path / "refused", kernel_venv=kernel,
         )
+
+
+def test_a_kernel_venv_prime_would_rebuild_is_refused_for_that_reason(
+    tmp_path, monkeypatch,
+):
+    """Refused at construction, naming the cause, not later as a mutation.
+
+    Prime ``rm -rf``s and rebuilds a PRIME_AGENT_KERNEL_VENV whose interpreter
+    cannot import ``ipykernel`` and ``rlm``. Accepted, an empty directory was
+    sealed, deleted by the first session, and reported on a lost rollout as
+    "run-scoped Prime kernel venv was mutated" -- the wrong cause, every time.
+    """
+    source = _source(tmp_path)
+    workspace = tmp_path / "runs"
+
+    def _refusal(kernel: Path) -> str:
+        with pytest.raises(ConfigurationError) as refused:
+            PrimeHarnessSnapshot(source, workspace_dir=workspace, kernel_venv=kernel)
+        message = str(refused.value)
+        assert "PRIME_AGENT_KERNEL_VENV is not a provisioned Prime kernel" in message
+        assert "Prime would delete and rebuild it" in message
+        assert "mutated kernel venv" in message
+        assert not list(workspace.glob("prime-harness-*")), (
+            "a refused kernel leaked the run root it was refused in")
+        return message
+
+    empty = tmp_path / "empty-kernel"
+    empty.mkdir()
+    assert "it has no interpreter at bin/python" in _refusal(empty)
+
+    no_runtime = _provisioned(tmp_path / "no-runtime", modules=("ipykernel",))
+    assert "No module named 'rlm'" in _refusal(no_runtime)
+
+    # The serving process's own directory cannot answer for the venv: Prime
+    # imports from the venv, not from wherever this process was started.
+    beside = tmp_path / "serving-cwd"
+    for name in ("ipykernel", "rlm"):
+        (beside / name).mkdir(parents=True)
+        (beside / name / "__init__.py").write_text("")
+    bare = _provisioned(tmp_path / "bare", modules=())
+    monkeypatch.chdir(beside)
+    assert "No module named 'ipykernel'" in _refusal(bare)
+
+    accepted = PrimeHarnessSnapshot(
+        source, workspace_dir=workspace,
+        kernel_venv=_provisioned(tmp_path / "provisioned"),
+    )
+    try:
+        assert accepted.kernel_sha256 is not None
+    finally:
+        accepted.close()

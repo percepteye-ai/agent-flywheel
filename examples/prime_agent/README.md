@@ -123,6 +123,26 @@ venv; do not install or upgrade packages while a run is active. External
 dynamic libraries loaded by its interpreter remain host-runtime provenance,
 not part of this venv digest.
 
+Provision it with the installed prime-agent's own kernel bootstrap, with
+`PRIME_AGENT_KERNEL_PYTHON` unset, so the venv carries the readiness marker
+that same prime-agent checks. It needs `uv`, and the network on a cold uv
+cache:
+
+```bash
+PRIME_AGENT_KERNEL_VENV=/absolute/path/to/kernel-venv \
+  node "$PRIME_AGENT_PACKAGE_ROOT/dist/core/kernel/bootstrap-cli.js"
+```
+
+Prime decides at every session start whether it can use the venv. When it
+cannot, it deletes the directory and rebuilds it in place, which the seal can
+only report as a mutation of the kernel, on a rollout that is already lost. So
+the snapshot refuses at startup, and says why, a venv whose `bin/python` cannot
+import `ipykernel` and `rlm` (the package prime-agent-runtime installs). That
+check covers Prime's imports, not its private version marker. A venv that a
+different prime-agent version provisioned still imports, Prime still rebuilds
+it, and the result still shows up as kernel drift, so re-provision whenever
+prime-agent changes.
+
 The example starts one run-owned Prime daemon under a separate scrubbed HOME
 and empty run-owned working directory, then explicitly shuts it down before
 removing the snapshot. The daemon receives no ambient project settings and no

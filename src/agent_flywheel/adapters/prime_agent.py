@@ -22,6 +22,7 @@ import re
 import shutil
 import stat
 import struct
+import subprocess
 import tempfile
 import threading
 from collections.abc import Mapping
@@ -177,6 +178,23 @@ MAX_HARNESS_BYTES = 64 * 1024 * 1024
 MAX_KERNEL_ENTRIES = 100_000
 MAX_KERNEL_BYTES = 4 * 1024 * 1024 * 1024
 
+#: What Prime itself imports before it will use a kernel venv. At every session
+#: start prime-agent (0.7.2, ``kernelReady``) runs ``<venv>/bin/python -c
+#: "import ipykernel"`` and then a runtime check that begins ``import rlm`` --
+#: the package prime-agent-runtime installs -- and when either fails it
+#: ``rm -rf``s the directory PRIME_AGENT_KERNEL_VENV names and rebuilds it in
+#: place with uv. Rebuilding a sealed venv is indistinguishable, from here,
+#: from any other write to it, so an unprovisioned venv used to surface only
+#: as "run-scoped Prime kernel venv was mutated" on a rollout that was already
+#: lost. Probing the same imports once, before the venv is sealed, refuses it
+#: at construction for the reason it will fail. This is Prime's import check
+#: and not its ``.bootstrap-version`` marker logic, which is private to the
+#: Prime release and changes with it: a venv another prime-agent version
+#: provisioned still imports, Prime still rebuilds it, and that remains drift.
+_KERNEL_IMPORT_PROBE = "import ipykernel, rlm"
+#: A cold import of ipykernel is a second or two; this only bounds a hung one.
+_KERNEL_PROBE_TIMEOUT_S = 60.0
+
 
 #: The longest path a Unix-domain socket can bind: ``sun_path`` holds 104
 #: bytes on macOS and the BSDs and 108 on Linux, NUL included. The smaller
@@ -206,6 +224,57 @@ def unix_socket_directory(relative_path: str) -> str:
     if os.name == "nt" or len(os.fsencode(joined)) <= _UNIX_SOCKET_PATH_MAX:
         return preferred
     return "/tmp"
+
+
+def _refuse_unprovisioned_kernel(
+    venv: Path, *, env: Mapping[str, str], cwd: Path,
+) -> None:
+    """Refuse a kernel venv Prime would delete and rebuild, naming why.
+
+    Runs ``<venv>/bin/python -c "import ipykernel, rlm"`` -- Prime's own
+    readiness imports -- under the scrubbed daemon environment, from the empty
+    run-owned working directory so a module beside the serving process cannot
+    answer for the venv. ``PYTHONDONTWRITEBYTECODE`` is part of that
+    environment, so the probe writes nothing into the venv it is about to seal.
+    """
+    def _refusal(reason: str) -> ConfigurationError:
+        return ConfigurationError(
+            f"PRIME_AGENT_KERNEL_VENV is not a provisioned Prime kernel: {reason}. "
+            "Prime would delete and rebuild it at the first session start, "
+            "which this snapshot could only report as a mutated kernel venv; "
+            "provision it with this prime-agent's own kernel bootstrap before "
+            "serving"
+        )
+
+    python = venv / "bin" / "python"
+    if not python.is_file():
+        raise _refusal("it has no interpreter at bin/python")
+    try:
+        probe = subprocess.run(
+            [str(python), "-c", _KERNEL_IMPORT_PROBE],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            cwd=cwd,
+            env=dict(env),
+            timeout=_KERNEL_PROBE_TIMEOUT_S,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise _refusal(
+            f"bin/python did not import ipykernel and rlm within "
+            f"{_KERNEL_PROBE_TIMEOUT_S:.0f}s"
+        ) from exc
+    except OSError as exc:
+        raise _refusal(
+            f"bin/python cannot start ({exc.strerror or type(exc).__name__})"
+        ) from exc
+    if probe.returncode != 0:
+        lines = probe.stderr.decode("utf-8", "replace").strip().splitlines()
+        detail = lines[-1].strip()[:200] if lines else f"exit {probe.returncode}"
+        raise _refusal(
+            "bin/python cannot import ipykernel and rlm "
+            f"(prime-agent-runtime): {detail}"
+        )
 
 
 class _HarnessDrift(ConfigurationError):
@@ -874,7 +943,10 @@ class PrimeHarnessSnapshot:
     to bootstrap a separate runtime. It is runtime state, not continual
     harness state, so it receives its own ``kernel_sha256`` identity and a
     metadata seal checked before and after every child. A write poisons the
-    snapshot rather than silently changing later replicas.
+    snapshot rather than silently changing later replicas. Construction
+    refuses a venv whose ``bin/python`` cannot import ``ipykernel`` and
+    ``rlm``: Prime deletes and rebuilds such a venv at its first session, and
+    that rebuild would otherwise be reported only as a mutation.
 
     ``execution_artifacts`` is an adapter-owned map of stable names to exact
     files or link-free trees, such as Prime's bundled package and the explicit
@@ -988,6 +1060,11 @@ class PrimeHarnessSnapshot:
             self._manifest = manifest
             self._sha256 = _manifest_sha256(manifest)
             if self._kernel_venv is not None:
+                _refuse_unprovisioned_kernel(
+                    self._kernel_venv,
+                    env=self._scrubbed_daemon_environment(),
+                    cwd=self._daemon_cwd,
+                )
                 self._kernel_sha256, self._kernel_seal = _kernel_tree_state(
                     self._kernel_venv
                 )
@@ -1188,31 +1265,39 @@ class PrimeHarnessSnapshot:
         worker gets the private child's full launch environment from Prime's
         daemon protocol.
         """
-        from ..isolation import ROUTING_VARS, build_child_env
-
         with self._lock:
             if self._closed:
                 raise ConfigurationError("Prime harness snapshot is closed")
             self._attest_master()
-            extra = self._environment_for(self._daemon_home, self._daemon_agent)
-            env = build_child_env(
-                rollout_id="percepteye-daemon-not-a-rollout",
-                llm_url="http://127.0.0.1:1/v1",
-                api_key="percepteye-daemon-no-sampling",
-                trajectory_dir=str(self._root / "daemon-trajectory-unused"),
-                # The supervisor does not execute the customer's task. It
-                # needs only enough process environment to start; session
-                # workers receive their own child environments over Prime's
-                # client-owned launch protocol. An arbitrary Jira/AWS/etc.
-                # credential has no reason to enter this long-lived process.
-                allowlist=(),
-                extra=extra,
-            )
-            for name in [key for key in env if key.startswith("PERCEPTEYE_")]:
-                env.pop(name, None)
-            for name in ROUTING_VARS:
-                env.pop(name, None)
-            return env
+            return self._scrubbed_daemon_environment()
+
+    def _scrubbed_daemon_environment(self) -> dict[str, str]:
+        """``daemon_environment`` without the attestation, for construction.
+
+        The kernel probe runs before there is a seal to attest against, and
+        must see exactly the environment the daemon will get.
+        """
+        from ..isolation import ROUTING_VARS, build_child_env
+
+        extra = self._environment_for(self._daemon_home, self._daemon_agent)
+        env = build_child_env(
+            rollout_id="percepteye-daemon-not-a-rollout",
+            llm_url="http://127.0.0.1:1/v1",
+            api_key="percepteye-daemon-no-sampling",
+            trajectory_dir=str(self._root / "daemon-trajectory-unused"),
+            # The supervisor does not execute the customer's task. It
+            # needs only enough process environment to start; session
+            # workers receive their own child environments over Prime's
+            # client-owned launch protocol. An arbitrary Jira/AWS/etc.
+            # credential has no reason to enter this long-lived process.
+            allowlist=(),
+            extra=extra,
+        )
+        for name in [key for key in env if key.startswith("PERCEPTEYE_")]:
+            env.pop(name, None)
+        for name in ROUTING_VARS:
+            env.pop(name, None)
+        return env
 
     def release_child(self, child: PrimeHarnessChild) -> None:
         """Remove a child copy after attestation."""
