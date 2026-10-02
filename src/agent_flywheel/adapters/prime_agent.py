@@ -34,6 +34,7 @@ from ..errors import ConfigurationError
 from ..event_stream import (
     CommandOutputProjection,
     StreamFormat,
+    _first,
     parse_tool_calls_with_omissions,
 )
 
@@ -1410,11 +1411,30 @@ _POLICY_EXTERNAL_EVENTS = frozenset({
 #: still be refused in a rollout. Such a call is an environment fault, not an
 #: outcome of the policy, and the rollout is excluded naming it, however many
 #: of its other calls ran -- the runner's every-call-failed rule catches only
-#: a rollout whose every call was refused.
+#: a rollout whose every call was refused. The words alone do not make a
+#: refusal: a cell the kernel ran can print them first and then raise. What
+#: does is the result's shape (``_ran_in_the_kernel``).
 _PRIME_KERNEL_REFUSALS = (
     "PRIME_AGENT_KERNEL_PYTHON points to a Python missing",
     "Failed to set up the Python kernel runtime",
 )
+
+
+def _ran_in_the_kernel(end_event: dict[str, Any]) -> bool:
+    """Whether a ``tool_execution_end`` reports code the kernel executed.
+
+    The ipython tool's own result carries the execution's ``durationMs`` and
+    ``status`` in ``details``, a raised cell's included; an error thrown
+    before the kernel ran anything -- the kernel refusals above -- reaches the
+    stream as ``createErrorToolResult``'s empty ``details`` (prime-agent
+    0.7.2). A parsed ``ToolCallOutcome`` does not carry ``details``, so this
+    reads the raw event, under the same vocabulary the parser reads it with.
+    """
+    result = _first(end_event, PRIME_TOOL_FORMAT.result)
+    details = result.get("details") if isinstance(result, dict) else None
+    return isinstance(details, dict) and (
+        "status" in details or "durationMs" in details
+    )
 
 
 def _assistant_text(message: Any) -> str | None:
@@ -1503,8 +1523,20 @@ class PrimeAgentOutputAdapter:
         parsed = parse_tool_calls_with_omissions(
             stdout, formats=(PRIME_TOOL_FORMAT,)
         )
+        # Whether each end event reports executed code, per call id in stream
+        # order, which is the order the parser emits their calls in (an end
+        # it cannot name is omitted, and counted in omitted_count).
+        ran: dict[str, list[bool]] = {}
+        for event in events:
+            if event.get("type") == PRIME_TOOL_FORMAT.end_type:
+                call_id = _first(event, PRIME_TOOL_FORMAT.call_id)
+                ran.setdefault(str(call_id or ""), []).append(
+                    _ran_in_the_kernel(event))
         refused: dict[str, list[str]] = {}
         for call in parsed.calls or ():
+            same_id = ran.get(call.tool_call_id or "")
+            if same_id and same_id.pop(0):
+                continue
             text = call.error if call.outcome == "failed" else None
             for refusal in _PRIME_KERNEL_REFUSALS:
                 if isinstance(text, str) and text.startswith(refusal):

@@ -513,6 +513,45 @@ def test_a_failed_cell_is_the_policys_outcome_not_a_refused_kernel():
     assert projected.exclusion_reason is None, projected.exclusion_detail
 
 
+def test_a_cell_that_printed_the_refusal_words_and_raised_is_the_policys_outcome():
+    """The kernel ran it, so it is the policy's attempt, whatever it printed.
+
+    Verbatim shape from prime-agent 0.7.2 for a cell that printed Prime's
+    refusal words first and then raised: the ipython tool's own result, whose
+    ``details`` carry the execution's ``durationMs`` and ``status``. A refusal
+    Prime throws before running anything has empty ``details`` instead.
+    """
+    words = "".join(_KERNEL_REFUSALS[0])
+    printed = words + "\n"
+    traceback = ["RuntimeError                              Traceback (most recent call last)",
+                 "Cell In[2], line 2", "RuntimeError: the policy's own error"]
+    start = {**_START, "toolCallId": "toolu_printed"}
+    end = {"type": "tool_execution_end", "toolCallId": "toolu_printed",
+           "toolName": "ipython",
+           "result": {
+               "content": [{"type": "text",
+                            "text": printed + "\n" + "\n".join(traceback)}],
+               "details": {"durationMs": 50, "status": "error",
+                           "errorEname": "RuntimeError", "stdout": printed,
+                           "stderr": "", "kernelRestarted": False,
+                           "error": {"traceback": traceback,
+                                     "ename": "RuntimeError",
+                                     "evalue": "the policy's own error"}},
+               "isError": True},
+           "isError": False}
+    projected = _PRIME.project(_completed_rollout(start, end))
+    assert [c.outcome for c in projected.tool_calls] == ["failed"]
+    assert (projected.tool_calls[0].error or "").startswith(words)
+    assert projected.exclusion_reason is None, projected.exclusion_detail
+
+    # The same call id refused once and run once: each end is read for itself.
+    refused_start, refused = _refused_call("toolu_printed", words)
+    projected = _PRIME.project(
+        _completed_rollout(start, end, refused_start, refused))
+    assert projected.exclusion_reason == "substrate_unavailable"
+    assert "1 ipython call(s)" in (projected.exclusion_detail or "")
+
+
 def test_command_runner_excludes_a_rollout_prime_answered_with_a_refused_kernel(
     tmp_path,
 ):

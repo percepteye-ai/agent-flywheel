@@ -166,7 +166,11 @@ be refused mid-run. The output adapter therefore excludes, as
 `substrate_unavailable`, any rollout in which a tool call came back as Prime's
 kernel-setup refusal (`PRIME_AGENT_KERNEL_PYTHON points to a Python missing`
 or `Failed to set up the Python kernel runtime`), however many of its other
-calls ran: the policy never ran that code, and is not graded as if it had.
+calls ran: the policy never ran that code, and is not graded as if it had. A
+call counts as refused only when its error result also carries none of the
+execution details (`status`, `durationMs`) the ipython tool reports for a cell
+the kernel ran, so a cell that prints those words and then raises stays the
+policy's own outcome.
 
 The serving shell's Python configuration does not reach the kernel. Prime's
 own processes are Node and pass their environment on to the kernel, so every
