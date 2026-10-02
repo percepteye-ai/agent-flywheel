@@ -25,9 +25,9 @@ One `GET /policy/current`. **It contributes nothing** — no registration, no ro
 |:--|:--|
 | `base_url` | OpenAI-compatible base URL — for a model PerceptEye serves, your agent's gateway URL (below) |
 | `api_key` | resolved credential (see below) |
-| `model` | the model name to send; `""` when the control plane did not name one |
+| `model` | the model name to send; an endpoint the control plane names no model for is not applied |
 
-**`{}` means keep your current configuration.** It is the answer for every reason you cannot act, and they deliberately read the same: nothing deployed, no `endpoint` in the body, no `base_url`, no credential to authenticate with, an unreachable control plane, no URL and key configured at all, or a model the control plane has withdrawn — at startup the configuration you have *is* your own. An endpoint you cannot authenticate to is not usable, so it is returned as "nothing to apply" here rather than as 401s at your first request.
+**`{}` means keep your current configuration.** It is the answer for every reason you cannot act, and they deliberately read the same: nothing deployed, no `endpoint` in the body, no `base_url` or `model`, no credential to authenticate with, an unreachable control plane, no URL and key configured at all, or a model the control plane has withdrawn — at startup the configuration you have *is* your own. An endpoint you cannot authenticate to is not usable, so it is returned as "nothing to apply" here rather than as 401s at your first request.
 
 **It never raises into your startup.** An unreachable control plane must never stop an agent from serving its users.
 
@@ -35,16 +35,17 @@ The credential is resolved in this order, and never invented:
 
 | order | source |
 |:--|:--|
-| 1 | the `api_key=` argument |
+| 1 | `endpoint_kwargs(body, api_key=...)` — your own credential for the endpoint, when you call it yourself |
 | 2 | the response's own `endpoint.api_key`, when the control plane sends one |
-| 3 | the env var named by the response's `endpoint.api_key_env` |
-| 4 | `PERCEPTEYE_API_KEY` |
+| 3 | the env var named by the response's `endpoint.api_key_env` — where `PERCEPTEYE_API_KEY` means your flywheel key, sent only to the control plane's own origin |
+
+**Your flywheel key is never a fallback.** It opens an endpoint only when the control plane names `PERCEPTEYE_API_KEY` for it *and* the endpoint is at the origin of your `control_plane_url` (`PERCEPTEYE_CONTROL_PLANE_URL`) — the one address the key already goes to on every call. An endpoint whose `api_key_env` is absent, names a variable that is not set, or names `PERCEPTEYE_API_KEY` at any other address (a GPU box's raw address, say) is not applied, and a warning names the cause; the Node SDK withholds the key from exactly the same endpoints. The `api_key=` you pass `apply_current_policy()` or `policy_source()` is that flywheel key, for the control plane — it never stands in for a provider's key.
 
 ### Where a served model comes from
 
 **A model PerceptEye serves arrives through the control plane's gateway, opened with the flywheel key your agent already holds.** The endpoint is your agent's one constant gateway URL (`…/llm/v1/o/{org}/agents/{agent_id}/v1`) with `api_key_env: "PERCEPTEYE_API_KEY"`, so the credential resolves to your `pefw_` key — never to a provider key that happens to be in your environment. The gateway holds the serving host's own credential and never hands it out, and your agent never learns the host's address.
 
-**A provider endpoint you own is still dialled directly**, with that provider's key: the control plane names the provider's variable instead, or sends the key itself.
+**A provider endpoint you own is still dialled directly**, with that provider's key: the control plane names the provider's variable instead, or sends the key itself. Your flywheel key never goes there.
 
 **Behind the gateway URL, a promotion or a rollback between served models takes effect without a rebuild.** The gateway sends every request to the model delivered for your agent at that moment, whatever `model` the request names, so even a client built once at startup follows it. The answer still moves `model`, and `policy_source()` still reports it as a change, so a log line or a fleet can see it.
 
@@ -57,7 +58,7 @@ Three lower-level functions sit underneath, all exported:
 | function | returns |
 |:--|:--|
 | `current_policy(agent_id=...)` | the raw `/policy/current` body, unparsed |
-| `endpoint_kwargs(body, api_key=None)` | the one place a body becomes client kwargs |
+| `endpoint_kwargs(body, api_key=None, flywheel_key=None, control_plane_url=None)` | the one place a body becomes client kwargs; `flywheel_key` and `control_plane_url` default to `PERCEPTEYE_API_KEY` and `PERCEPTEYE_CONTROL_PLANE_URL` |
 | `is_withdrawn(body)` | whether the body withdraws a served model: `withdrawn` is exactly `true` |
 
 `endpoint_kwargs()` is extracted rather than inlined because it now has two callers — `apply_current_policy()` and `PolicySource` — and a caller who unpacks the body slightly differently is a caller sampling from something other than what was trained.

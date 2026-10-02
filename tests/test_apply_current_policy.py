@@ -13,15 +13,20 @@ def _patch(monkeypatch, policy):
     monkeypatch.setattr(fw, "current_policy", lambda **kw: policy)
 
 
-_EP = {"base_url": "https://gpu:8001/v1", "model": "policy_acme",
+#: The agent's gateway URL, at the origin of the control plane the tests
+#: below configure: the one endpoint a PERCEPTEYE_API_KEY answer may open.
+_CP = "https://cp.example/api/flywheel/v1"
+_GW = "https://cp.example/llm/v1/o/org-1/agents/a/v1"
+_EP = {"base_url": _GW, "model": "policy_acme",
        "api_key_env": "PERCEPTEYE_API_KEY"}
 
 
 def test_it_returns_client_kwargs(monkeypatch):
     _patch(monkeypatch, {"arm": "candidate", "endpoint": _EP})
     monkeypatch.setenv("PERCEPTEYE_API_KEY", "k")
+    monkeypatch.setenv("PERCEPTEYE_CONTROL_PLANE_URL", _CP)
     out = fw.apply_current_policy(agent_id="a")
-    assert out["base_url"] == "https://gpu:8001/v1"
+    assert out["base_url"] == _GW
     assert out["model"] == "policy_acme"
     assert out["api_key"] == "k"
 
@@ -50,11 +55,16 @@ def test_env_export_is_opt_in(monkeypatch):
     """Mutating the process environment is a side effect a caller asks for."""
     _patch(monkeypatch, {"endpoint": _EP})
     monkeypatch.setenv("PERCEPTEYE_API_KEY", "k")
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setenv("PERCEPTEYE_CONTROL_PLANE_URL", _CP)
+    for name in ("OPENAI_BASE_URL", "OPENAI_API_KEY"):
+        # set, then deleted: monkeypatch records only a variable it changed,
+        # and set_env=True below writes both straight into os.environ.
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
     fw.apply_current_policy(agent_id="a")
     assert "OPENAI_BASE_URL" not in __import__("os").environ
     fw.apply_current_policy(agent_id="a", set_env=True)
-    assert __import__("os").environ["OPENAI_BASE_URL"] == "https://gpu:8001/v1"
+    assert __import__("os").environ["OPENAI_BASE_URL"] == _GW
 
 
 def test_serve_still_only_REPORTS_the_policy():

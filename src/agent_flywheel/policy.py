@@ -26,8 +26,11 @@ WHAT ARRIVES. A model PerceptEye serves arrives as the agent's one constant URL
 on the control plane's gateway, with ``api_key_env: "PERCEPTEYE_API_KEY"``, so
 :func:`~agent_flywheel.endpoint_kwargs` opens it with the agent's own flywheel
 key; the serving host's credential stays in the control plane and its address
-never reaches the agent. A provider endpoint the customer owns is still
-dialled directly, with that provider's key. Because the gateway sends each
+never reaches the agent. That is the ONLY endpoint the flywheel key opens: one
+the control plane names ``PERCEPTEYE_API_KEY`` for, at the control plane's own
+origin. A provider endpoint the customer owns is still dialled directly, with
+that provider's key -- the one the control plane sent, or the variable it
+named -- and never with the flywheel key. Because the gateway sends each
 request to the model delivered at that moment, a promotion or a rollback
 between served models takes effect without a rebuild -- the answer still moves
 ``model``, so ``changed`` still says so. A withdrawal is the one change the
@@ -85,6 +88,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
+from urllib.parse import urlsplit
 
 __all__ = [
     "ARCHIVE_REF_PREFIXES",
@@ -169,6 +173,33 @@ def is_withdrawn(policy: Mapping[str, Any] | None) -> bool:
     SDKs refuse the same answers.
     """
     return isinstance(policy, Mapping) and policy.get("withdrawn") is True
+
+
+def _origin(url: object) -> str | None:
+    """``scheme://host[:port]`` of an absolute http(s) URL, or ``None``.
+
+    The question :func:`~agent_flywheel.endpoint_kwargs` asks before it hands
+    the flywheel key to an endpoint: is it at the control plane's own origin,
+    the one address the key already goes to on every call? The Node SDK's
+    ``controlPlaneOrigin`` answers it the same way: the host lowercased, a
+    default port dropped, userinfo and path ignored -- so
+    ``https://Launch.example:443/x`` and ``https://launch.example/y`` are one
+    origin, while ``http://`` for ``https://``, another port, or a suffix like
+    ``launch.example.evil`` is another.
+    """
+    try:
+        parts = urlsplit(str(url or "").strip())
+        scheme = parts.scheme.lower()
+        host = parts.hostname
+        port = parts.port
+    except ValueError:            # a port that is not a number
+        return None
+    if scheme not in ("http", "https") or not host:
+        return None
+    if ":" in host:               # IPv6, which urlsplit returns unbracketed
+        host = f"[{host}]"
+    default = 443 if scheme == "https" else 80
+    return f"{scheme}://{host}" + (f":{port}" if port and port != default else "")
 
 
 #: Never poll faster than this, whatever the caller asks for or the server
@@ -439,7 +470,12 @@ class PolicySource:
         withdrawn = is_withdrawn(body)
         # `{}` for a withdrawal too: endpoint_kwargs refuses one before any
         # endpoint beside it, so the identity below is the empty triple.
-        kw = endpoint_kwargs(body, api_key=self._api_key_arg)
+        # This handle's key and URL are the FLYWHEEL key and where it goes,
+        # never a credential for the endpoint: see `_endpoint_credential`.
+        kw = endpoint_kwargs(
+            body, flywheel_key=self._api_key_arg,
+            control_plane_url=self._url_arg,
+        )
         if not kw and not withdrawn and self._last_identity is not None:
             # The control plane answered, and answered with nothing deployed.
             # That is NOT a failed refresh, and it is also not a reason to tear

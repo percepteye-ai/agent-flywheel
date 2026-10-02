@@ -39,6 +39,22 @@ repository's.
 
 ### Changed
 
+- **Your flywheel key opens only the control plane's own gateway.** A
+  `pefw_` key now goes to an endpoint only when the control plane names
+  `PERCEPTEYE_API_KEY` for it and it sits at the origin of your
+  `control_plane_url`, as the Node SDK already required. It used to be the
+  last fallback of the credential order, so it was sent to a provider endpoint
+  the control plane named no variable for, to one whose named variable was
+  unset, and to a self-hosted box's raw address; and the `api_key=` passed to
+  `apply_current_policy()` or `policy_source()` — the key to the control
+  plane — beat a provider's own key as an endpoint override. Each of those is
+  now not applied, with a warning naming the cause. `endpoint_kwargs()` takes
+  `flywheel_key=` and `control_plane_url=` (defaulting to the environment);
+  its `api_key=` stays your own credential for the endpoint. An endpoint with
+  no `model` is no longer applied, as in Node. **Upgrading:** a production
+  agent pointed at a self-hosted endpoint by a control plane without the
+  gateway projection keeps its own configuration until that control plane
+  serves the gateway URL, rather than sending its key to that box.
 - **A `policy_source()` refresh that cannot reach the control plane is a
   failed refresh**: `last_refresh_ok` goes `False` and `stale_for_s` grows
   while the last good snapshot stands. It used to be absorbed as a successful

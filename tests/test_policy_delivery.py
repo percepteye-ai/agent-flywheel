@@ -151,13 +151,25 @@ def test_an_nvidia_key_does_not_reach_the_child():
 
 FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures"
 
+#: Where the agent's flywheel key already goes: the documented control-plane
+#: URL, at the gateway fixture's origin. The flywheel key opens an endpoint
+#: only at this origin.
+CONTROL_PLANE = "https://launch.percepteye.ai/api/flywheel/v1"
+
+#: Every provider variable a test here could read, cleared so a developer's
+#: own environment cannot decide one.
+_PROVIDER_VARS = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TOGETHER_API_KEY")
+
 
 @pytest.fixture
 def flywheel_key(monkeypatch):
-    """The agent's flywheel key, the credential the gateway answer names. Set
-    here rather than inherited, so a developer's own key cannot decide a
-    test."""
+    """The agent's flywheel key, the credential the gateway answer names, and
+    the control plane it authenticates to. Set here rather than inherited, so
+    a developer's own key cannot decide a test."""
     monkeypatch.setenv("PERCEPTEYE_API_KEY", "pefw_x")
+    monkeypatch.setenv("PERCEPTEYE_CONTROL_PLANE_URL", CONTROL_PLANE)
+    for name in _PROVIDER_VARS:
+        monkeypatch.delenv(name, raising=False)
     return "pefw_x"
 
 
@@ -332,17 +344,169 @@ def test_an_arm_change_behind_the_same_gateway_url_is_a_change(flywheel_key):
     assert snap.model == "policy_support_agent_0c1d2e3f4a5b6c7d"
 
 
+# ── where the flywheel key may go ─────────────────────────────────────
+#
+# A `pefw_` key used to be fallback (4) of the credential order, so it went to
+# any endpoint the control plane did not give a working key for, and the
+# caller's own flywheel key -- the `api_key=` of apply_current_policy() and
+# policy_source() -- beat a provider's key as if it were an endpoint
+# override. The Node SDK's flywheelKeyDecision already refused all of it.
+
+
+def _provider(**ep):
+    return {"arm": "candidate", "reason": "policy_channel_candidate",
+            "endpoint": {"base_url": "https://api.openai.com/v1",
+                         "model": "ft:gpt-4o-mini:acme::abc123", **ep}}
+
+
+def _at(base_url, **ep):
+    """The gateway answer with its endpoint moved to ``base_url``; a field
+    given as None is left out, as the control plane omits one."""
+    body = _answer("policy_current_gateway.json")
+    merged = {**body["endpoint"], "base_url": base_url, **ep}
+    body["endpoint"] = {k: v for k, v in merged.items() if v is not None}
+    return body
+
+
+#: Each is an answer the flywheel key used to be sent for, and must not be.
+_NOT_FOR_THE_FLYWHEEL_KEY = {
+    # A provider whose key travels in the body: the control plane OMITS
+    # api_key_env because it can name no variable -- never "use yours".
+    "provider, no variable named": _provider(),
+    # The variable the control plane named is not set in this process.
+    "provider, its variable unset": _provider(api_key_env="OPENAI_API_KEY"),
+    # The same two at the control plane's own origin, where only the NAME can
+    # refuse the key: an absent name is not ours, and neither is another one.
+    "control plane's origin, no variable named": _at(
+        "https://launch.percepteye.ai/llm/v1/o/x/agents/support-agent/v1",
+        api_key_env=None),
+    "control plane's origin, another variable unset": _at(
+        "https://launch.percepteye.ai/llm/v1/o/x/agents/support-agent/v1",
+        api_key_env="OPENAI_API_KEY"),
+    # A self-hosted box's raw address, named PERCEPTEYE_API_KEY by a control
+    # plane without the gateway projection, exactly as it names the gateway.
+    "self-hosted raw address": _at("http://203.0.113.7:8000/v1"),
+    # The gateway's path at a look-alike origin.
+    "look-alike origin": _at(
+        "https://launch.percepteye.ai.evil/llm/v1/o/x/agents/support-agent/v1"),
+    # The control plane's host over another scheme.
+    "plain http to the control plane's host": _at(
+        "http://launch.percepteye.ai/llm/v1/o/x/agents/support-agent/v1"),
+    # The control plane's host on another port.
+    "another port": _at(
+        "https://launch.percepteye.ai:8443/llm/v1/o/x/agents/support-agent/v1"),
+}
+
+
+@pytest.mark.parametrize("row", sorted(_NOT_FOR_THE_FLYWHEEL_KEY))
+def test_the_flywheel_key_opens_only_the_control_plane_s_own_origin(
+        row, flywheel_key, caplog):
+    """The key goes only where the transport already sends it. Each of these
+    answers used to return ``api_key='pefw_x'`` for an address that is not
+    the control plane's: a provider's API, a GPU box, a look-alike host. Not
+    applying them is the legible answer -- the agent keeps the model it is
+    on, and the log line says why -- where sending the key handed a
+    credential to whoever answers there."""
+    body = _NOT_FOR_THE_FLYWHEEL_KEY[row]
+    with caplog.at_level("WARNING", logger="agent_flywheel"):
+        assert fw.endpoint_kwargs(body) == {}, row
+        assert fw.endpoint_kwargs(body, control_plane_url=CONTROL_PLANE) == {}, row
+    assert flywheel_key not in caplog.text
+    assert "no credential for its endpoint" in caplog.text, caplog.text
+
+    src, _ = _handle([body])
+    assert not src.current(), row
+
+
+def test_the_refusal_names_why_the_key_was_withheld(flywheel_key, caplog):
+    """THE PATTERN Q6: `{}` reads as "nothing deployed", so the line names
+    the actual cause -- the address, and the one address the key goes to."""
+    with caplog.at_level("WARNING", logger="agent_flywheel"):
+        fw.endpoint_kwargs(_at("http://203.0.113.7:8000/v1"))
+        fw.endpoint_kwargs(_provider())
+        fw.endpoint_kwargs(_provider(api_key_env="OPENAI_API_KEY"))
+    lines = [r.getMessage() for r in caplog.records]
+    assert any("http://203.0.113.7:8000" in m and "https://launch.percepteye.ai"
+               in m and "not sent there" in m for m in lines), lines
+    assert any("names no variable" in m for m in lines), lines
+    assert any("OPENAI_API_KEY" in m and "is not set" in m for m in lines), lines
+
+
+def test_the_gateway_at_the_same_origin_spelled_differently_gets_the_key(
+        flywheel_key):
+    """One origin however it is spelled: the host's case and a default port
+    are not a different address."""
+    body = _at("https://Launch.PerceptEye.ai:443/llm/v1/o/x/agents/support-agent/v1")
+    assert fw.endpoint_kwargs(body)["api_key"] == flywheel_key
+
+
+def test_no_control_plane_address_no_flywheel_key(flywheel_key, monkeypatch):
+    """A caller that cannot say where the key goes cannot have it sent
+    anywhere, as in Node."""
+    monkeypatch.delenv("PERCEPTEYE_CONTROL_PLANE_URL")
+    assert fw.endpoint_kwargs(_answer("policy_current_gateway.json")) == {}
+
+
+def test_the_callers_flywheel_key_is_never_a_provider_key(monkeypatch, flywheel_key):
+    """``api_key=`` on policy_source() and apply_current_policy() is the key
+    to the CONTROL PLANE. It used to be handed to endpoint_kwargs as the
+    caller's endpoint override, which beat both the key the control plane
+    sent and the provider's own variable -- so a provider endpoint was opened
+    with a `pefw_` key, sending it to the provider and 401ing every request.
+    At the gateway it is still the key used."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-provider")
+    sent = _provider(api_key_env="OPENAI_API_KEY", api_key="sk-vault")
+    named = _provider(api_key_env="OPENAI_API_KEY")
+    gateway = _answer("policy_current_gateway.json")
+
+    for body, want in ((sent, "sk-vault"), (named, "sk-provider"),
+                       (gateway, "pefw_cp")):
+        src = fw.PolicySource(
+            agent_id="support-agent", control_plane_url=CONTROL_PLANE,
+            api_key="pefw_cp", _fetch=lambda b=body: b, _rand=lambda a, b: 0.0)
+        assert src.current().api_key == want, body["endpoint"]["base_url"]
+
+        monkeypatch.setattr(fw, "current_policy", lambda b=body, **kw: b)
+        got = fw.apply_current_policy(
+            agent_id="support-agent", control_plane_url=CONTROL_PLANE,
+            api_key="pefw_cp")
+        assert got["api_key"] == want, body["endpoint"]["base_url"]
+
+
+def test_an_endpoint_without_a_model_is_not_applied(flywheel_key):
+    """An OpenAI client sends ``model`` on every request, and ``""`` names
+    nothing; Node's modelDecision reads it as no endpoint, and so does this."""
+    body = _answer("policy_current_gateway.json")
+    del body["endpoint"]["model"]
+    assert fw.endpoint_kwargs(body) == {}
+    body["endpoint"]["model"] = ""
+    assert fw.endpoint_kwargs(body) == {}
+    src, _ = _handle([body])
+    assert not src.current()
+
+
 def test_the_same_answers_as_the_node_sdk(flywheel_key):
-    """Both SDKs ship in one release and apply the same answers, so the
-    comments above saying "as in Node" are held by a mechanism: one table,
-    driven through Node's modelDecision and through endpoint_kwargs, which
-    must agree on WHICH answers are applied."""
+    """Both SDKs ship in one release and must agree on two things for every
+    answer: WHICH answers are applied, and WHERE the flywheel key goes. One
+    table, driven through Node's modelDecision and through endpoint_kwargs,
+    against the same control-plane URL.
+
+    The one designed difference is who supplies a key that is not the
+    flywheel key. Node leaves it to the host's own provider entry
+    (``credential: null`` and ``apply: true``); Python applies only with a
+    credential it holds, from the body or the variable the control plane
+    named, and returns ``{}`` otherwise. So: Python never applies an answer
+    Node refuses; Python opens the endpoint with the flywheel key exactly
+    when Node names the flywheel key; and when Node names it, Python applies.
+    """
     from .node_sdk import require_node_sdk, run_node
 
     sdk, node = require_node_sdk()
     gateway = _answer("policy_current_gateway.json")
     withdrawn = _answer("policy_current_withdrawn.json")
     nothing = {k: v for k, v in withdrawn.items() if k != "withdrawn"}
+    no_model = json.loads(json.dumps(gateway))
+    del no_model["endpoint"]["model"]
     table = {
         "gateway": gateway,
         "withdrawn": withdrawn,
@@ -350,21 +514,41 @@ def test_the_same_answers_as_the_node_sdk(flywheel_key):
         "withdrawn beside an endpoint": {**gateway, "withdrawn": True},
         "withdrawn false": {**gateway, "withdrawn": False},
         "withdrawn as a string": {**gateway, "withdrawn": "true"},
+        "no model": no_model,
+        "archive model": _at(gateway["endpoint"]["base_url"],
+                             model="gs://bucket/run/iter_0"),
+        "same origin spelled differently": _at(
+            "https://Launch.PerceptEye.ai:443/llm/v1/o/x/agents/support-agent/v1"),
+        "provider, key in the body": _provider(api_key="sk-vault"),
+        **_NOT_FOR_THE_FLYWHEEL_KEY,
     }
     script = (
         "import {modelDecision} from './src/policy.js';\n"
         "let raw='';\n"
         "for await (const chunk of process.stdin) raw += chunk;\n"
+        "const {table, controlPlaneUrl} = JSON.parse(raw);\n"
         "const out = {};\n"
-        "for (const [k, body] of Object.entries(JSON.parse(raw)))"
-        " out[k] = modelDecision(body);\n"
+        "for (const [k, body] of Object.entries(table))"
+        " out[k] = modelDecision(body, {controlPlaneUrl});\n"
         "process.stdout.write(JSON.stringify(out));\n"
     )
-    theirs = json.loads(run_node(sdk, node, script, stdin=json.dumps(table)))
+    theirs = json.loads(run_node(sdk, node, script, stdin=json.dumps(
+        {"table": table, "controlPlaneUrl": CONTROL_PLANE})))
     for row, body in table.items():
-        assert bool(fw.endpoint_kwargs(body)) == theirs[row]["apply"], (
-            f"the two SDKs disagree about {row!r}: node said "
-            f"apply={theirs[row]['apply']} ({theirs[row]['reason']})")
+        ours = fw.endpoint_kwargs(body, control_plane_url=CONTROL_PLANE)
+        node_says = theirs[row]
+        said = f"{row!r}: node said {node_says}, python returned {ours}"
+        if not node_says["apply"]:
+            assert ours == {}, f"python applied what node refuses -- {said}"
+        named = node_says.get("credential") == "flywheel_key"
+        assert (ours.get("api_key") == flywheel_key) == named, (
+            f"the SDKs disagree about where the flywheel key goes -- {said}")
+        if named:
+            assert ours, f"node names the flywheel key, python refused -- {said}"
+    # The table must exercise every branch it claims to.
+    assert {r for r, d in theirs.items() if d["apply"] and d["credential"] is None} \
+        >= set(_NOT_FOR_THE_FLYWHEEL_KEY)
+    assert fw.endpoint_kwargs(table["provider, key in the body"])["api_key"] == "sk-vault"
 
 
 def _wired(monkeypatch, cp, key):
@@ -373,7 +557,7 @@ def _wired(monkeypatch, cp, key):
     monkeypatch.setattr("agent_flywheel._http.ControlPlaneClient", lambda **kw: cp)
     clock = _Clock()
     src = fw.PolicySource(
-        agent_id="support-agent", control_plane_url="https://cp.example/v1",
+        agent_id="support-agent", control_plane_url=CONTROL_PLANE,
         api_key=key, _now=clock, _rand=lambda a, b: 0.0)
     return src, clock
 

@@ -38,7 +38,14 @@ class _Clock:
         self.t += dt
 
 
-def _body(base_url="https://a.example/v1", model="m1", key_env="PERCEPTEYE_API_KEY"):
+#: The agent's gateway URL at the control plane's own origin (the handles
+#: below are built with ``control_plane_url="https://cp.example"``): the one
+#: kind of endpoint the flywheel key a ``PERCEPTEYE_API_KEY`` answer names may
+#: open. These tests are about the cache, not the credential.
+GATEWAY = "https://cp.example/llm/v1/o/org-1/agents/agent-1/v1"
+
+
+def _body(base_url=GATEWAY, model="m1", key_env="PERCEPTEYE_API_KEY"):
     return {"endpoint": {"base_url": base_url, "model": model,
                          "api_key_env": key_env}}
 
@@ -72,7 +79,7 @@ def test_the_first_call_fetches_and_later_calls_inside_the_TTL_do_not():
     src, calls = _source([_body()], clock=clock)
 
     first = src.current()
-    assert first.base_url == "https://a.example/v1"
+    assert first.base_url == GATEWAY
     assert calls["n"] == 1
 
     clock.advance(MIN_TTL_S)          # still inside a 300s TTL
@@ -200,7 +207,7 @@ def test_a_raising_observer_never_breaks_serving():
         raise RuntimeError("customer callback blew up")
 
     src, _ = _source([_body()], clock=clock, on_change=_boom)
-    assert src.current().base_url == "https://a.example/v1"
+    assert src.current().base_url == GATEWAY
 
 
 # ── last-good retention: the behaviour the whole design turns on ─────
