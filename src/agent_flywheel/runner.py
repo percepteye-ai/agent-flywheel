@@ -48,7 +48,7 @@ from .execution_identity import (
     normalize_volatile_command_values,
 )
 from .introspection import _MAX_PROMPT_CHARS, DiscoveredAgent
-from .isolation import build_child_env
+from .isolation import build_child_env, is_environment_overlay
 from .outcomes import TOOL_CALLS_FILENAME, Trajectory, _RolloutScope
 from .transport import AttachTransport, sleep_ms
 
@@ -1280,7 +1280,9 @@ class RolloutRunner:
             ),
         )
 
-    def _prepared_child_environment(self, child: ExecutionChild) -> dict[str, str]:
+    def _prepared_child_environment(
+        self, child: ExecutionChild,
+    ) -> dict[str, str | None]:
         try:
             environment = dict(child.environment)
         except Exception as exc:
@@ -1288,13 +1290,10 @@ class RolloutRunner:
                 f"{self._execution_snapshot_name} execution child environment "
                 "must be a string mapping"
             ) from exc
-        if any(
-            not isinstance(name, str) or not isinstance(value, str)
-            for name, value in environment.items()
-        ):
+        if not is_environment_overlay(environment):
             raise ConfigurationError(
                 f"{self._execution_snapshot_name} execution child environment "
-                "must contain only string names and values"
+                "must map string names to a string, or to None to remove one"
             )
         return environment
 
@@ -1347,7 +1346,7 @@ class RolloutRunner:
         assert self._command is not None
         snapshot = self.execution_snapshot
         child: ExecutionChild | None = None
-        extra = {"PERCEPTEYE_TURN_INPUT": rollout.turn_input}
+        extra: dict[str, str | None] = {"PERCEPTEYE_TURN_INPUT": rollout.turn_input}
         if snapshot is not None:
             try:
                 child = snapshot.prepare_child(rollout.rollout_id)
@@ -1421,7 +1420,7 @@ class RolloutRunner:
     ) -> RolloutOutput:
         snapshot = self.execution_snapshot
         child: ExecutionChild | None = None
-        child_environment: dict[str, str] = {}
+        child_environment: dict[str, str | None] = {}
         ran = False
         if snapshot is not None:
             try:
@@ -1488,7 +1487,7 @@ class RolloutRunner:
 
     def _run_in_subprocess(
         self, rollout: RolloutRequest, *, trajectory_dir: str, timeout_s: float,
-        extra_env: Mapping[str, str] | None = None,
+        extra_env: Mapping[str, str | None] | None = None,
         teardown_s: float = TEARDOWN_DRAIN_S,
     ) -> RolloutOutput:
         assert self._spec is not None

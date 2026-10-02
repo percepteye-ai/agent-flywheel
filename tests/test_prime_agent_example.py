@@ -218,12 +218,15 @@ def test_main_wires_and_closes_one_run_scoped_snapshot(monkeypatch, tmp_path):
     monkeypatch.setattr(module, "PrimeHarnessSnapshot", _Snapshot)
     monkeypatch.setattr(module.fw, "serve", _serve)
     monkeypatch.setattr(module, "_RunOwnedPrimeDaemon", _Daemon)
-    monkeypatch.setattr(
-        module,
-        "_preflight_prime_runtime",
-        lambda executable, *, env, cwd: "0.test",
-    )
+    def _preflight(executable, *, env, cwd, kernel_check):
+        seen["kernel_check"] = kernel_check
+        return "0.test"
+
+    monkeypatch.setattr(module, "_preflight_prime_runtime", _preflight)
     assert module.main() == 7
+    # Prime's own kernel check, from the package the launcher belongs to.
+    assert seen["kernel_check"] == (
+        package / "dist" / "core" / "kernel" / "bootstrap-cli.js")
     assert seen["source"] == str(source)
     assert seen["kernel"] == str(kernel)
     assert seen["execution_artifacts"] == {
@@ -246,10 +249,26 @@ def test_main_wires_and_closes_one_run_scoped_snapshot(monkeypatch, tmp_path):
     assert order == ["daemon.start", "serve", "daemon.close", "snapshot.close"]
 
 
-def test_runtime_preflight_checks_launcher_and_required_flags(monkeypatch, tmp_path):
+def _kernel_check(tmp_path):
+    check = tmp_path / "prime" / "dist" / "core" / "kernel" / "bootstrap-cli.js"
+    check.parent.mkdir(parents=True, exist_ok=True)
+    check.write_text("// Prime's kernel check\n")
+    return check
+
+
+#: The daemon environment the snapshot hands the preflight: the sealed kernel
+#: arrives as PRIME_AGENT_KERNEL_PYTHON.
+_DAEMON_ENV = {
+    "PATH": "/pinned/node24/bin",
+    "PRIME_AGENT_KERNEL_PYTHON": "/sealed/kernel-venv/bin/python",
+}
+
+
+def test_runtime_preflight_checks_launcher_flags_and_the_kernel(monkeypatch, tmp_path):
     module = _load_example(monkeypatch, tmp_path)
     seen: list[tuple[list[str], dict]] = []
     help_text = "\n".join(module._REQUIRED_PRIME_FLAGS).encode()
+    check = _kernel_check(tmp_path)
 
     def _run(argv, **kwargs):
         seen.append((argv, kwargs))
@@ -259,15 +278,73 @@ def test_runtime_preflight_checks_launcher_and_required_flags(monkeypatch, tmp_p
     monkeypatch.setattr(module.subprocess, "run", _run)
     assert module._preflight_prime_runtime(
         "/attested/prime-agent",
-        env={"PATH": "/pinned/node24/bin"},
+        env=dict(_DAEMON_ENV),
         cwd=tmp_path,
+        kernel_check=check,
     ) == "0.7.2"
     assert [call[0] for call in seen] == [
         ["/attested/prime-agent", "--version"],
         ["/attested/prime-agent", "--help"],
+        # Prime's own verdict on the sealed interpreter, run by the node the
+        # launcher's shebang resolves, under the same environment.
+        ["/usr/bin/env", "node", str(check)],
     ]
-    assert all(call[1]["env"] == {"PATH": "/pinned/node24/bin"} for call in seen)
+    assert all(call[1]["env"] == _DAEMON_ENV for call in seen)
     assert all(call[1]["cwd"] == tmp_path for call in seen)
+
+
+def test_runtime_preflight_refuses_a_kernel_prime_refuses_naming_prime_reason(
+    monkeypatch, tmp_path
+):
+    """Prime uses a PRIME_AGENT_KERNEL_PYTHON as it is, or refuses it.
+
+    A refused kernel does not stop a session: it completes, and each
+    ``ipython`` call is answered with the refusal, so a kernel refused every
+    time is caught here, before serving, in Prime's words -- not restated from
+    a list of Prime's packages. A refusal mid-run is the output adapter's to
+    exclude.
+    """
+    import pytest
+
+    module = _load_example(monkeypatch, tmp_path)
+    help_text = "\n".join(module._REQUIRED_PRIME_FLAGS).encode()
+    check = _kernel_check(tmp_path)
+    reason = (b"PRIME_AGENT_KERNEL_PYTHON points to a Python missing default "
+              b"Python packages (tyro): /sealed/kernel-venv/bin/python\n")
+    calls: list[list[str]] = []
+
+    def _run(argv, **kwargs):
+        calls.append(argv)
+        if argv[-1] == "--version":
+            return module.subprocess.CompletedProcess(argv, 0, stdout=b"0.7.2\n", stderr=b"")
+        if argv[-1] == "--help":
+            return module.subprocess.CompletedProcess(argv, 0, stdout=help_text, stderr=b"")
+        return module.subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=reason)
+
+    monkeypatch.setattr(module.subprocess, "run", _run)
+    with pytest.raises(RuntimeError) as refused:
+        module._preflight_prime_runtime(
+            "prime-agent", env=dict(_DAEMON_ENV), cwd=tmp_path, kernel_check=check)
+    assert "prime-agent refuses the kernel PRIME_AGENT_KERNEL_VENV names" in str(refused.value)
+    assert "default Python packages (tyro)" in str(refused.value)
+
+    # Without the interpreter in the environment Prime's check would PROVISION
+    # a kernel under the daemon HOME, so it is not run at all.
+    calls.clear()
+    with pytest.raises(RuntimeError, match="sets no PRIME_AGENT_KERNEL_PYTHON"):
+        module._preflight_prime_runtime(
+            "prime-agent", env={"PATH": "/pinned/node24/bin",
+                                "PRIME_AGENT_KERNEL_PYTHON": ""},
+            cwd=tmp_path, kernel_check=check)
+    assert all(argv[0] == "prime-agent" for argv in calls)
+
+    # A release without the check cannot vouch for the kernel; nor is it run.
+    calls.clear()
+    with pytest.raises(RuntimeError, match="has no kernel check at"):
+        module._preflight_prime_runtime(
+            "prime-agent", env=dict(_DAEMON_ENV), cwd=tmp_path,
+            kernel_check=tmp_path / "absent" / "bootstrap-cli.js")
+    assert all(argv[0] == "prime-agent" for argv in calls)
 
 
 def test_runtime_preflight_names_a_broken_node_or_incompatible_prime(
@@ -284,8 +361,10 @@ def test_runtime_preflight_names_a_broken_node_or_incompatible_prime(
             argv, 134, stdout=b"", stderr=b"dyld: Library not loaded"
         ),
     )
+    check = _kernel_check(tmp_path)
     with pytest.raises(RuntimeError, match="dyld: Library not loaded"):
-        module._preflight_prime_runtime("prime-agent", env={}, cwd=tmp_path)
+        module._preflight_prime_runtime(
+            "prime-agent", env=dict(_DAEMON_ENV), cwd=tmp_path, kernel_check=check)
 
     calls = 0
 
@@ -297,7 +376,8 @@ def test_runtime_preflight_names_a_broken_node_or_incompatible_prime(
 
     monkeypatch.setattr(module.subprocess, "run", _missing_flag)
     with pytest.raises(RuntimeError, match="required rollout flags"):
-        module._preflight_prime_runtime("prime-agent", env={}, cwd=tmp_path)
+        module._preflight_prime_runtime(
+            "prime-agent", env=dict(_DAEMON_ENV), cwd=tmp_path, kernel_check=check)
 
 
 def test_run_owned_daemon_is_started_and_explicitly_shut_down(monkeypatch, tmp_path):
@@ -535,3 +615,59 @@ def test_the_example_hands_its_volatile_declaration_to_serve(monkeypatch, tmp_pa
     # And the declared option is in the command that was actually registered.
     for option in module.VOLATILE_COMMAND_VALUES:
         assert option in captured["command"]
+
+
+def test_the_daemon_socket_binds_under_a_long_tmpdir(monkeypatch, tmp_path):
+    """The run-owned daemon's socket was joined onto the temp directory as-is.
+
+    Under a long TMPDIR that path is past what ``sun_path`` holds, and the
+    real daemon exited at startup on ``listen EINVAL`` before any rollout ran.
+    """
+    import tempfile
+
+    import pytest
+
+    if os.name == "nt":
+        pytest.skip("AF_UNIX path limits are POSIX")
+    long_tmp = tmp_path / ("t" * 80)
+    long_tmp.mkdir()
+    monkeypatch.setenv("TMPDIR", str(long_tmp))
+    monkeypatch.setattr(tempfile, "tempdir", None)  # gettempdir() caches
+    module = _load_example(monkeypatch, tmp_path)
+
+    assert len(os.fsencode(str(long_tmp / "percepteye-prime-1.sock"))) > 103
+    assert len(os.fsencode(module._DAEMON_SOCKET)) <= 103
+    # And it is the path the launch command actually carries.
+    assert module.ARGV[module.ARGV.index("--daemon-socket") + 1] == module._DAEMON_SOCKET
+
+
+def test_a_daemon_that_dies_at_startup_is_refused_in_its_own_words(
+    monkeypatch, tmp_path
+):
+    """Every failed start used to read "exited during startup with code 1".
+
+    The daemon's stderr went to /dev/null, so the cause it printed -- here
+    the ``listen EINVAL`` a too-long socket path produces -- reached no one.
+    """
+    import pytest
+
+    module = _load_example(monkeypatch, tmp_path)
+    fake = tmp_path / "prime-agent"
+    fake.write_text(
+        "#!/bin/sh\n"
+        "echo 'Daemon supervisor startup failed: Error: listen EINVAL' >&2\n"
+        "exit 1\n"
+    )
+    fake.chmod(0o755)
+    daemon = module._RunOwnedPrimeDaemon(
+        f"/tmp/percepteye-test-{secrets.token_hex(8)}.sock",
+        {"PATH": os.environ["PATH"]},
+        cwd=tmp_path,
+        executable=str(fake),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="code 1: Daemon supervisor startup "
+                           "failed: Error: listen EINVAL"):
+            daemon.start()
+    finally:
+        daemon.close()

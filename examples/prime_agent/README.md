@@ -55,7 +55,8 @@ launcher's `#!/usr/bin/env node` also makes the order of `PATH` material, so pin
 and probe the intended Node runtime before starting the worker. Before polling,
 the example runs the resolved launcher's `--version` and `--help` under its
 scrubbed daemon environment and refuses a broken Node runtime or a Prime build
-that lacks any rollout flag this adapter uses.
+that lacks any rollout flag this adapter uses; it then runs that Prime's own
+kernel check against the sealed kernel (below).
 
 `PERCEPTEYE_PRIME_HARNESS_SOURCE` names the harness directory itself (normally
 `~/.prime/agent/harness`), not the whole agent directory. An empty directory is
@@ -123,6 +124,65 @@ venv; do not install or upgrade packages while a run is active. External
 dynamic libraries loaded by its interpreter remain host-runtime provenance,
 not part of this venv digest.
 
+Provision it once with the installed prime-agent's own kernel bootstrap, with
+`PRIME_AGENT_KERNEL_PYTHON` unset so that the bootstrap builds the venv rather
+than checking an existing interpreter. It needs `uv`, and the network on a cold
+uv cache:
+
+```bash
+env -u PRIME_AGENT_KERNEL_PYTHON PRIME_AGENT_KERNEL_VENV=/absolute/path/to/kernel-venv \
+  node "$PRIME_AGENT_PACKAGE_ROOT/dist/core/kernel/bootstrap-cli.js"
+```
+
+Prime receives the venv as `PRIME_AGENT_KERNEL_PYTHON=<venv>/bin/python`, the
+variable prime-agent documents for using an existing Python environment instead
+of auto-bootstrapping one. Prime uses that interpreter as it is: it never reads
+the venv's bootstrap marker and never deletes or rebuilds it, so a venv that a
+different prime-agent version provisioned keeps running, under the
+`kernel_sha256` that names it. (Handed only `PRIME_AGENT_KERNEL_VENV`, Prime
+deletes and rebuilds in place any venv its private readiness marker does not
+recognise, at the first session -- which the seal can only report as a mutated
+kernel, on a rollout already lost.)
+
+What Prime still does, at every session start, is check the interpreter and
+refuse one that lacks `ipykernel`, a current prime-agent-runtime (`rlm`), or one
+of the default packages that release installs. A refused kernel does not stop
+the session: it completes, and each `ipython` call is answered with the
+refusal instead of running. So the example refuses such a kernel before
+serving, for the reason Prime gives. The snapshot refuses at startup a venv
+whose `bin/python` cannot import `ipykernel` and `rlm`, the two packages
+Prime's docs name for that variable, and the runtime preflight then runs the
+installed prime-agent's own check (`dist/core/kernel/bootstrap-cli.js`, which
+only checks when `PRIME_AGENT_KERNEL_PYTHON` is set) against the sealed
+interpreter under the daemon environment. Re-provision if that check refuses
+after a prime-agent upgrade. Prime's check starts one interpreter per default
+package each time a session starts its kernel: a few seconds per rollout, where
+its marker check took well under one.
+
+That startup check is not the last word. Prime repeats it in every rollout,
+counts a package whose interpreter merely failed to spawn as missing, and
+writes nothing anyone re-checks, so a kernel the preflight accepted can still
+be refused mid-run. The output adapter therefore excludes, as
+`substrate_unavailable`, any rollout in which a tool call came back as Prime's
+kernel-setup refusal (`PRIME_AGENT_KERNEL_PYTHON points to a Python missing`
+or `Failed to set up the Python kernel runtime`), however many of its other
+calls ran: the policy never ran that code, and is not graded as if it had. A
+call counts as refused only when its error result also carries none of the
+execution details (`status`, `durationMs`) the ipython tool reports for a cell
+the kernel ran, so a cell that prints those words and then raises stays the
+policy's own outcome.
+
+The serving shell's Python configuration does not reach the kernel. Prime's
+own processes are Node and pass their environment on to the kernel, so every
+environment the adapter configures -- the kernel probe's, the daemon's, each
+rollout child's and discovery's -- has `PYTHONPATH`, `PYTHONHOME`,
+`PYTHONSTARTUP`, `IPYTHONDIR`, and macOS's `PYTHONEXECUTABLE` and
+`__PYVENV_LAUNCHER__` removed, not emptied: an import path, Python home,
+startup file, IPython profile, or another venv's interpreter path (on macOS
+the interpreter starts in the venv beside the path either names) from outside
+the venv can neither satisfy the probe's imports nor run code in the kernel
+under `kernel_sha256`.
+
 The example starts one run-owned Prime daemon under a separate scrubbed HOME
 and empty run-owned working directory, then explicitly shuts it down before
 removing the snapshot. The daemon receives no ambient project settings and no
@@ -137,6 +197,13 @@ cannot be caught; an orphaned
 `prime-agent` process alone is therefore not evidence that rollout polling is
 alive. The worker is the Python `serve_prime.py` process. Each run uses a unique
 Unix socket, so an older orphan cannot evict or serve a later run.
+
+A Unix socket path cannot exceed 103 bytes on macOS, and Prime binds one per
+session worker below `TMPDIR`. The run's socket and the `TMPDIR` the adapter
+gives the daemon and every child are therefore the system temp directory when
+the paths fit, and `/tmp` when a long `TMPDIR` would push them past the limit;
+without that, the daemon exits at startup or every session times out on
+`create`. A daemon that does exit at startup is refused with its own stderr.
 
 The example reads `PERCEPTEYE_MODEL_ID`, `PERCEPTEYE_CONTEXT_WINDOW`, and
 `PERCEPTEYE_MAX_TOKENS` in the parent, then the Prime adapter supplies matching

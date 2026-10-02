@@ -114,13 +114,24 @@ def test_report_reads_the_most_recent_recorded_session(goose_home, capsys):
 
 
 def test_report_on_an_explicit_directory(goose_home, capsys, tmp_path):
+    """The header names the file it read, in whichever form the reporter picks.
+
+    The reporter shows the SHORTER of the absolute and the cwd-relative path,
+    so which form appears depends on where pytest's cwd sits relative to
+    ``tmp_path`` -- a TMPDIR beside the checkout renders ``../tmp/...``. The
+    claim is that the header names THIS file, so that is what is checked: the
+    shown path, read from the cwd the way a person reading it would, is it.
+    """
     d = tmp_path / "traj"
     d.mkdir()
     (d / "tool_calls.jsonl").write_text(
         '{"name": "read", "outcome": "ok"}\n', encoding="utf-8")
     assert main(["report", str(d)]) == 0
     out = capsys.readouterr().out
-    assert str(d) in out and "Real failure rate: 0%" in out, out
+    header = next(line for line in out.splitlines() if line.strip())
+    shown = header.split("·", 1)[1].strip()
+    assert os.path.samefile(shown, d / "tool_calls.jsonl"), out
+    assert "Real failure rate: 0%" in out, out
 
 
 def test_report_with_nothing_recorded_says_what_to_do(goose_home, capsys):

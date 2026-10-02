@@ -6,7 +6,9 @@ import os
 import re
 import shlex
 import stat
+import tempfile
 import time
+import venv
 from pathlib import Path
 
 import pytest
@@ -59,13 +61,29 @@ def _source(tmp_path: Path) -> Path:
     return source
 
 
+def _provisioned(kernel: Path, *, modules=("ipykernel", "rlm")) -> Path:
+    """A real venv whose interpreter imports what every Prime kernel check does.
+
+    Prime refuses a PRIME_AGENT_KERNEL_PYTHON that cannot import ``ipykernel``
+    and ``rlm``, so the snapshot refuses such a venv at construction. Empty
+    stand-in packages are enough: the probe asks the venv's own interpreter,
+    through its own ``site``, and nothing here runs them.
+    """
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(kernel)
+    site = next((kernel / "lib").glob("python*/site-packages"))
+    for name in modules:
+        (site / name).mkdir(exist_ok=True)
+        (site / name / "__init__.py").write_text("")
+    return kernel
+
+
 def _snapshot(tmp_path: Path) -> PrimeHarnessSnapshot:
-    kernel = tmp_path / "kernel-venv"
-    kernel.mkdir(exist_ok=True)
+    kernel = _provisioned(tmp_path / "kernel-venv")
     (kernel / "runtime.txt").write_text("fixed runtime\n")
     (kernel / "lib").mkdir(exist_ok=True)
     (kernel / "lib" / "package.py").write_text("VERSION = 1\n")
-    (kernel / "lib64").symlink_to("lib", target_is_directory=True)
+    if not (kernel / "lib64").exists():  # venv makes it on 64-bit Linux
+        (kernel / "lib64").symlink_to("lib", target_is_directory=True)
     runtime = tmp_path / "prime-runtime"
     runtime.mkdir(exist_ok=True)
     (runtime / "bundle.js").write_text("export const version = 1;\n")
@@ -185,6 +203,8 @@ def test_snapshot_digest_is_canonical_and_children_are_private(tmp_path):
                 first.agent_dir
             )
             assert first.environment["PRIME_AGENT_KERNEL_VENV"].endswith("kernel-venv")
+            assert first.environment["PRIME_AGENT_KERNEL_PYTHON"] == str(
+                (tmp_path / "kernel-venv").resolve() / "bin" / "python")
             assert first.harness_sha256 == second.harness_sha256 == snapshot.harness_sha256
             assert (first.harness_dir / "skills" / "opsd.md").read_text() == "fixed tactic\n"
             assert first.settings_path.read_bytes() == _EXPECTED_SETTINGS
@@ -234,7 +254,7 @@ def test_child_env_builder_preserves_every_isolation_override(tmp_path):
             extra=child.environment,
         )
         for name, value in child.environment.items():
-            assert env[name] == value
+            assert env.get(name) == value
         assert env["HOME"] != "/ambient/home"
         assert env["XDG_CONFIG_HOME"] != "/ambient/config"
         assert env["PRIME_AGENT_CODING_AGENT_DIR"] != "/ambient/prime"
@@ -252,6 +272,59 @@ def test_expired_unstarted_result_does_not_claim_execution_identity(tmp_path):
         assert out.agent_fingerprint is None
     finally:
         snapshot.close()
+
+
+#: Where Prime binds a session worker's socket below its TMPDIR, written out
+#: here independently of the adapter: ``prime-agent-<uid>/worker-<12>-<12>.sock``.
+def _prime_worker_socket(tmpdir: str) -> str:
+    return os.path.join(
+        tmpdir, f"prime-agent-{os.getuid()}", f"worker-{'f' * 12}-{'f' * 12}.sock")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="AF_UNIX path limits are POSIX")
+def test_every_prime_process_gets_a_tmpdir_its_worker_sockets_can_bind_in(
+    tmp_path, monkeypatch,
+):
+    """Prime binds one socket per session worker below TMPDIR, so a long
+    TMPDIR -- a sandbox's, a CI runner's -- put every one of them past what
+    ``sun_path`` holds. The supervisor started; each worker died on ``listen
+    EINVAL``; every rollout timed out after 30s waiting on "create" with
+    nothing reaching the model. The supervisor and every child must agree on
+    one TMPDIR, since the supervisor names the socket the worker binds.
+    """
+    long_tmp = tmp_path / ("t" * 80)
+    long_tmp.mkdir()
+    monkeypatch.setenv("TMPDIR", str(long_tmp))
+    monkeypatch.setattr(tempfile, "tempdir", None)  # gettempdir() caches
+    assert len(os.fsencode(_prime_worker_socket(str(long_tmp)))) > 103
+
+    snapshot = _snapshot(tmp_path)
+    try:
+        child = snapshot.prepare_child()
+        try:
+            daemon_tmp = snapshot.daemon_environment()["TMPDIR"]
+            assert child.environment["TMPDIR"] == daemon_tmp
+            assert len(os.fsencode(_prime_worker_socket(daemon_tmp))) <= 103
+        finally:
+            snapshot.release_child(child)
+    finally:
+        snapshot.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="AF_UNIX path limits are POSIX")
+def test_a_temp_directory_with_room_stays_the_one_prime_uses(tmp_path, monkeypatch):
+    """The per-user temp directory stays first; ``/tmp`` is only the fallback."""
+    short_tmp = tempfile.mkdtemp(prefix="pe-", dir="/tmp")
+    try:
+        monkeypatch.setenv("TMPDIR", short_tmp)
+        monkeypatch.setattr(tempfile, "tempdir", None)
+        snapshot = _snapshot(tmp_path)
+        try:
+            assert snapshot.daemon_environment()["TMPDIR"] == short_tmp
+        finally:
+            snapshot.close()
+    finally:
+        os.rmdir(short_tmp)
 
 
 def test_supervisor_environment_is_stable_and_contains_no_ambient_secrets(
@@ -280,8 +353,126 @@ def test_supervisor_environment_is_stable_and_contains_no_ambient_secrets(
         assert list(snapshot.daemon_working_directory.iterdir()) == []
         assert snapshot.daemon_working_directory != tmp_path
         assert env["PRIME_AGENT_KERNEL_VENV"].endswith("kernel-venv")
-        assert env["PRIME_AGENT_KERNEL_PYTHON"] == ""
+        assert env["PRIME_AGENT_KERNEL_PYTHON"] == str(
+            (tmp_path / "kernel-venv").resolve() / "bin" / "python")
         assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+    finally:
+        snapshot.close()
+
+
+def test_prime_is_handed_the_sealed_interpreter_and_never_an_ambient_one(
+    tmp_path, monkeypatch,
+):
+    """PRIME_AGENT_KERNEL_PYTHON is how Prime uses a kernel without rebuilding.
+
+    Given the venv's interpreter there, Prime only checks it; given only
+    PRIME_AGENT_KERNEL_VENV, it deletes and rebuilds a venv its private
+    readiness marker does not recognise -- one another prime-agent version
+    provisioned, say -- and the seal reports a lost rollout as a mutated
+    kernel. Every process the adapter configures gets the sealed interpreter,
+    whatever the serving shell exported, and a snapshot without a kernel
+    clears an ambient one rather than let it stand in.
+    """
+    monkeypatch.setenv("PRIME_AGENT_KERNEL_PYTHON", "/ambient/bin/python")
+    monkeypatch.setenv("PRIME_AGENT_KERNEL_VENV", "/ambient/kernel-venv")
+    snapshot = _snapshot(tmp_path)
+    child = snapshot.prepare_child("sealed")
+    try:
+        sealed = str((tmp_path / "kernel-venv").resolve() / "bin" / "python")
+        rollout = build_child_env(
+            rollout_id="rl_sealed", llm_url="http://127.0.0.1:1/v1",
+            api_key="perk_test", trajectory_dir=str(tmp_path / "traj"),
+            extra=child.environment,
+        )
+        for env in (snapshot.daemon_environment(), child.environment,
+                    child.discovery_environment, rollout):
+            assert env["PRIME_AGENT_KERNEL_PYTHON"] == sealed
+            assert env["PRIME_AGENT_KERNEL_VENV"] == str(
+                (tmp_path / "kernel-venv").resolve())
+    finally:
+        snapshot.release_child(child)
+        snapshot.close()
+
+    bare = PrimeHarnessSnapshot(_source(tmp_path), workspace_dir=tmp_path / "bare")
+    try:
+        assert bare.daemon_environment()["PRIME_AGENT_KERNEL_PYTHON"] == ""
+        unsealed = bare.prepare_child("unsealed")
+        try:
+            assert unsealed.environment["PRIME_AGENT_KERNEL_PYTHON"] == ""
+        finally:
+            bare.release_child(unsealed)
+    finally:
+        bare.close()
+
+
+#: The serving shell's Python configuration that would run code in Prime's
+#: kernel from outside the venv it is sealed as.
+_AMBIENT_KERNEL_CODE = (
+    "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "IPYTHONDIR",
+    "PYTHONEXECUTABLE", "__PYVENV_LAUNCHER__",
+)
+
+
+def test_no_python_configuration_from_the_serving_shell_reaches_prime(
+    tmp_path, monkeypatch,
+):
+    """An ambient PYTHONPATH cannot stand in for the sealed kernel.
+
+    The process baseline every child keeps carried the serving shell's
+    PYTHONPATH and PYTHONHOME, a rollout child inherited PYTHONSTARTUP,
+    IPYTHONDIR and macOS's PYTHONEXECUTABLE and __PYVENV_LAUNCHER__ besides,
+    and Prime hands its session's environment on to the kernel -- so each ran
+    code ``kernel_sha256`` never covered, and the kernel probe accepted an
+    empty venv on stub ``ipykernel`` and ``rlm`` packages found on that path.
+    A checkout run with ``PYTHONPATH=src`` was enough. Every environment the
+    adapter configures removes them: the probe's, the daemon's, each rollout
+    child's through the runner, and discovery's.
+    """
+    stubs = tmp_path / "ambient-path"
+    for name in ("ipykernel", "rlm"):
+        (stubs / name).mkdir(parents=True)
+        (stubs / name / "__init__.py").write_text("")
+    bare = _provisioned(tmp_path / "bare-kernel", modules=())
+    # On macOS the bare venv's interpreter starts in the venv beside either
+    # path, and this one has the stubs.
+    elsewhere = _provisioned(tmp_path / "ambient-venv") / "bin" / "python"
+    startup = tmp_path / "ambient-startup.py"
+    startup.write_text("AMBIENT = 1\n")
+    monkeypatch.setenv("PYTHONPATH", str(stubs))
+    monkeypatch.setenv("PYTHONSTARTUP", str(startup))
+    monkeypatch.setenv("IPYTHONDIR", str(tmp_path / "ambient-ipython"))
+    monkeypatch.setenv("PYTHONEXECUTABLE", str(elsewhere))
+    monkeypatch.setenv("__PYVENV_LAUNCHER__", str(elsewhere))
+
+    with pytest.raises(ConfigurationError, match="No module named 'ipykernel'"):
+        PrimeHarnessSnapshot(
+            _source(tmp_path), workspace_dir=tmp_path / "refused",
+            kernel_venv=bare,
+        )
+
+    # No interpreter starts under this one, the probe's included.
+    monkeypatch.setenv("PYTHONHOME", str(tmp_path / "no-python-home"))
+    snapshot = _snapshot(tmp_path)
+    try:
+        assert not set(_AMBIENT_KERNEL_CODE) & set(snapshot.daemon_environment())
+
+        names = " ".join(f'"${{{name}-unset}}"' for name in _AMBIENT_KERNEL_CODE)
+        out = _runner(tmp_path, snapshot, f"printf '%s|' {names}\n").run_one(
+            _request("rl_ambient"))
+        assert out.exclusion_reason is None, out.exclusion_detail
+        assert out.final_text == "unset|" * len(_AMBIENT_KERNEL_CODE)
+
+        warm = tmp_path / "warm.sh"
+        warm.write_text(
+            f"#!/bin/sh\nprintf '%s|' {names} > \"$PERCEPTEYE_TRAJECTORY_DIR/env\"\n")
+        warm.chmod(warm.stat().st_mode | stat.S_IEXEC)
+        with pytest.warns(RuntimeWarning, match="Could not describe"):
+            fw._describe_via_host(  # type: ignore[attr-defined]
+                ["sh", str(warm)], artifacts_dir=str(tmp_path / "artifacts"),
+                agent_id="prime", execution_snapshot=snapshot,
+            )
+        seen = (tmp_path / "artifacts" / "_describe" / "env").read_text()
+        assert seen == "unset|" * len(_AMBIENT_KERNEL_CODE)
     finally:
         snapshot.close()
 
@@ -656,8 +847,7 @@ def test_command_discovery_uses_and_attests_the_same_isolated_harness(
 def test_source_links_fail_closed_and_generic_python_entrypoints_accept_adapter(tmp_path):
     source = _source(tmp_path)
     (source / "ambient").symlink_to(tmp_path)
-    kernel = tmp_path / "kernel"
-    kernel.mkdir()
+    kernel = _provisioned(tmp_path / "kernel")
     with pytest.raises(ConfigurationError, match="link"):
         PrimeHarnessSnapshot(
             source, workspace_dir=tmp_path / "runs", kernel_venv=kernel,
@@ -691,10 +881,9 @@ def test_kernel_external_directory_symlink_is_refused_but_lib64_alias_is_support
     tmp_path,
 ):
     source = _source(tmp_path)
-    kernel = tmp_path / "kernel"
-    kernel.mkdir()
-    (kernel / "lib").mkdir()
-    (kernel / "lib64").symlink_to("lib", target_is_directory=True)
+    kernel = _provisioned(tmp_path / "kernel")
+    if not (kernel / "lib64").exists():
+        (kernel / "lib64").symlink_to("lib", target_is_directory=True)
     supported = PrimeHarnessSnapshot(
         source, workspace_dir=tmp_path / "supported", kernel_venv=kernel,
     )
@@ -707,3 +896,54 @@ def test_kernel_external_directory_symlink_is_refused_but_lib64_alias_is_support
         PrimeHarnessSnapshot(
             source, workspace_dir=tmp_path / "refused", kernel_venv=kernel,
         )
+
+
+def test_a_kernel_venv_prime_would_refuse_is_refused_for_that_reason(
+    tmp_path, monkeypatch,
+):
+    """Refused at construction, naming the cause, not in every rollout.
+
+    Prime refuses a PRIME_AGENT_KERNEL_PYTHON that cannot import ``ipykernel``
+    and ``rlm`` when a session starts its kernel, and the session goes on to
+    complete with every ``ipython`` call answered by that refusal. Accepted, an
+    empty directory would be sealed and served that way, rollout after rollout.
+    """
+    source = _source(tmp_path)
+    workspace = tmp_path / "runs"
+
+    def _refusal(kernel: Path) -> str:
+        with pytest.raises(ConfigurationError) as refused:
+            PrimeHarnessSnapshot(source, workspace_dir=workspace, kernel_venv=kernel)
+        message = str(refused.value)
+        assert "PRIME_AGENT_KERNEL_VENV is not a provisioned Prime kernel" in message
+        assert "Prime refuses that interpreter" in message
+        assert "every rollout's ipython call would fail" in message
+        assert not list(workspace.glob("prime-harness-*")), (
+            "a refused kernel leaked the run root it was refused in")
+        return message
+
+    empty = tmp_path / "empty-kernel"
+    empty.mkdir()
+    assert "it has no interpreter at bin/python" in _refusal(empty)
+
+    no_runtime = _provisioned(tmp_path / "no-runtime", modules=("ipykernel",))
+    assert "No module named 'rlm'" in _refusal(no_runtime)
+
+    # The serving process's own directory cannot answer for the venv: Prime
+    # imports from the venv, not from wherever this process was started.
+    beside = tmp_path / "serving-cwd"
+    for name in ("ipykernel", "rlm"):
+        (beside / name).mkdir(parents=True)
+        (beside / name / "__init__.py").write_text("")
+    bare = _provisioned(tmp_path / "bare", modules=())
+    monkeypatch.chdir(beside)
+    assert "No module named 'ipykernel'" in _refusal(bare)
+
+    accepted = PrimeHarnessSnapshot(
+        source, workspace_dir=workspace,
+        kernel_venv=_provisioned(tmp_path / "provisioned"),
+    )
+    try:
+        assert accepted.kernel_sha256 is not None
+    finally:
+        accepted.close()

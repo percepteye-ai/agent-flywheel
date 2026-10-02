@@ -84,7 +84,7 @@ from .host_description import WARMUP_PROMPT, warm_up_command
 from .host_description import read_discovered_agent as read_discovered_agent
 from .introspection import DiscoveredAgent, ToolDefinition
 from .introspection import introspect as introspect_agent
-from .isolation import unroutable_providers_present
+from .isolation import is_environment_overlay, unroutable_providers_present
 from .outcomes import (
     CaptureScope,
     Trajectory,
@@ -613,14 +613,13 @@ def _describe_via_host(
                     f"{snapshot.adapter_name} execution child environments "
                     "must be string mappings"
                 ) from exc
-            if any(
-                not isinstance(name, str) or not isinstance(value, str)
-                for mapping in (rollout_environment, discovery_environment)
-                for name, value in mapping.items()
+            if not (
+                is_environment_overlay(rollout_environment)
+                and is_environment_overlay(discovery_environment)
             ):
                 raise ConfigurationError(
                     f"{snapshot.adapter_name} execution child environments "
-                    "must contain only string names and values"
+                    "must map string names to a string, or to None to remove one"
                 )
             if any(
                 rollout_environment.get(name) != value

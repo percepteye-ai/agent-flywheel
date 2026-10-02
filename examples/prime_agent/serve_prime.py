@@ -21,12 +21,13 @@ import tempfile
 import time
 from collections.abc import Callable
 from types import FrameType
-from typing import Any
+from typing import IO, Any
 
 import agent_flywheel as fw
 from agent_flywheel.adapters.prime_agent import (
     PrimeAgentOutputAdapter,
     PrimeHarnessSnapshot,
+    unix_socket_directory,
 )
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -119,14 +120,28 @@ WORKSPACE.mkdir(parents=True, exist_ok=True)
 #: new execution identity and invalidated any OPSD run already prepared
 #: against the previous one (observed: prime-agent registered
 #: 3502c7cd… on 2026-09-12 and 409c43ee… on 2026-09-15).
-_DAEMON_SOCKET = str(
-    pathlib.Path(tempfile.gettempdir()) / f"percepteye-prime-{os.getpid()}.sock"
-)
+#:
+#: The directory comes from the adapter rule that also sets Prime's own
+#: TMPDIR: the temp directory, or ``/tmp`` when a long TMPDIR would put this
+#: path past what a Unix socket can bind and the daemon would exit at startup
+#: on ``listen EINVAL``.
+def _daemon_socket_path(name: str) -> str:
+    return os.path.join(unix_socket_directory(name), name)
+
+
+_DAEMON_SOCKET = _daemon_socket_path(f"percepteye-prime-{os.getpid()}.sock")
 
 #: The one argument in ARGV whose VALUE varies per process. ``--daemon-socket``
 #: itself stays in the identity, so a build that runs without a private daemon
 #: socket remains a different execution from this one.
 VOLATILE_COMMAND_VALUES = ("--daemon-socket",)
+
+
+def _written(stream: IO[bytes]) -> str:
+    """What a child has written to ``stream``, bounded like the preflight's."""
+    stream.seek(0)
+    text = stream.read().decode("utf-8", "replace").strip()
+    return text[:500] or "it wrote nothing to stderr"
 
 
 class _RunOwnedPrimeDaemon:
@@ -165,28 +180,40 @@ class _RunOwnedPrimeDaemon:
                 f"Prime daemon socket already exists; refusing ambiguous owner: "
                 f"{self.socket_path}"
             )
-        self.process = subprocess.Popen(
-            [self.executable, "--mode", "daemon", "--daemon-socket", self.socket_path],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            cwd=self.cwd,
-            env=self.env,
-            start_new_session=(os.name != "nt"),
-        )
-        self._owns_socket_path = True
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            if self.process.poll() is not None:
-                raise RuntimeError(
-                    f"Prime daemon exited during startup with code {self.process.returncode}"
-                )
-            if self._accepting_connections():
-                return
-            time.sleep(0.05)
-        raise RuntimeError(
-            f"Prime daemon did not become ready within {timeout_s:g} seconds"
-        )
+        # The daemon's own account of a failed start is the only one that
+        # names the cause; discarded, every failure read "exited during
+        # startup with code 1". A file rather than a pipe: the daemon outlives
+        # startup and nothing drains a pipe after it, so a full one would
+        # block the supervisor on its next write. Only a failed start reads
+        # it, so this handle closes when start() returns either way; the
+        # daemon's own descriptor keeps the unlinked file until it exits, at
+        # a few lines per session -- lines its log under the daemon's agent
+        # directory also carries.
+        with tempfile.TemporaryFile() as stderr:
+            self.process = subprocess.Popen(
+                [self.executable, "--mode", "daemon", "--daemon-socket", self.socket_path],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr,
+                cwd=self.cwd,
+                env=self.env,
+                start_new_session=(os.name != "nt"),
+            )
+            self._owns_socket_path = True
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                if self.process.poll() is not None:
+                    raise RuntimeError(
+                        f"Prime daemon exited during startup with code "
+                        f"{self.process.returncode}: {_written(stderr)}"
+                    )
+                if self._accepting_connections():
+                    return
+                time.sleep(0.05)
+            raise RuntimeError(
+                f"Prime daemon did not become ready within {timeout_s:g} "
+                f"seconds: {_written(stderr)}"
+            )
 
     def _accepting_connections(self) -> bool:
         if os.name == "nt" or not hasattr(socket, "AF_UNIX"):
@@ -339,13 +366,46 @@ _REQUIRED_PRIME_FLAGS = (
 )
 
 
+def _prime_kernel_check(package_root: str | os.PathLike[str]) -> pathlib.Path:
+    """Prime's own kernel check, inside the installed package.
+
+    Compiled into the same ``dist/`` as the launcher, from the same source as
+    the check a session runs before it starts its kernel (``ensureKernelPython``).
+    With PRIME_AGENT_KERNEL_PYTHON set, which the snapshot does whenever it
+    has a kernel, it imports ``ipykernel``, runs Prime's runtime check and
+    imports Prime's default packages, then prints the interpreter, or exits 1
+    with the reason Prime would give a session. It writes nothing.
+    """
+    return pathlib.Path(package_root) / "dist" / "core" / "kernel" / "bootstrap-cli.js"
+
+
+#: Prime's kernel check imports a dozen packages (pandas and scipy among them),
+#: one interpreter each; tens of seconds on a cold disk. This bounds a hung one.
+_KERNEL_CHECK_TIMEOUT_S = 180
+
+
 def _preflight_prime_runtime(
     executable: str,
     *,
     env: dict[str, str],
     cwd: str | os.PathLike[str],
+    kernel_check: str | os.PathLike[str],
 ) -> str:
-    """Prove the pinned launcher can start and implements this adapter contract."""
+    """Prove the pinned launcher can start, implements this adapter contract,
+    and will use the snapshot's kernel.
+
+    The kernel reaches Prime as PRIME_AGENT_KERNEL_PYTHON, which Prime uses as
+    it is and never rebuilds -- but it refuses one that fails its check, and
+    a session that cannot start its kernel still completes, with each
+    ``ipython`` call answered by that refusal. The snapshot refuses an
+    interpreter without ``ipykernel`` and ``rlm`` at construction; the rest of
+    Prime's check (its runtime API and its default packages) belongs to the
+    installed release, so this asks that release, under the daemon
+    environment, rather than restating its list. Prime repeats the check in
+    every rollout and can still refuse there, so the output adapter excludes
+    any rollout a refusal reached; this only keeps a kernel that would be
+    refused every time from being served at all.
+    """
 
     def _run(option: str) -> subprocess.CompletedProcess[bytes]:
         try:
@@ -383,6 +443,42 @@ def _preflight_prime_runtime(
         raise RuntimeError(
             "prime-agent does not implement the required rollout flags: "
             + ", ".join(missing)
+        )
+
+    if not env.get("PRIME_AGENT_KERNEL_PYTHON"):
+        # Without it Prime's check is its bootstrap: it would build a kernel
+        # under the daemon HOME instead of checking the sealed one.
+        raise RuntimeError(
+            "the Prime daemon environment sets no PRIME_AGENT_KERNEL_PYTHON, "
+            "so there is no snapshot kernel to check"
+        )
+    check = pathlib.Path(kernel_check)
+    if not check.is_file():
+        raise RuntimeError(
+            f"prime-agent has no kernel check at {check}, so whether it will "
+            "use PRIME_AGENT_KERNEL_VENV cannot be confirmed before serving"
+        )
+    try:
+        # The node the launcher's own `#!/usr/bin/env node` resolves here.
+        kernel_probe = subprocess.run(
+            ["/usr/bin/env", "node", str(check)],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            cwd=cwd,
+            env=env,
+            timeout=_KERNEL_CHECK_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            f"prime-agent kernel preflight could not execute: {exc}"
+        ) from exc
+    if kernel_probe.returncode != 0:
+        detail = (kernel_probe.stderr + kernel_probe.stdout).decode(
+            "utf-8", "replace"
+        ).strip()[-500:] or f"exit {kernel_probe.returncode} without output"
+        raise RuntimeError(
+            f"prime-agent refuses the kernel PRIME_AGENT_KERNEL_VENV names: {detail}"
         )
     return version.splitlines()[0] if version else "version not reported"
 
@@ -516,6 +612,7 @@ def main() -> int:
             str(resolved_launcher),
             env=daemon_env,
             cwd=harness.daemon_working_directory,
+            kernel_check=_prime_kernel_check(package_root),
         )
         print(f"Prime runtime preflight passed: {version}", flush=True)
         daemon = _RunOwnedPrimeDaemon(

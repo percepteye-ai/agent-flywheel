@@ -78,7 +78,7 @@ from typing import Any
 from .errors import ConfigurationError
 from .execution_identity import canonical_observation_sha256
 from .introspection import _MAX_PROMPT_CHARS, DiscoveredAgent, ModelConfig, ToolDefinition
-from .isolation import build_child_env
+from .isolation import build_child_env, overlay_environment
 
 #: The file the companion plugin writes. One end of an ABI -- do not rename
 #: without renaming ``DISCOVERED_AGENT_FILENAME`` on the plugin side.
@@ -752,7 +752,7 @@ def warm_up_command(
     agent_name: str | None = None,
     observe_wire: bool = True,
     endpoint_env: tuple[str, str] | None = None,
-    isolation_environment: Mapping[str, str] | None = None,
+    isolation_environment: Mapping[str, str | None] | None = None,
 ) -> DiscoveredAgent | None:
     """Run the agent once, only far enough for the host to describe it.
 
@@ -810,7 +810,9 @@ def warm_up_command(
     # rollout id is removed immediately: discovery is not a rollout and must
     # never attribute its tool calls to one.
     parent_environment = dict(os.environ if env is None else env)
-    parent_environment.update(isolation_environment or {})
+    # Set, or removed where the adapter says None -- by the overlay rule the
+    # rollout child gets, so discovery runs the scaffold the rollouts do.
+    overlay_environment(parent_environment, isolation_environment or {})
     child_env = build_child_env(
         rollout_id="percepteye-discovery-not-a-rollout",
         llm_url=endpoint,

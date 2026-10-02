@@ -22,6 +22,7 @@ import re
 import shutil
 import stat
 import struct
+import subprocess
 import tempfile
 import threading
 from collections.abc import Mapping
@@ -33,6 +34,7 @@ from ..errors import ConfigurationError
 from ..event_stream import (
     CommandOutputProjection,
     StreamFormat,
+    _first,
     parse_tool_calls_with_omissions,
 )
 
@@ -48,6 +50,7 @@ __all__ = [
     "PrimeAgentOutputAdapter",
     "PrimeHarnessChild",
     "PrimeHarnessSnapshot",
+    "unix_socket_directory",
 ]
 
 _DIGEST_DOMAIN = b"percepteye-prime-harness-v1\0"
@@ -175,6 +178,138 @@ MAX_HARNESS_ENTRIES = 10_000
 MAX_HARNESS_BYTES = 64 * 1024 * 1024
 MAX_KERNEL_ENTRIES = 100_000
 MAX_KERNEL_BYTES = 4 * 1024 * 1024 * 1024
+
+#: The sealed kernel reaches Prime as PRIME_AGENT_KERNEL_PYTHON, the variable
+#: prime-agent documents for using an existing Python environment instead of
+#: auto-bootstrapping one (README, 0.7.2). Given it, Prime only CHECKS the
+#: interpreter when a session first starts its kernel -- it imports
+#: ``ipykernel``, runs a runtime check that begins ``import rlm`` (the package
+#: prime-agent-runtime installs) and imports its default packages -- and
+#: refuses one that fails, writing nothing. It reads no ``.bootstrap-version``
+#: marker and never deletes or rebuilds anything. PRIME_AGENT_KERNEL_VENV, the
+#: variable this adapter used to hand over, is the opposite: Prime ``rm -rf``s
+#: and rebuilds a venv there that fails its private readiness check, including
+#: one a different prime-agent version provisioned, and the seal could report
+#: that only as a mutated kernel on a rollout already lost.
+#:
+#: An interpreter that cannot import ``ipykernel`` and ``rlm`` is therefore no
+#: longer rebuilt, but every rollout's kernel would still be refused, so the
+#: snapshot probes these imports once, before sealing, and refuses it at
+#: construction for that reason. These are the two packages Prime's docs name
+#: for that variable (``ipykernel``, and prime-agent-runtime, which provides
+#: ``rlm``). The rest of its check -- the runtime's API and "the default
+#: runtime packages", whose list is the installed release's -- the example's
+#: runtime preflight asks that prime-agent for, instead of restating it here.
+_KERNEL_IMPORT_PROBE = "import ipykernel, rlm"
+#: A cold import of ipykernel is a second or two; this only bounds a hung one.
+_KERNEL_PROBE_TIMEOUT_S = 60.0
+
+#: Variables that make the kernel run code from outside its own venv, which
+#: ``kernel_sha256`` names: a module search path (PYTHONPATH), a different
+#: standard library and site-packages (PYTHONHOME), a file IPython executes in
+#: the kernel at startup (PYTHONSTARTUP), IPython's profile directory, whose
+#: ``startup/`` scripts it executes there too (IPYTHONDIR; the private HOME
+#: already holds the default one), and, on macOS, the path the interpreter
+#: takes as its own (PYTHONEXECUTABLE, and __PYVENV_LAUNCHER__, which the
+#: Python 3.11 that Prime's bootstrap provisions honours as well): the venv an
+#: interpreter starts in is the one beside that path, so either name runs the
+#: kernel on another venv's site-packages while its ``bin/python`` is still
+#: the sealed one's, and Prime's per-session kernel check is answered by that
+#: venv too. Prime's own processes are Node, and the Python it starts is the
+#: kernel, which inherits its session worker's environment, so every
+#: environment this adapter configures -- the daemon's, the kernel probe's and
+#: each child's -- REMOVES them. Not empties them: a name that is still set
+#: means whatever its reader decides an empty value means. Left in place, a
+#: serving shell's PYTHONPATH -- a checkout run with ``PYTHONPATH=src``, for
+#: one -- let an empty venv pass the kernel probe on stub ``ipykernel`` and
+#: ``rlm`` packages and reached every kernel as code the seal never covered.
+_UNSEALED_KERNEL_CODE_VARS = (
+    "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "IPYTHONDIR",
+    "PYTHONEXECUTABLE", "__PYVENV_LAUNCHER__",
+)
+
+
+#: The longest path a Unix-domain socket can bind: ``sun_path`` holds 104
+#: bytes on macOS and the BSDs and 108 on Linux, NUL included. The smaller
+#: limit is used everywhere, so a path that passes here binds on any of them.
+_UNIX_SOCKET_PATH_MAX = 103
+
+#: The longest socket Prime binds below its TMPDIR, by shape: a session
+#: worker's, at ``prime-agent-<uid>/worker-<12 hex>-<12 hex>.sock``
+#: (prime-agent 0.7.2). Its forkserver's ``control.sock`` sits shallower.
+_PRIME_WORKER_SOCKET = "prime-agent-{uid}/worker-" + "0" * 12 + "-" + "0" * 12 + ".sock"
+
+
+def unix_socket_directory(relative_path: str) -> str:
+    """A temp directory below which ``relative_path`` can still bind as a socket.
+
+    The temp directory itself when the joined path fits ``sun_path``, else
+    ``/tmp``. A long TMPDIR -- a sandbox's, a CI runner's, a per-job scratch
+    area -- puts every socket below it past the limit, and ``listen`` then
+    fails with EINVAL: Prime's daemon exits at startup, or each session
+    worker dies before the supervisor can reach it. ``/tmp`` is the POSIX
+    directory every user can create in and already the default on Linux;
+    Prime refuses a socket directory there that another user owns. Windows
+    has no ``sun_path`` for this to fit.
+    """
+    preferred = tempfile.gettempdir()
+    joined = os.path.join(preferred, relative_path)
+    if os.name == "nt" or len(os.fsencode(joined)) <= _UNIX_SOCKET_PATH_MAX:
+        return preferred
+    return "/tmp"
+
+
+def _refuse_unprovisioned_kernel(
+    venv: Path, *, env: Mapping[str, str], cwd: Path,
+) -> None:
+    """Refuse a kernel venv whose interpreter Prime would refuse, naming why.
+
+    Runs ``<venv>/bin/python -c "import ipykernel, rlm"`` -- the two packages
+    Prime's docs name for a PRIME_AGENT_KERNEL_PYTHON -- under the scrubbed
+    daemon environment, from the empty run-owned working directory so a module
+    beside the serving process cannot answer for the venv, and without the
+    serving shell's PYTHONPATH or PYTHONHOME, which that environment removes
+    (``_UNSEALED_KERNEL_CODE_VARS``), so neither can a module on its path.
+    ``PYTHONDONTWRITEBYTECODE`` is part of that environment, so the probe
+    writes nothing into the venv it is about to seal.
+    """
+    def _refusal(reason: str) -> ConfigurationError:
+        return ConfigurationError(
+            f"PRIME_AGENT_KERNEL_VENV is not a provisioned Prime kernel: {reason}. "
+            "Prime refuses that interpreter when a session starts its kernel, "
+            "so every rollout's ipython call would fail; provision the venv "
+            "with this prime-agent's own kernel bootstrap before serving"
+        )
+
+    python = venv / "bin" / "python"
+    if not python.is_file():
+        raise _refusal("it has no interpreter at bin/python")
+    try:
+        probe = subprocess.run(
+            [str(python), "-c", _KERNEL_IMPORT_PROBE],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            cwd=cwd,
+            env=dict(env),
+            timeout=_KERNEL_PROBE_TIMEOUT_S,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise _refusal(
+            f"bin/python did not import ipykernel and rlm within "
+            f"{_KERNEL_PROBE_TIMEOUT_S:.0f}s"
+        ) from exc
+    except OSError as exc:
+        raise _refusal(
+            f"bin/python cannot start ({exc.strerror or type(exc).__name__})"
+        ) from exc
+    if probe.returncode != 0:
+        lines = probe.stderr.decode("utf-8", "replace").strip().splitlines()
+        detail = lines[-1].strip()[:200] if lines else f"exit {probe.returncode}"
+        raise _refusal(
+            "bin/python cannot import ipykernel and rlm "
+            f"(prime-agent-runtime): {detail}"
+        )
 
 
 class _HarnessDrift(ConfigurationError):
@@ -817,7 +952,8 @@ class PrimeHarnessChild:
     agent_dir: Path
     harness_dir: Path
     settings_path: Path
-    environment: dict[str, str]
+    #: Overlaid onto the child's environment; a None value removes that name.
+    environment: dict[str, str | None]
     harness_sha256: str
     _root: Path
     _owner_token: object
@@ -825,7 +961,7 @@ class PrimeHarnessChild:
     _settings_seal: _MetadataEntry
 
     @property
-    def discovery_environment(self) -> dict[str, str]:
+    def discovery_environment(self) -> dict[str, str | None]:
         """Prime layout only; contains no provider or customer credentials."""
         return dict(self.environment)
 
@@ -843,7 +979,11 @@ class PrimeHarnessSnapshot:
     to bootstrap a separate runtime. It is runtime state, not continual
     harness state, so it receives its own ``kernel_sha256`` identity and a
     metadata seal checked before and after every child. A write poisons the
-    snapshot rather than silently changing later replicas.
+    snapshot rather than silently changing later replicas. Prime receives it
+    as ``PRIME_AGENT_KERNEL_PYTHON=<venv>/bin/python``, which it uses as it
+    is and never rebuilds, so construction refuses a venv whose
+    ``bin/python`` cannot import ``ipykernel`` and ``rlm``: Prime would refuse
+    that interpreter in every rollout.
 
     ``execution_artifacts`` is an adapter-owned map of stable names to exact
     files or link-free trees, such as Prime's bundled package and the explicit
@@ -957,6 +1097,11 @@ class PrimeHarnessSnapshot:
             self._manifest = manifest
             self._sha256 = _manifest_sha256(manifest)
             if self._kernel_venv is not None:
+                _refuse_unprovisioned_kernel(
+                    self._kernel_venv,
+                    env=self._scrubbed_daemon_environment(),
+                    cwd=self._daemon_cwd,
+                )
                 self._kernel_sha256, self._kernel_seal = _kernel_tree_state(
                     self._kernel_venv
                 )
@@ -1062,8 +1207,8 @@ class PrimeHarnessSnapshot:
         for artifact in self._execution_artifacts:
             _attest_execution_artifact(artifact)
 
-    def _environment_for(self, home: Path, agent: Path) -> dict[str, str]:
-        env = {
+    def _environment_for(self, home: Path, agent: Path) -> dict[str, str | None]:
+        env: dict[str, str | None] = {
             "HOME": str(home),
             "USERPROFILE": str(home),
             "XDG_CACHE_HOME": str(home / ".cache"),
@@ -1073,20 +1218,39 @@ class PrimeHarnessSnapshot:
             "PRIME_AGENT_CODING_AGENT_DIR": str(agent),
             "PRIME_AGENT_SESSION_DIR": str(agent / "sessions"),
             "PRIME_AGENT_CODING_AGENT_SESSION_DIR": str(agent / "sessions"),
-            # An ambient explicit interpreter takes precedence over the venv
-            # in Prime's bootstrapper. Clear it so the attested venv cannot be
-            # silently bypassed by the serving shell's configuration.
+            # Prime binds its worker and forkserver sockets below TMPDIR. The
+            # supervisor and every child get the same one, with room for the
+            # longest of those sockets, or no session ever starts.
+            "TMPDIR": unix_socket_directory(_PRIME_WORKER_SOCKET.format(
+                uid=os.getuid() if hasattr(os, "getuid") else "user")),
+            # Always set, so an interpreter from the serving shell's
+            # configuration can never stand in for the attested venv: Prime
+            # prefers this variable over any venv. Without a kernel it is
+            # empty, which Prime treats as unset.
             "PRIME_AGENT_KERNEL_PYTHON": "",
             # Import caches are runtime writes, not policy behavior. Suppress
             # them so a clean Python import cannot poison the shared kernel
             # seal; an explicit package/runtime mutation still fails closed.
             "PYTHONDONTWRITEBYTECODE": "1",
+            # Removed, so no code from outside the sealed venv runs in it.
+            **dict.fromkeys(_UNSEALED_KERNEL_CODE_VARS),
         }
         env.update({
             _ROUTE_ENV[name]: value
             for name, value in self._route_configuration.items()
         })
         if self._kernel_venv is not None:
+            # Prime's documented way to use an existing environment without
+            # auto-bootstrap (see _KERNEL_IMPORT_PROBE): the sealed venv's own
+            # interpreter, which Prime checks and then uses as it is. This is
+            # the exact path Prime would derive from PRIME_AGENT_KERNEL_VENV,
+            # so the kernel process is the same one; what goes is Prime's
+            # private readiness marker and the delete-and-rebuild behind it.
+            env["PRIME_AGENT_KERNEL_PYTHON"] = str(self._kernel_venv / "bin" / "python")
+            # Prime reads this only to find a venv to manage, which it never
+            # does once the interpreter is given. It stays set to the same
+            # sealed tree so an ambient value cannot name a different one to
+            # anything that does read it.
             env["PRIME_AGENT_KERNEL_VENV"] = str(self._kernel_venv)
         return env
 
@@ -1152,31 +1316,39 @@ class PrimeHarnessSnapshot:
         worker gets the private child's full launch environment from Prime's
         daemon protocol.
         """
-        from ..isolation import ROUTING_VARS, build_child_env
-
         with self._lock:
             if self._closed:
                 raise ConfigurationError("Prime harness snapshot is closed")
             self._attest_master()
-            extra = self._environment_for(self._daemon_home, self._daemon_agent)
-            env = build_child_env(
-                rollout_id="percepteye-daemon-not-a-rollout",
-                llm_url="http://127.0.0.1:1/v1",
-                api_key="percepteye-daemon-no-sampling",
-                trajectory_dir=str(self._root / "daemon-trajectory-unused"),
-                # The supervisor does not execute the customer's task. It
-                # needs only enough process environment to start; session
-                # workers receive their own child environments over Prime's
-                # client-owned launch protocol. An arbitrary Jira/AWS/etc.
-                # credential has no reason to enter this long-lived process.
-                allowlist=(),
-                extra=extra,
-            )
-            for name in [key for key in env if key.startswith("PERCEPTEYE_")]:
-                env.pop(name, None)
-            for name in ROUTING_VARS:
-                env.pop(name, None)
-            return env
+            return self._scrubbed_daemon_environment()
+
+    def _scrubbed_daemon_environment(self) -> dict[str, str]:
+        """``daemon_environment`` without the attestation, for construction.
+
+        The kernel probe runs before there is a seal to attest against, and
+        must see exactly the environment the daemon will get.
+        """
+        from ..isolation import ROUTING_VARS, build_child_env
+
+        extra = self._environment_for(self._daemon_home, self._daemon_agent)
+        env = build_child_env(
+            rollout_id="percepteye-daemon-not-a-rollout",
+            llm_url="http://127.0.0.1:1/v1",
+            api_key="percepteye-daemon-no-sampling",
+            trajectory_dir=str(self._root / "daemon-trajectory-unused"),
+            # The supervisor does not execute the customer's task. It
+            # needs only enough process environment to start; session
+            # workers receive their own child environments over Prime's
+            # client-owned launch protocol. An arbitrary Jira/AWS/etc.
+            # credential has no reason to enter this long-lived process.
+            allowlist=(),
+            extra=extra,
+        )
+        for name in [key for key in env if key.startswith("PERCEPTEYE_")]:
+            env.pop(name, None)
+        for name in ROUTING_VARS:
+            env.pop(name, None)
+        return env
 
     def release_child(self, child: PrimeHarnessChild) -> None:
         """Remove a child copy after attestation."""
@@ -1227,6 +1399,42 @@ _POLICY_EXTERNAL_EVENTS = frozenset({
     "refine_complete",
     "refine_failed",
 })
+#: How a tool call fails when Prime will not start the Python kernel it runs
+#: in: the refusals ``ensureKernelPython`` throws (prime-agent 0.7.2,
+#: dist/core/kernel/bootstrap.js) -- the check of a PRIME_AGENT_KERNEL_PYTHON
+#: that lacks a package, and a failed auto-bootstrap -- which the tool returns
+#: as the call's whole error result. A session does not stop on one: it
+#: completes, and the policy is answered with the refusal instead of having
+#: run its code. Prime runs that check each time a session starts its kernel,
+#: one interpreter per package, and counts a package that merely failed to
+#: spawn as missing, so a kernel the example's startup preflight accepted can
+#: still be refused in a rollout. Such a call is an environment fault, not an
+#: outcome of the policy, and the rollout is excluded naming it, however many
+#: of its other calls ran -- the runner's every-call-failed rule catches only
+#: a rollout whose every call was refused. The words alone do not make a
+#: refusal: a cell the kernel ran can print them first and then raise. What
+#: does is the result's shape (``_ran_in_the_kernel``).
+_PRIME_KERNEL_REFUSALS = (
+    "PRIME_AGENT_KERNEL_PYTHON points to a Python missing",
+    "Failed to set up the Python kernel runtime",
+)
+
+
+def _ran_in_the_kernel(end_event: dict[str, Any]) -> bool:
+    """Whether a ``tool_execution_end`` reports code the kernel executed.
+
+    The ipython tool's own result carries the execution's ``durationMs`` and
+    ``status`` in ``details``, a raised cell's included; an error thrown
+    before the kernel ran anything -- the kernel refusals above -- reaches the
+    stream as ``createErrorToolResult``'s empty ``details`` (prime-agent
+    0.7.2). A parsed ``ToolCallOutcome`` does not carry ``details``, so this
+    reads the raw event, under the same vocabulary the parser reads it with.
+    """
+    result = _first(end_event, PRIME_TOOL_FORMAT.result)
+    details = result.get("details") if isinstance(result, dict) else None
+    return isinstance(details, dict) and (
+        "status" in details or "durationMs" in details
+    )
 
 
 def _assistant_text(message: Any) -> str | None:
@@ -1312,6 +1520,28 @@ class PrimeAgentOutputAdapter:
             if normalized in {"error", "aborted"}:
                 terminal_failure = normalized
 
+        parsed = parse_tool_calls_with_omissions(
+            stdout, formats=(PRIME_TOOL_FORMAT,)
+        )
+        # Whether each end event reports executed code, per call id in stream
+        # order, which is the order the parser emits their calls in (an end
+        # it cannot name is omitted, and counted in omitted_count).
+        ran: dict[str, list[bool]] = {}
+        for event in events:
+            if event.get("type") == PRIME_TOOL_FORMAT.end_type:
+                call_id = _first(event, PRIME_TOOL_FORMAT.call_id)
+                ran.setdefault(str(call_id or ""), []).append(
+                    _ran_in_the_kernel(event))
+        refused: dict[str, list[str]] = {}
+        for call in parsed.calls or ():
+            same_id = ran.get(call.tool_call_id or "")
+            if same_id and same_id.pop(0):
+                continue
+            text = call.error if call.outcome == "failed" else None
+            for refusal in _PRIME_KERNEL_REFUSALS:
+                if isinstance(text, str) and text.startswith(refusal):
+                    refused.setdefault(refusal, []).append(call.name)
+
         invalid: list[str] = []
         lifecycle_complete = (
             not malformed_structured_line
@@ -1332,9 +1562,25 @@ class PrimeAgentOutputAdapter:
                 + " (diagnostic redacted)"
             )
 
-        parsed = parse_tool_calls_with_omissions(
-            stdout, formats=(PRIME_TOOL_FORMAT,)
-        )
+        excluded: list[str] = []
+        if refused:
+            # Prime's fixed words only. What follows them -- which packages,
+            # which interpreter path -- is redacted like the terminal
+            # diagnostic below; the startup preflight names it in full.
+            excluded.append(
+                "Prime did not start the policy's Python kernel, so "
+                + "; ".join(
+                    f"{len(names)} {'/'.join(sorted(set(names)))} call(s) "
+                    f"returned its refusal {refusal!r} (diagnostic redacted)"
+                    for refusal, names in refused.items()
+                )
+                + " instead of running the policy's code: an environment "
+                "fault, not a policy outcome, so this rollout is not trained on"
+            )
+        if invalid:
+            excluded.append(
+                "untrainable command event stream: observed " + "; ".join(invalid)
+            )
         return CommandOutputProjection(
             recognized=True,
             final_text=final_text or "",
@@ -1345,10 +1591,10 @@ class PrimeAgentOutputAdapter:
             llm_call_count=llm_call_count if lifecycle_complete else None,
             tool_calls=parsed.calls,
             tool_calls_omitted_count=parsed.omitted_count,
-            exclusion_reason="cancelled" if invalid else None,
-            exclusion_detail=(
-                "untrainable command event stream: observed " + "; ".join(invalid)
-                if invalid
+            exclusion_reason=(
+                "substrate_unavailable" if refused
+                else "cancelled" if invalid
                 else None
             ),
+            exclusion_detail="; ".join(excluded) or None,
         )
