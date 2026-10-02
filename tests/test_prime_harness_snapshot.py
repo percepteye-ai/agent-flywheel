@@ -370,8 +370,7 @@ def test_prime_is_handed_the_sealed_interpreter_and_never_an_ambient_one(
     readiness marker does not recognise -- one another prime-agent version
     provisioned, say -- and the seal reports a lost rollout as a mutated
     kernel. Every process the adapter configures gets the sealed interpreter,
-    whatever the serving shell exported, and a snapshot without a kernel
-    clears an ambient one rather than let it stand in.
+    whatever the serving shell exported.
     """
     monkeypatch.setenv("PRIME_AGENT_KERNEL_PYTHON", "/ambient/bin/python")
     monkeypatch.setenv("PRIME_AGENT_KERNEL_VENV", "/ambient/kernel-venv")
@@ -393,16 +392,30 @@ def test_prime_is_handed_the_sealed_interpreter_and_never_an_ambient_one(
         snapshot.release_child(child)
         snapshot.close()
 
-    bare = PrimeHarnessSnapshot(_source(tmp_path), workspace_dir=tmp_path / "bare")
-    try:
-        assert bare.daemon_environment()["PRIME_AGENT_KERNEL_PYTHON"] == ""
-        unsealed = bare.prepare_child("unsealed")
-        try:
-            assert unsealed.environment["PRIME_AGENT_KERNEL_PYTHON"] == ""
-        finally:
-            bare.release_child(unsealed)
-    finally:
-        bare.close()
+
+def test_a_snapshot_without_a_kernel_is_refused_before_it_allocates_anything(
+    tmp_path,
+):
+    """No kernel is refused at construction, naming why, not served.
+
+    A snapshot without one used to hand Prime an empty
+    PRIME_AGENT_KERNEL_PYTHON, and Prime then bootstrapped a runtime itself at
+    every session start -- ``uv python install``, then ``uv pip install`` --
+    in the background, into that rollout's private HOME. The bootstrap
+    outlived the rollout, reparented to init, and was still writing there
+    when ``release_child`` removed the child: ``Directory not empty``, a
+    rollout the runner excluded as a failed release, and an orphan running
+    on. Nothing the adapter owns can stop that process, so the configuration
+    that starts it is what goes.
+    """
+    source = _source(tmp_path)
+    with pytest.raises(TypeError, match="kernel_venv"):
+        PrimeHarnessSnapshot(source, workspace_dir=tmp_path / "omitted")
+    with pytest.raises(ConfigurationError) as refused:
+        PrimeHarnessSnapshot(source, workspace_dir=tmp_path / "none", kernel_venv=None)
+    assert "bootstraps a runtime at every session start" in str(refused.value)
+    assert "release fails" in str(refused.value)
+    assert not (tmp_path / "none").exists(), "a refused snapshot allocated a run root"
 
 
 #: The serving shell's Python configuration that would run code in Prime's
