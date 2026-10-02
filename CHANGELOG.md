@@ -32,10 +32,14 @@ repository's.
   as "keep what you run" and stay on the candidate a person had rolled back. A
   null endpoint without the flag still keeps the last configuration.
   `is_withdrawn()` is exported, and `endpoint_kwargs()` refuses a withdrawn
-  answer before any endpoint beside it, as the Node SDK does. **Upgrading:**
-  `on_change` now also fires on a withdrawal, with that empty snapshot, so a
-  callback that builds a client from the snapshot must treat a falsy one as
-  "back to my own configuration".
+  answer before any endpoint beside it, as the Node SDK does. The snapshot
+  says so in its own field, `PolicySnapshot.withdrawn`, and a withdrawal is
+  logged once as a warning naming the control plane's reason, by both
+  `policy_source()` and `apply_current_policy()`. **Upgrading:** `on_change`
+  now also fires on a withdrawal, with that empty snapshot, so a callback (or
+  a turn loop rebuilding on `changed`) that builds a client from the snapshot
+  must check `snap.withdrawn` and go back to its own configuration instead of
+  building one from empty fields.
 
 ### Changed
 

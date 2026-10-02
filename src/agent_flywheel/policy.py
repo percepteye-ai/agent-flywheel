@@ -47,7 +47,7 @@ USAGE — call it per turn::
             if snap:                  # a served policy
                 client = OpenAI(base_url=snap.base_url, api_key=snap.api_key)
                 model = snap.model
-            else:                     # withdrawn: back to your own
+            elif snap.withdrawn:      # taken back: your own again
                 client, model = OpenAI(), "my-model"
         ...
 
@@ -55,12 +55,12 @@ Per turn is the natural unit for an agent, and it is the recommendation. A
 caller who calls ``current()`` once has re-created the problem this class
 exists to solve.
 
-A CHANGE TO AN EMPTY SNAPSHOT IS A WITHDRAWAL. When the control plane moves
+A WITHDRAWAL IS A CHANGE TO AN EMPTY SNAPSHOT. When the control plane moves
 the agent back to a base arm that has nothing to serve -- no champion, no
 upstream -- it answers ``withdrawn: true`` (:func:`is_withdrawn`), and the
 handle reverts to the snapshot it was constructed with: empty, meaning your
-own configuration, reported once as ``changed``. Any other answer without an
-endpoint changes nothing.
+own configuration, reported once as ``changed``, with ``withdrawn`` set and
+one log line naming it. Any other answer without an endpoint changes nothing.
 
 WHAT IT WILL NOT DO
 -------------------
@@ -278,10 +278,19 @@ class PolicySnapshot:
     #: endpoint-only changes or miss prompt changes entirely.
     serving_generation: str = ""
 
+    #: True when this snapshot is empty because the control plane WITHDREW
+    #: the policy it served (:func:`is_withdrawn`), until it serves one again:
+    #: run your own configuration, by instruction. With ``changed`` it is the
+    #: edge to rebuild your own client on. Its own field so a caller asks the
+    #: flag rather than inferring a withdrawal from an empty snapshot, which
+    #: also describes "nothing was ever delivered".
+    withdrawn: bool = False
+
     def __bool__(self) -> bool:
         """Truthy only when there is something to act on — same meaning as
-        ``apply_current_policy()``'s ``{}``. Falsy and ``changed`` together is
-        a withdrawal: go back to your own configuration."""
+        ``apply_current_policy()``'s ``{}``. A falsy snapshot is never a
+        client to build: on ``changed`` with ``withdrawn``, go back to your
+        own configuration."""
         return bool(self.base_url and self.api_key)
 
     def as_kwargs(self) -> dict[str, Any]:
@@ -517,8 +526,19 @@ class PolicySource:
         self._snap = PolicySnapshot(
             base_url=identity[0], api_key=identity[1], model=identity[2],
             changed=changed, last_refresh_ok=True,
-            serving_generation=generation,
+            serving_generation=generation, withdrawn=withdrawn,
         )
+        if changed and withdrawn:
+            # SAID ONCE, on the edge: the empty snapshot is otherwise the same
+            # value as "never delivered", and an operator watching production
+            # change models needs the cause.
+            _log.warning(
+                "agent-flywheel: the control plane WITHDREW the policy it served "
+                "agent_id=%r (%s), so this agent goes back to its own "
+                "configuration.", self.agent_id,
+                (body.get("reason") if isinstance(body, dict) else None)
+                or "withdrawn=true",
+            )
         if changed and self._on_change is not None:
             try:
                 self._on_change(self._snap)

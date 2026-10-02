@@ -485,6 +485,59 @@ def test_an_endpoint_without_a_model_is_not_applied(flywheel_key):
     assert not src.current()
 
 
+# ── a withdrawal is a flag, and it is said ────────────────────────────
+
+
+def test_a_withdrawal_is_flagged_on_the_snapshot(flywheel_key):
+    """The caller asks ``snap.withdrawn`` rather than inferring a withdrawal
+    from an empty snapshot, which is also what "never delivered" looks like.
+    It stays set while the agent runs its own configuration because of it --
+    a later "nothing deployed" keeps that configuration, and its reason --
+    and clears when a policy is served again."""
+    gateway = _answer("policy_current_gateway.json")
+    withdrawn = _answer("policy_current_withdrawn.json")
+    nothing = {k: v for k, v in withdrawn.items() if k != "withdrawn"}
+    src, clock = _handle([gateway, withdrawn, nothing, gateway])
+
+    assert not src.current().withdrawn
+    snap = _next(src, clock)
+    assert snap.changed and snap.withdrawn and not snap
+    assert src.current().withdrawn            # the edge is consumed, not the flag
+    assert _next(src, clock).withdrawn
+    back = _next(src, clock)
+    assert back.changed and back and not back.withdrawn
+
+
+def test_a_withdrawal_before_any_policy_is_flagged_but_not_a_change(flywheel_key):
+    src, _ = _handle([_answer("policy_current_withdrawn.json")])
+    snap = src.current()
+    assert snap.withdrawn and not snap.changed
+
+
+def test_a_withdrawal_is_said_once_naming_its_reason(flywheel_key, caplog):
+    """THE PATTERN Q6: the empty snapshot and the one-shot `{}` are the same
+    values "nothing deployed" produces, so the withdrawal is named -- once
+    per change, not once per refresh."""
+    w = _answer("policy_current_withdrawn.json")
+    src, clock = _handle([_answer("policy_current_gateway.json"), w, w])
+    src.current()
+    with caplog.at_level("WARNING", logger="agent_flywheel"):
+        _next(src, clock)
+        _next(src, clock)
+    said = [r.getMessage() for r in caplog.records if "WITHDREW" in r.getMessage()]
+    assert len(said) == 1, said
+    assert w["reason"] in said[0] and "support-agent" in said[0]
+
+
+def test_the_one_shot_read_names_a_withdrawal(monkeypatch, flywheel_key, caplog):
+    w = _answer("policy_current_withdrawn.json")
+    monkeypatch.setattr(fw, "current_policy", lambda **kw: w)
+    with caplog.at_level("WARNING", logger="agent_flywheel"):
+        assert fw.apply_current_policy(agent_id="support-agent") == {}
+    assert any("WITHDREW" in r.getMessage() and w["reason"] in r.getMessage()
+               for r in caplog.records), caplog.text
+
+
 def test_the_same_answers_as_the_node_sdk(flywheel_key):
     """Both SDKs ship in one release and must agree on two things for every
     answer: WHICH answers are applied, and WHERE the flywheel key goes. One

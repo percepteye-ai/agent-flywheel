@@ -253,8 +253,8 @@ def test_a_failing_control_plane_is_retried_on_the_TTL_not_every_call():
 
 def test_NOTHING_DEPLOYED_does_not_withdraw_a_working_policy():
     """An absent endpoint means "keep your current configuration", exactly as
-    the one-shot function documents. Withdrawal is expressed by deploying the
-    base, not by an absence."""
+    the one-shot function documents. An absence is not a withdrawal; only
+    ``withdrawn: true`` is (see test_policy_delivery)."""
     clock = _Clock()
     src, _ = _source([_body(model="m1"), {}], clock=clock)
     src.current()

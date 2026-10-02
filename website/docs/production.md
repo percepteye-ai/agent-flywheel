@@ -49,7 +49,7 @@ The credential is resolved in this order, and never invented:
 
 **Behind the gateway URL, a promotion or a rollback between served models takes effect without a rebuild.** The gateway sends every request to the model delivered for your agent at that moment, whatever `model` the request names, so even a client built once at startup follows it. The answer still moves `model`, and `policy_source()` still reports it as a change, so a log line or a fleet can see it.
 
-**A withdrawal is the one change your client must act on.** When a rollback moves your agent back to a base that has nothing to serve — no champion has been promoted, and no endpoint of your own is registered for the agent — the control plane answers `endpoint: null` with `withdrawn: true`: run your own model again. `policy_source()` reports that as a change to an empty snapshot, on its next refresh. A one-shot `apply_current_policy()` sees it only at its next start, as `{}`, which is one more reason a production agent holds a handle. `is_withdrawn(body)` is the predicate both use, if you read the raw body yourself.
+**A withdrawal is the one change your client must act on.** When a rollback moves your agent back to a base that has nothing to serve — no champion has been promoted, and no endpoint of your own is registered for the agent — the control plane answers `endpoint: null` with `withdrawn: true`: run your own model again. `policy_source()` reports that as a change to an empty snapshot with `withdrawn` set, on its next refresh, and logs one warning naming it. A one-shot `apply_current_policy()` sees it only at its next start, as `{}` and the same warning, which is one more reason a production agent holds a handle. `is_withdrawn(body)` is the predicate both use, if you read the raw body yourself.
 
 `set_env=True` additionally exports `OPENAI_BASE_URL` and `OPENAI_API_KEY` for libraries that read the environment instead of accepting arguments. It is off by default because mutating the process environment is a side effect a caller should ask for, and it does **not** export the model.
 
@@ -79,7 +79,7 @@ while True:                       # per turn, or per request
         if snap:                  # a served policy
             client = OpenAI(base_url=snap.base_url, api_key=snap.api_key)
             model = snap.model
-        else:                     # withdrawn: back to your own
+        elif snap.withdrawn:      # taken back: your own again
             client, model = OpenAI(), "my-model"
     ...
 ```
@@ -97,8 +97,9 @@ while True:                       # per turn, or per request
 | `stale_for_s` | `float` | `0.0` while refreshes succeed; seconds **past the TTL** while they fail |
 | `last_refresh_ok` | `bool` | `False` after a failed attempt — the snapshot still stands |
 | `serving_generation` | `str` | the control plane's own answer to "is what I booted with still current?" |
+| `withdrawn` | `bool` | `True` while the snapshot is empty because the control plane **withdrew** the policy it served, until it serves one again |
 
-`bool(snap)` is truthy only when there is something to act on — the same meaning as `apply_current_policy()`'s `{}`. A falsy snapshot with `changed` set is a withdrawal: go back to your own configuration. `snap.as_kwargs()` returns a dict identical in shape to it, so migrating from the one-shot function changes where the dict comes from and nothing else.
+`bool(snap)` is truthy only when there is something to act on — the same meaning as `apply_current_policy()`'s `{}`. A snapshot with `changed` and `withdrawn` set is a withdrawal: go back to your own configuration. Ask the flag rather than inferring a withdrawal from an empty snapshot, which is also what "never delivered" looks like. `snap.as_kwargs()` returns a dict identical in shape to it, so migrating from the one-shot function changes where the dict comes from and nothing else.
 
 **`changed` is an edge, and it is consumed by whoever observes it** — so a second caller does not rebuild a client that is already correct. Two threads sharing one handle will not both see the edge. Build one client per handle.
 
@@ -112,7 +113,7 @@ while True:                       # per turn, or per request
 src = fw.policy_source(agent_id="my-coding-agent", on_change=reconfigure)
 ```
 
-It fires on **promotion and rollback alike** — any move in the `(base_url, api_key, model)` triple, including the first actionable answer, since without that the documented `if snap.changed:` usage would never build a client at all, and a withdrawal, with the empty snapshot. It does **not** fire when a refresh fails, and it does not fire when the control plane answers "nothing deployed" without `withdrawn: true`: only the flag takes a served model away, never an absence. Exceptions it raises are swallowed.
+It fires on **promotion and rollback alike** — any move in the `(base_url, api_key, model)` triple, including the first actionable answer, since without that the documented `if snap.changed:` usage would never build a client at all, and a withdrawal, with the empty snapshot and `withdrawn` set. It does **not** fire when a refresh fails, and it does not fire when the control plane answers "nothing deployed" without `withdrawn: true`: only the flag takes a served model away, never an absence. Exceptions it raises are swallowed.
 
 ### Nothing polls in the background
 

@@ -486,7 +486,8 @@ def endpoint_kwargs(
         # applying different models if one ever arrives with an endpoint.
         # `{}` is the right one-shot answer -- at startup the configuration
         # you have IS your own -- and PolicySource tells the withdrawal apart
-        # from "nothing deployed" itself, through the same predicate.
+        # from "nothing deployed" itself, through the same predicate. Each
+        # caller says so once, where it knows whether it is news.
         return {}
     ep = policy.get("endpoint")
     if not isinstance(ep, Mapping):
@@ -654,6 +655,12 @@ def apply_current_policy(
     pol = current_policy(
         agent_id=agent_id, control_plane_url=control_plane_url, api_key=api_key,
     )
+    if is_withdrawn(pol):
+        _log.warning(
+            "agent-flywheel: the control plane WITHDREW the policy it served "
+            "agent_id=%r (%s), so this agent runs on its own configuration.",
+            agent_id, pol.get("reason") or "withdrawn=true",
+        )
     out = endpoint_kwargs(
         pol, flywheel_key=api_key, control_plane_url=control_plane_url,
     )
