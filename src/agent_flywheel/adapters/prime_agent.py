@@ -209,10 +209,13 @@ _KERNEL_PROBE_TIMEOUT_S = 60.0
 #: standard library and site-packages (PYTHONHOME), a file IPython executes in
 #: the kernel at startup (PYTHONSTARTUP), IPython's profile directory, whose
 #: ``startup/`` scripts it executes there too (IPYTHONDIR; the private HOME
-#: already holds the default one), and, on macOS, the path the interpreter
-#: takes as its own (PYTHONEXECUTABLE, and __PYVENV_LAUNCHER__, which the
-#: Python 3.11 that Prime's bootstrap provisions honours as well): the venv an
-#: interpreter starts in is the one beside that path, so either name runs the
+#: already holds the default one), a bytecode cache tree outside the venv,
+#: whose compiled code the interpreter loads in place of a module's source
+#: whenever its header matches that source's size and modification time
+#: (PYTHONPYCACHEPREFIX), and, on macOS, the path the interpreter takes as its
+#: own (PYTHONEXECUTABLE, and __PYVENV_LAUNCHER__, which the Python 3.11 that
+#: Prime's bootstrap provisions honours as well): the venv an interpreter
+#: starts in is the one beside that path, so either name runs the
 #: kernel on another venv's site-packages while its ``bin/python`` is still
 #: the sealed one's, and Prime's per-session kernel check is answered by that
 #: venv too. Prime's own processes are Node, and the Python it starts is the
@@ -225,7 +228,7 @@ _KERNEL_PROBE_TIMEOUT_S = 60.0
 #: ``rlm`` packages and reached every kernel as code the seal never covered.
 _UNSEALED_KERNEL_CODE_VARS = (
     "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "IPYTHONDIR",
-    "PYTHONEXECUTABLE", "__PYVENV_LAUNCHER__",
+    "PYTHONPYCACHEPREFIX", "PYTHONEXECUTABLE", "__PYVENV_LAUNCHER__",
 )
 
 

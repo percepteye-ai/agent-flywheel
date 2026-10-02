@@ -524,15 +524,65 @@ def _kernel_copy(provisioned, destination: pathlib.Path) -> pathlib.Path:
 #: and anything the serving shell's Python configuration put there.
 _WHICH_KERNEL = (
     "import importlib.util, os, sys\n"
+    "import jupyter\n"
     "print('kernel-prefix=' + sys.prefix)\n"
     "print('ambient=' + repr(\n"
     "    [n for n in ('PYTHONPATH', 'PYTHONHOME', 'PYTHONSTARTUP', 'IPYTHONDIR',\n"
-    "                 'PYTHONEXECUTABLE', '__PYVENV_LAUNCHER__')\n"
+    "                 'PYTHONPYCACHEPREFIX', 'PYTHONEXECUTABLE',\n"
+    "                 '__PYVENV_LAUNCHER__')\n"
     "     if n in os.environ]\n"
     "    + [m for m in ('ambient_marker', 'ambient_venv_marker')\n"
     "       if importlib.util.find_spec(m)]\n"
-    "    + [g for g in ('AMBIENT_STARTUP', 'AMBIENT_PROFILE') if g in globals()]))\n"
+    "    + [g for g in ('AMBIENT_STARTUP', 'AMBIENT_PROFILE') if g in globals()]\n"
+    "    + [a for a in ('AMBIENT_BYTECODE',) if hasattr(jupyter, a)]))\n"
 )
+
+#: A module of the kernel's own that nothing imports when the kernel starts:
+#: jupyter_core's ``python -m jupyter`` shim in its site-packages, which
+#: ``_WHICH_KERNEL`` imports.
+_BYTECODE_SHADOWED_MODULE = "jupyter"
+
+#: Run by the kernel's own interpreter under the ambient PYTHONPYCACHEPREFIX:
+#: compiles the module's source plus a marker and writes it where that
+#: interpreter looks for the module's bytecode, behind the PEP 552 header it
+#: checks -- its magic number, then the source's modification time and size
+#: -- so it loads this in place of the source, though no byte of the venv
+#: changed.
+_PLANT_BYTECODE = (
+    "import importlib.util, marshal, os, sys\n"
+    "origin = importlib.util.find_spec(sys.argv[1]).origin\n"
+    "with open(origin, 'rb') as f:\n"
+    "    source = f.read()\n"
+    "code = compile(source + b'\\nAMBIENT_BYTECODE = 1\\n', origin, 'exec')\n"
+    "cached = importlib.util.cache_from_source(origin)\n"
+    "os.makedirs(os.path.dirname(cached), exist_ok=True)\n"
+    "st = os.stat(origin)\n"
+    "header = importlib.util.MAGIC_NUMBER + b''.join(\n"
+    "    (n & 0xFFFFFFFF).to_bytes(4, 'little')\n"
+    "    for n in (0, int(st.st_mtime), st.st_size))\n"
+    "with open(cached, 'wb') as f:\n"
+    "    f.write(header + marshal.dumps(code))\n"
+    "print(cached)\n"
+)
+
+
+def _ambient_bytecode(kernel: pathlib.Path, prefix: pathlib.Path) -> None:
+    """Compiled code for one of ``kernel``'s modules, in a cache tree outside it.
+
+    Written by the kernel's own interpreter, so it carries that interpreter's
+    magic number; a PYTHONPYCACHEPREFIX naming ``prefix`` makes the kernel run
+    it in place of the module's source in the venv ``kernel_sha256`` names.
+    """
+    planted = subprocess.run(
+        [str(kernel / "bin" / "python"), "-c", _PLANT_BYTECODE,
+         _BYTECODE_SHADOWED_MODULE],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
+        env={"PATH": os.environ.get("PATH", ""), "PYTHONPYCACHEPREFIX": str(prefix),
+             "PYTHONDONTWRITEBYTECODE": "1"},
+        cwd=str(prefix.parent), check=False,
+    )
+    assert planted.returncode == 0, planted.stderr[-800:]
+    assert pathlib.Path(planted.stdout.strip()).is_relative_to(prefix), planted.stdout
 
 
 def _ambient_python_configuration(tmp_path, monkeypatch, provisioned) -> None:
@@ -540,11 +590,13 @@ def _ambient_python_configuration(tmp_path, monkeypatch, provisioned) -> None:
 
     A module on PYTHONPATH, a file IPython runs in the kernel at startup
     (PYTHONSTARTUP), an IPython profile whose startup script it runs there too
-    (IPYTHONDIR), a PYTHONHOME no interpreter can start under, and, on macOS,
-    the interpreter path of another venv (PYTHONEXECUTABLE and
-    __PYVENV_LAUNCHER__), whose site-packages the kernel would then run on --
-    a copy of the provisioned kernel, so it still starts, plus a marker
-    module. None of it is in the venv ``kernel_sha256`` names.
+    (IPYTHONDIR), a PYTHONHOME no interpreter can start under, a bytecode
+    cache tree (PYTHONPYCACHEPREFIX) that ``_ambient_bytecode`` fills for the
+    kernel the test serves, and, on macOS, the interpreter path of another
+    venv (PYTHONEXECUTABLE and __PYVENV_LAUNCHER__), whose site-packages the
+    kernel would then run on -- a copy of the provisioned kernel, so it still
+    starts, plus a marker module. None of it is in the venv ``kernel_sha256``
+    names.
     """
     path = tmp_path / "ambient-path"
     path.mkdir()
@@ -558,6 +610,7 @@ def _ambient_python_configuration(tmp_path, monkeypatch, provisioned) -> None:
     monkeypatch.setenv("PYTHONSTARTUP", str(startup))
     monkeypatch.setenv("IPYTHONDIR", str(tmp_path / "ambient-ipython"))
     monkeypatch.setenv("PYTHONHOME", str(tmp_path / "no-python-home"))
+    monkeypatch.setenv("PYTHONPYCACHEPREFIX", str(tmp_path / "ambient-pycache"))
     elsewhere = _kernel_copy(provisioned, tmp_path / "ambient-venv")
     site = next((elsewhere / "lib").glob("python*/site-packages"))
     (site / "ambient_venv_marker.py").write_text("")
@@ -597,9 +650,9 @@ def test_the_sealed_kernel_runs_the_policy_code_as_it_is(
 
     And it runs only the sealed venv. Prime's kernel inherits its session's
     environment, so the serving shell's Python configuration used to reach it
-    -- a PYTHONPATH module importable, a startup file run, on macOS another
-    venv's site-packages -- as code the seal never covered; none of it does
-    now.
+    -- a PYTHONPATH module importable, a startup file run, a venv module's
+    bytecode loaded from a cache outside the venv, on macOS another venv's
+    site-packages -- as code the seal never covered; none of it does now.
     """
     _ambient_python_configuration(tmp_path, monkeypatch, provisioned_kernel)
     kernel = provisioned_kernel
@@ -614,6 +667,7 @@ def test_the_sealed_kernel_runs_the_policy_code_as_it_is(
         # a hash of the bundled prime-agent-runtime source.
         recorded["runtime"] = "sha256:" + "0" * 64
         marker.write_text(json.dumps(recorded, separators=(",", ":")) + "\n")
+    _ambient_bytecode(kernel, tmp_path / "ambient-pycache")
     launch = _runnable_launcher()
     with _Gateway(answer=True, ipython=_WHICH_KERNEL) as gateway:
         out, _ = _run_one_rollout(
