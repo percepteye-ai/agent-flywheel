@@ -25,17 +25,28 @@ and the design follows from that ordering.
 USAGE — call it per turn::
 
     policy = fw.policy_source(agent_id="my-coding-agent", ttl_s=300)
+    client, model = OpenAI(), "my-model"      # your own configuration
 
     while True:                       # per turn, or per request
         snap = policy.current()
         if snap.changed:              # rebuild ONLY on an actual change
-            client = OpenAI(base_url=snap.base_url, api_key=snap.api_key)
-            model = snap.model
+            if snap:                  # a served policy
+                client = OpenAI(base_url=snap.base_url, api_key=snap.api_key)
+                model = snap.model
+            else:                     # withdrawn: back to your own
+                client, model = OpenAI(), "my-model"
         ...
 
 Per turn is the natural unit for an agent, and it is the recommendation. A
 caller who calls ``current()`` once has re-created the problem this class
 exists to solve.
+
+A CHANGE TO AN EMPTY SNAPSHOT IS A WITHDRAWAL. When the control plane moves
+the agent back to a base arm that has nothing to serve -- no champion, no
+upstream -- it answers ``withdrawn: true`` (:func:`is_withdrawn`), and the
+handle reverts to the snapshot it was constructed with: empty, meaning your
+own configuration, reported once as ``changed``. Any other answer without an
+endpoint changes nothing.
 
 WHAT IT WILL NOT DO
 -------------------
@@ -60,7 +71,7 @@ import logging
 import random
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -69,6 +80,7 @@ __all__ = [
     "PolicySnapshot",
     "PolicySource",
     "is_archive_ref",
+    "is_withdrawn",
     "missing_credentials_cause",
     "policy_source",
 ]
@@ -127,6 +139,27 @@ def is_archive_ref(model: str) -> bool:
     return model.startswith(ARCHIVE_REF_PREFIXES)
 
 
+def is_withdrawn(policy: Mapping[str, Any] | None) -> bool:
+    """Has the control plane WITHDRAWN the policy it was serving this agent?
+
+    ``withdrawn: true`` (with ``endpoint: null``) is its answer when an agent
+    is moved back to its base arm and there is nothing to serve there: no
+    champion has been promoted and no upstream is registered. It means run
+    your OWN model again, the configuration the agent had before any policy
+    reached it.
+
+    That is not what ``endpoint: null`` means on its own. Without the flag a
+    null endpoint says nothing new is deployed, keep what you run -- and
+    reading the two the same way left an agent pinned on a candidate a human
+    had already rolled back, because "keep what you run" was the candidate.
+
+    Strictly ``True``, and asked before any endpoint beside it, because the
+    Node SDK's ``modelDecision`` asks ``withdrawn === true`` first and the two
+    SDKs refuse the same answers.
+    """
+    return isinstance(policy, Mapping) and policy.get("withdrawn") is True
+
+
 #: Never poll faster than this, whatever the caller asks for or the server
 #: hints. A misconfigured ``ttl_s=1`` across a fleet is a denial of service
 #: aimed at our own control plane, and the client is the wrong place to
@@ -161,7 +194,8 @@ class PolicySnapshot:
     """
 
     #: OpenAI-compatible base URL. Empty when the control plane has nothing
-    #: deployed for this agent, or has never answered.
+    #: deployed for this agent, has never answered, or has withdrawn the
+    #: policy it served -- in every case, run your own configuration.
     base_url: str = ""
     api_key: str = ""
     model: str = ""
@@ -204,7 +238,8 @@ class PolicySnapshot:
 
     def __bool__(self) -> bool:
         """Truthy only when there is something to act on — same meaning as
-        ``apply_current_policy()``'s ``{}``: keep your current configuration."""
+        ``apply_current_policy()``'s ``{}``. Falsy and ``changed`` together is
+        a withdrawal: go back to your own configuration."""
         return bool(self.base_url and self.api_key)
 
     def as_kwargs(self) -> dict[str, Any]:
@@ -236,7 +271,9 @@ class PolicySource:
     control-plane blip would silently demote production from the trained model
     back to the untrained one, which is strictly worse than serving a slightly
     stale policy. So the snapshot stands, ``changed`` is False, and staleness
-    accumulates visibly instead.
+    accumulates visibly instead. The one answer that does take a served policy
+    away is the control plane's explicit ``withdrawn: true``, never an absence
+    or a failure.
 
     NO STAMPEDE. Exactly one caller refreshes; everyone else is handed the
     cached snapshot immediately rather than queueing behind the lock. Fifty
@@ -388,13 +425,20 @@ class PolicySource:
             self._server_ttl = float(hint)
             self._next_refresh_at = now + self.ttl_s
 
+        withdrawn = is_withdrawn(body)
+        # `{}` for a withdrawal too: endpoint_kwargs refuses one before any
+        # endpoint beside it, so the identity below is the empty triple.
         kw = endpoint_kwargs(body, api_key=self._api_key_arg)
-        if not kw and self._last_identity is not None:
+        if not kw and not withdrawn and self._last_identity is not None:
             # The control plane answered, and answered with nothing deployed.
             # That is NOT a failed refresh, and it is also not a reason to tear
             # a working client down: "nothing deployed" means keep your current
             # configuration, exactly as the one-shot function documents.
-            # Withdrawal is expressed by deploying the base, not by an absence.
+            # WITHDRAWAL IS NOT THIS BRANCH. It is said with `withdrawn: true`
+            # and falls through below to the empty triple, the snapshot this
+            # handle held when it was constructed -- your own configuration --
+            # reported as a change. An agent rolled back to a base with no
+            # champion used to land here and stay on the candidate.
             # The generation still moves: the control plane's answer DID
             # change, even though the part this snapshot carries did not, and
             # a fleet watching it should still see that.
@@ -415,6 +459,10 @@ class PolicySource:
         # out before it — without that, the documented `if snap.changed:` usage
         # would never build a client at all. An unusable first answer is not a
         # change: there is nothing for the caller to rebuild against.
+        # A WITHDRAWAL is a change by the second clause once a policy was
+        # handed out -- the empty triple differs from it, and the caller must
+        # go back to its own configuration -- and not before one was, when
+        # the caller is still on that configuration.
         actionable = bool(identity[0] and identity[1])
         changed = identity != self._last_identity and (
             actionable or self._last_identity is not None)

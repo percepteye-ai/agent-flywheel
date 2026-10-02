@@ -97,6 +97,7 @@ from .policy import (
     PolicySnapshot,
     PolicySource,
     is_archive_ref,
+    is_withdrawn,
     missing_credentials_cause,
     policy_source,
 )
@@ -172,6 +173,7 @@ __all__ = [
     "endpoint_kwargs",
     "introspect_agent",
     "is_archive_ref",
+    "is_withdrawn",
     "policy_source",
     "prompt_decision",
     "record_tool_call",
@@ -336,7 +338,9 @@ def current_policy(
 
     ``endpoint`` is absent when the control plane has nothing deployed to
     hand you — keep your current configuration, do not fall back to
-    something you guessed.
+    something you guessed. The exception is :func:`is_withdrawn`: a body with
+    ``withdrawn: true`` takes back a policy it served, so go back to your own
+    configuration. :func:`policy_source` tells the two apart for you.
     """
     url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL) or ""
     key = api_key or os.environ.get(ENV_API_KEY) or ""
@@ -454,6 +458,15 @@ def endpoint_kwargs(
     to apply" here.
     """
     if not isinstance(policy, Mapping):
+        return {}
+    if is_withdrawn(policy):
+        # WITHDRAWN WINS over any endpoint beside it, as in the Node SDK's
+        # modelDecision. The control plane sends it with `endpoint: null`, so
+        # this changes no answer it gives today; it keeps the two SDKs from
+        # applying different models if one ever arrives with an endpoint.
+        # `{}` is the right one-shot answer -- at startup the configuration
+        # you have IS your own -- and PolicySource tells the withdrawal apart
+        # from "nothing deployed" itself, through the same predicate.
         return {}
     ep = policy.get("endpoint")
     if not isinstance(ep, Mapping) or not ep.get("base_url"):
