@@ -19,7 +19,7 @@ Short answers. Each one links to the page that carries the detail.
 
 ### Do I need a GPU?
 
-**No.** No container to build, no cluster to run, no GPU to provision — the control plane holds those. Your side runs the agent process you already run, plus one HTTP client.
+**Not beside your agent.** No container to build, no cluster to run, and no GPU in the process you integrate: your side runs the agent process you already run, plus one HTTP client. Training compute depends on the method. GRPO trains on compute you connect to the control plane — a Tinker key or a GPU machine you register — and your first on-policy self-distillation (OPSD) model trains on PerceptEye's.
 
 ### Does this send my system prompt anywhere?
 

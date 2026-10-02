@@ -23,11 +23,11 @@ One `GET /policy/current`. **It contributes nothing** — no registration, no ro
 
 | key | value |
 |:--|:--|
-| `base_url` | OpenAI-compatible base URL, e.g. `https://gw.percepteye.ai/v1` |
+| `base_url` | OpenAI-compatible base URL — for a model PerceptEye serves, your agent's gateway URL (below) |
 | `api_key` | resolved credential (see below) |
 | `model` | the model name to send; `""` when the control plane did not name one |
 
-**`{}` means keep your current configuration.** It is the answer for every reason you cannot act, and they deliberately read the same: nothing deployed, no `endpoint` in the body, no `base_url`, no credential to authenticate with, an unreachable control plane, or no URL and key configured at all. An endpoint you cannot authenticate to is not usable, so it is returned as "nothing to apply" here rather than as 401s at your first request.
+**`{}` means keep your current configuration.** It is the answer for every reason you cannot act, and they deliberately read the same: nothing deployed, no `endpoint` in the body, no `base_url`, no credential to authenticate with, an unreachable control plane, no URL and key configured at all, or a model the control plane has withdrawn — at startup the configuration you have *is* your own. An endpoint you cannot authenticate to is not usable, so it is returned as "nothing to apply" here rather than as 401s at your first request.
 
 **It never raises into your startup.** An unreachable control plane must never stop an agent from serving its users.
 
@@ -36,17 +36,29 @@ The credential is resolved in this order, and never invented:
 | order | source |
 |:--|:--|
 | 1 | the `api_key=` argument |
-| 2 | the env var named by the response's `endpoint.api_key_env` |
-| 3 | `PERCEPTEYE_API_KEY` |
+| 2 | the response's own `endpoint.api_key`, when the control plane sends one |
+| 3 | the env var named by the response's `endpoint.api_key_env` |
+| 4 | `PERCEPTEYE_API_KEY` |
+
+### Where a served model comes from
+
+**A model PerceptEye serves arrives through the control plane's gateway, opened with the flywheel key your agent already holds.** The endpoint is your agent's one constant gateway URL (`…/llm/v1/o/{org}/agents/{agent_id}/v1`) with `api_key_env: "PERCEPTEYE_API_KEY"`, so the credential resolves to your `pefw_` key — never to a provider key that happens to be in your environment. The gateway holds the serving host's own credential and never hands it out, and your agent never learns the host's address.
+
+**A provider endpoint you own is still dialled directly**, with that provider's key: the control plane names the provider's variable instead, or sends the key itself.
+
+**Behind the gateway URL, a promotion or a rollback between served models takes effect without a rebuild.** The gateway sends every request to the model delivered for your agent at that moment, whatever `model` the request names, so even a client built once at startup follows it. The answer still moves `model`, and `policy_source()` still reports it as a change, so a log line or a fleet can see it.
+
+**A withdrawal is the one change your client must act on.** When a rollback moves your agent back to a base that has nothing to serve — no champion has been promoted, and no endpoint of your own is registered for the agent — the control plane answers `endpoint: null` with `withdrawn: true`: run your own model again. `policy_source()` reports that as a change to an empty snapshot, on its next refresh. A one-shot `apply_current_policy()` sees it only at its next start, as `{}`, which is one more reason a production agent holds a handle. `is_withdrawn(body)` is the predicate both use, if you read the raw body yourself.
 
 `set_env=True` additionally exports `OPENAI_BASE_URL` and `OPENAI_API_KEY` for libraries that read the environment instead of accepting arguments. It is off by default because mutating the process environment is a side effect a caller should ask for, and it does **not** export the model.
 
-Two lower-level functions sit underneath, both exported:
+Three lower-level functions sit underneath, all exported:
 
 | function | returns |
 |:--|:--|
 | `current_policy(agent_id=...)` | the raw `/policy/current` body, unparsed |
 | `endpoint_kwargs(body, api_key=None)` | the one place a body becomes client kwargs |
+| `is_withdrawn(body)` | whether the body withdraws a served model: `withdrawn` is exactly `true` |
 
 `endpoint_kwargs()` is extracted rather than inlined because it now has two callers — `apply_current_policy()` and `PolicySource` — and a caller who unpacks the body slightly differently is a caller sampling from something other than what was trained.
 
@@ -58,12 +70,16 @@ The obvious cost is that a promotion waits for your next deploy. **The larger co
 
 ```python
 policy = fw.policy_source(agent_id="my-coding-agent", ttl_s=300)
+client, model = OpenAI(), "my-model"      # your own configuration
 
 while True:                       # per turn, or per request
     snap = policy.current()
     if snap.changed:              # rebuild ONLY on an actual change
-        client = OpenAI(base_url=snap.base_url, api_key=snap.api_key)
-        model = snap.model
+        if snap:                  # a served policy
+            client = OpenAI(base_url=snap.base_url, api_key=snap.api_key)
+            model = snap.model
+        else:                     # withdrawn: back to your own
+            client, model = OpenAI(), "my-model"
     ...
 ```
 
@@ -75,13 +91,13 @@ while True:                       # per turn, or per request
 
 | field | type | meaning |
 |:--|:--|:--|
-| `base_url` · `api_key` · `model` | `str` | what to run; empty when nothing is deployed or the control plane has never answered |
+| `base_url` · `api_key` · `model` | `str` | what to run; empty when nothing is deployed, the control plane has never answered, or it withdrew the model it served — in every case, your own configuration |
 | `changed` | `bool` | `True` on the **one** snapshot that first reports a change |
 | `stale_for_s` | `float` | `0.0` while refreshes succeed; seconds **past the TTL** while they fail |
 | `last_refresh_ok` | `bool` | `False` after a failed attempt — the snapshot still stands |
 | `serving_generation` | `str` | the control plane's own answer to "is what I booted with still current?" |
 
-`bool(snap)` is truthy only when there is something to act on — the same meaning as `apply_current_policy()`'s `{}`. `snap.as_kwargs()` returns a dict identical in shape to it, so migrating from the one-shot function changes where the dict comes from and nothing else.
+`bool(snap)` is truthy only when there is something to act on — the same meaning as `apply_current_policy()`'s `{}`. A falsy snapshot with `changed` set is a withdrawal: go back to your own configuration. `snap.as_kwargs()` returns a dict identical in shape to it, so migrating from the one-shot function changes where the dict comes from and nothing else.
 
 **`changed` is an edge, and it is consumed by whoever observes it** — so a second caller does not rebuild a client that is already correct. Two threads sharing one handle will not both see the edge. Build one client per handle.
 
@@ -95,7 +111,7 @@ while True:                       # per turn, or per request
 src = fw.policy_source(agent_id="my-coding-agent", on_change=reconfigure)
 ```
 
-It fires on **promotion and rollback alike** — any move in the `(base_url, api_key, model)` triple, including the first actionable answer, since without that the documented `if snap.changed:` usage would never build a client at all. It does **not** fire when a refresh fails, and it does not fire when the control plane answers "nothing deployed": withdrawal is expressed by deploying the base, not by an absence. Exceptions it raises are swallowed.
+It fires on **promotion and rollback alike** — any move in the `(base_url, api_key, model)` triple, including the first actionable answer, since without that the documented `if snap.changed:` usage would never build a client at all, and a withdrawal, with the empty snapshot. It does **not** fire when a refresh fails, and it does not fire when the control plane answers "nothing deployed" without `withdrawn: true`: only the flag takes a served model away, never an absence. Exceptions it raises are swallowed.
 
 ### Nothing polls in the background
 
@@ -117,7 +133,7 @@ Compare the one-shot functions, which build their client with the transport defa
 
 ### Serve-stale, always
 
-After the first call, `current()` returns the cached snapshot. **A failed refresh is a non-event**: the snapshot stands, `changed` stays `False`, `last_refresh_ok` goes `False`, and `stale_for_s` accumulates visibly.
+After the first call, `current()` returns the cached snapshot. **A failed refresh is a non-event**: the snapshot stands, `changed` stays `False`, `last_refresh_ok` goes `False`, and `stale_for_s` accumulates visibly. An unreachable control plane is a failed refresh, not an answer of "nothing deployed".
 
 The naive reading of "fail open" would be to return the empty answer meaning "keep your current configuration" — but a handle that returns empty after having *had* a policy makes `changed` fire and the caller rebuild against the base model. **A control-plane blip would silently demote production from the trained model back to the untrained one**, which is strictly worse than serving a slightly stale policy.
 
@@ -241,7 +257,7 @@ binding before any downstream use.
 
 **The turn's text is opt-in, and both halves are yours to pass.** `input_text=` records what the user asked and `record_answer()` records what the agent finally said. They are your end user's message and the answer your code returned — facts only your own code holds, which no adapter can tell apart from the rest of a model call. That is what keeps tool outcomes zero-instrumentation while turn text stays a decision you make.
 
-**What the model saw is a second consent tier, off by default.** When an operator grants the agent model-content capture, the LangChain and Google ADK adapters also observe every model call inside a turn — its system instructions, its whole input, the tool definitions it was offered, what it answered — and every tool's result, and the turn uploads that as one OpenTelemetry GenAI trace in `genai_trace`: an `invoke_agent` span with a `chat` span per model call and an `execute_tool` span per tool call, content per the GenAI semantic conventions. The adapters are observers only — every callback returns nothing, so no call, response or result can be changed — and without the grant nothing of it is recorded, not even to disk. `px.may_capture_model_content` is the live answer and `px.model_content_refusal` the sentence explaining a `False`; a grant made later is noticed on the flush cadence, and when the control plane refuses a trace by name the SDK stops recording at once. Prime Agent runs as a `serve()` command and its JSON stream carries neither its system prompt nor its tool definitions, so no model content is captured for it.
+**What the model saw is a second consent tier, off by default.** When an operator grants the agent model-content capture, the LangChain and Google ADK adapters also observe every model call inside a turn — its system instructions, its whole input, the tool definitions it was offered, what it answered — and every tool's result, and the turn uploads that as one OpenTelemetry GenAI trace in `genai_trace`: an `invoke_agent` span with a `chat` span per model call and an `execute_tool` span per tool call, content per the GenAI semantic conventions. The adapters are observers only — every callback returns nothing, so no call, response or result can be changed — and without the grant nothing of it is recorded, not even to disk. `px.may_capture_model_content` is the live answer and `px.model_content_refusal` the sentence explaining a `False`; a grant made later is noticed on the flush cadence, and when the control plane refuses a trace by name the SDK stops recording at once. **They are the only two adapters that capture model content.** An agent with its own model loop — calling a provider's SDK directly, or built on a framework with no adapter here — can still record its tool outcomes with `record_tool_call()`, but nothing of what its model saw; to train on that, export the agent's OpenTelemetry GenAI traces as an OTLP/JSON file and upload it in the dashboard. Prime Agent runs as a `serve()` command and its JSON stream carries neither its system prompt nor its tool definitions, so no model content is captured for it.
 
 They are separate calls because the answer does not exist yet when the turn opens — `record_answer()` is callable after the scope has closed, for the same reason `turn()` yields its id. **Omit them and the periodic flush sends nothing**: a turn with no recorded answer is held back on every 32-turn flush and leaves only at `close()` or the `atexit` hook, carrying no text at all.
 

@@ -22,6 +22,17 @@ incident whose remedy sits in the customer's deploy pipeline rather than ours.
 This handle is therefore the transport for ROLLBACK first and promotion second,
 and the design follows from that ordering.
 
+WHAT ARRIVES. A model PerceptEye serves arrives as the agent's one constant URL
+on the control plane's gateway, with ``api_key_env: "PERCEPTEYE_API_KEY"``, so
+:func:`~agent_flywheel.endpoint_kwargs` opens it with the agent's own flywheel
+key; the serving host's credential stays in the control plane and its address
+never reaches the agent. A provider endpoint the customer owns is still
+dialled directly, with that provider's key. Because the gateway sends each
+request to the model delivered at that moment, a promotion or a rollback
+between served models takes effect without a rebuild -- the answer still moves
+``model``, so ``changed`` still says so. A withdrawal is the one change the
+caller must act on; see below.
+
 USAGE — call it per turn::
 
     policy = fw.policy_source(agent_id="my-coding-agent", ttl_s=300)
