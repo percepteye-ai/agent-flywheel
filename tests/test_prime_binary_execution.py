@@ -192,6 +192,26 @@ def _example():
     return module
 
 
+def _path_without_uv(tmp_path) -> str:
+    """PATH with a ``uv`` in front that refuses, as if none were installed.
+
+    These rollouts get an EMPTY kernel venv; the example requires a
+    provisioned one, which is a few hundred megabytes. Prime prewarms its
+    Python kernel at every session start, so with ``uv`` on PATH it bootstraps
+    one in the background -- ``uv python install`` into the child's private
+    HOME -- and the session ending orphans that ``uv``, still writing while
+    the child is removed: ``Directory not empty`` on a machine with uv, not
+    on one without. A ``uv`` that fails gives every machine the second case:
+    the bootstrap stops at once, and this turn uses no tool.
+    """
+    bin_dir = tmp_path / "no-uv"
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / "uv"
+    stub.write_text("#!/bin/sh\necho 'no Prime kernel is provisioned here' >&2\nexit 1\n")
+    stub.chmod(0o755)
+    return f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+
+
 def _run_one_rollout(tmp_path, launch, gateway, *, budget_s: float):
     """One rollout through the example's own ARGV and run-owned daemon."""
     module = _example()
@@ -242,7 +262,8 @@ def _run_one_rollout(tmp_path, launch, gateway, *, budget_s: float):
         env = build_child_env(
             rollout_id=rollout.rollout_id, llm_url=gateway.base_url,
             api_key="perk_test", trajectory_dir=str(trajectory),
-            extra={"PERCEPTEYE_TURN_INPUT": rollout.turn_input, **child.environment},
+            extra={"PERCEPTEYE_TURN_INPUT": rollout.turn_input,
+                   "PATH": _path_without_uv(tmp_path), **child.environment},
         )
         started = time.monotonic()
         out = run_rollout_as_command(
@@ -252,12 +273,18 @@ def _run_one_rollout(tmp_path, launch, gateway, *, budget_s: float):
         )
         return out, time.monotonic() - started
     finally:
-        if child is not None:
-            harness.release_child(child)
+        # Each step runs whatever the one before it raised. A failed release
+        # used to skip daemon.close(), and every such run left its run-owned
+        # supervisor alive and orphaned -- dozens of them, days old, on one
+        # developer machine.
         try:
-            daemon.close()
+            if child is not None:
+                harness.release_child(child)
         finally:
-            harness.close()
+            try:
+                daemon.close()
+            finally:
+                harness.close()
 
 
 def _ci_pinned_prime_version() -> str:
