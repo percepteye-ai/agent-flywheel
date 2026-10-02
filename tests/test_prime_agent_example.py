@@ -535,3 +535,59 @@ def test_the_example_hands_its_volatile_declaration_to_serve(monkeypatch, tmp_pa
     # And the declared option is in the command that was actually registered.
     for option in module.VOLATILE_COMMAND_VALUES:
         assert option in captured["command"]
+
+
+def test_the_daemon_socket_binds_under_a_long_tmpdir(monkeypatch, tmp_path):
+    """The run-owned daemon's socket was joined onto the temp directory as-is.
+
+    Under a long TMPDIR that path is past what ``sun_path`` holds, and the
+    real daemon exited at startup on ``listen EINVAL`` before any rollout ran.
+    """
+    import tempfile
+
+    import pytest
+
+    if os.name == "nt":
+        pytest.skip("AF_UNIX path limits are POSIX")
+    long_tmp = tmp_path / ("t" * 80)
+    long_tmp.mkdir()
+    monkeypatch.setenv("TMPDIR", str(long_tmp))
+    monkeypatch.setattr(tempfile, "tempdir", None)  # gettempdir() caches
+    module = _load_example(monkeypatch, tmp_path)
+
+    assert len(os.fsencode(str(long_tmp / "percepteye-prime-1.sock"))) > 103
+    assert len(os.fsencode(module._DAEMON_SOCKET)) <= 103
+    # And it is the path the launch command actually carries.
+    assert module.ARGV[module.ARGV.index("--daemon-socket") + 1] == module._DAEMON_SOCKET
+
+
+def test_a_daemon_that_dies_at_startup_is_refused_in_its_own_words(
+    monkeypatch, tmp_path
+):
+    """Every failed start used to read "exited during startup with code 1".
+
+    The daemon's stderr went to /dev/null, so the cause it printed -- here
+    the ``listen EINVAL`` a too-long socket path produces -- reached no one.
+    """
+    import pytest
+
+    module = _load_example(monkeypatch, tmp_path)
+    fake = tmp_path / "prime-agent"
+    fake.write_text(
+        "#!/bin/sh\n"
+        "echo 'Daemon supervisor startup failed: Error: listen EINVAL' >&2\n"
+        "exit 1\n"
+    )
+    fake.chmod(0o755)
+    daemon = module._RunOwnedPrimeDaemon(
+        f"/tmp/percepteye-test-{secrets.token_hex(8)}.sock",
+        {"PATH": os.environ["PATH"]},
+        cwd=tmp_path,
+        executable=str(fake),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="code 1: Daemon supervisor startup "
+                           "failed: Error: listen EINVAL"):
+            daemon.start()
+    finally:
+        daemon.close()

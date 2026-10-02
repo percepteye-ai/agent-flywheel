@@ -48,6 +48,7 @@ __all__ = [
     "PrimeAgentOutputAdapter",
     "PrimeHarnessChild",
     "PrimeHarnessSnapshot",
+    "unix_socket_directory",
 ]
 
 _DIGEST_DOMAIN = b"percepteye-prime-harness-v1\0"
@@ -175,6 +176,36 @@ MAX_HARNESS_ENTRIES = 10_000
 MAX_HARNESS_BYTES = 64 * 1024 * 1024
 MAX_KERNEL_ENTRIES = 100_000
 MAX_KERNEL_BYTES = 4 * 1024 * 1024 * 1024
+
+
+#: The longest path a Unix-domain socket can bind: ``sun_path`` holds 104
+#: bytes on macOS and the BSDs and 108 on Linux, NUL included. The smaller
+#: limit is used everywhere, so a path that passes here binds on any of them.
+_UNIX_SOCKET_PATH_MAX = 103
+
+#: The longest socket Prime binds below its TMPDIR, by shape: a session
+#: worker's, at ``prime-agent-<uid>/worker-<12 hex>-<12 hex>.sock``
+#: (prime-agent 0.7.2). Its forkserver's ``control.sock`` sits shallower.
+_PRIME_WORKER_SOCKET = "prime-agent-{uid}/worker-" + "0" * 12 + "-" + "0" * 12 + ".sock"
+
+
+def unix_socket_directory(relative_path: str) -> str:
+    """A temp directory below which ``relative_path`` can still bind as a socket.
+
+    The temp directory itself when the joined path fits ``sun_path``, else
+    ``/tmp``. A long TMPDIR -- a sandbox's, a CI runner's, a per-job scratch
+    area -- puts every socket below it past the limit, and ``listen`` then
+    fails with EINVAL: Prime's daemon exits at startup, or each session
+    worker dies before the supervisor can reach it. ``/tmp`` is the POSIX
+    directory every user can create in and already the default on Linux;
+    Prime refuses a socket directory there that another user owns. Windows
+    has no ``sun_path`` for this to fit.
+    """
+    preferred = tempfile.gettempdir()
+    joined = os.path.join(preferred, relative_path)
+    if os.name == "nt" or len(os.fsencode(joined)) <= _UNIX_SOCKET_PATH_MAX:
+        return preferred
+    return "/tmp"
 
 
 class _HarnessDrift(ConfigurationError):
@@ -1073,6 +1104,11 @@ class PrimeHarnessSnapshot:
             "PRIME_AGENT_CODING_AGENT_DIR": str(agent),
             "PRIME_AGENT_SESSION_DIR": str(agent / "sessions"),
             "PRIME_AGENT_CODING_AGENT_SESSION_DIR": str(agent / "sessions"),
+            # Prime binds its worker and forkserver sockets below TMPDIR. The
+            # supervisor and every child get the same one, with room for the
+            # longest of those sockets, or no session ever starts.
+            "TMPDIR": unix_socket_directory(_PRIME_WORKER_SOCKET.format(
+                uid=os.getuid() if hasattr(os, "getuid") else "user")),
             # An ambient explicit interpreter takes precedence over the venv
             # in Prime's bootstrapper. Clear it so the attested venv cannot be
             # silently bypassed by the serving shell's configuration.

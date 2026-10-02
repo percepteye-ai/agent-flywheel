@@ -138,6 +138,13 @@ cannot be caught; an orphaned
 alive. The worker is the Python `serve_prime.py` process. Each run uses a unique
 Unix socket, so an older orphan cannot evict or serve a later run.
 
+A Unix socket path cannot exceed 103 bytes on macOS, and Prime binds one per
+session worker below `TMPDIR`. The run's socket and the `TMPDIR` the adapter
+gives the daemon and every child are therefore the system temp directory when
+the paths fit, and `/tmp` when a long `TMPDIR` would push them past the limit;
+without that, the daemon exits at startup or every session times out on
+`create`. A daemon that does exit at startup is refused with its own stderr.
+
 The example reads `PERCEPTEYE_MODEL_ID`, `PERCEPTEYE_CONTEXT_WINDOW`, and
 `PERCEPTEYE_MAX_TOKENS` in the parent, then the Prime adapter supplies matching
 `PRIME_AGENT_FLYWHEEL_*` child variables and attests their digest. Core scrubs

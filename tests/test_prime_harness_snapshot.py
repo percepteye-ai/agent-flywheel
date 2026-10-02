@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 import stat
+import tempfile
 import time
 from pathlib import Path
 
@@ -252,6 +253,59 @@ def test_expired_unstarted_result_does_not_claim_execution_identity(tmp_path):
         assert out.agent_fingerprint is None
     finally:
         snapshot.close()
+
+
+#: Where Prime binds a session worker's socket below its TMPDIR, written out
+#: here independently of the adapter: ``prime-agent-<uid>/worker-<12>-<12>.sock``.
+def _prime_worker_socket(tmpdir: str) -> str:
+    return os.path.join(
+        tmpdir, f"prime-agent-{os.getuid()}", f"worker-{'f' * 12}-{'f' * 12}.sock")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="AF_UNIX path limits are POSIX")
+def test_every_prime_process_gets_a_tmpdir_its_worker_sockets_can_bind_in(
+    tmp_path, monkeypatch,
+):
+    """Prime binds one socket per session worker below TMPDIR, so a long
+    TMPDIR -- a sandbox's, a CI runner's -- put every one of them past what
+    ``sun_path`` holds. The supervisor started; each worker died on ``listen
+    EINVAL``; every rollout timed out after 30s waiting on "create" with
+    nothing reaching the model. The supervisor and every child must agree on
+    one TMPDIR, since the supervisor names the socket the worker binds.
+    """
+    long_tmp = tmp_path / ("t" * 80)
+    long_tmp.mkdir()
+    monkeypatch.setenv("TMPDIR", str(long_tmp))
+    monkeypatch.setattr(tempfile, "tempdir", None)  # gettempdir() caches
+    assert len(os.fsencode(_prime_worker_socket(str(long_tmp)))) > 103
+
+    snapshot = _snapshot(tmp_path)
+    try:
+        child = snapshot.prepare_child()
+        try:
+            daemon_tmp = snapshot.daemon_environment()["TMPDIR"]
+            assert child.environment["TMPDIR"] == daemon_tmp
+            assert len(os.fsencode(_prime_worker_socket(daemon_tmp))) <= 103
+        finally:
+            snapshot.release_child(child)
+    finally:
+        snapshot.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="AF_UNIX path limits are POSIX")
+def test_a_temp_directory_with_room_stays_the_one_prime_uses(tmp_path, monkeypatch):
+    """The per-user temp directory stays first; ``/tmp`` is only the fallback."""
+    short_tmp = tempfile.mkdtemp(prefix="pe-", dir="/tmp")
+    try:
+        monkeypatch.setenv("TMPDIR", short_tmp)
+        monkeypatch.setattr(tempfile, "tempdir", None)
+        snapshot = _snapshot(tmp_path)
+        try:
+            assert snapshot.daemon_environment()["TMPDIR"] == short_tmp
+        finally:
+            snapshot.close()
+    finally:
+        os.rmdir(short_tmp)
 
 
 def test_supervisor_environment_is_stable_and_contains_no_ambient_secrets(

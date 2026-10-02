@@ -21,12 +21,13 @@ import tempfile
 import time
 from collections.abc import Callable
 from types import FrameType
-from typing import Any
+from typing import IO, Any
 
 import agent_flywheel as fw
 from agent_flywheel.adapters.prime_agent import (
     PrimeAgentOutputAdapter,
     PrimeHarnessSnapshot,
+    unix_socket_directory,
 )
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -119,14 +120,28 @@ WORKSPACE.mkdir(parents=True, exist_ok=True)
 #: new execution identity and invalidated any OPSD run already prepared
 #: against the previous one (observed: prime-agent registered
 #: 3502c7cd… on 2026-09-12 and 409c43ee… on 2026-09-15).
-_DAEMON_SOCKET = str(
-    pathlib.Path(tempfile.gettempdir()) / f"percepteye-prime-{os.getpid()}.sock"
-)
+#:
+#: The directory comes from the adapter rule that also sets Prime's own
+#: TMPDIR: the temp directory, or ``/tmp`` when a long TMPDIR would put this
+#: path past what a Unix socket can bind and the daemon would exit at startup
+#: on ``listen EINVAL``.
+def _daemon_socket_path(name: str) -> str:
+    return os.path.join(unix_socket_directory(name), name)
+
+
+_DAEMON_SOCKET = _daemon_socket_path(f"percepteye-prime-{os.getpid()}.sock")
 
 #: The one argument in ARGV whose VALUE varies per process. ``--daemon-socket``
 #: itself stays in the identity, so a build that runs without a private daemon
 #: socket remains a different execution from this one.
 VOLATILE_COMMAND_VALUES = ("--daemon-socket",)
+
+
+def _written(stream: IO[bytes]) -> str:
+    """What a child has written to ``stream``, bounded like the preflight's."""
+    stream.seek(0)
+    text = stream.read().decode("utf-8", "replace").strip()
+    return text[:500] or "it wrote nothing to stderr"
 
 
 class _RunOwnedPrimeDaemon:
@@ -165,28 +180,40 @@ class _RunOwnedPrimeDaemon:
                 f"Prime daemon socket already exists; refusing ambiguous owner: "
                 f"{self.socket_path}"
             )
-        self.process = subprocess.Popen(
-            [self.executable, "--mode", "daemon", "--daemon-socket", self.socket_path],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            cwd=self.cwd,
-            env=self.env,
-            start_new_session=(os.name != "nt"),
-        )
-        self._owns_socket_path = True
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            if self.process.poll() is not None:
-                raise RuntimeError(
-                    f"Prime daemon exited during startup with code {self.process.returncode}"
-                )
-            if self._accepting_connections():
-                return
-            time.sleep(0.05)
-        raise RuntimeError(
-            f"Prime daemon did not become ready within {timeout_s:g} seconds"
-        )
+        # The daemon's own account of a failed start is the only one that
+        # names the cause; discarded, every failure read "exited during
+        # startup with code 1". A file rather than a pipe: the daemon outlives
+        # startup and nothing drains a pipe after it, so a full one would
+        # block the supervisor on its next write. Only a failed start reads
+        # it, so this handle closes when start() returns either way; the
+        # daemon's own descriptor keeps the unlinked file until it exits, at
+        # a few lines per session -- lines its log under the daemon's agent
+        # directory also carries.
+        with tempfile.TemporaryFile() as stderr:
+            self.process = subprocess.Popen(
+                [self.executable, "--mode", "daemon", "--daemon-socket", self.socket_path],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr,
+                cwd=self.cwd,
+                env=self.env,
+                start_new_session=(os.name != "nt"),
+            )
+            self._owns_socket_path = True
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                if self.process.poll() is not None:
+                    raise RuntimeError(
+                        f"Prime daemon exited during startup with code "
+                        f"{self.process.returncode}: {_written(stderr)}"
+                    )
+                if self._accepting_connections():
+                    return
+                time.sleep(0.05)
+            raise RuntimeError(
+                f"Prime daemon did not become ready within {timeout_s:g} "
+                f"seconds: {_written(stderr)}"
+            )
 
     def _accepting_connections(self) -> bool:
         if os.name == "nt" or not hasattr(socket, "AF_UNIX"):

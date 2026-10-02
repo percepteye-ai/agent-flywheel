@@ -34,7 +34,6 @@ import pathlib
 import re
 import shutil
 import subprocess
-import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -233,10 +232,12 @@ def _run_one_rollout(tmp_path, launch, gateway, *, budget_s: float):
         route_configuration={"model_id": "policy", "context_window": "65536",
                              "max_tokens": "4096"},
     )
-    # Short path: a macOS AF_UNIX socket path is capped near 104 bytes, and a
-    # pytest tmp_path is already past it.
-    socket_path = str(pathlib.Path(tempfile.gettempdir())
-                      / f"pe-test-{os.getpid()}-{time.monotonic_ns()}.sock")
+    # Placed by the example's own rule, not a second copy of it: a pytest
+    # tmp_path is past the AF_UNIX path limit, and so is the temp directory
+    # itself under a long TMPDIR -- where a copy that joined onto
+    # tempfile.gettempdir() made the real daemon exit on `listen EINVAL`.
+    socket_path = module._daemon_socket_path(
+        f"pe-test-{os.getpid()}-{time.monotonic_ns()}.sock")
     daemon = module._RunOwnedPrimeDaemon(
         socket_path, harness.daemon_environment(),
         cwd=harness.daemon_working_directory, executable=str(launcher),
