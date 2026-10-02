@@ -32,6 +32,28 @@ INTERNAL_NAMES = (
 INTERNAL_DETAILS = ("max-loras", "vllm", "offline_grpo", "bundle_materializer",
                     "scored_suite_sha", "prompt_group_key", "doctrine")
 
+#: WIRE FIXTURES ONLY: a term a byte copy of the control plane's PUBLIC
+#: response carries, as ``(file, term, why)``.
+#:
+#: Such a file discloses nothing: every customer's agent already receives those
+#: bytes from the endpoint. It also cannot be reworded here -- it is held
+#: byte-equal to the Node SDK's and the control plane's copies
+#: (``tests/cross_repo/test_fixture_parity.py``) -- so the cheap way out,
+#: editing the fixture, is exactly the drift that test refuses. Narrow on
+#: purpose: one term in one file, never a term everywhere, and
+#: ``test_every_wire_fixture_exemption_is_still_needed`` fails the day the term
+#: leaves the file, so an exemption cannot outlive its reason. The Node SDK's
+#: guard exempts the same pair for its copy of the same bytes.
+WIRE_FIXTURE_TERMS = (
+    ("tests/fixtures/policy_current_gateway.json", "vllm",
+     "model.kind of a served adapter, exactly as GET /policy/current returns it"),
+)
+
+
+def _is_wire_fixture_term(path, term):
+    rel = path.relative_to(ROOT).as_posix()
+    return any(f == rel and t == term for f, t, _why in WIRE_FIXTURE_TERMS)
+
 
 def _package_files():
     return sorted(p for p in SRC.rglob("*.py"))
@@ -170,11 +192,33 @@ def test_no_internal_invariants_disclosed():
     for path in _published_files():
         text = _text(path)
         for name in INTERNAL_DETAILS:
+            if _is_wire_fixture_term(path, name):
+                continue
             if name in text:
                 offenders.append(f"{path.relative_to(ROOT)} -> {name}")
     assert not offenders, (
         "internal detail disclosed in PUBLISHED files:\n" + "\n".join(offenders)
     )
+
+
+def test_every_wire_fixture_exemption_is_still_needed():
+    """An exemption whose term has left its file is a hole with no reason
+    behind it: the next copy of that term into the file would pass unseen."""
+    published = {p.relative_to(ROOT).as_posix(): p for p in _published_files()}
+    for file, term, why in WIRE_FIXTURE_TERMS:
+        assert why, f"{file} -> {term} must say why it is exempt"
+        assert term in INTERNAL_DETAILS, f"{term} is not a forbidden term"
+        assert file in published, f"{file} is not a tracked file"
+        assert term in _text(published[file]), (
+            f"{file} no longer carries {term}: remove its exemption")
+
+
+def test_a_wire_fixture_exemption_is_one_file_and_one_term():
+    """Not the term everywhere, and not the file for every term."""
+    gateway = ROOT / "tests" / "fixtures" / "policy_current_gateway.json"
+    assert _is_wire_fixture_term(gateway, "vllm")
+    assert not _is_wire_fixture_term(ROOT / "README.md", "vllm")
+    assert not _is_wire_fixture_term(gateway, "doctrine")
 
 
 def test_no_internal_system_names_anywhere_published():
