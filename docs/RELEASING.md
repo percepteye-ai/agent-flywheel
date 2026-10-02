@@ -360,9 +360,10 @@ repository's CI checks the Node one out.
   history.
 - **Issues, PRs and Actions run logs:** descriptions, comments, review threads,
   and whatever a workflow printed.
-- **The current tree:** `tests/test_oss_boundary.py` checks every tracked file
-  for internal system names, internal details and local developer paths. It
-  does not look at history.
+- **The current tree:** `tests/test_oss_boundary.py` checks every tracked file,
+  and every untracked one `.gitignore` does not exclude, for internal system
+  names, internal details and local developer paths. It does not look at
+  history.
 - **History:** scan for secrets with a scanner such as `gitleaks detect` or
   `trufflehog git file://.`. Then search `git log -p --all` for the name lists
   in `tests/test_oss_boundary.py`.

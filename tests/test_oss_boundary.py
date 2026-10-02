@@ -17,6 +17,8 @@ import subprocess
 
 import pytest
 
+from .repo_files import repo_files
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "agent_flywheel"
 
@@ -34,39 +36,12 @@ INTERNAL_DETAILS = ("max-loras", "vllm", "offline_grpo", "bundle_materializer",
 
 
 def _package_files():
-    return sorted(p for p in SRC.rglob("*.py"))
-
-
-#: Directories that are never published, whichever way the file list is built.
-#: Only consulted on the unpacked-sdist path — a git checkout answers this
-#: itself, and these are the things pytest and pip leave behind when the suite
-#: is run inside a tarball.
-_NEVER_PUBLISHED = {".git", ".venv", "__pycache__", ".pytest_cache",
-                    ".mypy_cache", ".ruff_cache", "build", "dist", ".eggs",
-                    ".tox", ".nox", "node_modules"}
-
-
-def _virtualenv_roots(root):
-    """Every virtualenv inside ``root``, found by its OWN marker file.
-
-    ASKED AS "does this directory carry ``pyvenv.cfg``", NOT "is it called
-    ``.venv``". The name is a convention; the marker is the definition, and
-    the name list above answers only the half of the question that the
-    README's own Development block happens to spell. An auditor who unpacks
-    the sdist and builds the environment beside the suite under any other
-    name -- ``venv``, ``env``, ``.direnv``, a bare ``py312`` -- otherwise has
-    every installed third-party package scanned as though this project
-    published it. Measured, with the environment named ``.fresh``: three of
-    these tests fail, naming Google ADK and two dependency licence files as
-    leaks of ``vllm`` and ``doctrine``. That is a false report of the exact
-    property this file exists to certify, produced by the exact downstream
-    audit the sdist fallback below was written to serve.
-    """
-    return {cfg.parent for cfg in root.rglob("pyvenv.cfg")}
+    return repo_files(SRC, suffix=".py")
 
 
 def _published_files():
-    """Every file git tracks, which is exactly what the public repo shows.
+    """Every file git tracks or is about to: what the public repo shows once
+    the change in this tree is committed.
 
     ``_package_files`` scans ``src/`` only, and that hole is not theoretical:
     the e2e demo under ``examples/`` named twelve internal control-plane
@@ -77,6 +52,14 @@ def _published_files():
     This file is excluded because it has to name the internals in order to
     forbid them.
 
+    UNTRACKED FILES ARE ASKED FOR (``--others``, minus what ``.gitignore``
+    excludes). Tracked files alone left out exactly the file a change adds: a
+    new example naming an internal module stayed invisible to all three
+    published-file guards until somebody staged it, so the run before the
+    commit -- the one that is supposed to stop it -- was green. A checkout
+    nested in the tree comes back from git as ONE directory entry, never its
+    files, so it is skipped below with every other non-file.
+
     OUTSIDE A GIT CHECKOUT THE TREE ITSELF IS THE ANSWER, and that case is not
     hypothetical: this suite ships in the sdist, so the standard downstream
     audit -- ``pip download --no-binary :all:``, unpack, run the tests -- runs
@@ -85,22 +68,22 @@ def _published_files():
     assertion below could say anything useful. Every file in an unpacked sdist
     is by definition published, so the fallback scans the tree rather than
     skipping: a boundary test that quietly does nothing in the one artifact a
-    stranger inspects is the shape this file exists to refuse.
+    stranger inspects is the shape this file exists to refuse. It walks the
+    tree through ``tests/repo_files.py``, the one walker every source guard
+    here shares, which leaves out what an audit leaves BESIDE the published
+    files: the virtualenv it built to run this, tool caches, and any checkout
+    nested inside the tree.
     """
     proc = subprocess.run(
-        ["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, text=True,
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=ROOT, capture_output=True, text=True,
     )
     here = pathlib.Path(__file__).resolve()
     if proc.returncode == 0:
         candidates = ((ROOT / rel) for rel in filter(None, proc.stdout.split("\0")))
         source = "git ls-files"
     else:
-        venvs = _virtualenv_roots(ROOT)
-        candidates = (
-            p for p in ROOT.rglob("*")
-            if not _NEVER_PUBLISHED & set(p.relative_to(ROOT).parts)
-            and not any(v in p.parents for v in venvs)
-        )
+        candidates = repo_files(ROOT)
         source = f"the unpacked tree at {ROOT} (not a git checkout)"
     paths = []
     for p in candidates:

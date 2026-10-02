@@ -41,6 +41,8 @@ import agent_flywheel
 from agent_flywheel.errors import LeaseLost, TransportError
 from agent_flywheel.runner import DEFAULT_ROLLOUT_TIMEOUT_S
 
+from .repo_files import repo_files
+
 # ── one bad file in the outbox ─────────────────────────────────────────────
 
 
@@ -246,9 +248,7 @@ def test_serve_defaults_to_the_runners_own_rollout_timeout(tmp_path):
 
 
 def _src_modules() -> list[pathlib.Path]:
-    return sorted(
-        (pathlib.Path(agent_flywheel.__file__).parent).rglob("*.py")
-    )
+    return repo_files(pathlib.Path(agent_flywheel.__file__).parent, suffix=".py")
 
 
 def test_the_rollout_timeout_is_declared_in_exactly_one_place():

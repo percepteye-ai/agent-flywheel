@@ -22,6 +22,8 @@ import ast
 from agent_flywheel import ENV_CONTROL_PLANE_URL
 from agent_flywheel.hosts import RECORDER
 
+from .repo_files import repo_files
+
 #: Spellings that must not appear. Written out rather than derived, because the
 #: point is that no OTHER name is consulted at all.
 _FOREIGN = ("CONTROL_PLANE_ENV_URL", "MC_CONTROL_PLANE_URL", "CONTROL_PLANE_URL\"")
@@ -67,7 +69,7 @@ def test_no_library_module_reads_a_second_spelling():
 
     src_dir = pathlib.Path(RECORDER).resolve().parents[2]
     offenders = []
-    for path in sorted(src_dir.rglob("*.py")):
+    for path in repo_files(src_dir, suffix=".py"):
         read = _env_names_read(path.read_text(encoding="utf-8"))
         for foreign in _FOREIGN:
             if foreign.rstrip('"') in read:
