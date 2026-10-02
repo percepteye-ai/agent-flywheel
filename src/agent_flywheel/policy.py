@@ -518,7 +518,12 @@ class PolicySource:
             )
         from .transport import AttachTransport
 
-        return AttachTransport(self._client, agent_id=self.agent_id).policy_current()
+        # THE RAISING READ. `policy_current()` fails open to `{}`, which
+        # `_absorb` takes as a successful "nothing deployed": an unreachable
+        # control plane then reported last_refresh_ok=True and stale_for_s=0.0
+        # for as long as it was down -- the documented alert could never fire.
+        return AttachTransport(
+            self._client, agent_id=self.agent_id).policy_current_or_raise()
 
 
 def policy_source(

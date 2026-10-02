@@ -365,3 +365,47 @@ def test_the_same_answers_as_the_node_sdk(flywheel_key):
         assert bool(fw.endpoint_kwargs(body)) == theirs[row]["apply"], (
             f"the two SDKs disagree about {row!r}: node said "
             f"apply={theirs[row]['apply']} ({theirs[row]['reason']})")
+
+
+def _wired(monkeypatch, cp, key):
+    """A handle that builds its own client, as in production, and is handed
+    ``cp`` for it."""
+    monkeypatch.setattr("agent_flywheel._http.ControlPlaneClient", lambda **kw: cp)
+    clock = _Clock()
+    src = fw.PolicySource(
+        agent_id="support-agent", control_plane_url="https://cp.example/v1",
+        api_key=key, _now=clock, _rand=lambda a, b: 0.0)
+    return src, clock
+
+
+def test_an_unreachable_control_plane_is_a_failed_refresh_not_an_empty_answer(
+        monkeypatch, flywheel_key):
+    """The handle's whole health signal. Its refresh used to go through the
+    fail-open read, which turns any failure into ``{}`` -- and ``{}`` is a
+    SUCCESSFUL answer of nothing deployed -- so a control plane that was down
+    reported last_refresh_ok=True and stale_for_s=0.0 for as long as it was
+    down, and a rollback it could not deliver looked delivered."""
+    gateway = _answer("policy_current_gateway.json")
+    cp = _Client(answer=gateway)
+    src, clock = _wired(monkeypatch, cp, flywheel_key)
+    first = src.current()
+    assert first.changed and first.last_refresh_ok
+
+    cp.boom = True
+    snap = _next(src, clock)
+
+    assert not snap.last_refresh_ok
+    assert not snap.changed
+    assert _triple(snap) == _triple(first)     # last good stands
+    assert snap.stale_for_s > 0.0
+    assert cp.calls == [("GET", "/policy/current")] * 2
+
+
+def test_a_control_plane_never_reached_is_stale_from_the_start(monkeypatch, flywheel_key):
+    cp = _Client(boom=True)
+    src, clock = _wired(monkeypatch, cp, flywheel_key)
+
+    assert not src.current().last_refresh_ok
+    snap = _next(src, clock)
+    assert not snap.last_refresh_ok
+    assert snap.stale_for_s > 0.0
