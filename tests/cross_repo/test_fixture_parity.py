@@ -22,7 +22,11 @@ Three mechanisms, because the siblings are not always there:
   checkout. Its repository is not public, so nothing published here can find it
   by name; the variable is the only way in, and like ``PERCEPTEYE_NODE_SDK`` a
   variable that is set is a promise -- a checkout or a copy that is not there
-  fails instead of skipping.
+  fails. It is compared INSIDE the digest test rather than in a test of its
+  own, because a test of its own could only ever skip in CI, which can never
+  name that checkout in a file it publishes, and the zero-skip gate rightly
+  refuses a skip. Unnamed, the digest is still checked: the one the control
+  plane's copy is made from too.
 """
 from __future__ import annotations
 
@@ -53,10 +57,24 @@ def _ours(name: str) -> bytes:
 
 
 @pytest.mark.parametrize("name", sorted(SHARED))
-def test_this_copy_is_the_shared_fixture_by_digest(name):
+def test_this_copy_is_the_shared_fixture_and_the_control_planes(name):
     assert hashlib.sha256(_ours(name)).hexdigest() == SHARED[name], (
         f"tests/fixtures/{name} is not the shared fixture. Change every copy "
         f"together -- both SDKs and the control plane -- never one alone.")
+
+    named = os.environ.get(CONTROL_PLANE_CHECKOUT, "").strip()
+    if not named:
+        return
+    root = pathlib.Path(named).expanduser()
+    assert root.is_dir(), (
+        f"{CONTROL_PLANE_CHECKOUT}={named} is not a directory. It was set on "
+        f"purpose, so this is a broken checkout, not a copy to stop checking.")
+    theirs = root / "tests" / "fixtures" / name
+    assert theirs.is_file(), (
+        f"the control plane checkout at {root} has no tests/fixtures/{name}: "
+        f"its endpoint is held to an answer the SDKs never see")
+    assert theirs.read_bytes() == _ours(name), (
+        f"the control plane's tests/fixtures/{name} differs from this SDK's copy")
 
 
 @pytest.mark.parametrize("name", sorted(SHARED))
@@ -71,20 +89,3 @@ def test_the_node_sdk_tests_against_the_same_bytes(name):
     assert theirs.read_bytes() == _ours(name), (
         f"test/fixtures/{name} in the Node SDK differs from this SDK's copy")
 
-
-@pytest.mark.parametrize("name", sorted(SHARED))
-def test_the_control_plane_tests_against_the_same_bytes(name):
-    named = os.environ.get(CONTROL_PLANE_CHECKOUT, "").strip()
-    if not named:
-        pytest.skip(f"{CONTROL_PLANE_CHECKOUT} does not name the control "
-                    f"plane's checkout")
-    root = pathlib.Path(named).expanduser()
-    assert root.is_dir(), (
-        f"{CONTROL_PLANE_CHECKOUT}={named} is not a directory. It was set on "
-        f"purpose, so this is a broken checkout, not a reason to skip.")
-    theirs = root / "tests" / "fixtures" / name
-    assert theirs.is_file(), (
-        f"the control plane checkout at {root} has no tests/fixtures/{name}: "
-        f"its endpoint is held to an answer the SDKs never see")
-    assert theirs.read_bytes() == _ours(name), (
-        f"the control plane's tests/fixtures/{name} differs from this SDK's copy")
