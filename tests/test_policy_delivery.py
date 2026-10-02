@@ -473,6 +473,32 @@ def test_the_callers_flywheel_key_is_never_a_provider_key(monkeypatch, flywheel_
         assert got["api_key"] == want, body["endpoint"]["base_url"]
 
 
+@pytest.mark.parametrize("env_url, arg_url, applied", [
+    (None, CONTROL_PLANE, True),
+    ("https://elsewhere.example/api/flywheel/v1", CONTROL_PLANE, True),
+    (CONTROL_PLANE, "https://elsewhere.example/api/flywheel/v1", False),
+])
+def test_the_control_plane_a_caller_names_is_where_the_key_may_go(
+        monkeypatch, flywheel_key, env_url, arg_url, applied):
+    """The origin asked is the control plane this caller authenticates to,
+    so ``control_plane_url=`` wins over the environment exactly as it does
+    for the GET itself -- in both callers."""
+    if env_url is None:
+        monkeypatch.delenv("PERCEPTEYE_CONTROL_PLANE_URL")
+    else:
+        monkeypatch.setenv("PERCEPTEYE_CONTROL_PLANE_URL", env_url)
+    gateway = _answer("policy_current_gateway.json")
+
+    src = fw.PolicySource(
+        agent_id="support-agent", control_plane_url=arg_url,
+        _fetch=lambda: gateway, _rand=lambda a, b: 0.0)
+    assert bool(src.current()) is applied
+
+    monkeypatch.setattr(fw, "current_policy", lambda **kw: gateway)
+    got = fw.apply_current_policy(agent_id="support-agent", control_plane_url=arg_url)
+    assert bool(got) is applied
+
+
 def test_an_endpoint_without_a_model_is_not_applied(flywheel_key):
     """An OpenAI client sends ``model`` on every request, and ``""`` names
     nothing; Node's modelDecision reads it as no endpoint, and so does this."""
