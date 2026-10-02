@@ -520,8 +520,39 @@ def _kernel_copy(provisioned, destination: pathlib.Path) -> pathlib.Path:
     return destination
 
 
-#: What the policy runs in Prime's kernel: which interpreter, from which venv.
-_WHICH_KERNEL = "import sys; print('kernel-prefix=' + sys.prefix)"
+#: What the policy runs in Prime's kernel: which interpreter, from which venv,
+#: and anything the serving shell's Python configuration put there.
+_WHICH_KERNEL = (
+    "import importlib.util, os, sys\n"
+    "print('kernel-prefix=' + sys.prefix)\n"
+    "print('ambient=' + repr(\n"
+    "    [n for n in ('PYTHONPATH', 'PYTHONHOME', 'PYTHONSTARTUP', 'IPYTHONDIR')\n"
+    "     if n in os.environ]\n"
+    "    + [m for m in ('ambient_marker',) if importlib.util.find_spec(m)]\n"
+    "    + [g for g in ('AMBIENT_STARTUP', 'AMBIENT_PROFILE') if g in globals()]))\n"
+)
+
+
+def _ambient_python_configuration(tmp_path, monkeypatch) -> None:
+    """The serving shell's Python configuration, each piece able to run code.
+
+    A module on PYTHONPATH, a file IPython runs in the kernel at startup
+    (PYTHONSTARTUP), an IPython profile whose startup script it runs there too
+    (IPYTHONDIR), and a PYTHONHOME no interpreter can start under. None of it
+    is in the venv ``kernel_sha256`` names.
+    """
+    path = tmp_path / "ambient-path"
+    path.mkdir()
+    (path / "ambient_marker.py").write_text("")
+    startup = tmp_path / "ambient-startup.py"
+    startup.write_text("AMBIENT_STARTUP = 1\n")
+    profile_startup = tmp_path / "ambient-ipython" / "profile_default" / "startup"
+    profile_startup.mkdir(parents=True)
+    (profile_startup / "00-ambient.py").write_text("AMBIENT_PROFILE = 1\n")
+    monkeypatch.setenv("PYTHONPATH", str(path))
+    monkeypatch.setenv("PYTHONSTARTUP", str(startup))
+    monkeypatch.setenv("IPYTHONDIR", str(tmp_path / "ambient-ipython"))
+    monkeypatch.setenv("PYTHONHOME", str(tmp_path / "no-python-home"))
 
 
 def _kernel_without_a_default_package(provisioned, destination: pathlib.Path):
@@ -541,7 +572,7 @@ def _kernel_without_a_default_package(provisioned, destination: pathlib.Path):
 
 @pytest.mark.parametrize("provisioned_by", ["this prime-agent", "another prime-agent"])
 def test_the_sealed_kernel_runs_the_policy_code_as_it_is(
-    tmp_path, provisioned_kernel, provisioned_by,
+    tmp_path, monkeypatch, provisioned_kernel, provisioned_by,
 ):
     """Prime runs ipython in the sealed venv and never rebuilds it.
 
@@ -553,7 +584,13 @@ def test_the_sealed_kernel_runs_the_policy_code_as_it_is(
     Prime's documented way to use an existing environment without
     auto-bootstrap -- the interpreter is checked and used as it is: the tool
     call runs in the sealed venv, which is still there, unchanged, afterwards.
+
+    And it runs only the sealed venv. Prime's kernel inherits its session's
+    environment, so the serving shell's Python configuration used to reach it
+    -- a PYTHONPATH module importable, a startup file run -- as code the seal
+    never covered; none of it does now.
     """
+    _ambient_python_configuration(tmp_path, monkeypatch)
     kernel = provisioned_kernel
     if provisioned_by == "another prime-agent":
         kernel = _kernel_copy(provisioned_kernel, tmp_path / "kernel-venv")
@@ -575,6 +612,9 @@ def test_the_sealed_kernel_runs_the_policy_code_as_it_is(
     assert gateway.tool_results, "the policy's ipython call never came back"
     assert f"kernel-prefix={kernel.resolve()}" in gateway.tool_results[0], (
         f"the ipython call did not run in the sealed kernel venv: "
+        f"{gateway.tool_results[0][:400]}")
+    assert "ambient=[]" in gateway.tool_results[0], (
+        f"the serving shell's Python configuration reached the kernel: "
         f"{gateway.tool_results[0][:400]}")
 
 

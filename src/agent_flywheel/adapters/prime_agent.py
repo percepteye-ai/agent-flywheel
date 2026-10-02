@@ -203,6 +203,22 @@ _KERNEL_IMPORT_PROBE = "import ipykernel, rlm"
 #: A cold import of ipykernel is a second or two; this only bounds a hung one.
 _KERNEL_PROBE_TIMEOUT_S = 60.0
 
+#: Variables that make the kernel run code from outside its own venv, which
+#: ``kernel_sha256`` names: a module search path (PYTHONPATH), a different
+#: standard library and site-packages (PYTHONHOME), a file IPython executes in
+#: the kernel at startup (PYTHONSTARTUP), and IPython's profile directory,
+#: whose ``startup/`` scripts it executes there too (IPYTHONDIR; the private
+#: HOME already holds the default one). Prime's own processes are Node, and
+#: the Python it starts is the kernel, which inherits its session worker's
+#: environment, so every environment this adapter configures -- the daemon's,
+#: the kernel probe's and each child's -- REMOVES them. Not empties them: a
+#: name that is still set means whatever its reader decides an empty value
+#: means. Left in place, a serving shell's PYTHONPATH -- a checkout run with
+#: ``PYTHONPATH=src``, for one -- let an empty venv pass the kernel probe on
+#: stub ``ipykernel`` and ``rlm`` packages and reached every kernel as code
+#: the seal never covered.
+_UNSEALED_KERNEL_CODE_VARS = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "IPYTHONDIR")
+
 
 #: The longest path a Unix-domain socket can bind: ``sun_path`` holds 104
 #: bytes on macOS and the BSDs and 108 on Linux, NUL included. The smaller
@@ -241,10 +257,12 @@ def _refuse_unprovisioned_kernel(
 
     Runs ``<venv>/bin/python -c "import ipykernel, rlm"`` -- the two packages
     Prime's docs name for a PRIME_AGENT_KERNEL_PYTHON -- under the scrubbed
-    daemon environment, from the empty run-owned working
-    directory so a module beside the serving process cannot answer for the
-    venv. ``PYTHONDONTWRITEBYTECODE`` is part of that environment, so the
-    probe writes nothing into the venv it is about to seal.
+    daemon environment, from the empty run-owned working directory so a module
+    beside the serving process cannot answer for the venv, and without the
+    serving shell's PYTHONPATH or PYTHONHOME, which that environment removes
+    (``_UNSEALED_KERNEL_CODE_VARS``), so neither can a module on its path.
+    ``PYTHONDONTWRITEBYTECODE`` is part of that environment, so the probe
+    writes nothing into the venv it is about to seal.
     """
     def _refusal(reason: str) -> ConfigurationError:
         return ConfigurationError(
@@ -925,7 +943,8 @@ class PrimeHarnessChild:
     agent_dir: Path
     harness_dir: Path
     settings_path: Path
-    environment: dict[str, str]
+    #: Overlaid onto the child's environment; a None value removes that name.
+    environment: dict[str, str | None]
     harness_sha256: str
     _root: Path
     _owner_token: object
@@ -933,7 +952,7 @@ class PrimeHarnessChild:
     _settings_seal: _MetadataEntry
 
     @property
-    def discovery_environment(self) -> dict[str, str]:
+    def discovery_environment(self) -> dict[str, str | None]:
         """Prime layout only; contains no provider or customer credentials."""
         return dict(self.environment)
 
@@ -1179,8 +1198,8 @@ class PrimeHarnessSnapshot:
         for artifact in self._execution_artifacts:
             _attest_execution_artifact(artifact)
 
-    def _environment_for(self, home: Path, agent: Path) -> dict[str, str]:
-        env = {
+    def _environment_for(self, home: Path, agent: Path) -> dict[str, str | None]:
+        env: dict[str, str | None] = {
             "HOME": str(home),
             "USERPROFILE": str(home),
             "XDG_CACHE_HOME": str(home / ".cache"),
@@ -1204,6 +1223,8 @@ class PrimeHarnessSnapshot:
             # them so a clean Python import cannot poison the shared kernel
             # seal; an explicit package/runtime mutation still fails closed.
             "PYTHONDONTWRITEBYTECODE": "1",
+            # Removed, so no code from outside the sealed venv runs in it.
+            **dict.fromkeys(_UNSEALED_KERNEL_CODE_VARS),
         }
         env.update({
             _ROUTE_ENV[name]: value

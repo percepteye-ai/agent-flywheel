@@ -254,7 +254,7 @@ def test_child_env_builder_preserves_every_isolation_override(tmp_path):
             extra=child.environment,
         )
         for name, value in child.environment.items():
-            assert env[name] == value
+            assert env.get(name) == value
         assert env["HOME"] != "/ambient/home"
         assert env["XDG_CONFIG_HOME"] != "/ambient/config"
         assert env["PRIME_AGENT_CODING_AGENT_DIR"] != "/ambient/prime"
@@ -403,6 +403,69 @@ def test_prime_is_handed_the_sealed_interpreter_and_never_an_ambient_one(
             bare.release_child(unsealed)
     finally:
         bare.close()
+
+
+#: The serving shell's Python configuration that would run code in Prime's
+#: kernel from outside the venv it is sealed as.
+_AMBIENT_KERNEL_CODE = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "IPYTHONDIR")
+
+
+def test_no_python_configuration_from_the_serving_shell_reaches_prime(
+    tmp_path, monkeypatch,
+):
+    """An ambient PYTHONPATH cannot stand in for the sealed kernel.
+
+    The process baseline every child keeps carried the serving shell's
+    PYTHONPATH and PYTHONHOME, a rollout child inherited PYTHONSTARTUP and
+    IPYTHONDIR besides, and Prime hands its session's environment on to the
+    kernel -- so each ran code ``kernel_sha256`` never covered, and the kernel
+    probe accepted an empty venv on stub ``ipykernel`` and ``rlm`` packages
+    found on that path. A checkout run with ``PYTHONPATH=src`` was enough.
+    Every environment the adapter configures removes them: the probe's, the
+    daemon's, each rollout child's through the runner, and discovery's.
+    """
+    stubs = tmp_path / "ambient-path"
+    for name in ("ipykernel", "rlm"):
+        (stubs / name).mkdir(parents=True)
+        (stubs / name / "__init__.py").write_text("")
+    bare = _provisioned(tmp_path / "bare-kernel", modules=())
+    startup = tmp_path / "ambient-startup.py"
+    startup.write_text("AMBIENT = 1\n")
+    monkeypatch.setenv("PYTHONPATH", str(stubs))
+    monkeypatch.setenv("PYTHONSTARTUP", str(startup))
+    monkeypatch.setenv("IPYTHONDIR", str(tmp_path / "ambient-ipython"))
+
+    with pytest.raises(ConfigurationError, match="No module named 'ipykernel'"):
+        PrimeHarnessSnapshot(
+            _source(tmp_path), workspace_dir=tmp_path / "refused",
+            kernel_venv=bare,
+        )
+
+    # No interpreter starts under this one, the probe's included.
+    monkeypatch.setenv("PYTHONHOME", str(tmp_path / "no-python-home"))
+    snapshot = _snapshot(tmp_path)
+    try:
+        assert not set(_AMBIENT_KERNEL_CODE) & set(snapshot.daemon_environment())
+
+        names = " ".join(f'"${{{name}-unset}}"' for name in _AMBIENT_KERNEL_CODE)
+        out = _runner(tmp_path, snapshot, f"printf '%s|' {names}\n").run_one(
+            _request("rl_ambient"))
+        assert out.exclusion_reason is None, out.exclusion_detail
+        assert out.final_text == "unset|" * len(_AMBIENT_KERNEL_CODE)
+
+        warm = tmp_path / "warm.sh"
+        warm.write_text(
+            f"#!/bin/sh\nprintf '%s|' {names} > \"$PERCEPTEYE_TRAJECTORY_DIR/env\"\n")
+        warm.chmod(warm.stat().st_mode | stat.S_IEXEC)
+        with pytest.warns(RuntimeWarning, match="Could not describe"):
+            fw._describe_via_host(  # type: ignore[attr-defined]
+                ["sh", str(warm)], artifacts_dir=str(tmp_path / "artifacts"),
+                agent_id="prime", execution_snapshot=snapshot,
+            )
+        seen = (tmp_path / "artifacts" / "_describe" / "env").read_text()
+        assert seen == "unset|" * len(_AMBIENT_KERNEL_CODE)
+    finally:
+        snapshot.close()
 
 
 def test_concurrent_children_are_distinct_but_have_one_identity(tmp_path):

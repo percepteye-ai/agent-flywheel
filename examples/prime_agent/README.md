@@ -168,6 +168,14 @@ kernel-setup refusal (`PRIME_AGENT_KERNEL_PYTHON points to a Python missing`
 or `Failed to set up the Python kernel runtime`), however many of its other
 calls ran: the policy never ran that code, and is not graded as if it had.
 
+The serving shell's Python configuration does not reach the kernel. Prime's
+own processes are Node and pass their environment on to the kernel, so every
+environment the adapter configures -- the kernel probe's, the daemon's, each
+rollout child's and discovery's -- has `PYTHONPATH`, `PYTHONHOME`,
+`PYTHONSTARTUP` and `IPYTHONDIR` removed, not emptied: an import path, Python
+home, startup file or IPython profile from outside the venv can neither satisfy
+the probe's imports nor run code in the kernel under `kernel_sha256`.
+
 The example starts one run-owned Prime daemon under a separate scrubbed HOME
 and empty run-owned working directory, then explicitly shuts it down before
 removing the snapshot. The daemon receives no ambient project settings and no

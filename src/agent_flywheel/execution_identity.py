@@ -49,17 +49,19 @@ _LOWER_SHA256 = re.compile(r"[0-9a-f]{64}")
 class ExecutionChild(Protocol):
     """One adapter-prepared child view used for exactly one execution.
 
-    The SDK overlays ``environment`` only into an isolated child process. An
-    in-process Python entrypoint can use an execution snapshot for lifecycle
-    attestation, but its prepared child must expose an empty mapping because
-    mutating process-global environment would cross-contaminate rollouts.
+    The SDK overlays ``environment`` only into an isolated child process: a
+    string value sets that name, and ``None`` removes it from what the child
+    would otherwise inherit. An in-process Python entrypoint can use an
+    execution snapshot for lifecycle attestation, but its prepared child must
+    expose an empty mapping because mutating process-global environment would
+    cross-contaminate rollouts.
     """
 
     @property
-    def environment(self) -> Mapping[str, str]: ...
+    def environment(self) -> Mapping[str, str | None]: ...
 
     @property
-    def discovery_environment(self) -> Mapping[str, str]:
+    def discovery_environment(self) -> Mapping[str, str | None]:
         """Non-secret layout values a command warm-up may receive."""
         ...
 
