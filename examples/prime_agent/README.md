@@ -172,9 +172,12 @@ The serving shell's Python configuration does not reach the kernel. Prime's
 own processes are Node and pass their environment on to the kernel, so every
 environment the adapter configures -- the kernel probe's, the daemon's, each
 rollout child's and discovery's -- has `PYTHONPATH`, `PYTHONHOME`,
-`PYTHONSTARTUP` and `IPYTHONDIR` removed, not emptied: an import path, Python
-home, startup file or IPython profile from outside the venv can neither satisfy
-the probe's imports nor run code in the kernel under `kernel_sha256`.
+`PYTHONSTARTUP`, `IPYTHONDIR`, and macOS's `PYTHONEXECUTABLE` and
+`__PYVENV_LAUNCHER__` removed, not emptied: an import path, Python home,
+startup file, IPython profile, or another venv's interpreter path (on macOS
+the interpreter starts in the venv beside the path either names) from outside
+the venv can neither satisfy the probe's imports nor run code in the kernel
+under `kernel_sha256`.
 
 The example starts one run-owned Prime daemon under a separate scrubbed HOME
 and empty run-owned working directory, then explicitly shuts it down before

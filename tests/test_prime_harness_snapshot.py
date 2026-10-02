@@ -407,7 +407,10 @@ def test_prime_is_handed_the_sealed_interpreter_and_never_an_ambient_one(
 
 #: The serving shell's Python configuration that would run code in Prime's
 #: kernel from outside the venv it is sealed as.
-_AMBIENT_KERNEL_CODE = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "IPYTHONDIR")
+_AMBIENT_KERNEL_CODE = (
+    "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "IPYTHONDIR",
+    "PYTHONEXECUTABLE", "__PYVENV_LAUNCHER__",
+)
 
 
 def test_no_python_configuration_from_the_serving_shell_reaches_prime(
@@ -416,24 +419,30 @@ def test_no_python_configuration_from_the_serving_shell_reaches_prime(
     """An ambient PYTHONPATH cannot stand in for the sealed kernel.
 
     The process baseline every child keeps carried the serving shell's
-    PYTHONPATH and PYTHONHOME, a rollout child inherited PYTHONSTARTUP and
-    IPYTHONDIR besides, and Prime hands its session's environment on to the
-    kernel -- so each ran code ``kernel_sha256`` never covered, and the kernel
-    probe accepted an empty venv on stub ``ipykernel`` and ``rlm`` packages
-    found on that path. A checkout run with ``PYTHONPATH=src`` was enough.
-    Every environment the adapter configures removes them: the probe's, the
-    daemon's, each rollout child's through the runner, and discovery's.
+    PYTHONPATH and PYTHONHOME, a rollout child inherited PYTHONSTARTUP,
+    IPYTHONDIR and macOS's PYTHONEXECUTABLE and __PYVENV_LAUNCHER__ besides,
+    and Prime hands its session's environment on to the kernel -- so each ran
+    code ``kernel_sha256`` never covered, and the kernel probe accepted an
+    empty venv on stub ``ipykernel`` and ``rlm`` packages found on that path.
+    A checkout run with ``PYTHONPATH=src`` was enough. Every environment the
+    adapter configures removes them: the probe's, the daemon's, each rollout
+    child's through the runner, and discovery's.
     """
     stubs = tmp_path / "ambient-path"
     for name in ("ipykernel", "rlm"):
         (stubs / name).mkdir(parents=True)
         (stubs / name / "__init__.py").write_text("")
     bare = _provisioned(tmp_path / "bare-kernel", modules=())
+    # On macOS the bare venv's interpreter starts in the venv beside either
+    # path, and this one has the stubs.
+    elsewhere = _provisioned(tmp_path / "ambient-venv") / "bin" / "python"
     startup = tmp_path / "ambient-startup.py"
     startup.write_text("AMBIENT = 1\n")
     monkeypatch.setenv("PYTHONPATH", str(stubs))
     monkeypatch.setenv("PYTHONSTARTUP", str(startup))
     monkeypatch.setenv("IPYTHONDIR", str(tmp_path / "ambient-ipython"))
+    monkeypatch.setenv("PYTHONEXECUTABLE", str(elsewhere))
+    monkeypatch.setenv("__PYVENV_LAUNCHER__", str(elsewhere))
 
     with pytest.raises(ConfigurationError, match="No module named 'ipykernel'"):
         PrimeHarnessSnapshot(

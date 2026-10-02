@@ -206,18 +206,26 @@ _KERNEL_PROBE_TIMEOUT_S = 60.0
 #: Variables that make the kernel run code from outside its own venv, which
 #: ``kernel_sha256`` names: a module search path (PYTHONPATH), a different
 #: standard library and site-packages (PYTHONHOME), a file IPython executes in
-#: the kernel at startup (PYTHONSTARTUP), and IPython's profile directory,
-#: whose ``startup/`` scripts it executes there too (IPYTHONDIR; the private
-#: HOME already holds the default one). Prime's own processes are Node, and
-#: the Python it starts is the kernel, which inherits its session worker's
-#: environment, so every environment this adapter configures -- the daemon's,
-#: the kernel probe's and each child's -- REMOVES them. Not empties them: a
-#: name that is still set means whatever its reader decides an empty value
-#: means. Left in place, a serving shell's PYTHONPATH -- a checkout run with
-#: ``PYTHONPATH=src``, for one -- let an empty venv pass the kernel probe on
-#: stub ``ipykernel`` and ``rlm`` packages and reached every kernel as code
-#: the seal never covered.
-_UNSEALED_KERNEL_CODE_VARS = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "IPYTHONDIR")
+#: the kernel at startup (PYTHONSTARTUP), IPython's profile directory, whose
+#: ``startup/`` scripts it executes there too (IPYTHONDIR; the private HOME
+#: already holds the default one), and, on macOS, the path the interpreter
+#: takes as its own (PYTHONEXECUTABLE, and __PYVENV_LAUNCHER__, which the
+#: Python 3.11 that Prime's bootstrap provisions honours as well): the venv an
+#: interpreter starts in is the one beside that path, so either name runs the
+#: kernel on another venv's site-packages while its ``bin/python`` is still
+#: the sealed one's, and Prime's per-session kernel check is answered by that
+#: venv too. Prime's own processes are Node, and the Python it starts is the
+#: kernel, which inherits its session worker's environment, so every
+#: environment this adapter configures -- the daemon's, the kernel probe's and
+#: each child's -- REMOVES them. Not empties them: a name that is still set
+#: means whatever its reader decides an empty value means. Left in place, a
+#: serving shell's PYTHONPATH -- a checkout run with ``PYTHONPATH=src``, for
+#: one -- let an empty venv pass the kernel probe on stub ``ipykernel`` and
+#: ``rlm`` packages and reached every kernel as code the seal never covered.
+_UNSEALED_KERNEL_CODE_VARS = (
+    "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "IPYTHONDIR",
+    "PYTHONEXECUTABLE", "__PYVENV_LAUNCHER__",
+)
 
 
 #: The longest path a Unix-domain socket can bind: ``sun_path`` holds 104

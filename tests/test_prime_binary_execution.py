@@ -526,20 +526,25 @@ _WHICH_KERNEL = (
     "import importlib.util, os, sys\n"
     "print('kernel-prefix=' + sys.prefix)\n"
     "print('ambient=' + repr(\n"
-    "    [n for n in ('PYTHONPATH', 'PYTHONHOME', 'PYTHONSTARTUP', 'IPYTHONDIR')\n"
+    "    [n for n in ('PYTHONPATH', 'PYTHONHOME', 'PYTHONSTARTUP', 'IPYTHONDIR',\n"
+    "                 'PYTHONEXECUTABLE', '__PYVENV_LAUNCHER__')\n"
     "     if n in os.environ]\n"
-    "    + [m for m in ('ambient_marker',) if importlib.util.find_spec(m)]\n"
+    "    + [m for m in ('ambient_marker', 'ambient_venv_marker')\n"
+    "       if importlib.util.find_spec(m)]\n"
     "    + [g for g in ('AMBIENT_STARTUP', 'AMBIENT_PROFILE') if g in globals()]))\n"
 )
 
 
-def _ambient_python_configuration(tmp_path, monkeypatch) -> None:
+def _ambient_python_configuration(tmp_path, monkeypatch, provisioned) -> None:
     """The serving shell's Python configuration, each piece able to run code.
 
     A module on PYTHONPATH, a file IPython runs in the kernel at startup
     (PYTHONSTARTUP), an IPython profile whose startup script it runs there too
-    (IPYTHONDIR), and a PYTHONHOME no interpreter can start under. None of it
-    is in the venv ``kernel_sha256`` names.
+    (IPYTHONDIR), a PYTHONHOME no interpreter can start under, and, on macOS,
+    the interpreter path of another venv (PYTHONEXECUTABLE and
+    __PYVENV_LAUNCHER__), whose site-packages the kernel would then run on --
+    a copy of the provisioned kernel, so it still starts, plus a marker
+    module. None of it is in the venv ``kernel_sha256`` names.
     """
     path = tmp_path / "ambient-path"
     path.mkdir()
@@ -553,6 +558,11 @@ def _ambient_python_configuration(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("PYTHONSTARTUP", str(startup))
     monkeypatch.setenv("IPYTHONDIR", str(tmp_path / "ambient-ipython"))
     monkeypatch.setenv("PYTHONHOME", str(tmp_path / "no-python-home"))
+    elsewhere = _kernel_copy(provisioned, tmp_path / "ambient-venv")
+    site = next((elsewhere / "lib").glob("python*/site-packages"))
+    (site / "ambient_venv_marker.py").write_text("")
+    monkeypatch.setenv("PYTHONEXECUTABLE", str(elsewhere / "bin" / "python"))
+    monkeypatch.setenv("__PYVENV_LAUNCHER__", str(elsewhere / "bin" / "python"))
 
 
 def _kernel_without_a_default_package(provisioned, destination: pathlib.Path):
@@ -587,10 +597,11 @@ def test_the_sealed_kernel_runs_the_policy_code_as_it_is(
 
     And it runs only the sealed venv. Prime's kernel inherits its session's
     environment, so the serving shell's Python configuration used to reach it
-    -- a PYTHONPATH module importable, a startup file run -- as code the seal
-    never covered; none of it does now.
+    -- a PYTHONPATH module importable, a startup file run, on macOS another
+    venv's site-packages -- as code the seal never covered; none of it does
+    now.
     """
-    _ambient_python_configuration(tmp_path, monkeypatch)
+    _ambient_python_configuration(tmp_path, monkeypatch, provisioned_kernel)
     kernel = provisioned_kernel
     if provisioned_by == "another prime-agent":
         kernel = _kernel_copy(provisioned_kernel, tmp_path / "kernel-venv")

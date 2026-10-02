@@ -207,7 +207,7 @@ A rule is one prose sentence about how your agent should work — the conditiona
 | rule | effect |
 |:--|:--|
 | Your environment passes through | your agent needs your credentials. That is the premise of running it in your process. |
-| The inherited `PERCEPTEYE_` namespace is scrubbed completely | no customer- or harness-specific setting crosses implicitly; an execution adapter may supply its own non-PerceptEye variables through its child environment, or remove an inherited one (the Prime adapter removes `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP` and `IPYTHONDIR`, so nothing from outside its sealed kernel runs in it) |
+| The inherited `PERCEPTEYE_` namespace is scrubbed completely | no customer- or harness-specific setting crosses implicitly; an execution adapter may supply its own non-PerceptEye variables through its child environment, or remove an inherited one (the Prime adapter removes `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, `IPYTHONDIR`, and macOS's `PYTHONEXECUTABLE` and `__PYVENV_LAUNCHER__`, which pick the venv the interpreter starts in, so nothing from outside its sealed kernel runs in it) |
 | Two are then set | `PERCEPTEYE_ROLLOUT_ID` and `PERCEPTEYE_TRAJECTORY_DIR`, scoped to this rollout |
 | Routing is set last | `OPENAI_BASE_URL`, `OPENAI_API_BASE`, `OPENAI_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, so they beat anything inherited |
 | Unroutable provider config is removed | see below |
