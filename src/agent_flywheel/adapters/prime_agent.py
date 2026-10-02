@@ -1369,6 +1369,23 @@ _POLICY_EXTERNAL_EVENTS = frozenset({
     "refine_complete",
     "refine_failed",
 })
+#: How a tool call fails when Prime will not start the Python kernel it runs
+#: in: the refusals ``ensureKernelPython`` throws (prime-agent 0.7.2,
+#: dist/core/kernel/bootstrap.js) -- the check of a PRIME_AGENT_KERNEL_PYTHON
+#: that lacks a package, and a failed auto-bootstrap -- which the tool returns
+#: as the call's whole error result. A session does not stop on one: it
+#: completes, and the policy is answered with the refusal instead of having
+#: run its code. Prime runs that check each time a session starts its kernel,
+#: one interpreter per package, and counts a package that merely failed to
+#: spawn as missing, so a kernel the example's startup preflight accepted can
+#: still be refused in a rollout. Such a call is an environment fault, not an
+#: outcome of the policy, and the rollout is excluded naming it, however many
+#: of its other calls ran -- the runner's every-call-failed rule catches only
+#: a rollout whose every call was refused.
+_PRIME_KERNEL_REFUSALS = (
+    "PRIME_AGENT_KERNEL_PYTHON points to a Python missing",
+    "Failed to set up the Python kernel runtime",
+)
 
 
 def _assistant_text(message: Any) -> str | None:
@@ -1454,6 +1471,16 @@ class PrimeAgentOutputAdapter:
             if normalized in {"error", "aborted"}:
                 terminal_failure = normalized
 
+        parsed = parse_tool_calls_with_omissions(
+            stdout, formats=(PRIME_TOOL_FORMAT,)
+        )
+        refused: dict[str, list[str]] = {}
+        for call in parsed.calls or ():
+            text = call.error if call.outcome == "failed" else None
+            for refusal in _PRIME_KERNEL_REFUSALS:
+                if isinstance(text, str) and text.startswith(refusal):
+                    refused.setdefault(refusal, []).append(call.name)
+
         invalid: list[str] = []
         lifecycle_complete = (
             not malformed_structured_line
@@ -1474,9 +1501,25 @@ class PrimeAgentOutputAdapter:
                 + " (diagnostic redacted)"
             )
 
-        parsed = parse_tool_calls_with_omissions(
-            stdout, formats=(PRIME_TOOL_FORMAT,)
-        )
+        excluded: list[str] = []
+        if refused:
+            # Prime's fixed words only. What follows them -- which packages,
+            # which interpreter path -- is redacted like the terminal
+            # diagnostic below; the startup preflight names it in full.
+            excluded.append(
+                "Prime did not start the policy's Python kernel, so "
+                + "; ".join(
+                    f"{len(names)} {'/'.join(sorted(set(names)))} call(s) "
+                    f"returned its refusal {refusal!r} (diagnostic redacted)"
+                    for refusal, names in refused.items()
+                )
+                + " instead of running the policy's code: an environment "
+                "fault, not a policy outcome, so this rollout is not trained on"
+            )
+        if invalid:
+            excluded.append(
+                "untrainable command event stream: observed " + "; ".join(invalid)
+            )
         return CommandOutputProjection(
             recognized=True,
             final_text=final_text or "",
@@ -1487,10 +1530,10 @@ class PrimeAgentOutputAdapter:
             llm_call_count=llm_call_count if lifecycle_complete else None,
             tool_calls=parsed.calls,
             tool_calls_omitted_count=parsed.omitted_count,
-            exclusion_reason="cancelled" if invalid else None,
-            exclusion_detail=(
-                "untrainable command event stream: observed " + "; ".join(invalid)
-                if invalid
+            exclusion_reason=(
+                "substrate_unavailable" if refused
+                else "cancelled" if invalid
                 else None
             ),
+            exclusion_detail="; ".join(excluded) or None,
         )

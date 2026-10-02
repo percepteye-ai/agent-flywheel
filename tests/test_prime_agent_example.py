@@ -298,9 +298,11 @@ def test_runtime_preflight_refuses_a_kernel_prime_refuses_naming_prime_reason(
 ):
     """Prime uses a PRIME_AGENT_KERNEL_PYTHON as it is, or refuses it.
 
-    A refused kernel does not stop a session: it completes, and every
-    ``ipython`` call is answered with the refusal, so it is caught here, before
-    serving, in Prime's words -- not restated from a list of Prime's packages.
+    A refused kernel does not stop a session: it completes, and each
+    ``ipython`` call is answered with the refusal, so a kernel refused every
+    time is caught here, before serving, in Prime's words -- not restated from
+    a list of Prime's packages. A refusal mid-run is the output adapter's to
+    exclude.
     """
     import pytest
 

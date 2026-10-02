@@ -147,17 +147,26 @@ kernel, on a rollout already lost.)
 What Prime still does, at every session start, is check the interpreter and
 refuse one that lacks `ipykernel`, a current prime-agent-runtime (`rlm`), or one
 of the default packages that release installs. A refused kernel does not stop
-the session: it completes, and every `ipython` call is answered with the
-refusal. So the example refuses such a kernel before serving, for the reason
-Prime gives. The snapshot refuses at startup a venv whose `bin/python` cannot
-import `ipykernel` and `rlm`, the two packages Prime's docs name for that
-variable, and the runtime preflight then runs the installed prime-agent's own check
-(`dist/core/kernel/bootstrap-cli.js`, which only checks when
-`PRIME_AGENT_KERNEL_PYTHON` is set) against the sealed interpreter under the
-daemon environment. Re-provision if that check refuses after a prime-agent
-upgrade. Prime's check starts one interpreter per default package each time a
-session starts its kernel: a few seconds per rollout, where its marker check
-took well under one.
+the session: it completes, and each `ipython` call is answered with the
+refusal instead of running. So the example refuses such a kernel before
+serving, for the reason Prime gives. The snapshot refuses at startup a venv
+whose `bin/python` cannot import `ipykernel` and `rlm`, the two packages
+Prime's docs name for that variable, and the runtime preflight then runs the
+installed prime-agent's own check (`dist/core/kernel/bootstrap-cli.js`, which
+only checks when `PRIME_AGENT_KERNEL_PYTHON` is set) against the sealed
+interpreter under the daemon environment. Re-provision if that check refuses
+after a prime-agent upgrade. Prime's check starts one interpreter per default
+package each time a session starts its kernel: a few seconds per rollout, where
+its marker check took well under one.
+
+That startup check is not the last word. Prime repeats it in every rollout,
+counts a package whose interpreter merely failed to spawn as missing, and
+writes nothing anyone re-checks, so a kernel the preflight accepted can still
+be refused mid-run. The output adapter therefore excludes, as
+`substrate_unavailable`, any rollout in which a tool call came back as Prime's
+kernel-setup refusal (`PRIME_AGENT_KERNEL_PYTHON points to a Python missing`
+or `Failed to set up the Python kernel runtime`), however many of its other
+calls ran: the policy never ran that code, and is not graded as if it had.
 
 The example starts one run-owned Prime daemon under a separate scrubbed HOME
 and empty run-owned working directory, then explicitly shuts it down before

@@ -396,12 +396,15 @@ def _preflight_prime_runtime(
 
     The kernel reaches Prime as PRIME_AGENT_KERNEL_PYTHON, which Prime uses as
     it is and never rebuilds -- but it refuses one that fails its check, and
-    a session that cannot start its kernel still completes, with every
+    a session that cannot start its kernel still completes, with each
     ``ipython`` call answered by that refusal. The snapshot refuses an
     interpreter without ``ipykernel`` and ``rlm`` at construction; the rest of
     Prime's check (its runtime API and its default packages) belongs to the
     installed release, so this asks that release, under the daemon
-    environment, rather than restating its list.
+    environment, rather than restating its list. Prime repeats the check in
+    every rollout and can still refuse there, so the output adapter excludes
+    any rollout a refusal reached; this only keeps a kernel that would be
+    refused every time from being served at all.
     """
 
     def _run(option: str) -> subprocess.CompletedProcess[bytes]:

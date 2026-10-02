@@ -301,13 +301,16 @@ def _path_without_uv(tmp_path) -> str:
     return f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
 
 
-def _run_one_rollout(tmp_path, launch, gateway, kernel, *, budget_s: float):
+def _run_one_rollout(
+    tmp_path, launch, gateway, kernel, *, budget_s: float, preflight: bool = True,
+):
     """One rollout through the example's own ARGV and run-owned daemon.
 
     Preflighted as ``main`` preflights before serving, and attested before
     release, as ``RolloutRunner`` attests every rollout: a kernel Prime would
     not use, or a drifted kernel, harness or settings, fails here instead of
-    passing.
+    passing. ``preflight=False`` serves a kernel the preflight would refuse,
+    as a kernel the preflight accepted and Prime then refused in a rollout.
     """
     module = _example()
     launcher = pathlib.Path(launch[-1])
@@ -338,11 +341,12 @@ def _run_one_rollout(tmp_path, launch, gateway, kernel, *, budget_s: float):
     )
     child = None
     try:
-        module._preflight_prime_runtime(
-            str(launcher), env=harness.daemon_environment(),
-            cwd=harness.daemon_working_directory,
-            kernel_check=module._prime_kernel_check(package_root),
-        )
+        if preflight:
+            module._preflight_prime_runtime(
+                str(launcher), env=harness.daemon_environment(),
+                cwd=harness.daemon_working_directory,
+                kernel_check=module._prime_kernel_check(package_root),
+            )
         daemon.start()
         child = harness.prepare_child("test")
         trajectory = tmp_path / "trajectory"
@@ -520,6 +524,21 @@ def _kernel_copy(provisioned, destination: pathlib.Path) -> pathlib.Path:
 _WHICH_KERNEL = "import sys; print('kernel-prefix=' + sys.prefix)"
 
 
+def _kernel_without_a_default_package(provisioned, destination: pathlib.Path):
+    """A copy of the kernel with ``ipykernel`` and ``rlm`` and without
+    ``tyro``, one of the default packages this prime-agent installs and then
+    requires -- a kernel Prime refuses, and only the installed release can
+    say why."""
+    kernel = _kernel_copy(provisioned, destination)
+    required = json.loads((kernel / ".bootstrap-version").read_text())["extraUvArgs"]
+    assert "tyro" in required, (
+        f"this prime-agent no longer installs tyro by default ({required}); "
+        f"remove another package it does")
+    site = next((kernel / "lib").glob("python*/site-packages"))
+    shutil.rmtree(site / "tyro")
+    return kernel
+
+
 @pytest.mark.parametrize("provisioned_by", ["this prime-agent", "another prime-agent"])
 def test_the_sealed_kernel_runs_the_policy_code_as_it_is(
     tmp_path, provisioned_kernel, provisioned_by,
@@ -566,19 +585,14 @@ def test_a_kernel_prime_would_refuse_is_refused_before_serving(
 
     PRIME_AGENT_KERNEL_PYTHON is used as it is or refused -- and a refused
     kernel does not stop a session: it completes, with every ``ipython`` call
-    answered by the refusal, a rollout nothing excludes. The snapshot probes
-    only the two packages Prime's docs name for it, ``ipykernel`` and ``rlm``;
-    this kernel has both and lacks one of the default packages THIS release
-    requires, which only the installed prime-agent can say, so the example's
-    preflight asks it.
+    answered by the refusal, a rollout that would only be excluded one at a
+    time (see the next test). The snapshot probes only the two packages
+    Prime's docs name for it, ``ipykernel`` and ``rlm``; this kernel has both
+    and lacks one of the default packages THIS release requires, which only
+    the installed prime-agent can say, so the example's preflight asks it.
     """
-    kernel = _kernel_copy(provisioned_kernel, tmp_path / "kernel-venv")
-    required = json.loads((kernel / ".bootstrap-version").read_text())["extraUvArgs"]
-    assert "tyro" in required, (
-        f"this prime-agent no longer installs tyro by default ({required}); "
-        f"remove another package it does")
-    site = next((kernel / "lib").glob("python*/site-packages"))
-    shutil.rmtree(site / "tyro")
+    kernel = _kernel_without_a_default_package(
+        provisioned_kernel, tmp_path / "kernel-venv")
 
     module = _example()
     launcher = pathlib.Path(_runnable_launcher()[-1])
@@ -598,3 +612,35 @@ def test_a_kernel_prime_would_refuse_is_refused_before_serving(
     assert "prime-agent refuses the kernel PRIME_AGENT_KERNEL_VENV names" in str(
         refused.value)
     assert "tyro" in str(refused.value)
+
+
+def test_a_rollout_whose_kernel_prime_refuses_is_excluded(
+    tmp_path, provisioned_kernel,
+):
+    """The refusal the startup preflight cannot rule out, excluded where it lands.
+
+    Prime checks the kernel each time a session starts it, one interpreter
+    per package, and counts a package that merely failed to spawn as missing,
+    so a kernel the preflight accepted can still be refused in a rollout --
+    and the session completes regardless, the policy's ``ipython`` call
+    answered by the refusal instead of running. Served here with the
+    preflight skipped, a kernel without one of Prime's default packages gives
+    exactly that rollout: attested, completed, its call refused. It is
+    excluded as an environment fault, not graded as the policy's attempt.
+    """
+    kernel = _kernel_without_a_default_package(
+        provisioned_kernel, tmp_path / "kernel-venv")
+    launch = _runnable_launcher()
+    with _Gateway(answer=True, ipython=_WHICH_KERNEL) as gateway:
+        out, _ = _run_one_rollout(
+            tmp_path, launch, gateway, kernel, budget_s=120.0, preflight=False)
+
+    refusal = "PRIME_AGENT_KERNEL_PYTHON points to a Python missing"
+    assert gateway.tool_results, "the policy's ipython call never came back"
+    assert gateway.tool_results[0].startswith(refusal), (
+        f"Prime did not refuse this kernel, so this rollout shows nothing: "
+        f"{gateway.tool_results[0][:400]}")
+    assert out.exclusion_reason == "substrate_unavailable", out.exclusion_detail
+    assert refusal in (out.exclusion_detail or "")
+    assert str(kernel) not in (out.exclusion_detail or ""), (
+        "the exclusion carried the kernel's path")
