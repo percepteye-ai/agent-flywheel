@@ -37,9 +37,11 @@ Follow this in order; each step links to the detail. When something fails,
    places in the Python README plus `website/docs/python.md` and `index.md`, and
    in the Node README the badge, the comment above it, and the Develop line.
 3. **Run §1 in both repositories,** with the Node SDK checked out and named
-   through `PERCEPTEYE_NODE_SDK`, and the control plane's checkout named
-   through `PERCEPTEYE_CONTROL_PLANE_CHECKOUT`, so the Python parity tests run
-   instead of skipping: `N passed, 0 skipped`. CI cannot vouch for this part yet
+   through `PERCEPTEYE_NODE_SDK`, so the Python parity tests run instead of
+   skipping (`N passed, 0 skipped`), and the control plane's checkout named
+   through `PERCEPTEYE_CONTROL_PLANE_CHECKOUT`, so the shared-fixture test
+   compares the control plane's copy byte for byte. Unnamed, that test still
+   passes, having checked only the fixtures' digests, as every CI run does. CI cannot vouch for this part yet
    ([§5](#5-when-a-publish-fails): `NODE_SDK_READ_TOKEN`).
 4. **Merge the Node PR first, then the Python one.** The Python parity tests
    import the Node repository's `main`.
@@ -62,7 +64,8 @@ Follow this in order; each step links to the detail. When something fails,
 checked out beside it (the parity tests find it there, or through
 `PERCEPTEYE_NODE_SDK`), and `PERCEPTEYE_CONTROL_PLANE_CHECKOUT` naming the
 control plane's checkout, whose copy of the shared `/policy/current` fixtures
-`tests/cross_repo/test_fixture_parity.py` compares byte for byte:
+`tests/cross_repo/test_fixture_parity.py` then compares byte for byte (unnamed,
+it checks only their digests, and passes):
 
 ```bash
 .venv/bin/pytest -q                        # N passed, 0 skipped

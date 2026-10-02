@@ -25,8 +25,14 @@ Three mechanisms, because the siblings are not always there:
   fails. It is compared INSIDE the digest test rather than in a test of its
   own, because a test of its own could only ever skip in CI, which can never
   name that checkout in a file it publishes, and the zero-skip gate rightly
-  refuses a skip. Unnamed, the digest is still checked: the one the control
-  plane's copy is made from too.
+  refuses a skip.
+
+WHAT AN UNNAMED RUN CHECKS, said plainly because it passes either way: only
+the digest. That is every CI run. The control plane's copy is then held by
+the control plane's own suite pinning these same two digests -- the other
+half of this mechanism, which lives in that repository and which nothing here
+can see -- so a release is checked with the variable named
+(``docs/RELEASING.md`` §1), where the two copies are compared directly.
 """
 from __future__ import annotations
 
@@ -57,7 +63,7 @@ def _ours(name: str) -> bytes:
 
 
 @pytest.mark.parametrize("name", sorted(SHARED))
-def test_this_copy_is_the_shared_fixture_and_the_control_planes(name):
+def test_this_copy_has_the_shared_digest_and_equals_a_named_control_plane_copy(name):
     assert hashlib.sha256(_ours(name)).hexdigest() == SHARED[name], (
         f"tests/fixtures/{name} is not the shared fixture. Change every copy "
         f"together -- both SDKs and the control plane -- never one alone.")
