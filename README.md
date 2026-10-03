@@ -248,6 +248,16 @@ snap = src.current()                     # per turn; between refreshes it's a ca
 
 **A model PerceptEye serves arrives through its gateway, on the key you already hold.** The endpoint is your agent's one constant gateway URL, opened with your flywheel key (`PERCEPTEYE_API_KEY`) — never a provider key in your environment — and the serving host's own credential never leaves the control plane. A provider endpoint you own is still dialled directly, with that provider's key: your flywheel key goes only to the control plane's own origin, never as a fallback. Behind the gateway URL a promotion or rollback between served models takes effect without even a client rebuild. And when a rollback leaves nothing to serve — no champion promoted yet — the control plane **withdraws** the model (`withdrawn: true`), and `policy_source()` reports a change back to your own configuration. See [Production](website/docs/production.md).
 
+**When the gateway cannot serve the delivered model it says why, by a code and whose it is.** The body is `{"detail": {"code": ..., ...}}`; the codes are part of the control plane's published contract (`GET /api/v2/contract`, `x-refusal-codes`), which also carries the control plane's own refusals (promote, rollback, launching a hill climb).
+
+| `code` | HTTP | Whose | What it means and what to do |
+|---|---|---|---|
+| `no_delivered_policy` | 404 | yours | The agent was moved back to the base model and has no upstream of its own registered, so there is nothing to call. Run your own configuration, or register an upstream. |
+| `policy_concurrency_limited` | 429 | yours | Your organization already has the allowed number of delivered-model calls in flight. Retry after `Retry-After`. |
+| `policy_host_unavailable` | 503 | environment | The host serving the delivered model cannot serve now, and no upstream of your own is registered to fall back to. Retry after `Retry-After`. |
+| `policy_resolution_unavailable` | 503 | environment | The control plane could not resolve which model to serve, so the gateway refuses rather than call a model nobody delivered. Retry after `Retry-After`. |
+| `policy_endpoint_key_unavailable` | 500 | PerceptEye | Not yours to fix: the gateway could not authenticate the delivered model's host. Give PerceptEye support the agent id and the time. |
+
 `prompt_decision()` is the whole rule in one call, and the SDK never applies a prompt for you: it checks that a prompt is actually being served, that your own baseline prompt has not changed since the pair was certified, that the bundle's status is one a person approved, and that the prompt's identity matches the checkpoint it was certified against. `apply` is false unless all four hold, `reason` says which one failed, and `text` is `None` rather than `""` — so a refusal can never blank the instructions your agent is already running on. The Node SDK asks the identical question, and [`tests/test_prompt_decision_parity.py`](tests/test_prompt_decision_parity.py) drives one table of cases through both implementations and asserts every field of the answer agrees.
 
 ## ✋ Nothing reaches your users until a person approves it

@@ -49,9 +49,9 @@ FIXTURES = pathlib.Path(__file__).resolve().parents[1] / "fixtures"
 #: Each shared fixture and the sha256 every copy of it was made from.
 SHARED = {
     "policy_current_gateway.json":
-        "8eb1fa741706b268a76db597384e5e698065e1c313e88f20a474ca067e92b191",
+        "46871a1b96401e321df5a19501f0bbcaa0413970ad1629be56cc276d25a0a3a6",
     "policy_current_withdrawn.json":
-        "2f54007e6108e99b03d5907d7a231e66a97e334445156290880814c2e2a81511",
+        "b370a3ae9b5742b78d6b97c5774fc51089822d8be7aac119eeb14e2c788ccbe9",
 }
 
 #: Names the control plane's checkout. Read by these tests alone.

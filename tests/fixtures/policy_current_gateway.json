@@ -1,6 +1,6 @@
 {
   "arm": "candidate",
-  "reason": "policy_channel_candidate",
+  "reason": "an operator put this agent on the candidate",
   "candidate_available": true,
   "endpoint": {
     "base_url": "https://launch.percepteye.ai/llm/v1/o/7b0c3f9e-2d41-4c8a-9f6e-1a2b3c4d5e6f/agents/support-agent/v1",
@@ -13,9 +13,9 @@
     "kind": "vllm_lora"
   },
   "prompt": null,
-  "bundle_digest": null,
+  "bundle_digest": "5d2e8a41-7c3b-4f90-8e1d-6a5b4c3d2e1f",
   "resolved_at": "2026-10-02T12:00:00+00:00",
   "ttl_s": 60.0,
   "withdrawn": false,
-  "serving_generation": "a41c09e7d2b85f36"
+  "serving_generation": "4cb601dcb5157267"
 }
