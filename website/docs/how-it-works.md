@@ -329,7 +329,7 @@ Lane ⓪ opens once, and lane ④ once from `attach()`. The rest repeat, and **e
 
 !!! warning "Lane ④ does not ship yet"
 
-    `attach()` binds the same adapters, writes the same tri-state into the same trajectory format, and scopes it to a live user turn instead of a claimed rollout. `flywheel/1` gained `/turns` for exactly this, so captured turns are uploaded — but only once an operator enables capture for that agent, which is off by default because a production turn carries your end users' own messages. Until then, and whenever the control plane is unreachable, they accumulate as directories under the `trajectory_root` you name and you own them. `trajectory_root` is required and undefaulted for exactly that reason: nothing deletes them unless you set `retention_turns`.
+    `attach()` binds the same adapters, writes the same tri-state into the same trajectory format, and scopes it to a live user turn instead of a claimed rollout. `flywheel/1` gained `/turns` for exactly this, so captured turns are uploaded — but only once an org admin switches capture on for that agent (the **Permissions** step of adding it), which is off by default because a production turn carries your end users' own messages. Until then, and whenever the control plane is unreachable, they accumulate as directories under the `trajectory_root` you name and you own them. `trajectory_root` is required and undefaulted for exactly that reason: nothing deletes them unless you set `retention_turns`.
 
     Writing a client for a route the server does not serve is how an earlier SDK ended up with five modes, four of which were strings nobody read.
 

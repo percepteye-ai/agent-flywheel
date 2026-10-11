@@ -241,7 +241,7 @@ binding before any downstream use.
 
 **The turn's text is opt-in, and both halves are yours to pass.** `input_text=` records what the user asked and `record_answer()` records what the agent finally said. They are your end user's message and the answer your code returned — facts only your own code holds, which no adapter can tell apart from the rest of a model call. That is what keeps tool outcomes zero-instrumentation while turn text stays a decision you make.
 
-**What the model saw is a second consent tier, off by default.** When an operator grants the agent model-content capture, the LangChain and Google ADK adapters also observe every model call inside a turn — its system instructions, its whole input, the tool definitions it was offered, what it answered — and every tool's result, and the turn uploads that as one OpenTelemetry GenAI trace in `genai_trace`: an `invoke_agent` span with a `chat` span per model call and an `execute_tool` span per tool call, content per the GenAI semantic conventions. The adapters are observers only — every callback returns nothing, so no call, response or result can be changed — and without the grant nothing of it is recorded, not even to disk. `px.may_capture_model_content` is the live answer and `px.model_content_refusal` the sentence explaining a `False`; a grant made later is noticed on the flush cadence, and when the control plane refuses a trace by name the SDK stops recording at once. Prime Agent runs as a `serve()` command and its JSON stream carries neither its system prompt nor its tool definitions, so no model content is captured for it.
+**What the model saw is a second consent tier, off by default.** With the model-content tier granted for the agent (the second switch in the same **Permissions** step), the LangChain and Google ADK adapters also observe every model call inside a turn — its system instructions, its whole input, the tool definitions it was offered, what it answered — and every tool's result, and the turn uploads that as one OpenTelemetry GenAI trace in `genai_trace`: an `invoke_agent` span with a `chat` span per model call and an `execute_tool` span per tool call, content per the GenAI semantic conventions. The adapters are observers only — every callback returns nothing, so no call, response or result can be changed — and without the grant nothing of it is recorded, not even to disk. `px.may_capture_model_content` is the live answer and `px.model_content_refusal` the sentence explaining a `False`; a grant made later is noticed on the flush cadence, and when the control plane refuses a trace by name the SDK stops recording at once. Prime Agent runs as a `serve()` command and its JSON stream carries neither its system prompt nor its tool definitions, so no model content is captured for it.
 
 They are separate calls because the answer does not exist yet when the turn opens — `record_answer()` is callable after the scope has closed, for the same reason `turn()` yields its id. **Omit them and the periodic flush sends nothing**: a turn with no recorded answer is held back on every 32-turn flush and leaves only at `close()` or the `atexit` hook, carrying no text at all.
 
@@ -272,14 +272,13 @@ the isolated command lifecycle.
 are uploaded — subject to one gate and one cadence.
 
 The gate is **per-agent capture consent, and it is off by default**: a production
-turn carries your end users' own messages, so nothing is sent until an operator
-enables capture for that agent. The registration response tells the SDK whether
+turn carries your end users' own messages, so nothing is sent until an org admin switches capture on for that agent, in the **Permissions** step of adding it (**Add → An agent → Connect it with our SDK**). There are two switches, its conversations and their message text, and training from the agent needs both. The registration response tells the SDK whether
 it may, which is why it never finds out by uploading. `px.may_upload` is that
 answer and `px.upload_refusal` is the sentence explaining a `False`.
 
 **Enabling it does not require restarting your agent.** While the answer is no,
 the SDK re-reads the verdict from `GET /agents/{agent_id}/capture` on its flush
-cadence and begins uploading as soon as an operator says yes. That read is a
+cadence and begins uploading as soon as capture is switched on. That read is a
 plain `GET`: it changes nothing, which is precisely why it can be repeated —
 the verdict used to be reachable only through a registration, and registering
 to ask a permission question had side effects of its own.
