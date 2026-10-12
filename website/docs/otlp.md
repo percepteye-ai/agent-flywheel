@@ -10,7 +10,7 @@ If your agent already records its model calls as OpenTelemetry spans — the [Ge
 POST $PERCEPTEYE_CONTROL_PLANE_URL/agents/<agent_id>/otlp/v1/traces
 ```
 
-The dashboard shows this agent's full endpoint, ready to copy, on the agent's connect step and on its own page (its **Agent** tab). With the OpenTelemetry SDK's exporter:
+In the dashboard, add the agent with **Add → An agent → It sends OpenTelemetry**: one click names it, gives it its key and registers it, then its **Permissions** step opens, then its full endpoint is shown, ready to copy (and again on the agent's own page, its **Agent** tab). With the OpenTelemetry SDK's exporter:
 
 ```bash
 export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="$PERCEPTEYE_CONTROL_PLANE_URL/agents/support-agent/otlp/v1/traces"
@@ -32,9 +32,9 @@ service:
       exporters: [otlphttp/percepteye]
 ```
 
-**Auth** is the agent's own key (`pefw_…`), sent as a Bearer token: the key you get when you add the agent in the dashboard (**Add → An agent → Connect it with our SDK**). A key bound to a different agent is refused.
+**Auth** is the agent's own key (`pefw_…`), sent as a Bearer token: the key you get when you add the agent in the dashboard (**Add → An agent**). A key bound to a different agent is refused.
 
-**Consent comes first, and nothing is read without it.** The agent has to be known to the control plane, and both capture switches have to be on in the **Permissions** step of adding it: its conversations, and their message text. Until both are on, every push is answered `403` and nothing in it is read. The model-content tier is granted only while exactly one active Product declares the agent, as for the SDK. An agent that never runs this SDK registers itself once, so that its Permissions can be switched on:
+**Consent comes first, and nothing is read without it.** The agent has to be known to the control plane, and both capture switches have to be on in the **Permissions** step of adding it: its conversations, and their message text. Until both are on, every push is answered `403` and nothing in it is read. The model-content tier is granted only while exactly one active Product declares the agent, as for the SDK. The dashboard's **It sends OpenTelemetry** path registers the agent for you; the push endpoint never registers an agent itself. Through the API instead, an agent that never runs this SDK registers once, so that its Permissions can be switched on:
 
 ```bash
 curl -X POST "$PERCEPTEYE_CONTROL_PLANE_URL/agents" \
@@ -52,7 +52,7 @@ curl -X POST "$PERCEPTEYE_CONTROL_PLANE_URL/agents" \
 - `429` when your organization's share of the endpoint is busy or over its rate, and `503` when the control plane is, each with `Retry-After`; the OpenTelemetry exporters and the Collector retry these on their own;
 - `400`, `403` and `415` for a request it will never take: retrying it does not help.
 
-Send spans in batches, as the OpenTelemetry SDK's batch processor and the Collector do by default; a single very large request can be refused by a proxy before it reaches the control plane.
+There is no size cap. Each request is spooled to disk and read in bounded memory, and one this host's disk cannot hold is answered `507` with a `google.rpc.Status` before it is read. Batches, as the OpenTelemetry SDK's batch processor and the Collector send by default, are learned from soonest.
 
 **Personal data is kept, and never learned from.** The message content of every span is scanned for personal data. A request whose spans hold any is kept, recorded and excluded from training, and the response's `partial_success` message says so (with no span rejected). Spans that carry this SDK's own rollout marker (`percepteye.rollout.id`) are not kept, and are counted as rejected: rollouts reach the control plane through the SDK.
 
