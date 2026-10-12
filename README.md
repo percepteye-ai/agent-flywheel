@@ -125,7 +125,7 @@ Everything that can be misconfigured — entrypoint, credential, contract versio
      Permissions step (2026-10-11). The Node README says the same; keep the
      two in step. -->
 
-**Where a `pefw_` key comes from:** PerceptEye runs the control plane, and signing in is free and self-serve at **[launch.percepteye.ai](https://launch.percepteye.ai)**. There, choose **Add → An agent → Connect it with our SDK** and give it the agent id your agent reports as: you get its key — shown once, and scoped to that one agent — along with the exact `PERCEPTEYE_CONTROL_PLANE_URL` to export. A lost key is replaced from the agent's own page: **Agents** → your agent → **Get a new key**.
+**Where a `pefw_` key comes from:** PerceptEye runs the control plane, and signing in is free and self-serve at **[launch.percepteye.ai](https://launch.percepteye.ai)**. There, choose **New mission → An agent → Connect it with our SDK** and give it the agent id your agent reports as: you get its key — shown once, and scoped to that one agent — along with the exact `PERCEPTEYE_CONTROL_PLANE_URL` to export. A lost key is replaced from the agent's own page: **Agents** → your agent → **Get a new key**.
 
 > [!TIP]
 > Rollouts are real runs on your real credentials. Bound the first one with `max_rollouts=8` and point `artifacts_dir=` somewhere you don't mind it writing. `max_rollouts` is also the only clean exit: there is no signal handler, and Ctrl-C drains in-flight rollouts first.
@@ -296,7 +296,7 @@ Supplying it grants no training eligibility. Control-plane clustering and
 dataset services validate any later trace-to-task binding.
 
 > [!IMPORTANT]
-> **Upload is opt-in per agent and off by default.** A production turn is your end user's message and the answer you gave them, so nothing is sent until an org admin switches capture on for that agent, in the **Permissions** step of adding it (**Add → An agent → Connect it with our SDK**). There are two switches, its conversations and their message text, and training from the agent needs both. Until then turns accumulate as trajectory directories under the `trajectory_root` you named and go nowhere.
+> **Upload is opt-in per agent and off by default.** A production turn is your end user's message and the answer you gave them, so nothing is sent until an org admin switches capture on for that agent, in the **Permissions** step of adding it (**New mission → An agent → Connect it with our SDK**). There are two switches, its conversations and their message text, and training from the agent needs both. Until then turns accumulate as trajectory directories under the `trajectory_root` you named and go nowhere.
 >
 > **No restart needed to enable it.** While the answer is no, the SDK re-reads the verdict on its flush cadence and starts uploading as soon as capture is switched on. `px.may_upload` is the live answer; `px.upload_refusal` is the sentence explaining a `False`.
 
@@ -321,7 +321,7 @@ If your agent already records its model calls as OpenTelemetry spans — the [Ge
 POST $PERCEPTEYE_CONTROL_PLANE_URL/agents/<agent_id>/otlp/v1/traces
 ```
 
-In the dashboard, add the agent with **Add → An agent → It sends OpenTelemetry**: one click names it, gives it its key and registers it, then its **Permissions** step opens, then its full endpoint is shown, ready to copy (and again on the agent's own page, its **Agent** tab). With the OpenTelemetry SDK's exporter:
+In the dashboard, add the agent with **New mission → An agent → It sends OpenTelemetry**: one click names it, gives it its key and registers it, then its **Permissions** step opens, then its full endpoint is shown, ready to copy (and again on the agent's own page, its **Agent** tab). With the OpenTelemetry SDK's exporter:
 
 ```bash
 export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="$PERCEPTEYE_CONTROL_PLANE_URL/agents/support-agent/otlp/v1/traces"
@@ -343,7 +343,7 @@ service:
       exporters: [otlphttp/percepteye]
 ```
 
-**Auth** is the agent's own key (`pefw_…`), sent as a Bearer token: the key you get when you add the agent in the dashboard (**Add → An agent**). A key bound to a different agent is refused.
+**Auth** is the agent's own key (`pefw_…`), sent as a Bearer token: the key you get when you add the agent in the dashboard (**New mission → An agent**). A key bound to a different agent is refused.
 
 **Consent comes first, and nothing is read without it.** The agent has to be known to the control plane, and both capture switches have to be on in the **Permissions** step of adding it: its conversations, and their message text. Until both are on, every push is answered `403` and nothing in it is read. The model-content tier is granted only while exactly one active Product declares the agent, as for the SDK. The dashboard's **It sends OpenTelemetry** path registers the agent for you; the push endpoint never registers an agent itself. Through the API instead, an agent that never runs this SDK registers once, so that its Permissions can be switched on:
 

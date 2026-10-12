@@ -272,7 +272,7 @@ the isolated command lifecycle.
 are uploaded — subject to one gate and one cadence.
 
 The gate is **per-agent capture consent, and it is off by default**: a production
-turn carries your end users' own messages, so nothing is sent until an org admin switches capture on for that agent, in the **Permissions** step of adding it (**Add → An agent → Connect it with our SDK**). There are two switches, its conversations and their message text, and training from the agent needs both. The registration response tells the SDK whether
+turn carries your end users' own messages, so nothing is sent until an org admin switches capture on for that agent, in the **Permissions** step of adding it (**New mission → An agent → Connect it with our SDK**). There are two switches, its conversations and their message text, and training from the agent needs both. The registration response tells the SDK whether
 it may, which is why it never finds out by uploading. `px.may_upload` is that
 answer and `px.upload_refusal` is the sentence explaining a `False`.
 
