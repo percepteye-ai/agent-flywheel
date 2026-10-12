@@ -351,8 +351,10 @@ service:
 curl -X POST "$PERCEPTEYE_CONTROL_PLANE_URL/agents" \
   -H "Authorization: Bearer $PERCEPTEYE_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"agent_id": "support-agent", "mode": "production"}'
+  -d '{"agent_id": "support-agent", "mode": "production", "discovered_agent": null}'
 ```
+
+`"discovered_agent": null` records that the agent describes nothing about itself, as a production process does, rather than that you switched that description off.
 
 **What the endpoint takes and answers**, per the OTLP/HTTP specification:
 
