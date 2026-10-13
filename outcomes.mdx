@@ -1,0 +1,290 @@
+---
+title: "Outcomes"
+description: "The tri-state outcome contract — ok, failed, unknown — and why unknown is never rounded up, how status_code and entity_ids work, and what record_tool_call records."
+---
+
+## Outcomes: ok, failed, unknown
+
+Rewards in agent reinforcement learning are usually computed from transcripts, but transcripts can lie about tool outcomes. Two shapes cause most of the error:
+
+- A tool swallows its own exception. For example, a LangChain tool with `handle_tool_error=True` catches the exception and returns a string that looks like a normal result.
+- An API returns a permission denial with HTTP status `200`. The response body explains the refusal, but the HTTP status says the request succeeded.
+
+The SDK adds a third outcome, `unknown`, and makes the dangerous shape unconstructible. The contract refuses records that claim an observed status when no outcome was actually observed.
+
+## The three values
+
+An outcome records what the agent runtime observed, not what a status code or response body might suggest after the fact.
+
+| value | what it asserts | status_code | on the wire, server-side |
+| --- | --- | --- | --- |
+| `ok` | An observed success | Integer or `null` | `true` |
+| `failed` | An observed failure | Integer or `null` | `false` |
+| `unknown` | Nothing exposed a verdict | Forced to `null` | `null`, so outcome-dependent verifiers abstain |
+
+`Outcome` is `Literal["ok", "failed", "unknown"]`. The contract has no fourth value.
+
+A status is not an outcome. `status_code` is meaningful only when the runtime observed a verdict. An HTTP `200` can accompany `failed` when the response is an application-level permission denial, and an HTTP error can accompany `ok` when the tool observed a successful operation through another signal.
+
+## Both fields are required, and neither has a default
+
+`outcome` and `status_code` are non-defaultable on `ToolCallOutcome`. The `record_tool_call` function accepts both as keyword-only and requires both values. You cannot record half an outcome.
+
+Omitting either field raises `TypeError`:
+
+```python
+from percepteye import ToolCallOutcome
+
+ToolCallOutcome(name="charge_card", arguments={})
+# TypeError: missing required arguments: outcome and status_code
+```
+
+A permission denial returned with HTTP `200` records both observations:
+
+```python
+record_tool_call(
+    "charge_card",
+    {"amount": 4200},
+    outcome="failed",
+    status_code=200,
+    error="app_auth_error",
+)
+```
+
+The record says that the call failed and that the service returned status `200`. The status does not override the observed failure, and the failure does not erase the observed status.
+
+## unknown is legal, and it is never rounded up
+
+Use `unknown` when nothing exposed a real verdict. It is a first-class, supported, and expected outcome.
+
+The SDK never promotes `unknown` to `ok` during capture, trajectory processing, or serialization. An agent with no tool instrumentation therefore reports an honest `unknown` for every call instead of claiming success from an unverified transcript.
+
+A zero-instrumentation result can contain records like this:
+
+```json
+{
+  "tool_name": "create_issue",
+  "outcome": "unknown",
+  "status_code": null
+}
+```
+
+`unknown` remains `unknown` on the wire. Downstream verifiers can abstain instead of treating an unobserved call as a successful tool execution.
+
+## unknown discards status from the field and from the body
+
+Setting `status_code=None` is not enough. A scorer could recover a status from the tool result and incorrectly treat an unobserved call as landed.
+
+When `outcome == "unknown"`, `__post_init__` forces `status_code=None` and scrubs status information from `output`. The scrub applies to nested values, JSON strings, and status-like text.
+
+```python
+from percepteye import ToolCallOutcome
+
+tool_call = ToolCallOutcome(
+    name="POST /issue",
+    arguments={},
+    outcome="unknown",
+    status_code=200,
+    output={
+        "status_code": 201,
+        "id": "10001",
+        "note": "created with HTTP 201",
+    },
+)
+
+print(tool_call.status_code)
+# None
+
+print(tool_call.output)
+# {"id": "10001", "note": "created with"}
+```
+
+The identity remains available through `entity_ids` when it can be extracted safely. The response body itself cannot carry a hidden status that changes an unknown call into an observed success.
+
+<Expandable title="What the scrub actually removes">
+
+`_scrub_status` runs only when `outcome == "unknown"`.
+
+| input | treatment |
+| --- | --- |
+| Dictionary | Drops keys named `status_code`, `status`, `http_status`, `code`, and `statusCode`, then recurses into remaining values |
+| String that parses as JSON | Parses the string, scrubs the parsed value, and serializes it again |
+| String that does not parse as JSON | Removes text matching `\bHTTP\s*\d{3}\b` |
+| List | Recurses into each element |
+
+The schema also enforces that `outcome: "unknown"` implies `status_code: {"type": "null"}`.
+
+</Expandable>
+
+## What unknown costs, and what it does not
+
+`unknown` lowers the grade, but it does not exclude the rollout. It is not an exclusion reason.
+
+The automatic `substrate_unavailable` exclusion fires only when every call is an observed failure and at least one call was made. Because `unknown` is not failure, a rollout containing unknown calls does not meet that condition. Partial failure is also left alone.
+
+Use `Trajectory.unknown_count()` to measure the number of unknown calls locally:
+
+```python
+unknown_calls = trajectory.unknown_count()
+```
+
+The count tells you how much of the trajectory lacks an observed verdict. It does not convert those calls into failures or remove the rollout.
+
+## record_tool_call
+
+`record_tool_call` records one observed tool call for the active rollout:
+
+```python
+def record_tool_call(
+    name,
+    arguments=None,
+    *,
+    outcome,
+    status_code,
+    output=None,
+    error=None,
+    error_class=None,
+    latency_ms=None,
+    agent_name=None,
+    tool_call_id=None,
+    entity_ids=None,
+) -> None
+```
+
+| argument | notes |
+| --- | --- |
+| `name` | Name of the tool or operation. |
+| `arguments` | Arguments supplied to the tool. Defaults to `None`. |
+| `outcome` | Required keyword-only value: `ok`, `failed`, or `unknown`. |
+| `status_code` | Required keyword-only status observation. Use `None` when no status was observed. |
+| `output` | Tool output, which is scrubbed for status information when the outcome is `unknown`. |
+| `error` | Free-text error description. |
+| `error_class` | Exception class name or other error classification. |
+| `latency_ms` | Observed tool-call latency in milliseconds. |
+| `agent_name` | Agent responsible for the call in a multi-agent system. `None` means unattributed. |
+| `tool_call_id` | Identifier assigned by the model. Use it to join the record back to the completion. |
+| `entity_ids` | Identifiers for entities produced by a write operation. |
+
+Outside a rollout, `record_tool_call` is a no-op.
+
+<Callout kind="warning">
+
+If you record a call with no destination, the SDK emits one `RuntimeWarning` and discards the outcome. The warning is not emitted repeatedly for every discarded call.
+
+</Callout>
+
+Records are written as one JSON object per line to:
+
+```text
+$PERCEPTEYE_TRAJECTORY_DIR/tool_calls.jsonl
+```
+
+The SDK uses a JSON Lines file rather than an in-memory list because subprocess isolation can spawn a child process for each rollout. In-memory state does not cross that process boundary.
+
+## tool_calls: None is not []
+
+The SDK preserves the difference between not reporting tool calls and observing zero tool calls.
+
+| value | meaning |
+| --- | --- |
+| `None` | The agent did not report tool calls. |
+| `[]` | The agent observed zero tool calls. This is a positive claim. |
+
+`RolloutOutput.tool_calls` defaults to `None`. If the trajectory has no `tool_calls.jsonl`, `Trajectory.read()` preserves `None` instead of converting it to an empty list.
+
+A truncated final JSON line is counted in `tool_calls_omitted_count`. The SDK does not silently drop the fact that a record was omitted.
+
+## entity_ids: which entity the write produced
+
+A tool outcome says whether a call worked. It cannot say whether the resulting change survived or which entity the write produced.
+
+The trajectory carries entity identity, never the entity body. Pass `entity_ids=` when you know the identity of the created or modified entity:
+
+```python
+record_tool_call(
+    "POST /rest/api/2/issue",
+    {"summary": "Update deployment checklist"},
+    outcome="unknown",
+    status_code=None,
+    output={
+        "id": "10001",
+        "key": "ENG-7",
+        "status_code": 201,
+    },
+    entity_ids={
+        "id": "10001",
+        "key": "ENG-7",
+    },
+)
+```
+
+The resulting JSON preserves the identity while removing the status from the output:
+
+```json
+{
+  "name": "POST /rest/api/2/issue",
+  "outcome": "unknown",
+  "status_code": null,
+  "entity_ids": {
+    "id": "10001",
+    "key": "ENG-7"
+  },
+  "output": {
+    "id": "10001",
+    "key": "ENG-7"
+  }
+}
+```
+
+### Which fields count
+
+The contract accepts high-entropy fields that usually identify one entity and rejects low-entropy fields that different entities can share.
+
+| accepted fields | refused fields |
+| --- | --- |
+| `id` | `name` |
+| `key` | `number` |
+| `uuid` | `title` |
+| `sid` | `label` |
+| `gid` | `summary` |
+|  | `description` |
+
+Using a refused field raises `ContractViolation`. For example, a human-readable title is not sufficient evidence of entity identity because multiple entities can have the same title.
+
+### How extraction decides
+
+When the SDK extracts identities from output, it applies bounded and conservative rules:
+
+| input or condition | extraction rule |
+| --- | --- |
+| JSON string body | Parse the string, then walk the resulting value. |
+| Prose | Return `{}`. An identifier embedded in free text is a guess. |
+| Nesting depth | Bound traversal at depth `3`. |
+| Two matches at different depths | Keep the shallowest match. |
+| Two matches at the same depth with different values | Drop the ambiguous identity. |
+| `true`, `null`, an empty string, or whitespace-only text | Never treat the value as an identity. |
+| Anything unreadable | Return `{}`. |
+
+Extraction is intentionally narrower than general response parsing. The SDK records an identity only when the field name, value, and location provide enough evidence to identify one entity.
+
+### Identity is recorded even when the outcome is unknown
+
+`entity_ids` is not scrubbed for `unknown`, unlike `output`. An entity identity can provide the independent evidence needed to turn an honest unknown into an honest observed success later.
+
+<Callout kind="info">
+
+The absence of an outcome is abstention, not failure. Preserve `entity_ids` because it names the entity that another observer may later verify.
+
+</Callout>
+
+## Where outcomes come from when you write nothing
+
+Adapters map runtime signals to the tri-state contract. Each adapter reports `unknown` when its input does not expose a trustworthy verdict instead of guessing from an incomplete transcript.
+
+| surface | mapping |
+| --- | --- |
+| [LangChain and LangGraph](/python-agents) | `ok` when `ToolMessage(status="success")`; `failed` when the tool raises or reports `status="error"`; `unknown` otherwise |
+| [Google ADK](/python-agents) | `failed` when the tool raises or returns `{"error": ...}`; `unknown` otherwise |
+| [Command-output adapters](/cli) | Generic `StreamFormat` preserves all three states; Prime maps `result.details.status="error"` to `failed` |
+
+These mappings keep adapter-specific behavior inside the adapter boundary. The trajectory contract receives an observed success, an observed failure, or an explicit absence of evidence.
