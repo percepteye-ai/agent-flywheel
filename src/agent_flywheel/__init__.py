@@ -61,6 +61,13 @@ from .contract import (
     RulebookReceipt,
     ToolCallOutcome,
 )
+from .control_plane import (
+    DEFAULT_CONTROL_PLANE_URL as DEFAULT_CONTROL_PLANE_URL,
+)
+from .control_plane import (
+    ENV_CONTROL_PLANE_URL as ENV_CONTROL_PLANE_URL,
+)
+from .control_plane import resolve_control_plane_url
 from .declaration import Describe
 from .entrypoint import TASK, InputShape, resolve_entrypoint
 from .errors import (
@@ -199,7 +206,9 @@ __all__ = [
 #: rollout child along with everything else PERCEPTEYE_, which is correct: it
 #: configures the process that DONATES capacity, and a child does not call
 #: serve().
-ENV_CONTROL_PLANE_URL = "PERCEPTEYE_CONTROL_PLANE_URL"
+#:
+#: ENV_CONTROL_PLANE_URL is imported from ``control_plane``, where it is
+#: defined beside its default and the one rule that resolves it.
 ENV_API_KEY = "PERCEPTEYE_API_KEY"
 ENV_MODE = "PERCEPTEYE_AGENT_MODE"
 ENV_ROLLOUT_ID = "PERCEPTEYE_ROLLOUT_ID"      # set by us, for the child
@@ -344,9 +353,9 @@ def current_policy(
     ``withdrawn: true`` takes back a policy it served, so go back to your own
     configuration. :func:`policy_source` tells the two apart for you.
     """
-    url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL) or ""
+    url = resolve_control_plane_url(control_plane_url)
     key = api_key or os.environ.get(ENV_API_KEY) or ""
-    cause = missing_credentials_cause(url, key)
+    cause = missing_credentials_cause(key)
     if cause:
         _log.warning(
             "agent-flywheel: not reading the served policy for agent_id=%r: %s, so "
@@ -415,9 +424,9 @@ def current_prompt(
     the same bundles for the same stated reason. See
     :mod:`agent_flywheel.prompt`.
     """
-    url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL) or ""
+    url = resolve_control_plane_url(control_plane_url)
     key = api_key or os.environ.get(ENV_API_KEY) or ""
-    cause = missing_credentials_cause(url, key)
+    cause = missing_credentials_cause(key)
     if cause:
         # SAID, because `prompt_decision({})` blames the control plane for
         # serving no approved prompt -- true of the empty answer and wrong
@@ -467,8 +476,9 @@ def endpoint_kwargs(
     other source; neither :func:`apply_current_policy` nor
     :func:`policy_source` ever passes one. ``flywheel_key=`` and
     ``control_plane_url=`` are the agent's flywheel key and the control plane
-    it authenticates to (``PERCEPTEYE_API_KEY`` and
-    ``PERCEPTEYE_CONTROL_PLANE_URL`` when not given): the flywheel key goes to
+    it authenticates to (``PERCEPTEYE_API_KEY``, and the URL every other
+    reader resolves -- :func:`resolve_control_plane_url`, so the variable and
+    then the default -- when not given): the flywheel key goes to
     an endpoint only when the control plane names ``PERCEPTEYE_API_KEY`` for
     it AND it sits at the control plane's own origin -- see
     :func:`_endpoint_credential`.
@@ -595,7 +605,11 @@ def _endpoint_credential(
             return str(os.environ[key_env]), ""
         return "", (f"{key_env}, the variable the control plane names for it, "
                     "is not set")
-    home = _origin(control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL))
+    # WHERE THE KEY ALREADY GOES is the transport's own answer, default
+    # included: an agent on the default control plane sends its key there on
+    # every call, so its gateway URL there is the key's home too. Reading the
+    # variable alone refused the gateway to every agent on the default.
+    home = _origin(resolve_control_plane_url(control_plane_url))
     there = _origin(base_url)
     if not home or there != home:
         return "", (
@@ -1084,11 +1098,7 @@ def serve(
     # would otherwise surface as a rulebook that never registered.
     rulebook = declared_rulebook(rules)
 
-    url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL)
-    if not url:
-        raise ConfigurationError(
-            f"control_plane_url is required (or set {ENV_CONTROL_PLANE_URL})"
-        )
+    url = resolve_control_plane_url(control_plane_url)
     key = api_key or os.environ.get(ENV_API_KEY)
     if not key:
         raise ConfigurationError(f"an API key is required (or set {ENV_API_KEY})")

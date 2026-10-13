@@ -15,23 +15,22 @@ from .errors import ConfigurationError
 
 
 def _contribution_line() -> str:
-    """Whether this install will claim rollouts, and if not WHICH variable.
+    """Whether this install will claim rollouts, where, and if not why.
 
-    Both variables are required and neither has a default, so the message that
-    named only ``PERCEPTEYE_API_KEY`` was wrong for the customer who had
-    already exported it: they were told to set the thing they had set, while
-    the thing that was actually missing went unnamed. Asked through the same
-    predicate the library asks, so the CLI and the SDK cannot disagree about
-    what "configured" means.
+    The key is the one thing that can be missing: the control-plane URL
+    resolves through the one rule the library uses (a default when unset), and
+    the line names the URL it resolved to, because a default a customer cannot
+    see is a default they cannot tell apart from a control plane that is down.
+    Asked through the same predicate the library asks, so the CLI and the SDK
+    cannot disagree about what "configured" means.
     """
+    from .control_plane import resolve_control_plane_url
     from .policy import missing_credentials_cause
 
-    cause = missing_credentials_cause(
-        os.environ.get("PERCEPTEYE_CONTROL_PLANE_URL"),
-        os.environ.get("PERCEPTEYE_API_KEY"),
-    )
+    url = resolve_control_plane_url()
+    cause = missing_credentials_cause(os.environ.get("PERCEPTEYE_API_KEY"))
     if cause is None:
-        return "rollouts  claimed — the control plane URL and key are both set"
+        return f"rollouts  claimed — from {url}"
     return f"rollouts  NOT claimed — {cause}"
 
 

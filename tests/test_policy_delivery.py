@@ -440,11 +440,34 @@ def test_the_gateway_at_the_same_origin_spelled_differently_gets_the_key(
     assert fw.endpoint_kwargs(body)["api_key"] == flywheel_key
 
 
-def test_no_control_plane_address_no_flywheel_key(flywheel_key, monkeypatch):
-    """A caller that cannot say where the key goes cannot have it sent
-    anywhere, as in Node."""
+def test_the_default_control_plane_is_where_the_key_goes(flywheel_key, monkeypatch):
+    """With no control-plane URL given, the key's home is the URL every reader
+    resolves, the default included, as the Node plugin's resolved
+    ``config.controlPlaneUrl`` is: the transport sends the key there on every
+    call, so the gateway URL there gets it. Reading the variable alone left an
+    agent on the default with no home, and refused it every model we serve."""
+    from urllib.parse import urlsplit
+
     monkeypatch.delenv("PERCEPTEYE_CONTROL_PLANE_URL")
-    assert fw.endpoint_kwargs(_answer("policy_current_gateway.json")) == {}
+    body = _answer("policy_current_gateway.json")
+    assert (urlsplit(body["endpoint"]["base_url"]).netloc
+            == urlsplit(fw.DEFAULT_CONTROL_PLANE_URL).netloc)
+    assert fw.endpoint_kwargs(body)["api_key"] == flywheel_key
+
+    # And a handle built with no URL asks the same resolver.
+    src = fw.PolicySource(agent_id="support-agent", api_key=flywheel_key,
+                          _fetch=lambda: body)
+    assert src.current().api_key == flywheel_key
+
+
+def test_the_default_control_plane_does_not_open_another_address(
+        flywheel_key, monkeypatch):
+    """The default is a home, not a wildcard: an endpoint named for the key at
+    any other address is still refused."""
+    monkeypatch.delenv("PERCEPTEYE_CONTROL_PLANE_URL")
+    body = _answer("policy_current_gateway.json")
+    body["endpoint"]["base_url"] = "http://10.0.0.7:8000/v1"
+    assert fw.endpoint_kwargs(body) == {}
 
 
 def test_the_callers_flywheel_key_is_never_a_provider_key(monkeypatch, flywheel_key):

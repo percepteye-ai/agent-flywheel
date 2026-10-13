@@ -101,8 +101,13 @@ __all__ = [
 ]
 
 
-def missing_credentials_cause(url: str | None, key: str | None) -> str | None:
-    """WHICH control-plane variable is unset. ``None`` when neither is.
+def missing_credentials_cause(key: str | None) -> str | None:
+    """Why the control plane cannot be asked, or ``None`` when it can.
+
+    Only the key can be missing. The URL has a default
+    (:func:`agent_flywheel.control_plane.resolve_control_plane_url`, the Node
+    SDK's rule), so it is resolved, never refused; this used to name an unset
+    ``PERCEPTEYE_CONTROL_PLANE_URL`` too, because Python alone had no default.
 
     ONE answer to a question asked wherever the control plane is dialled:
     ``current_policy``, ``current_prompt`` (and ``apply_current_policy``
@@ -120,12 +125,8 @@ def missing_credentials_cause(url: str | None, key: str | None) -> str | None:
     could not do and says so itself. A refusal that names the wrong subsystem
     costs more than one that says nothing.
     """
-    from . import ENV_API_KEY, ENV_CONTROL_PLANE_URL
+    from . import ENV_API_KEY
 
-    if not url and not key:
-        return f"neither {ENV_CONTROL_PLANE_URL} nor {ENV_API_KEY} is set"
-    if not url:
-        return f"{ENV_CONTROL_PLANE_URL} is not set"
     if not key:
         return f"{ENV_API_KEY} is not set"
     return None
@@ -551,13 +552,14 @@ class PolicySource:
         if self._client is None:
             import os
 
-            from . import ENV_API_KEY, ENV_CONTROL_PLANE_URL
+            from . import ENV_API_KEY
             from ._http import ControlPlaneClient
+            from .control_plane import resolve_control_plane_url
             from .errors import ConfigurationError
 
-            url = self._url_arg or os.environ.get(ENV_CONTROL_PLANE_URL) or ""
+            url = resolve_control_plane_url(self._url_arg)
             key = self._api_key_arg or os.environ.get(ENV_API_KEY) or ""
-            cause = missing_credentials_cause(url, key)
+            cause = missing_credentials_cause(key)
             if cause:
                 if not self._warned_no_credentials:
                     self._warned_no_credentials = True

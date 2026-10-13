@@ -359,20 +359,22 @@ def _contributing():
     day-one promise. A marketplace install with no SDK at all lands in the same
     branch through the ImportError.
     """
-    # PERCEPTEYE_CONTROL_PLANE_URL, and nothing else. This used to read an
-    # un-prefixed ``CONTROL_PLANE_ENV_URL`` FIRST -- a name no library module
-    # in this package reads, and which the Node SDK ranks LAST -- so the same
-    # two variables sent the goose recorder and the SDK in one process to two
-    # different control planes, with nothing logged either way. One spelling.
-    url = os.environ.get("PERCEPTEYE_CONTROL_PLANE_URL")
     key = os.environ.get("PERCEPTEYE_API_KEY")
-    if not url or not key:
+    if not key:
         return None
     try:
         from agent_flywheel._http import ControlPlaneClient
+        from agent_flywheel.control_plane import resolve_control_plane_url
         from agent_flywheel.transport import AttachTransport
     except Exception:
         return None
+    # THE LIBRARY'S RULE, not a second reading of the variable. This used to
+    # read an un-prefixed ``CONTROL_PLANE_ENV_URL`` FIRST -- a name no library
+    # module reads, and which the Node SDK ranked LAST -- and then required
+    # PERCEPTEYE_CONTROL_PLANE_URL while the SDKs default it, so the recorder
+    # and the SDK in one process could disagree about where the control plane
+    # is. Imported here, on the once-per-session path, never per tool call.
+    url = resolve_control_plane_url()
     agent = os.environ.get("PERCEPTEYE_AGENT_ID") or "goose"
     client = ControlPlaneClient(base_url=url, api_key=key)
     return AttachTransport(client, agent_id=agent), client

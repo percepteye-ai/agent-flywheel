@@ -218,6 +218,11 @@ def _session_start(root, cfg, env_extra):
                 "PERCEPTEYE_CAPTURE"):
         env.pop(var, None)
     env["PERCEPTEYE_API_KEY"] = "pefw_test"
+    # The control-plane URL defaults to production now (the Node SDK's rule),
+    # and SessionStart claims a practice task with a key set: point it at a
+    # port nothing listens on, so the subprocess never reaches the live
+    # service. The in-process guard in conftest cannot follow it here.
+    env["PERCEPTEYE_CONTROL_PLANE_URL"] = "http://127.0.0.1:9/api/flywheel/v1"
     env.update(env_extra)
     proc = subprocess.run(
         [sys.executable, str(RECORDER)],
