@@ -1637,7 +1637,20 @@ def attach(
         raise ConfigurationError(
             "attach() requires trajectory_root -- the directory captured turns "
             "accumulate in. It is not defaulted because nothing deletes them "
-            "yet, and where a customer's data lands is not ours to assume."
+            "unless you ask (retention_turns=, prune()), and where a "
+            "customer's data lands is not ours to assume."
+        )
+    # The Node SDK's `retentionTurns` accepts the same values and drops any
+    # other with the same sentence (`capture.js:retentionTurnsFrom`); here a
+    # wrong value raises, before capture starts, as every attach() argument
+    # does. A bool is not a count, though Python calls it an int.
+    if retention_turns is not None and not (
+            isinstance(retention_turns, int)
+            and not isinstance(retention_turns, bool)
+            and retention_turns >= 0):
+        raise ConfigurationError(
+            "retention_turns must be a whole number of turns, 0 or more, "
+            f"not {retention_turns!r}"
         )
     normalized_components = normalize_attested_components(
         attested_execution_components
