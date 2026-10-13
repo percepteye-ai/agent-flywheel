@@ -19,9 +19,11 @@ def _load_example(monkeypatch, tmp_path, **environment):
         "PERCEPTEYE_CONTEXT_WINDOW": "65536",
         "PERCEPTEYE_MAX_TOKENS": "4096",
     }
-    # serve_prime deliberately makes these values explicit in os.environ for
-    # its future children. Register every key with monkeypatch first so an
-    # import in this test cannot leak those mutations into a later test.
+    # serve_prime reads these at import. Each is set through monkeypatch -- to
+    # this test's value, the developer's own, or the example's default -- so
+    # what the import saw is undone after the test and cannot leak into a
+    # later one. PRIME_WORKSPACE above is set the same way, for the same
+    # reason, and because its default is in the developer's real home.
     for name, default in defaults.items():
         monkeypatch.setenv(name, environment.get(name, os.environ.get(name, default)))
     for name, value in environment.items():
