@@ -8,7 +8,7 @@ repository takes copies of both.
 |:--|:--|:--|
 | repository | `percepteye-ai/agent-flywheel` | `percepteye-ai/agent-flywheel-node` |
 | registry | PyPI [`agent-flywheel`](https://pypi.org/project/agent-flywheel/) — published | npm [`@percepteye/agent-flywheel`](https://www.npmjs.com/package/@percepteye/agent-flywheel), owned by the `percepteye` npm organization |
-| version lives in | `src/agent_flywheel/_version.py`; `pyproject.toml`, the goose manifest and `uv.lock` repeat it, `CHANGELOG.md` opens with its entry, and `tests/test_one_version.py` holds them all together | `package.json`; the User-Agent derives from it, and `test/version.test.js` holds `openclaw.plugin.json` (version *and* description) equal to it |
+| version lives in | `src/agent_flywheel/_version.py`; `pyproject.toml` and the goose manifest repeat it, and `tests/test_one_version.py` holds all three together | `package.json`; the User-Agent derives from it, and `test/version.test.js` holds `openclaw.plugin.json` (version *and* description) equal to it |
 | publishes through | `.github/workflows/workflow.yml` on a `v*` tag, via PyPI trusted publishing. Works: 0.1.0, 0.1.1 and 0.1.2 went out this way | `.github/workflows/publish.yml` on a `v*` tag, via npm trusted publishing: the rehearsal's token exchange has succeeded since 2026-09-15 ([§3](#3-node-release-npm)). 0.1.0 and 0.1.2 went out by hand ([§3b](#3b-publishing-to-npm-by-hand)), the fallback if a tag is ever refused |
 
 Neither repository is public yet. That is why the PyPI page shows the figures'
@@ -31,19 +31,14 @@ Follow this in order; each step links to the detail. When something fails,
    version (`pip install "agent-flywheel>=X.Y.Z"`), the release is urgent the
    moment that deploy lands: until then the page's first command fails.
 2. **Bump both versions, one number for both.** Python: `_version.py`,
-   `pyproject.toml` and the goose manifest, then `uv lock`, and add the
-   version's entry at the top of `CHANGELOG.md`. Node: `package.json`
+   `pyproject.toml` and the goose manifest, then `uv lock`. Node: `package.json`
    and `openclaw.plugin.json`. Then update the published test counts: three
    places in the Python README plus `website/docs/python.md` and `index.md`, and
    in the Node README the badge, the comment above it, and the Develop line.
 3. **Run §1 in both repositories,** with the Node SDK checked out and named
    through `PERCEPTEYE_NODE_SDK`, so the Python parity tests run instead of
-   skipping (`N passed, 0 skipped`), and the control plane's checkout named
-   through `PERCEPTEYE_CONTROL_PLANE_CHECKOUT`, so the shared-fixture test
-   compares the control plane's copy byte for byte. Unnamed, that test still
-   passes, having checked only the fixtures' digests, as every CI run does.
-   CI's `test-full` and `node-plugins` jobs check the Node half once the
-   deploy key is in place ([§5](#5-when-a-publish-fails): `NODE_SDK_DEPLOY_KEY`).
+   skipping: `N passed, 0 skipped`. CI cannot vouch for this part yet
+   ([§5](#5-when-a-publish-fails): `NODE_SDK_READ_TOKEN`).
 4. **Merge the Node PR first, then the Python one.** The Python parity tests
    import the Node repository's `main`.
 5. **Rehearse npm's authentication before tagging.** In the Node repository,
@@ -63,10 +58,7 @@ Follow this in order; each step links to the detail. When something fails,
 
 **Python**, from a checkout with every extra installed and the Node repository
 checked out beside it (the parity tests find it there, or through
-`PERCEPTEYE_NODE_SDK`), and `PERCEPTEYE_CONTROL_PLANE_CHECKOUT` naming the
-control plane's checkout, whose copy of the shared `/policy/current` fixtures
-`tests/cross_repo/test_fixture_parity.py` then compares byte for byte (unnamed,
-it checks only their digests, and passes):
+`PERCEPTEYE_NODE_SDK`):
 
 ```bash
 .venv/bin/pytest -q                        # N passed, 0 skipped
@@ -111,8 +103,7 @@ this repository's `test-full` job checks out the Node repository's `main`.
 ## 2. Python release (PyPI)
 
 1. **Bump the version** in `src/agent_flywheel/_version.py`, `pyproject.toml`
-   and `src/agent_flywheel/hosts/goose/plugin.json`, then run `uv lock`, and
-   add the version's entry at the top of `CHANGELOG.md`.
+   and `src/agent_flywheel/hosts/goose/plugin.json`, then run `uv lock`.
    `tests/test_one_version.py` fails if one is missed.
 2. **If tests were added or removed**, update the published suite size: three
    places in the README, plus `website/docs/python.md` and
@@ -178,14 +169,8 @@ this repository's `test-full` job checks out the Node repository's `main`.
   payments fail or its spending limit is reached, jobs are "not started" and
   fail in seconds with no logs. The reason is only in the run's annotation.
   macOS jobs bill at 10× on private repositories.
-- **CI reads the Node repository with a deploy key.** The `test-full` and
-  `node-plugins` jobs check out the private Node repository over SSH with the
-  secret `NODE_SDK_DEPLOY_KEY`: the private half of a key whose public half is
-  a read-only deploy key on `agent-flywheel-node` alone. A deploy key never
-  expires and reaches one repository, unlike the personal token the jobs used
-  to need (`NODE_SDK_READ_TOKEN`, never set, so those jobs had never run). To
-  rotate it, add a new key and replace the secret
-  ([§5](#5-when-a-publish-fails)).
+- **CI needs `NODE_SDK_READ_TOKEN`.** The `test-full` and `node-plugins` jobs
+  check out the private Node repository and stop at checkout without it.
 - **A version bump is a new execution identity.** The `sdk` string is part of
   the hashed descriptor, so every agent's `execution_sha256` changes on every
   release.
@@ -414,11 +399,10 @@ gh repo edit percepteye-ai/agent-flywheel-node --visibility public --accept-visi
   it is now safe to flip".
 - **Restore the `ci` badge,** which is kept verbatim in the comment above the
   badges.
-- **Drop the deploy key if the Node repository is public too.** The
-  cross-repository checkouts in `ci.yml` no longer need `ssh-key:`, so remove
-  those lines, delete the `NODE_SDK_DEPLOY_KEY` secret here and the deploy key
-  on the Node repository. Pull requests from forks never receive secrets, so
-  this is also what lets outside contributors' PRs run `test-full`.
+- **Drop `NODE_SDK_READ_TOKEN` if the Node repository is public too.** The
+  cross-repository checkouts in `ci.yml` no longer need `token:`, so remove
+  them and delete the secret. Pull requests from forks never receive secrets,
+  so this is also what lets outside contributors' PRs run `test-full`.
 - **Release a new patch version.** The corrected images and links reach PyPI
   only with a new version, because descriptions are frozen per release.
 
@@ -466,4 +450,4 @@ otherwise.
 | `npm view` or `npm install` of a version answers 404 or "No matching version" right after `+ @percepteye/agent-flywheel@X.Y.Z` | "Your package is being processed and may take a few minutes to become available" | Poll the version's registry URL until it answers 200, then install with `--prefer-online` ([§3](#3-node-release-npm) step 6) |
 | `dyld: Library not loaded: …/libsimdjson…` | Homebrew's node 25.4.0 is broken on this Mac | `PATH=/opt/homebrew/opt/node@24/bin:$PATH` |
 | The `Set up job` step's GITHUB_TOKEN Permissions list no `IdToken`, so OIDC "must" be missing | Not evidence: GitHub never lists `id-token` there. The PyPI job that published 0.1.2 over OIDC lists only `Metadata: read` | Diagnose from the `oidc` log line instead |
-| Python CI: `test-full` and `node-plugins` fail at `Run actions/checkout@v4` | The private Node repository could not be read: the `NODE_SDK_DEPLOY_KEY` secret is missing, or its public half is not a deploy key on `agent-flywheel-node` | Create the pair and register both halves: `ssh-keygen -t ed25519 -N "" -C "agent-flywheel CI reads agent-flywheel-node" -f /tmp/node_sdk_key`, then `gh repo deploy-key add /tmp/node_sdk_key.pub --repo percepteye-ai/agent-flywheel-node --title "agent-flywheel CI (read-only)"` (read-only unless `--allow-write`), then `gh secret set NODE_SDK_DEPLOY_KEY --repo percepteye-ai/agent-flywheel < /tmp/node_sdk_key`, then delete both files. Until then, run their suite locally with the Node SDK named: `PERCEPTEYE_NODE_SDK=<node checkout> .venv/bin/pytest -q` must print `0 skipped` |
+| Python CI: `test-full` and `node-plugins` fail at `Run actions/checkout@v4` | The `NODE_SDK_READ_TOKEN` secret is missing, so the private Node repository cannot be checked out and those jobs never reach their tests | Add the secret (or a read-only deploy key, or make both repositories public: [§4c](#4c-then-one-pr-per-repository)). Until then, run their suite locally with the Node SDK named: `PERCEPTEYE_NODE_SDK=<node checkout> .venv/bin/pytest -q` must print `0 skipped` |

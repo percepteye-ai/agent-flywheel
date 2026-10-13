@@ -9,4 +9,4 @@ have announced itself to the control plane as the previous one.
 tag check, as do the goose manifest and ``uv.lock``, and ``CHANGELOG.md`` opens
 with its entry; ``tests/test_one_version.py`` holds them all together.
 """
-__version__ = "0.2.0"
+__version__ = "0.1.3"

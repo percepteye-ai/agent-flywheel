@@ -5,10 +5,19 @@ What changed in `agent-flywheel`, by release. The Node SDK,
 ships the same version number in the same release. Commit hashes are this
 repository's.
 
-## 0.2.0
+## 0.1.3
 
 ### Added
 
+- **The control-plane URL has a default**, as it already had in the Node SDK:
+  the `control_plane_url=` given in code, then `PERCEPTEYE_CONTROL_PLANE_URL`,
+  then `https://launch.percepteye.ai/api/flywheel/v1`, each trimmed and a
+  blank one falling through, through one resolver
+  (`agent_flywheel.control_plane.resolve_control_plane_url()`, beside
+  `DEFAULT_CONTROL_PLANE_URL`) that every reader uses, the goose hook and the flywheel key's home
+  included. `serve()` no longer refuses a missing URL, and the key is the one
+  thing that can be missing. `agent-flywheel install-hooks` and `status` name
+  the URL they resolved to. (from 5e91987)
 - **What the model saw, under a consent tier of its own.** With an operator's
   model-content grant for the agent, the LangChain and Google ADK adapters
   observe each model call inside an `attach()` turn — system instructions, the
@@ -43,17 +52,33 @@ repository's.
 
 ### Changed
 
+- **The goose hook claims practice tasks only in training mode.** It claims
+  a task on `SessionStart`, and reports the session as its result on `Stop`,
+  only when `PERCEPTEYE_AGENT_MODE` resolves to training and the key is set;
+  a production install with a key used to lease a rollout into the
+  customer's session and POST that session as its result. An unreadable mode
+  claims nothing. `install-hooks` and `status` say which applies, through the
+  same predicate (`install_hooks.claim_refusal`). (8c9b151)
+- **`attach(retention_turns=...)` refuses a value that is not a whole number
+  0 or more**, before capture starts, as the Node SDK drops one. (from
+  52bec17)
+- **A Prime harness snapshot requires its kernel venv** and is refused without
+  one, naming why: without it Prime bootstrapped a runtime into the rollout's
+  private home at every session start, and the release of that home failed.
+  (6379c52)
 - **Your flywheel key opens only the control plane's own gateway.** A
   `pefw_` key now goes to an endpoint only when the control plane names
-  `PERCEPTEYE_API_KEY` for it and it sits at the origin of your
-  `control_plane_url`, as the Node SDK already required. It used to be the
+  `PERCEPTEYE_API_KEY` for it and it sits at the origin of your control-plane
+  URL (resolved as everywhere else, the default included), as the Node SDK
+  already required. It used to be the
   last fallback of the credential order, so it was sent to a provider endpoint
   the control plane named no variable for, to one whose named variable was
   unset, and to a self-hosted box's raw address; and the `api_key=` passed to
   `apply_current_policy()` or `policy_source()` — the key to the control
   plane — beat a provider's own key as an endpoint override. Each of those is
   now not applied, with a warning naming the cause. `endpoint_kwargs()` takes
-  `flywheel_key=` and `control_plane_url=` (defaulting to the environment);
+  `flywheel_key=` and `control_plane_url=` (defaulting to `PERCEPTEYE_API_KEY`
+  and the resolved control-plane URL);
   its `api_key=` stays your own credential for the endpoint. An endpoint with
   no `model` is no longer applied, as in Node. **Upgrading:** a production
   agent pointed at a self-hosted endpoint by a control plane without the
@@ -63,13 +88,6 @@ repository's.
   failed refresh**: `last_refresh_ok` goes `False` and `stale_for_s` grows
   while the last good snapshot stands. It used to be absorbed as a successful
   answer of nothing deployed, so an outage reported a fresh, healthy policy.
-- **The production docs say where a served model comes from**: a model
-  PerceptEye serves arrives as the agent's one constant gateway URL, opened
-  with its flywheel key (`PERCEPTEYE_API_KEY`); a provider endpoint you own is
-  still dialled directly; a promotion or rollback between served models takes
-  effect behind that URL without a rebuild. The README and FAQ no longer say
-  every model trains on PerceptEye's GPUs: GRPO trains on compute you connect,
-  and your first OPSD model trains on PerceptEye's.
 - **A bounded tool or error body keeps both ends** behind a marker that counts
   what it replaced, in every producer — the host recorder, both adapters and
   the parser — and an error body gets the same 4000 characters as output
