@@ -25,9 +25,10 @@ why ``install_hooks`` writes the former.
 TOOL OUTCOMES come from the hook plugin, which SHIPS IN THIS WHEEL -- there is
 no second install and no external repository. ``agent-flywheel install-hooks``
 renders it, pointed at this virtualenv's interpreter; it subscribes to goose's
-post-tool hook events and appends to ``$PERCEPTEYE_TRAJECTORY_DIR``. It is inert
-whenever that variable is unset, so the same install is a no-op outside a
-rollout. Nothing in goose's source is modified.
+post-tool hook events and appends to ``$PERCEPTEYE_TRAJECTORY_DIR``. Outside a
+rollout it records locally under ``$PERCEPTEYE_HOME/turns/<session>`` instead,
+and claims a practice task only in training mode with a key -- see README.md.
+Nothing in goose's source is modified.
 
 THIS FILE IS THE CAPACITY-DONATION PATH, not the only one. Here the SDK drives
 goose. A customer who runs goose THEMSELVES needs no worker at all -- see

@@ -34,6 +34,7 @@ def goose_home(monkeypatch, tmp_path):
     monkeypatch.setenv("PERCEPTEYE_HOME", str(tmp_path / ".percepteye"))
     monkeypatch.delenv("PERCEPTEYE_AGENT_MODE", raising=False)
     monkeypatch.delenv("PERCEPTEYE_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("PERCEPTEYE_CAPTURE", raising=False)
     return tmp_path
 
 
@@ -80,7 +81,8 @@ def test_a_configured_install_says_so(goose_home, monkeypatch, capsys):
     monkeypatch.setenv(KEY, "pefw_x")
     assert main(["install-hooks"]) == 0
     out = capsys.readouterr().out
-    assert "rollouts  claimed — from https://cp.example/api/flywheel/v1" in out, out
+    assert ("rollouts  claimed — training mode, from "
+            "https://cp.example/api/flywheel/v1") in out, out
     assert "NOT claimed" not in out, out
 
 
@@ -94,7 +96,39 @@ def test_a_key_alone_claims_from_the_default_and_names_it(
     monkeypatch.setenv(KEY, "pefw_x")
     assert main(["install-hooks"]) == 0
     out = capsys.readouterr().out
-    assert f"rollouts  claimed — from {DEFAULT_CONTROL_PLANE_URL}" in out, out
+    assert ("rollouts  claimed — training mode, from "
+            f"{DEFAULT_CONTROL_PLANE_URL}") in out, out
+
+
+@pytest.mark.parametrize("command", ["install-hooks", "status"])
+def test_a_production_install_with_a_key_says_it_claims_nothing(
+        goose_home, monkeypatch, capsys, command):
+    """The hook claims in training mode only, so the line must ask the mode
+    too: a production install with both variables set claims nothing, and
+    "rollouts claimed" there would be the one line the customer reads
+    contradicting what the hook does."""
+    monkeypatch.setenv(URL, "https://cp.example/api/flywheel/v1")
+    monkeypatch.setenv(KEY, "pefw_x")
+    assert main(["install-hooks"]) == 0
+    capsys.readouterr()
+    monkeypatch.setenv("PERCEPTEYE_AGENT_MODE", "production")
+    main([command])
+    out = capsys.readouterr().out
+    assert "NOT claimed" in out and "PERCEPTEYE_AGENT_MODE" in out, out
+    assert "rollouts  claimed" not in out, out
+
+
+def test_capture_off_says_it_claims_nothing(goose_home, monkeypatch, capsys):
+    """``PERCEPTEYE_CAPTURE=0`` stops the hook before it reaches the claim --
+    the claim record lives in the capture directory -- so a training install
+    with both variables set claims nothing, and the line must say so."""
+    monkeypatch.setenv(URL, "https://cp.example/api/flywheel/v1")
+    monkeypatch.setenv(KEY, "pefw_x")
+    monkeypatch.setenv("PERCEPTEYE_CAPTURE", "0")
+    assert main(["install-hooks"]) == 0
+    out = capsys.readouterr().out
+    assert "NOT claimed" in out and "PERCEPTEYE_CAPTURE" in out, out
+    assert "rollouts  claimed" not in out, out
 
 
 # ── the reporter now has a consumer ────────────────────────────────────────

@@ -25,7 +25,8 @@ THREE PROPERTIES THIS FILE MUST KEEP:
    ``$PERCEPTEYE_HOME/turns/<session>``, which is what makes the plugin's
    day-one promise -- your agent's real tool failure rate, no account, no
    network -- reachable for a customer who never signs up. ``PERCEPTEYE_CAPTURE=0``
-   turns it off entirely. Nothing leaves the machine without an API key.
+   turns it off entirely. Nothing leaves the machine without an API key,
+   and no practice task is claimed or reported outside training mode.
 2. Never fails the agent. Every path exits 0, and every branch that can touch
    the network or the filesystem is wrapped. A telemetry writer that can break
    someone's tool call is worse than no telemetry.
@@ -311,6 +312,17 @@ def turns_root():
     return os.path.join(home, "turns")
 
 
+def capture_off() -> bool:
+    """Whether ``PERCEPTEYE_CAPTURE`` has turned this recorder off.
+
+    ONE reading of the switch, for two consumers: ``_capture_dir`` below, and
+    ``agent-flywheel install-hooks``/``status``, which load this file to say
+    whether rollouts are claimed. Capture off records nothing, and the claim
+    record lives in the capture directory, so it claims nothing either.
+    """
+    return str(os.environ.get(CAPTURE_ENV, "")).strip().lower() in _OFF
+
+
 def _capture_dir(event):
     """Where this event's records belong, or None to record nothing.
 
@@ -319,7 +331,7 @@ def _capture_dir(event):
     which is what makes the plugin useful to somebody who has never heard of a
     control plane.
     """
-    if str(os.environ.get(CAPTURE_ENV, "")).strip().lower() in _OFF:
+    if capture_off():
         return None
     base = os.environ.get(TRAJECTORY_DIR_ENV)
     if base:
@@ -354,19 +366,26 @@ def _contributing():
     interpreter floor, so the per-tool-call path must never reach it. Inside
     these two session branches it runs once per SESSION, where it is nothing.
 
-    Returns ``None`` for the ordinary case, not an error: a customer with no key
-    is not misconfigured, they are recording locally, which is the plugin's
-    day-one promise. A marketplace install with no SDK at all lands in the same
-    branch through the ImportError.
+    THE ONE GATE for both session branches: the claim and the report each pass
+    through here, so neither can talk to the control plane on a decision the
+    other did not make. ``claim_refusal`` is that decision -- training mode,
+    then the key (the URL has the library's default) -- and it is the same
+    predicate ``install-hooks`` and ``status`` print.
+
+    Returns ``None`` for the ordinary cases, not an error: a customer with no
+    key, or in production mode, is not misconfigured, they are recording
+    locally, which is the plugin's day-one promise. A marketplace install with
+    no SDK at all lands in the same branch through the ImportError, and an
+    unreadable mode through the refusal.
     """
-    key = os.environ.get("PERCEPTEYE_API_KEY")
-    if not key:
-        return None
     try:
         from agent_flywheel._http import ControlPlaneClient
         from agent_flywheel.control_plane import resolve_control_plane_url
+        from agent_flywheel.install_hooks import claim_refusal
         from agent_flywheel.transport import AttachTransport
     except Exception:
+        return None
+    if claim_refusal() is not None:
         return None
     # THE LIBRARY'S RULE, not a second reading of the variable. This used to
     # read an un-prefixed ``CONTROL_PLANE_ENV_URL`` FIRST -- a name no library
@@ -375,6 +394,7 @@ def _contributing():
     # and the SDK in one process could disagree about where the control plane
     # is. Imported here, on the once-per-session path, never per tool call.
     url = resolve_control_plane_url()
+    key = os.environ.get("PERCEPTEYE_API_KEY")
     agent = os.environ.get("PERCEPTEYE_AGENT_ID") or "goose"
     client = ControlPlaneClient(base_url=url, api_key=key)
     return AttachTransport(client, agent_id=agent), client
@@ -383,9 +403,10 @@ def _contributing():
 def _reconcile():
     """Make the host's endpoint match ``PERCEPTEYE_AGENT_MODE``.
 
-    DELIBERATELY NOT GATED ON THE API KEY, unlike everything else that talks to
-    the control plane. The state this exists to repair is precisely the one
-    where the key is gone: a customer who flips to production AND unsets
+    DELIBERATELY NOT GATED ON ``claim_refusal`` -- the mode or the API key --
+    unlike the claim and the report. Production mode is the state it hands the
+    endpoint back in, and the other state it exists to repair is precisely the
+    one where the key is gone: a customer who flips to production AND unsets
     ``PERCEPTEYE_API_KEY`` would otherwise keep a config pointing at our gateway
     with nothing left to authenticate it -- every completion failing, and the
     kill switch they just used appearing to be the cause.

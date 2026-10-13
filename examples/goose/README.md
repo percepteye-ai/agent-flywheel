@@ -12,10 +12,16 @@ added to goose itself.
 > SDK drives goose: it claims a rollout, spawns the binary, and reports the
 > outcome. That fits an operator who wants to lend the flywheel capacity.
 >
-> If instead you *run goose yourself* and want the turns you already serve to
-> feed the flywheel, you do not need this file or any worker process:
-> `pip install agent-flywheel`, `agent-flywheel install-hooks`, and you start goose
-> exactly as before.
+> If instead you *run goose yourself*, you do not need this file or any worker
+> process: `pip install agent-flywheel`, `agent-flywheel install-hooks`, and you
+> start goose exactly as before. In training mode (the default), with
+> `PERCEPTEYE_CONTROL_PLANE_URL` and `PERCEPTEYE_API_KEY` set, each session
+> claims one practice task when a run has one for this agent
+> (`PERCEPTEYE_AGENT_ID`, default `goose`), finds it in its working directory
+> as `PERCEPTEYE_TASK.md`, and is reported as that task's result. With
+> `PERCEPTEYE_AGENT_MODE=production` the hooks claim nothing and report
+> nothing, key or no key: tool outcomes are recorded locally and goose keeps
+> its own endpoint. `agent-flywheel status` prints which applies.
 
 ## The two halves
 
@@ -25,11 +31,12 @@ already sets per rollout — so on this path `serve_goose.py` carries the routin
 
 **Tool outcomes** come from the hook plugin, which **ships in this wheel**. There
 is no second install and no external repository to clone: `agent-flywheel
-install-hooks` renders it, pointed at this virtualenv's interpreter. It is inert
-unless `PERCEPTEYE_TRAJECTORY_DIR` is set — which the SDK sets per rollout — so
-the same install is a no-op outside one. `serve_goose.py` refuses to start
-without it, because `reports_tool_calls=True` is an assertion only the plugin
-makes true.
+install-hooks` renders it, pointed at this virtualenv's interpreter. Inside a
+rollout it records into the `PERCEPTEYE_TRAJECTORY_DIR` the SDK sets; outside
+one it records locally under `$PERCEPTEYE_HOME/turns/<session>` (default
+`~/.percepteye`), and `PERCEPTEYE_CAPTURE=0` turns recording off.
+`serve_goose.py` refuses to start without it, because `reports_tool_calls=True`
+is an assertion only the plugin makes true.
 
 ```bash
 agent-flywheel install-hooks
