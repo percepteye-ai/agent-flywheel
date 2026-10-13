@@ -5,7 +5,7 @@ What changed in `agent-flywheel`, by release. The Node SDK,
 ships the same version number in the same release. Commit hashes are this
 repository's.
 
-## 0.1.3
+## 0.2.0
 
 ### Added
 
