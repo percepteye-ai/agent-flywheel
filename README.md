@@ -119,13 +119,11 @@ Everything that can be misconfigured — entrypoint, credential, contract versio
 <!-- THE KEY ROUTE, confirmed by the owner 2026-09-14: PerceptEye operates the
      control plane, and sign-in is free and self-serve at
      https://launch.percepteye.ai (HTTP 200, "Mission Control · PerceptEye").
-     Adding the agent there (Add -> An agent -> Connect it with our SDK)
-     issues its key -- shown once, bound to that agent -- and prints the
-     control-plane URL to export; capture is switched on in that path's
-     Permissions step (2026-10-11). The Node README says the same; keep the
-     two in step. -->
+     Connecting an agent there issues its key -- shown once, bound to that
+     agent -- and prints the control-plane URL to export. The Node README says
+     the same; keep the two in step. -->
 
-**Where a `pefw_` key comes from:** PerceptEye runs the control plane, and signing in is free and self-serve at **[launch.percepteye.ai](https://launch.percepteye.ai)**. There, choose **Add → An agent → Connect it with our SDK** and give it the agent id your agent reports as: you get its key — shown once, and scoped to that one agent — along with the exact `PERCEPTEYE_CONTROL_PLANE_URL` to export. A lost key is replaced from the agent's own page: **Agents** → your agent → **Get a new key**.
+**Where a `pefw_` key comes from:** PerceptEye runs the control plane, and signing in is free and self-serve at **[launch.percepteye.ai](https://launch.percepteye.ai)**. Connect your agent there and you get its key — shown once, and scoped to that one agent — along with the exact `PERCEPTEYE_CONTROL_PLANE_URL` to export.
 
 > [!TIP]
 > Rollouts are real runs on your real credentials. Bound the first one with `max_rollouts=8` and point `artifacts_dir=` somewhere you don't mind it writing. `max_rollouts` is also the only clean exit: there is no signal handler, and Ctrl-C drains in-flight rollouts first.
@@ -296,9 +294,9 @@ Supplying it grants no training eligibility. Control-plane clustering and
 dataset services validate any later trace-to-task binding.
 
 > [!IMPORTANT]
-> **Upload is opt-in per agent and off by default.** A production turn is your end user's message and the answer you gave them, so nothing is sent until an org admin switches capture on for that agent, in the **Permissions** step of adding it (**Add → An agent → Connect it with our SDK**). There are two switches, its conversations and their message text, and training from the agent needs both. Until then turns accumulate as trajectory directories under the `trajectory_root` you named and go nowhere.
+> **Upload is opt-in per agent and off by default.** A production turn is your end user's message and the answer you gave them, so nothing is sent until an operator enables capture for that agent. Until then turns accumulate as trajectory directories under the `trajectory_root` you named and go nowhere.
 >
-> **No restart needed to enable it.** While the answer is no, the SDK re-reads the verdict on its flush cadence and starts uploading as soon as capture is switched on. `px.may_upload` is the live answer; `px.upload_refusal` is the sentence explaining a `False`.
+> **No restart needed to enable it.** While the answer is no, the SDK re-reads the verdict on its flush cadence and starts uploading as soon as an operator says yes. `px.may_upload` is the live answer; `px.upload_refusal` is the sentence explaining a `False`.
 
 `input_text=` and `record_answer()` are the two lines that carry the turn's text, and both are yours to pass — they are your end user's message and the answer your code returned, which no adapter can tell apart from the rest of a model call. Once capture is on, uploading is automatic: answered turns go every 32 turns on a short-lived daemon thread, and an `atexit` hook sends the rest. Uploads never raise into your process and never block a turn on the network.
 

@@ -99,8 +99,8 @@ in your process, behind your firewall, on your credentials — unchanged.
 **Register once, then loop forever.** The SDK describes your agent from inside its own
 process and registers it — once, before the first rollout. After that: it claims a task,
 your agent runs it, the outcomes go back, a policy is trained and promoted, and your
-production agent picks it up. Once capture is switched on for it (the **Permissions**
-step of adding it), its live turns feed the next lap too.
+production agent picks it up. Once an operator enables capture for it, its live
+turns feed the next lap too.
 
 That last step is what makes it a flywheel rather than a pipeline: **the better agent
 generates the better evidence.**

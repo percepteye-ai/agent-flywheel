@@ -27,7 +27,7 @@ export PERCEPTEYE_CONTROL_PLANE_URL=https://launch.percepteye.ai/api/flywheel/v1
 export PERCEPTEYE_API_KEY=pefw_...        # free: sign in at https://launch.percepteye.ai
 ```
 
-PerceptEye runs the control plane, and signing in is free and self-serve at [launch.percepteye.ai](https://launch.percepteye.ai). There, choose **Add → An agent → Connect it with our SDK** and give it the agent id your agent reports as: you get its key — shown once, and scoped to that one agent — along with the exact control-plane URL to export. A lost key is replaced from the agent's own page: **Agents** → your agent → **Get a new key**.
+PerceptEye runs the control plane, and signing in is free and self-serve at [launch.percepteye.ai](https://launch.percepteye.ai). Connect your agent there and you get its key — shown once, and scoped to that one agent — along with the exact control-plane URL to export.
 
 Both are overridable in code as `control_plane_url=` and `api_key=`, and the argument wins. Everything else `serve()` takes has a default.
 
