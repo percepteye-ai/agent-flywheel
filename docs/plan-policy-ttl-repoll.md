@@ -5,8 +5,8 @@ Status: **phases 1 and 2 BUILT** (`src/agent_flywheel/policy.py`,
 unbuilt — per §6 it ships only if inline refresh proves insufficient for
 low-traffic agents, and nothing has measured that yet.
 
-Two things this document got wrong, corrected in the build and recorded here
-so the next reader does not re-derive them:
+Three things this document got wrong, corrected in the build and recorded
+here so the next reader does not re-derive them:
 
 * §4.2 ("never blocks on the network after the first call") and §4.3 (inline
   refresh with a 1s timeout) contradict each other. §4.3 is the mechanism;
@@ -17,6 +17,11 @@ so the next reader does not re-derive them:
   concurrent caller queue behind the in-flight fetch on its way to READ the
   cache — the exact latency this design exists to avoid, and invisible to a
   test that only counts requests.
+* §4.1's loop rebuilds from the snapshot on every `changed`. Since 0.2.0 a
+  WITHDRAWAL (`withdrawn: true`) is a change to an EMPTY snapshot with
+  `snap.withdrawn` set, and the caller goes back to its own configuration
+  instead; the current loop is in `policy.py`'s docstring and
+  `website/docs/production.md`.
 
 Open question 2 is answered: the handle has no `set_env`. Open question 3 is
 answered: damping a flapping control plane is not the client's job. Open

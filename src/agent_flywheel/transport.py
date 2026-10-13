@@ -330,9 +330,21 @@ class AttachTransport:
         endpoint existed.
         """
         try:
-            return self._c.request("GET", "/policy/current") or {}
+            return self.policy_current_or_raise()
         except Exception:  # see docstring
             return {}
+
+    def policy_current_or_raise(self) -> dict[str, Any]:
+        """The same read, with a failure left to the caller.
+
+        For :class:`~agent_flywheel.policy.PolicySource`, the one reader that
+        must tell an unreachable control plane from one that answered. Its
+        failed refresh keeps the last good snapshot and says so through
+        ``last_refresh_ok`` and ``stale_for_s``; read through the fail-open
+        method above, the failure arrived as ``{}``, a SUCCESSFUL answer of
+        nothing deployed, so an outage reported a fresh, healthy policy.
+        """
+        return self._c.request("GET", "/policy/current") or {}
 
     def prompt_current(self) -> dict[str, Any]:
         """The approved optimized system prompt for this agent, or ``{}``.

@@ -28,8 +28,8 @@ in your process, behind your firewall, on your credentials — unchanged.
 <div class="fw-stats">
 <div class="fw-stat"><div class="fw-stat__n">0</div><div class="fw-stat__l">lines changed inside your agent</div></div>
 <div class="fw-stat"><div class="fw-stat__n">1</div><div class="fw-stat__l">runtime dependency (<code>httpx</code>)</div></div>
-<div class="fw-stat"><div class="fw-stat__n">0</div><div class="fw-stat__l">inbound ports, containers, GPUs</div></div>
-<div class="fw-stat"><div class="fw-stat__n">1316</div><div class="fw-stat__l">tests, zero skips permitted</div></div>
+<div class="fw-stat"><div class="fw-stat__n">0</div><div class="fw-stat__l">inbound ports, containers, GPUs beside your agent</div></div>
+<div class="fw-stat"><div class="fw-stat__n">1350</div><div class="fw-stat__l">tests, zero skips permitted</div></div>
 </div>
 
 ## Start here
@@ -113,7 +113,7 @@ generates the better evidence.**
 | Lines of integration code | **1 import + 1 call** |
 | Runtime dependencies | **1** (`httpx`), enforced by a test and a clean-install CI job |
 | Inbound ports · public DNS · TLS | **0 · 0 · 0** — there is no listening socket in this package |
-| Containers to build · GPUs to provision | **0 · 0** — your agent runs as your process |
+| Containers to build · GPUs to provision beside your agent | **0 · 0** — your agent runs as your process; training compute is [a separate question](faq.md#do-i-need-a-gpu) |
 | Languages | Python by import path, anything else by argv |
 | License | [MIT](https://github.com/percepteye-ai/agent-flywheel/blob/main/LICENSE) |
 

@@ -1,0 +1,13 @@
+{
+  "arm": "base",
+  "reason": "policy_withdrawn_no_champion",
+  "candidate_available": false,
+  "endpoint": null,
+  "model": null,
+  "prompt": null,
+  "bundle_digest": null,
+  "resolved_at": "2026-10-02T12:05:00+00:00",
+  "ttl_s": 300.0,
+  "withdrawn": true,
+  "serving_generation": "bc94445390645e3e"
+}

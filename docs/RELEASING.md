@@ -8,7 +8,7 @@ repository takes copies of both.
 |:--|:--|:--|
 | repository | `percepteye-ai/agent-flywheel` | `percepteye-ai/agent-flywheel-node` |
 | registry | PyPI [`agent-flywheel`](https://pypi.org/project/agent-flywheel/) — published | npm [`@percepteye/agent-flywheel`](https://www.npmjs.com/package/@percepteye/agent-flywheel), owned by the `percepteye` npm organization |
-| version lives in | `src/agent_flywheel/_version.py`; `pyproject.toml` and the goose manifest repeat it, and `tests/test_one_version.py` holds all three together | `package.json`; the User-Agent derives from it, and `test/version.test.js` holds `openclaw.plugin.json` (version *and* description) equal to it |
+| version lives in | `src/agent_flywheel/_version.py`; `pyproject.toml`, the goose manifest and `uv.lock` repeat it, `CHANGELOG.md` opens with its entry, and `tests/test_one_version.py` holds them all together | `package.json`; the User-Agent derives from it, and `test/version.test.js` holds `openclaw.plugin.json` (version *and* description) equal to it |
 | publishes through | `.github/workflows/workflow.yml` on a `v*` tag, via PyPI trusted publishing. Works: 0.1.0, 0.1.1 and 0.1.2 went out this way | `.github/workflows/publish.yml` on a `v*` tag, via npm trusted publishing: the rehearsal's token exchange has succeeded since 2026-09-15 ([§3](#3-node-release-npm)). 0.1.0 and 0.1.2 went out by hand ([§3b](#3b-publishing-to-npm-by-hand)), the fallback if a tag is ever refused |
 
 Neither repository is public yet. That is why the PyPI page shows the figures'
@@ -31,13 +31,17 @@ Follow this in order; each step links to the detail. When something fails,
    version (`pip install "agent-flywheel>=X.Y.Z"`), the release is urgent the
    moment that deploy lands: until then the page's first command fails.
 2. **Bump both versions, one number for both.** Python: `_version.py`,
-   `pyproject.toml` and the goose manifest, then `uv lock`. Node: `package.json`
+   `pyproject.toml` and the goose manifest, then `uv lock`, and add the
+   version's entry at the top of `CHANGELOG.md`. Node: `package.json`
    and `openclaw.plugin.json`. Then update the published test counts: three
    places in the Python README plus `website/docs/python.md` and `index.md`, and
    in the Node README the badge, the comment above it, and the Develop line.
 3. **Run §1 in both repositories,** with the Node SDK checked out and named
    through `PERCEPTEYE_NODE_SDK`, so the Python parity tests run instead of
-   skipping: `N passed, 0 skipped`. CI cannot vouch for this part yet
+   skipping (`N passed, 0 skipped`), and the control plane's checkout named
+   through `PERCEPTEYE_CONTROL_PLANE_CHECKOUT`, so the shared-fixture test
+   compares the control plane's copy byte for byte. Unnamed, that test still
+   passes, having checked only the fixtures' digests, as every CI run does. CI cannot vouch for this part yet
    ([§5](#5-when-a-publish-fails): `NODE_SDK_READ_TOKEN`).
 4. **Merge the Node PR first, then the Python one.** The Python parity tests
    import the Node repository's `main`.
@@ -58,7 +62,10 @@ Follow this in order; each step links to the detail. When something fails,
 
 **Python**, from a checkout with every extra installed and the Node repository
 checked out beside it (the parity tests find it there, or through
-`PERCEPTEYE_NODE_SDK`):
+`PERCEPTEYE_NODE_SDK`), and `PERCEPTEYE_CONTROL_PLANE_CHECKOUT` naming the
+control plane's checkout, whose copy of the shared `/policy/current` fixtures
+`tests/cross_repo/test_fixture_parity.py` then compares byte for byte (unnamed,
+it checks only their digests, and passes):
 
 ```bash
 .venv/bin/pytest -q                        # N passed, 0 skipped
@@ -103,7 +110,8 @@ this repository's `test-full` job checks out the Node repository's `main`.
 ## 2. Python release (PyPI)
 
 1. **Bump the version** in `src/agent_flywheel/_version.py`, `pyproject.toml`
-   and `src/agent_flywheel/hosts/goose/plugin.json`, then run `uv lock`.
+   and `src/agent_flywheel/hosts/goose/plugin.json`, then run `uv lock`, and
+   add the version's entry at the top of `CHANGELOG.md`.
    `tests/test_one_version.py` fails if one is missed.
 2. **If tests were added or removed**, update the published suite size: three
    places in the README, plus `website/docs/python.md` and
