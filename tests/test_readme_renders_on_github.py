@@ -106,13 +106,28 @@ def test_no_link_into_this_repo_is_an_absolute_github_url(body):
         "resolve against whatever ref the reader is on:\n  " + "\n  ".join(bad))
 
 
+def _headings(text: str) -> set[str]:
+    return {_slug(m.group(1)) for m in re.finditer(r"^#+\s+(.*)$", text, re.M)}
+
+
 def test_every_relative_target_exists(targets):
-    """The cost of relative paths, paid here instead of by the reader."""
-    missing = [
-        t for t in targets
-        if not t.startswith(("http://", "https://", "#", "mailto:"))
-        and not (ROOT / t).exists()
-    ]
+    """The cost of relative paths, paid here instead of by the reader.
+
+    A target into another page of this repo (``website/docs/x.md#heading``)
+    names a file AND a heading in it; both have to be there, or GitHub opens
+    the page at its top and the reader is left to look for what was linked.
+    """
+    missing = []
+    for t in targets:
+        if t.startswith(("http://", "https://", "#", "mailto:")):
+            continue
+        path, _, fragment = t.partition("#")
+        dest = ROOT / path
+        if not dest.exists():
+            missing.append(t)
+        elif fragment and dest.suffix == ".md" and fragment not in _headings(
+                _readable(dest.read_text(encoding="utf-8"))):
+            missing.append(t)
     assert not missing, (
         "README points at paths that are not in the tree -- GitHub renders "
         "these as dead links with no error:\n  " + "\n  ".join(missing))
