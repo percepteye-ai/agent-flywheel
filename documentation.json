@@ -1,5 +1,6 @@
 {
   "name": "Agent Flywheel",
+  "initialRoute": "introduction",
   "colors": {
     "light": {
       "brand": "#6366f1",
