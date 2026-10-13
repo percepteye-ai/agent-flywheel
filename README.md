@@ -218,7 +218,7 @@ PERCEPTEYE_AGENT_MODE=production
 |:--|:--|:--|
 | **pick it for** | a machine you're happy to lend to rollouts | the deployment serving your users |
 | `fw.serve(...)` | claims and runs rollouts | returns `0` immediately, **before opening any connection** |
-| needs a URL and key | yes | no |
+| needs a key (the URL has a default) | yes | no |
 
 An unrecognised value **raises** rather than guessing: a typo that silently picked `training` would keep spending your credentials with nothing printed. (`train`, `rollout`, `fine-tuning` also mean contribute; `prod` and `serving` mean don't. `mode=` in code beats the variable, and the printed line says when that happened.)
 
@@ -349,7 +349,7 @@ record_tool_call("charge_card", {"amount": 4200}, outcome="ok", status_code=201)
 
 | variable | meaning |
 |:--|:--|
-| `PERCEPTEYE_CONTROL_PLANE_URL` | control-plane base URL. **No default** — unset means nothing is claimed and no trained policy is read, and every call that needed it now says so |
+| `PERCEPTEYE_CONTROL_PLANE_URL` | control-plane base URL; unset, it defaults to `https://launch.percepteye.ai/api/flywheel/v1` |
 | `PERCEPTEYE_API_KEY` | your flywheel key |
 | `PERCEPTEYE_AGENT_MODE` | `training` (default) or `production` — [one switch, both ways](#-two-modes-one-image) |
 | `PERCEPTEYE_INTROSPECT` | `0` disables agent discovery |

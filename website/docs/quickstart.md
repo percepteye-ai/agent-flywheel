@@ -109,7 +109,7 @@ fw.serve(
 | step | raises when |
 |:--|:--|
 | resolve the mode | `PERCEPTEYE_AGENT_MODE` or `mode=` is a value it cannot parse |
-| read the control-plane URL | neither `control_plane_url=` nor `PERCEPTEYE_CONTROL_PLANE_URL` is set |
+| read the control-plane URL | never: with neither `control_plane_url=` nor `PERCEPTEYE_CONTROL_PLANE_URL` set, it is `https://launch.percepteye.ai/api/flywheel/v1` |
 | read the API key | neither `api_key=` nor `PERCEPTEYE_API_KEY` is set |
 | create `artifacts_dir` | the path cannot be created |
 | `GET /health` | the control plane does not answer, or does not speak `flywheel/1` |

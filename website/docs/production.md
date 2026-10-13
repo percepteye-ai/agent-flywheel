@@ -27,7 +27,7 @@ One `GET /policy/current`. **It contributes nothing** — no registration, no ro
 | `api_key` | resolved credential (see below) |
 | `model` | the model name to send; `""` when the control plane did not name one |
 
-**`{}` means keep your current configuration.** It is the answer for every reason you cannot act, and they deliberately read the same: nothing deployed, no `endpoint` in the body, no `base_url`, no credential to authenticate with, an unreachable control plane, or no URL and key configured at all. An endpoint you cannot authenticate to is not usable, so it is returned as "nothing to apply" here rather than as 401s at your first request.
+**`{}` means keep your current configuration.** It is the answer for every reason you cannot act, and they deliberately read the same: nothing deployed, a model the control plane has withdrawn (`withdrawn: true`), no `endpoint` in the body, no `base_url` or `model`, no credential to authenticate with, an unreachable control plane, or no key configured at all. An endpoint you cannot authenticate to is not usable, so it is returned as "nothing to apply" here rather than as 401s at your first request.
 
 **It never raises into your startup.** An unreachable control plane must never stop an agent from serving its users.
 
@@ -35,9 +35,9 @@ The credential is resolved in this order, and never invented:
 
 | order | source |
 |:--|:--|
-| 1 | the `api_key=` argument |
-| 2 | the env var named by the response's `endpoint.api_key_env` |
-| 3 | `PERCEPTEYE_API_KEY` |
+| 1 | `endpoint_kwargs(body, api_key=...)`: your own credential for the endpoint |
+| 2 | the response's own `endpoint.api_key`, when the control plane sends one |
+| 3 | the env var named by the response's `endpoint.api_key_env`; `PERCEPTEYE_API_KEY` there is sent only to an endpoint at the control plane's own address, never as a fallback |
 
 `set_env=True` additionally exports `OPENAI_BASE_URL` and `OPENAI_API_KEY` for libraries that read the environment instead of accepting arguments. It is off by default because mutating the process environment is a side effect a caller should ask for, and it does **not** export the model.
 
@@ -95,7 +95,7 @@ while True:                       # per turn, or per request
 src = fw.policy_source(agent_id="my-coding-agent", on_change=reconfigure)
 ```
 
-It fires on **promotion and rollback alike** — any move in the `(base_url, api_key, model)` triple, including the first actionable answer, since without that the documented `if snap.changed:` usage would never build a client at all. It does **not** fire when a refresh fails, and it does not fire when the control plane answers "nothing deployed": withdrawal is expressed by deploying the base, not by an absence. Exceptions it raises are swallowed.
+It fires on **promotion and rollback alike** — any move in the `(base_url, api_key, model)` triple, including the first actionable answer, since without that the documented `if snap.changed:` usage would never build a client at all. It does **not** fire when a refresh fails, and it does not fire when the control plane answers "nothing deployed" without `withdrawn: true`. A withdrawal (`withdrawn: true`, which `is_withdrawn(body)` tests) after a served policy fires it with an empty snapshot and `snap.withdrawn` set: go back to your own configuration. Exceptions it raises are swallowed.
 
 ### Nothing polls in the background
 
