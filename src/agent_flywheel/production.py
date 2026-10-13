@@ -75,6 +75,7 @@ from .contract import (
     _production_identifier,
     _production_turn_identifier,
 )
+from .control_plane import resolve_control_plane_url
 from .declaration import Describe
 from .entrypoint import InputShape
 from .errors import ConfigurationError, TransportError
@@ -105,7 +106,6 @@ from .transport import (
 
 __all__ = ["Attachment", "CaptureVerdict", "attach", "capture_verdict"]
 
-ENV_CONTROL_PLANE_URL = "PERCEPTEYE_CONTROL_PLANE_URL"
 ENV_API_KEY = "PERCEPTEYE_API_KEY"
 
 
@@ -1745,7 +1745,7 @@ def attach(
     # ── the control plane, entirely optional ────────────────────────────────
     policy: dict[str, Any] = {}
     register_error: Exception | None = None
-    url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL)
+    url = resolve_control_plane_url(control_plane_url)
     key = api_key or os.environ.get(ENV_API_KEY)
     may_upload = False
     may_capture_model_content = False
@@ -1758,7 +1758,7 @@ def attach(
     #
     # WHICH VARIABLE is asked through the same helper `policy_source` and the
     # CLI ask, so "configured" means one thing across the package.
-    cause = missing_credentials_cause(url, key)
+    cause = missing_credentials_cause(key)
     if not register:
         upload_refusal: str | None = (
             "attach(register=False) was asked for, so the control plane was "

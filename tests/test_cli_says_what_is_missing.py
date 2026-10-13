@@ -3,8 +3,9 @@
 ``install-hooks`` used to close, unconditionally, with "set PERCEPTEYE_API_KEY
 to contribute rollouts" -- so the customer who had just followed step 3 of the
 README and exported that key was told to export that key, while
-``PERCEPTEYE_CONTROL_PLANE_URL``, which was the thing actually blocking them and
-which this package has no default for, went unnamed on both subcommands. The
+``PERCEPTEYE_CONTROL_PLANE_URL``, which was the thing actually blocking them
+then, went unnamed on both subcommands. The URL has a default now, the Node
+SDK's; the line names where it resolved to. The
 result is the failure mode this package front-loads its checks to prevent: the
 plugin loads, tool outcomes land on disk, no rollout is ever claimed, and
 nothing anywhere says why.
@@ -39,8 +40,7 @@ def goose_home(monkeypatch, tmp_path):
 @pytest.mark.parametrize(
     ("env", "must_name"),
     [
-        ({}, URL),
-        ({KEY: "pefw_x"}, URL),
+        ({}, KEY),
         ({URL: "https://cp.example"}, KEY),
     ],
 )
@@ -66,13 +66,13 @@ def test_status_says_it_too(goose_home, monkeypatch, capsys):
     ``status`` documents itself as printing "where traffic will actually go on
     the next run" and said nothing at all about whether rollouts are claimed.
     """
-    monkeypatch.delenv(URL, raising=False)
-    monkeypatch.setenv(KEY, "pefw_x")
+    monkeypatch.setenv(URL, "https://cp.example/api/flywheel/v1")
+    monkeypatch.delenv(KEY, raising=False)
     assert main(["install-hooks"]) == 0
     capsys.readouterr()
     main(["status"])
     out = capsys.readouterr().out
-    assert "NOT claimed" in out and URL in out, out
+    assert "NOT claimed" in out and KEY in out, out
 
 
 def test_a_configured_install_says_so(goose_home, monkeypatch, capsys):
@@ -80,8 +80,21 @@ def test_a_configured_install_says_so(goose_home, monkeypatch, capsys):
     monkeypatch.setenv(KEY, "pefw_x")
     assert main(["install-hooks"]) == 0
     out = capsys.readouterr().out
-    assert "rollouts  claimed" in out, out
+    assert "rollouts  claimed — from https://cp.example/api/flywheel/v1" in out, out
     assert "NOT claimed" not in out, out
+
+
+def test_a_key_alone_claims_from_the_default_and_names_it(
+        goose_home, monkeypatch, capsys):
+    """The Node SDK's rule: no URL means the production control plane, and
+    the line says which one, so a default is never invisible."""
+    from agent_flywheel.control_plane import DEFAULT_CONTROL_PLANE_URL
+
+    monkeypatch.delenv(URL, raising=False)
+    monkeypatch.setenv(KEY, "pefw_x")
+    assert main(["install-hooks"]) == 0
+    out = capsys.readouterr().out
+    assert f"rollouts  claimed — from {DEFAULT_CONTROL_PLANE_URL}" in out, out
 
 
 # ── the reporter now has a consumer ────────────────────────────────────────

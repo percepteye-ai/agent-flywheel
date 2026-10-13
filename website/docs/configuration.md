@@ -328,7 +328,7 @@ Symlinks are **never** followed — one dropped in the agent's own directory wou
 | Variable | Meaning |
 |:--|:--|
 | `PERCEPTEYE_AGENT_MODE` | `training` (default) or `production`. In production `serve()` returns 0 without connecting. Gates capacity contribution only — not `attach()`. A value it cannot parse raises rather than being guessed. |
-| `PERCEPTEYE_CONTROL_PLANE_URL` | Control-plane base URL. No default: `serve()` refuses to start without it, and `attach()` records on disk only. Overridable with `control_plane_url=`. |
+| `PERCEPTEYE_CONTROL_PLANE_URL` | Control-plane base URL; defaults to `https://launch.percepteye.ai/api/flywheel/v1`, the Node SDK's default. `control_plane_url=` wins over it, and a blank value falls through to the next. |
 | `PERCEPTEYE_API_KEY` | Your flywheel key. Overridable with `api_key=`. |
 | `PERCEPTEYE_INTROSPECT` | Set to `0`, `false`, `no` or `off` to disable agent discovery. |
 | `PERCEPTEYE_ROLLOUT_ID` | *Set by us* for the child. Read it to tag your own logs. |

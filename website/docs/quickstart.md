@@ -30,7 +30,7 @@ export PERCEPTEYE_API_KEY=pefw_...
 ```
 
 <!-- lang -->
-Both are required. Without them the SDK still records on your disk, and sends nothing.
+The URL is also the SDK's default. Without a key the SDK still records on your disk, and sends nothing.
 <!-- /lang -->
 
 ## Record its conversations

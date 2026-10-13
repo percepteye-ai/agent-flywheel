@@ -53,7 +53,7 @@ def shared_parts(text: str, *, readme: bool) -> list[str]:
 
 
 def first_difference(ours: list[str], theirs: list[str]) -> str:
-    for i, (a, b) in enumerate(zip(ours, theirs)):
+    for i, (a, b) in enumerate(zip(ours, theirs, strict=False)):
         if a != b:
             diff = difflib.unified_diff(
                 a.splitlines(), b.splitlines(), "python", "node", lineterm="", n=1)

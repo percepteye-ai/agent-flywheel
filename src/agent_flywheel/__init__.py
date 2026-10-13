@@ -61,6 +61,13 @@ from .contract import (
     RulebookReceipt,
     ToolCallOutcome,
 )
+from .control_plane import (
+    DEFAULT_CONTROL_PLANE_URL as DEFAULT_CONTROL_PLANE_URL,
+)
+from .control_plane import (
+    ENV_CONTROL_PLANE_URL as ENV_CONTROL_PLANE_URL,
+)
+from .control_plane import resolve_control_plane_url
 from .declaration import Describe
 from .entrypoint import TASK, InputShape, resolve_entrypoint
 from .errors import (
@@ -196,7 +203,9 @@ __all__ = [
 #: rollout child along with everything else PERCEPTEYE_, which is correct: it
 #: configures the process that DONATES capacity, and a child does not call
 #: serve().
-ENV_CONTROL_PLANE_URL = "PERCEPTEYE_CONTROL_PLANE_URL"
+#:
+#: ENV_CONTROL_PLANE_URL is imported from ``control_plane``, where it is
+#: defined beside its default and the one rule that resolves it.
 ENV_API_KEY = "PERCEPTEYE_API_KEY"
 ENV_MODE = "PERCEPTEYE_AGENT_MODE"
 ENV_ROLLOUT_ID = "PERCEPTEYE_ROLLOUT_ID"      # set by us, for the child
@@ -338,9 +347,9 @@ def current_policy(
     hand you — keep your current configuration, do not fall back to
     something you guessed.
     """
-    url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL) or ""
+    url = resolve_control_plane_url(control_plane_url)
     key = api_key or os.environ.get(ENV_API_KEY) or ""
-    cause = missing_credentials_cause(url, key)
+    cause = missing_credentials_cause(key)
     if cause:
         _log.warning(
             "agent-flywheel: not reading the served policy for agent_id=%r: %s, so "
@@ -409,9 +418,9 @@ def current_prompt(
     the same bundles for the same stated reason. See
     :mod:`agent_flywheel.prompt`.
     """
-    url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL) or ""
+    url = resolve_control_plane_url(control_plane_url)
     key = api_key or os.environ.get(ENV_API_KEY) or ""
-    cause = missing_credentials_cause(url, key)
+    cause = missing_credentials_cause(key)
     if cause:
         # SAID, because `prompt_decision({})` blames the control plane for
         # serving no approved prompt -- true of the empty answer and wrong
@@ -977,11 +986,7 @@ def serve(
     # would otherwise surface as a rulebook that never registered.
     rulebook = declared_rulebook(rules)
 
-    url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL)
-    if not url:
-        raise ConfigurationError(
-            f"control_plane_url is required (or set {ENV_CONTROL_PLANE_URL})"
-        )
+    url = resolve_control_plane_url(control_plane_url)
     key = api_key or os.environ.get(ENV_API_KEY)
     if not key:
         raise ConfigurationError(f"an API key is required (or set {ENV_API_KEY})")

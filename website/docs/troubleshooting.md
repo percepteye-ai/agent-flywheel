@@ -8,9 +8,9 @@ read `px.upload_refusal` and `px.model_content_refusal` on the object `attach()`
 
 ## The dashboard never sees your agent connect
 
-- **The key or the URL is not in your agent's environment.**
+- **The key is not in your agent's environment, or the URL points somewhere else.**
   <!-- lang -->
-  `serve()` refuses to start and names it: `control_plane_url is required (or set PERCEPTEYE_CONTROL_PLANE_URL)`, or `an API key is required (or set PERCEPTEYE_API_KEY)`. `attach()` keeps your agent running and records on disk; `px.upload_refusal` names the missing variable.
+  `serve()` refuses to start without the key: `an API key is required (or set PERCEPTEYE_API_KEY)`. `attach()` keeps your agent running and records on disk; `px.upload_refusal` names the missing variable. Unset, the URL is the production control plane; with a key set, `agent-flywheel status` prints the URL it uses.
   <!-- /lang -->
 - **Your network blocks it.** Every connection is outbound HTTPS to your control-plane URL; allow it.
 - **The key was revoked, or is more than 180 days old.** [Replace it](dashboard.md#replace-a-lost-key).
@@ -64,7 +64,7 @@ Your organization is over a [rate limit](production.md#retries-and-rate-limits),
 
 - **It has not been approved yet, or is not ready to serve yet.** Approving happens in [Decisions](dashboard.md#approve-the-winner-in-decisions). Until a version is approved and serving, the answer is "keep what you run".
 <!-- lang -->
-- **`apply_current_policy()` returned `{}`.** It returns `{}` for every reason it cannot act, and logs which on the `agent_flywheel` logger: nothing approved, no URL or key, an unreachable control plane, or an address that is a stored file (`gs://`, `s3://`, `file://`) rather than a running endpoint.
+- **`apply_current_policy()` returned `{}`.** It returns `{}` for every reason it cannot act, and logs which on the `agent_flywheel` logger: nothing approved, no key, an unreachable control plane, or an address that is a stored file (`gs://`, `s3://`, `file://`) rather than a running endpoint.
 - **`policy_source()` still serves the old model.** It refreshes about every five minutes. A `snap.stale_for_s` above zero means refreshes are failing and it is serving the last answer it had.
 - **The prompt did not change.** The SDK never applies a prompt for you. `fw.prompt_decision(...).reason` says why a prompt may not be applied.
 <!-- /lang -->
@@ -72,5 +72,5 @@ Your organization is over a [rate limit](production.md#retries-and-rate-limits),
 ## The SDK will not start
 
 <!-- lang -->
-`serve()` checks everything before its first practice task and raises `ConfigurationError` naming the cause: a mode it cannot read (set `PERCEPTEYE_AGENT_MODE` to `training` or `production`), a missing URL or key, an entrypoint that does not import, or a control plane that does not answer. `attach()` never refuses to start: it captures on disk and says what it could not do.
+`serve()` checks everything before its first practice task and raises `ConfigurationError` naming the cause: a mode it cannot read (set `PERCEPTEYE_AGENT_MODE` to `training` or `production`), a missing key, an entrypoint that does not import, or a control plane that does not answer. `attach()` never refuses to start: it captures on disk and says what it could not do.
 <!-- /lang -->

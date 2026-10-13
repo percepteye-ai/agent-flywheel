@@ -30,7 +30,7 @@ px.record_answer(turn_id, reply)          # after the scope closes: the answer e
 | `adapters` | `"auto"` | binds every built-in whose framework is installed |
 | `register` | `True` | `False` skips the control-plane call entirely |
 | `retention_turns` | `None` | keep only the most recent N turns on disk |
-| `control_plane_url` · `api_key` | env | `PERCEPTEYE_CONTROL_PLANE_URL` / `PERCEPTEYE_API_KEY` |
+| `control_plane_url` · `api_key` | env | `PERCEPTEYE_CONTROL_PLANE_URL` (default: the production control plane) / `PERCEPTEYE_API_KEY` |
 | `execution_entrypoint` | `None` | the live Python agent/import spec to describe for exact execution identity |
 | `execution_input_shape` · `execution_method` | `"text"` · `None` | the declared call surface of `execution_entrypoint` |
 | `attested_execution_components` | `None` | opaque exact adapter evidence for implementation/state discovery cannot observe |
@@ -128,7 +128,7 @@ One `GET /policy/current`. It contributes nothing (no registration, no practice 
 | `api_key` | resolved credential (see below) |
 | `model` | the model name to send; `""` when the control plane did not name one |
 
-**`{}` means keep your current configuration.** It is the answer for every reason you cannot act: nothing deployed, no `endpoint` in the body, no `base_url`, no credential to authenticate with, an address that is a stored file (`gs://`, `s3://`, `file://`) rather than a running endpoint, an unreachable control plane, or no URL and key configured at all. The reason is logged on the `agent_flywheel` logger. **It never raises into your startup.**
+**`{}` means keep your current configuration.** It is the answer for every reason you cannot act: nothing deployed, no `endpoint` in the body, no `base_url`, no credential to authenticate with, an address that is a stored file (`gs://`, `s3://`, `file://`) rather than a running endpoint, an unreachable control plane, or no key configured at all. The reason is logged on the `agent_flywheel` logger. **It never raises into your startup.**
 
 The credential is resolved in this order, and never invented: the `api_key=` argument; the environment variable named by the response's `endpoint.api_key_env`; `PERCEPTEYE_API_KEY`. `set_env=True` additionally exports `OPENAI_BASE_URL` and `OPENAI_API_KEY` for libraries that read the environment; it does **not** export the model.
 
@@ -227,7 +227,7 @@ import agent_flywheel as fw
 fw.serve("my_package.agent:build", agent_id="support-agent", input_shape="text")
 ```
 
-`serve()` claims practice tasks, runs each one in a fresh child process, reports the result, and blocks until you stop it. It returns an `int`: the number of tasks that completed. Tasks arrive while a run that uses them is going, [started from your agent's page](dashboard.md#run-practice-tasks). It needs `PERCEPTEYE_CONTROL_PLANE_URL` and `PERCEPTEYE_API_KEY` (or `control_plane_url=` and `api_key=`), and refuses to start without them.
+`serve()` claims practice tasks, runs each one in a fresh child process, reports the result, and blocks until you stop it. It returns an `int`: the number of tasks that completed. Tasks arrive while a run that uses them is going, [started from your agent's page](dashboard.md#run-practice-tasks). It needs `PERCEPTEYE_API_KEY` (or `api_key=`), and refuses to start without it; the control-plane URL defaults to the production one, and `PERCEPTEYE_CONTROL_PLANE_URL` or `control_plane_url=` overrides it.
 
 **Your agent must sample through an OpenAI-compatible client.** During a practice task its model calls go through a per-task gateway, which is what records them; the child's environment routes the client there. See [Configuration](configuration.md#isolation).
 
@@ -260,7 +260,6 @@ fw.serve(
 | step | raises when |
 |:--|:--|
 | resolve the mode | `PERCEPTEYE_AGENT_MODE` or `mode=` is a value it cannot parse |
-| read the control-plane URL | neither `control_plane_url=` nor `PERCEPTEYE_CONTROL_PLANE_URL` is set |
 | read the API key | neither `api_key=` nor `PERCEPTEYE_API_KEY` is set |
 | create `artifacts_dir` | the path cannot be created |
 | `GET /health` | the control plane does not answer, or does not speak `flywheel/1` |
@@ -434,7 +433,7 @@ On a practice task whose text is `"count to three"`, the reported trajectory is:
 
 **`unknown`, not `ok`.** The tool returned a string and nothing observed whether the call succeeded. `Tool.invoke({"q": ...})` with a plain dict has no tool-call id to attach, so LangChain returns raw content rather than a `ToolMessage` — and raw content from a tool that worked is byte-identical to raw content from a tool that caught its own exception and returned prose. Calling that `ok` is the single most consequential lie a capture can tell, so the adapter does not.
 
-That is the honest floor zero instrumentation buys you, and it is enforced by [`tests/test_zero_instrumentation.py`](https://github.com/percepteye-ai/agent-flywheel/blob/main/tests/test_zero_instrumentation.py) inside the 1324-test suite. Drive the same tool through a model-issued tool call and the same adapter reports `"outcome": "ok"` with the model's `tool_call_id` attached, because then there is a `ToolMessage` with a real `status`.
+That is the honest floor zero instrumentation buys you, and it is enforced by [`tests/test_zero_instrumentation.py`](https://github.com/percepteye-ai/agent-flywheel/blob/main/tests/test_zero_instrumentation.py) inside the 1336-test suite. Drive the same tool through a model-issued tool call and the same adapter reports `"outcome": "ok"` with the model's `tool_call_id` attached, because then there is a `ToolMessage` with a real `status`.
 
 One call where you *do* know the answer gets you the rest:
 
