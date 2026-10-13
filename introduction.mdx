@@ -1,0 +1,73 @@
+---
+title: "Introduction"
+description: "What Agent Flywheel is, what you get, and how the continual-learning loop closes around the agent you already have, with zero lines changed inside your agent."
+---
+
+## Agent Flywheel
+
+Agent Flywheel is a continual-learning loop around the agent you already have. Your agent keeps running in your process, behind your firewall, on your credentials, unchanged, while the model it calls keeps improving. Agent Flywheel turns real work into training data and delivers what it learns back as an endpoint your agent already calls. It is not a dashboard or a benchmark. It is a loop that closes on its own.
+
+## What you get
+
+| You get | What it actually means |
+| --- | --- |
+| An agent that improves in place | A policy trained on this agent's own trajectories: its prompt, its tools, and its failure modes, not a generic model |
+| Post-training you never operate | Task generation, grading, reinforcement learning, and promotion gates run by the control plane on its GPUs |
+| A prompt that improves too | Training co-optimizes the system prompt and ships the approved prompt back beside the model |
+| Honest evidence | Every tool call is recorded as `ok`, `failed`, or `unknown`. `unknown` is legal, expected, and never rounded up to `ok` |
+| Nothing moves | No container, cluster, GPU, or inbound port is required. Every connection is dialled out from your side |
+
+## What it costs to integrate
+
+| | |
+| --- | --- |
+| Lines changed inside your agent | 0, because adapters bind from the outside |
+| Lines of integration code | 1 import + 1 call |
+| Runtime dependencies | 1, `httpx`, enforced by a test and a clean-install CI job |
+| Inbound ports, public DNS, and TLS | 0, 0, and 0. This package does not open a listening socket |
+| Containers to build and GPUs to provision | 0 and 0. Your agent runs as your process |
+| Languages | Python by import path; anything else by argv |
+| License | MIT |
+
+## The loop, in one figure
+
+Register once, then loop forever. The SDK describes your agent from inside its own process and registers it once, before the first rollout. After registration, the process claims a task, your agent runs it, the outcomes go back, and a policy is trained and promoted. Your production agent then picks up the promoted policy.
+
+<Callout kind="info">
+
+The better agent generates the better evidence. Each improved production agent produces more useful trajectories for the next training cycle, which makes the loop a flywheel rather than a pipeline.
+
+</Callout>
+
+## Two modes, one image
+
+The same container can contribute to training or run only in production. Set `PERCEPTEYE_AGENT_MODE` to control the behavior without changing your agent code:
+
+- `training`: the default when the variable is unset; the agent connects and contributes rollouts.
+- `production`: `serve()` returns `0` immediately, before opening any connection.
+
+An unrecognised value raises an error instead of selecting a mode implicitly.
+
+<Callout kind="tip">
+
+If you are not ready to contribute capacity, set `PERCEPTEYE_AGENT_MODE=production`. The same deployed image then runs without opening a connection, and you do not need to change your agent code.
+
+</Callout>
+
+## Start here
+
+<Columns cols={3}>
+
+<Card title="Quickstart" href="/quickstart" description="One import, one call. Serve your first rollout in minutes." />
+
+<Card title="How It Works" href="/how-it-works" description="Understand the flywheel loop, architecture, and guarantees." />
+
+<Card title="Outcomes" href="/outcomes" description="See how every tool call is recorded as ok, failed, or unknown, without rounding unknown up." />
+
+<Card title="Python Agents" href="/python-agents" description="Connect LangChain, LangGraph, and Google ADK agents with zero instrumentation." />
+
+<Card title="Node Harnesses" href="/node-harnesses" description="Connect OpenClaw and DeepSeek Harness plugins with zero dependencies." />
+
+<Card title="CLI and Other Languages" href="/cli-and-other-languages" description="Use Agent Flywheel with non-Python agents by passing an argv list." />
+
+</Columns>

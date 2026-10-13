@@ -1,0 +1,183 @@
+---
+title: "FAQ"
+description: "Answers to common questions about deployment and security, integration, running the flywheel, and everything else — each linking to the page that carries the detail."
+---
+
+## Deployment and security
+
+### Does my agent leave my infrastructure?
+
+No. `serve()` rebuilds your agent from an importable factory in a child process on the same machine, in your environment, using your credentials. Only the rollout report and, once at startup, the agent description cross the boundary. Your tool source and credentials stay local.
+
+`attach()` always captures production turns to disk. It uploads them only when an operator enables capture, which is off by default. `Attachment.may_upload` reports the live upload setting. See [Production](/production).
+
+<Callout kind="info">
+
+The one thing that does route out is a training rollout. Your agent samples through PerceptEye's per-rollout gateway because the gateway attributes and captures the completion. Completions leave your environment, but tool calls stay local and run using your credentials. `attach()` binds adapters without an endpoint.
+
+</Callout>
+
+### Do I need to open a port?
+
+No. Agent Flywheel does not open a listening socket. Every connection starts from your side. The source check below exits with status 1 because it finds no matching server:
+
+```bash
+grep -rnE '\.listen\(|HTTPServer|uvicorn|fastapi|flask' src/
+```
+
+See [Configuration](/configuration).
+
+### Do I need a GPU?
+
+No. You do not need to build a container, run a cluster, or provision a GPU. The control plane holds those requirements.
+
+### Does this send my system prompt anywhere?
+
+Yes, once at startup, unless you turn discovery off. Agent discovery sends the shape of the constructed agent:
+
+- The system prompt, truncated at 20,000 characters
+- Tool names, descriptions, and JSON Schemas
+- Provider and model name
+- Sub-agents to depth 4
+
+Set `introspect=False` or `PERCEPTEYE_INTROSPECT=0` to opt out. The trade-off is that generic tasks are unavailable. See [Configuration](/configuration).
+
+## Integration
+
+### Do I have to rewrite my agent?
+
+No. Your agent code stays unchanged. Add one import and one call in a separate serving script. The zero-instrumentation behavior is covered by `tests/test_zero_instrumentation.py`.
+
+See [Quickstart](/quickstart) and [Python agents](/python-agents).
+
+### What if my agent isn't Python?
+
+Pass an argument vector instead of an import path. Your existing CLI needs no protocol changes.
+
+```python
+import flywheel as fw
+
+fw.serve(
+    ["opencode", "run"],
+    agent_id="coding-agent",
+    input_shape="text",
+)
+```
+
+Each task arrives on standard input and in `PERCEPTEYE_TURN_INPUT`. Mark the argument position with `fw.TASK`. See [CLI and other languages](/cli).
+
+### Can a CLI report per-tool outcomes?
+
+Usually yes, usually without additional instrumentation. Read outcomes from the event stream your CLI already prints.
+
+| Vocabulary | Events | You get it if |
+| --- | --- | --- |
+| `otel-genai` | `gen_ai.tool.start` and `gen_ai.tool.end` | Your agent logs OTel GenAI events as JSON lines |
+| `prime-agent` | `tool_execution_start` and `tool_execution_end` | You run prime-agent with `--mode json` |
+
+If neither event format is available, append tool outcomes to `$PERCEPTEYE_TRAJECTORY_DIR/tool_calls.jsonl`. See [CLI and other languages](/cli).
+
+### Is it really one dependency?
+
+Yes. The Python package depends on `httpx>=0.27` and nothing else. The dependency boundary is checked by `tests/test_oss_boundary.py` and the clean-install CI job.
+
+The Node plugin has no dependencies beyond Node built-ins. See [Node harnesses](/node-harnesses).
+
+## Running it
+
+### How do I stop contributing capacity?
+
+Set `PERCEPTEYE_AGENT_MODE=production` to make `serve()` return 0 immediately:
+
+```bash
+PERCEPTEYE_AGENT_MODE=production python serve_agent.py
+```
+
+The default is training mode. These values mean that the agent should contribute capacity:
+
+- `train`
+- `training`
+- `rollout`
+- `rollouts`
+- `fine-tuning`
+- `finetuning`
+- `improving`
+
+The production aliases `prod` and `serving` also disable contribution. An unparseable value raises an error.
+
+<Callout kind="warning">
+
+The mode is read at startup and gates `serve()` only. Changing it does not stop a loop that is already running. Use `max_rollouts=N` for a clean exit. The setting does not gate `attach()`.
+
+</Callout>
+
+See [Configuration](/configuration).
+
+### Can I run more than one rollout at a time?
+
+Yes. Set `concurrency=N` to run rollouts concurrently under subprocess isolation. Each rollout gets its own child process, environment, and single-use credential.
+
+The `inprocess` mode is capped at one concurrent rollout. Setting a value above 1 in that mode raises `ConfigurationError`.
+
+### What happens when a rollout crashes or a credential expires?
+
+Agent Flywheel records a typed exclusion so a substrate fault does not count as a bad decision.
+
+| What happened | `exclusion_reason` |
+| --- | --- |
+| The Python entrypoint raised an exception | `entrypoint_error` |
+| The command agent exited with a non-zero status | `agent_exit_nonzero` |
+| The rollout exceeded `rollout_timeout_s` and was killed | `deadline_exceeded` |
+| The credential lease lapsed while the rollout was running | `credential_expired` |
+| The SDK child process died or returned an unparseable result | `flywheel_crash` |
+
+`entrypoint_error` and `agent_exit_nonzero` remain separate deliberately. The first is retryable and untrainable. The second is a real attempt that training must see. Every rollout is reported with its exclusion block.
+
+<Expandable title="Every reason in the enum">
+
+The complete `exclusion_reason` enum is:
+
+- `flywheel_crash`
+- `substrate_unavailable`
+- `credential_expired`
+- `deadline_exceeded`
+- `entrypoint_error`
+- `agent_exit_nonzero`
+- `cancelled`
+- `capacity`
+
+The enum is declared in `schema/flywheel-1.json` and mirrored in `contract.py`.
+
+</Expandable>
+
+See [The contract](/contract).
+
+### What is `substrate_unavailable`?
+
+`substrate_unavailable` excludes a rollout when every observed tool call failed. The rule is strict:
+
+- At least one tool call must exist.
+- Every call must have a failed status.
+- One `unknown` or `ok` status prevents the exclusion.
+- A partial failure remains unchanged.
+- The rule never overwrites an existing exclusion.
+
+See [Outcomes](/outcomes).
+
+### What does `unknown` do to my score?
+
+Nothing. `unknown` abstains, so verifiers skip the call. Agent Flywheel never rounds `unknown` up to `ok`, and it discards the status from both the field and the body.
+
+See [Outcomes](/outcomes).
+
+## Everything else
+
+### How is this different from an eval platform?
+
+An eval platform measures performance. Agent Flywheel closes the loop: training produces a model and co-optimized system prompt, then the production agent uses the result as an endpoint.
+
+Tasks come from tool-surface discovery, and outcomes are observed at the call site instead of being parsed from a transcript. See [How the loop closes](/how-it-works).
+
+### What license is this under?
+
+Agent Flywheel is licensed under MIT. Report vulnerabilities privately to [security@percepteye.ai](mailto:security@percepteye.ai).

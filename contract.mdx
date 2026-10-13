@@ -1,0 +1,322 @@
+---
+title: "Wire Contract"
+description: "The flywheel-1.json wire contract: JSON Schema authority, hand-written Python types, what an agent may assert, absence never collapsed to zero, RolloutRequest fields, eight exclusion reasons (six emitted), evidence collection, and substrate_unavailable."
+---
+
+## The wire between an agent and the control plane
+
+The wire connects an agent you run to a control plane you do not. One JSON Schema file defines the contract, with a small number of rules about absence.
+
+## One file is the authority
+
+`schema/flywheel-1.json` is the contract. The server pins against the published schema. The schema is never generated from a server type.
+
+| Contract property | Value |
+| --- | --- |
+| `$id` | `https://schemas.percepteye.ai/flywheel/1.json` |
+| `x-contract-version` | `flywheel/1` |
+| Python constant | `contract.CONTRACT_VERSION == 'flywheel/1'` |
+| Declared types | `ToolCallRecord`, `ProductionTurn`, `ProductionTurnBatch`, `Exclusion`, `RolloutRequest`, `RolloutOutput`, `ClaimResponse`, `RulebookRequest`, `RulebookReceipt` |
+
+`RolloutOutput` and `ToolCallRecord` are **FLYWHEEL-AUTHORED**. `RolloutRequest` is **PERCEPTEYE-AUTHORED**. These ownership labels identify which side can make an authoritative assertion about each type.
+
+### ProductionTurnBatch
+
+`ProductionTurnBatch` is the closed request body for `POST /turns`.
+
+- `agent_id` is required.
+- `turns` contains between 1 and 64 production turns.
+- `task_id` is optional and opaque. It provides correlation evidence, not a semantic assertion.
+- Production identifiers contain 1 to 255 characters.
+- Production identifiers cannot contain edge whitespace or C0 and C1 control characters.
+- `turn_id` and `agent_id` cannot contain path separators or the dot segments `.` and `..`.
+
+### RulebookRequest
+
+`RulebookRequest` is the request body for `POST /agents/{agent_id}/rulebook`.
+
+```json
+{
+  "rules": [
+    "Prefer compact JSON responses.",
+    "Do not expose credentials in generated output."
+  ]
+}
+```
+
+The `rules` array contains strings only. Sending an empty array retracts the current rulebook.
+
+### RulebookReceipt
+
+`RulebookReceipt` reports the result of registering or retracting a rulebook.
+
+| Field | Meaning |
+| --- | --- |
+| `status` | `registered`, `retracted`, or `unchanged` |
+| `product_id` | Product associated with the rulebook |
+| `version_id` | Version associated with the rulebook |
+| `version` | Rulebook version |
+| `content_sha256` | Digest of the submitted content |
+| `parent_sha256` | Digest of the parent rulebook |
+| `rule_count` | Number of rules in the receipt |
+
+## The Python types are hand-written to match
+
+`contract.py` is not generated from the schema. It is written by hand because the schema cannot express several runtime rules:
+
+- `status_code` has no default.
+- An unknown tool outcome discards `status_code` from the body.
+- Weak `entity_ids` are refused by name.
+
+Three tests protect the boundary between the hand-written types and the published schema.
+
+| Test | What it compares | Assertion |
+| --- | --- | --- |
+| `test_output_emits_only_declared_contract_keys` | Keys emitted by `RolloutOutput.to_wire()` against schema properties | Emitted keys are a subset of schema properties |
+| `test_every_exclusion_reason` | `ExclusionReason` against the schema `reason` enum | Exact list equality, including order |
+| `test_rollout_request_and_the_schema` | Dataclass fields against schema properties | Both directions must match |
+
+Both directions matter. Checking only one direction is how contract drift survived previously.
+
+<Callout kind="info">
+
+Order is part of the assertion. The exclusion reason list must match the schema enum exactly, including the order of its values.
+
+</Callout>
+
+## What an agent may assert, and what it cannot
+
+`RolloutOutput` is a closed dataclass with `additionalProperties: false`. Its wire representation can contain only the declared fields.
+
+| Field | Type | Default or nullability | Emission rule |
+| --- | --- | --- | --- |
+| `final_text` | string | Required | Always |
+| `tool_calls` | list of `ToolCallOutcome` or null | `null` | Always, including when null |
+| `tool_calls_omitted_count` | integer | `0` | Always |
+| `artifacts` | object | `{}` | Always |
+| `events` | list of objects | `[]` | Always |
+| `timing` | object | `{}` | Always |
+| `llm_call_count` | integer or null | `null` | Only when set; pinned runs require the exact count |
+| `reward` | number or null | `null` | Only when set; advisory only |
+| `success` | boolean or null | `null` | Only when set |
+| `agent_fingerprint` | object or null | `null` | Only when set |
+| `exclusion` | object or null | `null` | Contains `reason` and optional `detail` |
+
+Anything derived from inference at the wire is absent by construction. The agent cannot assert fields that the control plane observes independently.
+
+| Control-plane field | Why the agent cannot assert it |
+| --- | --- |
+| `grade` | Computed after the report |
+| Gateway completion count | Observed by the gateway |
+| Rendered-prompt SHA | Observed by the gateway |
+| Tool-schema digest | Observed by the gateway |
+| Sampling parameters | Observed by the gateway |
+| Tokenizer | Observed by the gateway |
+
+`to_wire()` raises `ContractViolation` when an unknown key would be emitted.
+
+<Callout kind="alert">
+
+A client-side check binds only honest clients. Every rule is enforced in the SDK and independently at intake.
+
+</Callout>
+
+The `tool_calls_omitted_count` field has a direct training consequence. A non-zero value means the tool-call record is incomplete and forbids training grade.
+
+## Absence is never collapsed into zero
+
+The contract treats absence as information. The single rule is that an agent must not turn “did not report” into “observed none.”
+
+| `tool_calls` value | Assertion |
+| --- | --- |
+| `null` | The agent did not report tool calls |
+| `[]` | The agent observed zero tool calls. This is a positive assertion |
+| A non-empty list | The agent observed exactly these calls, never a partial list |
+
+These values are distinct on the wire:
+
+```json
+{
+  "final_text": "I could not determine whether the deployment completed.",
+  "tool_calls": null,
+  "tool_calls_omitted_count": 0
+}
+```
+
+```json
+{
+  "final_text": "The request completed without using tools.",
+  "tool_calls": [],
+  "tool_calls_omitted_count": 0
+}
+```
+
+A list of tool calls asserts that the list is complete. If the agent cannot make that assertion, it must use `null` and report the number of omitted calls when known.
+
+### ToolCallRecord
+
+`ToolCallRecord` is closed with `additionalProperties: false`. Its required fields are `name`, `outcome`, and `status_code`.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `name` | string | Tool name |
+| `outcome` | `ok`, `failed`, or `unknown` | Observed outcome |
+| `status_code` | integer from 100 through 599 or null | Observed status code, or no status observation |
+| `agent_name` | string or null | Attribution to an agent, when available |
+| `tool_call_id` | string or null | Framework-provided call identifier, when available |
+| `entity_ids` | object | Identity evidence using only `id`, `key`, `uuid`, `sid`, or `gid` keys |
+
+`status_code` is a required key with a nullable value. A null value means that no status was observed. It does not mean that the call had no status. When `outcome` is `unknown`, the wire contract forces `status_code` to null.
+
+`agent_name: null` means the call is unattributed. It does not mean that one agent made every call. `tool_call_id: null` means that the framework exposed no identifier. It does not mean that the call did not happen.
+
+An absent or empty `entity_ids` object means there is no identity evidence. It is abstention, not evidence that a write failed.
+
+```json
+{
+  "name": "create_invoice",
+  "outcome": "unknown",
+  "status_code": null,
+  "agent_name": null,
+  "tool_call_id": null,
+  "entity_ids": {}
+}
+```
+
+## RolloutRequest
+
+A `RolloutRequest` describes one unit of work. PerceptEye mints the request before the agent runs.
+
+| Field | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `rollout_id` | string | Yes | Attribution unit for the rollout |
+| `turn_input` | string | Yes | Task sent to the agent |
+| `llm_url` | string | Yes | Unguessable, single-use, expiring inference URL for the rollout |
+| `api_key` | string | Yes | Single-use key for the gateway |
+| `artifacts_dir` | string | Yes | Directory where the agent writes artifacts |
+| `deadline_ts` | number | Yes | Authoritative deadline used to compute timeout |
+| `lease_expires_ts` | number or null | No | Absolute epoch-second lease expiry |
+| `lease_token` | string or null | No | Token associated with the lease |
+| `metadata` | object | No | Free-form metadata, including `completion_gate` |
+
+`deadline_ts` and `lease_expires_ts` serve different purposes. The deadline bounds the work and does not move. The lease controls liveness and can be renewed by heartbeat.
+
+The agent reads the lease once when it claims the rollout. Heartbeats are paced at one-third of the remaining lease grant.
+
+<Expandable title="There is deliberately no environment key">
+
+The request does not include an environment key. A previous SDK wrote server values into `os.environ`, which was both dangerous and useless. The wire contract therefore carries the values needed for this rollout explicitly and does not provide a mechanism for copying server credentials into the agent environment.
+
+</Expandable>
+
+## Exclusions: eight reasons, six emitted
+
+The schema defines eight exclusion reasons. The SDK emits six of them. `cancelled` and `capacity` are reserved for the control plane.
+
+| Reason | Emitted by this SDK | When it applies |
+| --- | --- | --- |
+| `flywheel_crash` | Yes | The child exits non-zero, the result is unparseable, or no payload is available |
+| `substrate_unavailable` | Yes | Every observed tool call failed, with at least one call made |
+| `credential_expired` | Yes | The lease lapses or a heartbeat kills the child |
+| `deadline_exceeded` | Yes | The entrypoint, child, or command exceeds its budget, or the deadline has passed at claim time |
+| `entrypoint_error` | Yes | The Python entrypoint raises |
+| `agent_exit_nonzero` | Yes | The command entrypoint runs and exits non-zero |
+| `cancelled` | No | The control plane withdraws the work |
+| `capacity` | No | The control plane cannot place the work |
+
+`entrypoint_error` and `agent_exit_nonzero` are separate because they describe different failures. An entrypoint error is retryable and untrainable. A non-zero agent exit is a real attempt that training must see.
+
+An exclusion is represented as an object:
+
+```json
+{
+  "exclusion": {
+    "reason": "deadline_exceeded",
+    "detail": "The rollout deadline passed before the command produced a report."
+  }
+}
+```
+
+The control plane owns `cancelled` and `capacity`. An agent must not invent either reason for its own report.
+
+## Evidence is collected before the report, on every path
+
+The execution path always collects artifacts before sending the report:
+
+```text
+run_one()
+  -> _collect_artifacts()
+  -> _mark_substrate_unavailable()
+  -> transport.report()
+```
+
+Collection does not depend on a clean exit. The agent collects evidence after failures as well as after successful execution.
+
+Every rollout is reported. The report is the only artifact channel, so writing a file to `artifacts_dir` without including it in the report does not make it available to the control plane.
+
+## `substrate_unavailable` is deliberately strict
+
+The SDK emits `substrate_unavailable` only when all three conditions hold:
+
+1. At least one tool call was made.
+2. Every observed tool call failed.
+3. No call was partial, unknown, or successful.
+
+| Observed tool outcomes | Result |
+| --- | --- |
+| `[failed, failed]` | `substrate_unavailable` |
+| `[failed]` | `substrate_unavailable` |
+| `[failed, ok]` | No `substrate_unavailable` exclusion |
+| `[failed, unknown]` | No `substrate_unavailable` exclusion |
+| `[unknown, unknown]` | No `substrate_unavailable` exclusion |
+| `[]` | No `substrate_unavailable` exclusion |
+| `null` | No `substrate_unavailable` exclusion |
+
+A failed call followed by an unknown call is not an all-failed substrate result. The unknown call prevents the agent from asserting that every call failed. Likewise, `[]` and `null` contain no evidence of a substrate failure.
+
+The SDK never overwrites an exclusion that was already set. When it emits `substrate_unavailable`, the detail names the failed tools.
+
+```json
+{
+  "exclusion": {
+    "reason": "substrate_unavailable",
+    "detail": "All observed calls failed: search_orders, get_customer."
+  },
+  "tool_calls": [
+    {
+      "name": "search_orders",
+      "outcome": "failed",
+      "status_code": 503
+    },
+    {
+      "name": "get_customer",
+      "outcome": "failed",
+      "status_code": 503
+    }
+  ]
+}
+```
+
+## Related contract documentation
+
+<Columns cols={3}>
+
+<Card title="Outcomes" href="/outcomes" icon="check-circle">
+
+Review how rollout results and assertions are interpreted.
+
+</Card>
+
+<Card title="Configuration" href="/configuration" icon="settings">
+
+Configure the agent-side values used by the contract.
+
+</Card>
+
+<Card title="Production" href="/production" icon="database">
+
+Understand the production turn format and reporting flow.
+
+</Card>
+
+</Columns>

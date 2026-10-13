@@ -1,0 +1,328 @@
+---
+title: "Python Agents"
+description: "Serve LangChain, LangGraph, and Google ADK agents with zero instrumentation — adapters auto-bind, report tri-state outcomes, and add no dependencies to your runtime."
+---
+
+## Serve Python agents without instrumentation
+
+A Python agent is served by handing `serve()` an import path. Adapters are enabled by default, so LangChain, LangGraph, and Google ADK agents report per-call outcomes without importing Agent Flywheel or adding instrumentation code to the agent.
+
+```python
+fw.serve(
+    "lc_agent:build",
+    agent_id="research-agent",
+    input_shape="text",
+)
+```
+
+The import path is resolved when the service starts. Under subprocess isolation, the child process resolves the same path again for each rollout.
+
+## The entrypoint is an import path, not an object
+
+Subprocess isolation starts a child process for each rollout. A child process cannot receive a live Python object from the parent, so `serve()` accepts a string in the form `module:attribute` instead of an already-constructed agent.
+
+For example, `lc_agent:build` imports the `build` attribute from the `lc_agent` module.
+
+| `module:attr` resolves to | What happens |
+| --- | --- |
+| A class | Agent Flywheel instantiates the class with no arguments. A class that requires constructor arguments raises `ConfigurationError`. |
+| A zero-argument factory | Agent Flywheel calls the factory and uses its return value as the agent. |
+| An already-built object with `invoke`, `run`, `execute`, or `chat` | Agent Flywheel uses the object as-is and does not call it as a factory. |
+| A function that takes the task | Agent Flywheel treats the function as a factory first. The function receives no arguments and raises `TypeError` if it requires the task argument. |
+
+The last case is a sharp edge. A task-taking function is ambiguous because the same callable shape could represent either a factory or an agent method. Use a zero-argument factory when you need to construct an agent, then expose the task-taking method on the returned object.
+
+```python
+class Agent:
+    def invoke(self, task: str) -> str:
+        return f"Completed: {task}"
+
+
+def build() -> Agent:
+    return Agent()
+```
+
+Serve the factory, not the constructed object:
+
+```python
+fw.serve("agent:build", agent_id="task-agent", input_shape="text")
+```
+
+A constructed object is accepted only with `isolation="inprocess"`. In-process execution is capped at `concurrency=1`.
+
+## Which method gets called
+
+After resolving the entrypoint, Agent Flywheel selects the first supported method in this order:
+
+| Probe order | Method |
+| --- | --- |
+| 1 | `invoke` |
+| 2 | `run` |
+| 3 | `execute` |
+| 4 | `chat` |
+| 5 | `__call__` |
+
+Pass `method=` when the object exposes more than one of these methods or when you want to make the selection explicit.
+
+```python
+fw.serve(
+    "agent:build",
+    agent_id="task-agent",
+    input_shape="text",
+    method="run",
+)
+```
+
+Agent Flywheel detects asynchronous methods and awaits them. Resolution happens once at startup, so an invalid entrypoint or missing method raises before the first rollout begins.
+
+If no supported method exists, the error identifies the methods that were tried and the available callables:
+
+```text
+no entrypoint found on Nothing. Tried, in order: invoke, run, execute, chat, __call__. Available callables: helper. Pass method=... to name one explicitly.
+```
+
+## Declare `input_shape`
+
+`input_shape` is declared by the serving configuration and is never inferred from the agent. It controls the value passed to the selected method.
+
+| `input_shape` | Value passed to the agent |
+| --- | --- |
+| `text` | The task description as a string, such as `"the task description"` |
+| `messages` | A message list containing the task: `[{"role": "user", "content": "the task description"}]` |
+| `dict` | A dictionary containing the task: `{"input": "the task description"}` |
+
+Choose the shape that matches the input contract of your agent. For example, an agent that expects a chat history should use `messages`, while an agent that expects a request object should use `dict`.
+
+```python
+fw.serve(
+    "agent:build",
+    agent_id="conversation-agent",
+    input_shape="messages",
+)
+```
+
+## Adapters
+
+`adapters="auto"` is the default. Agent Flywheel walks its built-in adapter registry and binds every adapter whose framework is installed and compatible with the supported version range.
+
+| Adapter | Distribution | Supported versions | Covers |
+| --- | --- | --- | --- |
+| `langchain` | `langchain-core` | `>=0.3,<2` | LangChain and LangGraph |
+| `adk` | `google-adk` | `>=1,<3` | Google ADK |
+
+LangGraph does not have a separate adapter. LangGraph uses the `langchain-core` callback system, so the LangChain adapter captures both frameworks.
+
+Adapters add no framework dependencies to Agent Flywheel. The framework must already be installed in the process that runs the agent for the corresponding adapter to bind.
+
+## What each adapter can honestly report
+
+Adapters report three possible outcome states:
+
+- `ok`: The adapter observed a successful tool result.
+- `failed`: The adapter observed a tool exception or an explicit error result.
+- `unknown`: The adapter observed a return value but could not establish whether the tool succeeded.
+
+| Framework | `ok` | `failed` | `unknown` | Call attributed to |
+| --- | --- | --- | --- | --- |
+| LangChain | `ToolMessage` with `status="success"` | The tool raised, or `ToolMessage` has `status="error"` | Every other return value | The `agent:`-prefixed run tag |
+| LangGraph | Same as LangChain | Same as LangChain | Same as LangChain | The executing node from `langgraph_node` run metadata |
+| Google ADK | Never reported | The tool raised, or the returned dictionary has a truthy `error` key | Every other return value | `ToolContext.agent_name` |
+
+`status_code` is always `null` when the outcome comes from an adapter.
+
+Google ADK has no `ok` path by design. A returned value proves only that the tool did not raise. It does not prove that the tool produced a successful result, so the adapter reports `unknown` unless it observes an error.
+
+Adapters provide best-effort acceleration over explicit `record_tool_call()` calls. If your code knows the outcome directly, record it explicitly instead of relying on framework observation.
+
+```python
+record_tool_call(
+    "charge_card",
+    {"amount": 4200},
+    outcome="ok",
+    status_code=201,
+)
+```
+
+## Adapters add no dependencies
+
+No adapter imports its framework at module scope. Framework imports happen only when the adapter binds in the process that runs the agent.
+
+As a result, the runtime dependency list remains at one dependency: `httpx`. Installing Agent Flywheel does not require installing LangChain, LangGraph, or Google ADK.
+
+## `[]`, `auto`, and a name are three different instructions
+
+The `adapters` value controls whether Agent Flywheel discovers, disables, or requires adapters.
+
+| `adapters` value | Behavior |
+| --- | --- |
+| `"auto"` | The default. Bind every built-in adapter whose framework is installed and compatible. |
+| `[]` | Bind no adapters. |
+| `["langchain"]` | Require the named adapter. Raise `RoutingNotInstallable` if it cannot bind. |
+| `["nosuchname"]` | Raise `KeyError` and list the built-in adapter names that exist. |
+
+Naming an adapter fails closed. A requested adapter does not silently disappear when its framework is unavailable or incompatible.
+
+`RoutingNotInstallable` includes a machine-readable reason:
+
+- `AdapterFrameworkAbsent`: The framework distribution is not installed.
+- `VersionOutOfRange`: The installed framework version is outside the adapter's supported range.
+- `SymbolMissing`: The framework is installed, but the adapter cannot find the required symbol.
+
+The version gate is soft for automatic discovery. With `adapters="auto"`, an adapter whose framework version is outside the supported range is skipped. With an explicit adapter name, the same condition raises `RoutingNotInstallable`.
+
+<Callout kind="alert">
+
+Adapters bind in the process that runs your agent, not at startup. Binding happens inside the rollout child, after the child process starts.
+
+When you use `attach()`, the opposite rule applies: binding happens while attaching to production traffic, and there is no rollout endpoint to modify.
+
+</Callout>
+
+## Zero instrumentation, worked end to end
+
+The following LangChain agent contains no Agent Flywheel imports. The adapter observes LangChain tool activity at runtime.
+
+```python
+from langchain_core.tools import tool
+
+
+@tool
+def lookup(q: str) -> str:
+    """Look something up."""
+    return f"found: {q}"
+
+
+class Agent:
+    tools = [lookup]
+
+    def invoke(self, task: str) -> str:
+        return str(lookup.invoke({"q": task}))
+
+
+def build():
+    return Agent()
+```
+
+Serve the agent by referencing the module and factory:
+
+```python
+fw.serve(
+    "lc_agent:build",
+    agent_id="research-agent",
+    input_shape="text",
+)
+```
+
+A rollout with the task `count to three` can produce a trajectory like this:
+
+```json
+{
+  "agent_id": "research-agent",
+  "tool_calls": [
+    {
+      "name": "lookup",
+      "outcome": "unknown",
+      "status_code": null,
+      "output": "found: count to three"
+    }
+  ]
+}
+```
+
+The outcome is `unknown`, not `ok`, because the adapter observed a string return value without a successful LangChain `ToolMessage`. A tool return value alone does not prove that the framework classified the tool call as successful.
+
+When your application knows the outcome, use `record_tool_call()` to provide the definitive result:
+
+```python
+record_tool_call(
+    "charge_card",
+    {"amount": 4200},
+    outcome="ok",
+    status_code=201,
+)
+```
+
+The explicit record supplies the outcome and status code instead of asking an adapter to infer them from framework activity.
+
+<Expandable title="Routing a chat model you constructed yourself">
+
+Pass a constructed chat model to `LangChainAdapter(llm=...)` when you need to route that model through the per-rollout gateway.
+
+```python
+adapter = LangChainAdapter(llm=chat_model)
+```
+
+A `ChatOpenAI` instance configured with `base_url=...` in your code takes precedence over environment variables. If the client has a fixed endpoint, binding raises `RoutingNotInstallable` with the reason `HardcodedBaseUrl`.
+
+Constructed adapter instances are reachable only with `isolation="inprocess"`.
+
+</Expandable>
+
+## Capture outcomes from production traffic
+
+Use `attach()` to capture framework activity from production traffic. It accepts the same `adapters=` argument as `serve()`, but it binds adapters without an endpoint because production traffic already exists.
+
+```python
+fw.attach(
+    agent_id="research-agent",
+    adapters="auto",
+)
+```
+
+Both built-in adapters treat an empty URL as a signal not to modify routing. They observe calls without redirecting the framework client to a rollout gateway.
+
+See [Capturing production traffic](/production) for the production setup and lifecycle.
+
+## Ship your own adapter
+
+A custom adapter should meet three requirements:
+
+1. Do not import the target framework at module scope. Import it only during binding.
+2. Report `unknown` rather than guessing when the framework does not expose enough information to establish success or failure.
+3. Fail loudly at bind time when the framework is absent, incompatible, or missing a required symbol.
+
+Adapter binding should distinguish an observed error from an unobserved result. Returning a value is not sufficient evidence of success unless the framework explicitly marks that value as successful.
+
+Agent Flywheel currently reads the adapter entry-point group through `discover_adapters()`, but no public entry point calls that function. A third-party adapter is therefore not picked up by `adapters="auto"` yet.
+
+## Related
+
+<Columns cols={2}>
+
+<Card title="Outcome model" href="/outcomes" icon="bar-chart">
+
+Understand `ok`, `failed`, and `unknown` outcomes and how explicit records are represented.
+
+</Card>
+
+<Card title="Configuration" href="/configuration" icon="settings">
+
+Configure serving, isolation, concurrency, input shapes, methods, and adapters.
+
+</Card>
+
+<Card title="Production traffic" href="/production" icon="cloud">
+
+Attach to production traffic and capture framework activity without routing calls.
+
+</Card>
+
+<Card title="Agent contract" href="/contract" icon="code">
+
+Review the callable and input contract expected by a served Python agent.
+
+</Card>
+
+<Card title="Quickstart" href="/quickstart" icon="rocket">
+
+Serve your first agent and verify the resulting rollout data.
+
+</Card>
+
+<Card title="CLI reference" href="/cli" icon="terminal">
+
+Run and inspect Agent Flywheel workflows from the command line.
+
+</Card>
+
+</Columns>

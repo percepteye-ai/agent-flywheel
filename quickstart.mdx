@@ -1,0 +1,263 @@
+---
+title: "Quickstart"
+description: "Install Agent Flywheel, integrate with one serve() call, configure environment variables, run your first bounded rollout, and try the CLI agent variant."
+---
+
+## Start your first rollout
+
+Install Agent Flywheel, connect your agent to the control plane, and run a bounded set of rollouts without changing the agent's behavior.
+
+<Steps>
+<Step title="Install Agent Flywheel">
+
+Install the package with Python 3.10 through 3.13:
+
+```bash
+pip install agent-flywheel
+```
+
+The package has one runtime dependency, `httpx`. To emit each rollout outcome as an OpenTelemetry span, install the optional `otel` extra:
+
+```bash
+pip install "agent-flywheel[otel]"
+```
+
+The extra installs only the OpenTelemetry API. Agent Flywheel emits spans through a `TracerProvider` that you have already registered and does not install one.
+
+</Step>
+
+<Step title="Set the control-plane environment variables">
+
+Set the two required environment variables before starting your agent:
+
+```bash
+export PERCEPTEYE_CONTROL_PLANE_URL=https://launch.percepteye.ai/api/flywheel/v1
+export PERCEPTEYE_API_KEY=pefw_example_9xmk7q2r
+```
+
+Sign in at [launch.percepteye.ai](https://launch.percepteye.ai) to connect your agent. The console shows the API key once and provides the exact control-plane URL for that agent. Each key is scoped to one agent.
+
+You can pass either value directly to `serve()` with `control_plane_url=` or `api_key=`. A function argument overrides its corresponding environment variable.
+
+</Step>
+
+<Step title="Write the integration">
+
+Add the `serve()` call to the process that already runs your agent:
+
+```python
+import agent_flywheel as fw
+
+fw.serve("my_package.agent:build", agent_id="my-coding-agent", input_shape="text")
+```
+
+The first argument is an importable `module:attr` entrypoint. Subprocess isolation is the default, so each child process imports or constructs the agent instead of receiving a live Python object.
+
+| Entrypoint | What Agent Flywheel does |
+| --- | --- |
+| `"my_package.agent:build"` | Calls the zero-argument factory and uses its return value as the agent. |
+| `"my_package.agent:Agent"` | Instantiates the class with no arguments. |
+| `"my_package.agent:agent"` | Uses the existing object when it provides `invoke`, `run`, `execute`, or `chat`. |
+
+Agent Flywheel resolves the entrypoint once at startup. It probes the agent methods in this order and uses the first matching method:
+
+```text
+invoke, run, execute, chat, __call__
+```
+
+Set `method="..."` to choose a method explicitly. Agent Flywheel does not re-resolve the method during a rollout.
+
+Declare the shape of the input that your agent receives. Agent Flywheel does not infer it:
+
+| `input_shape` | Agent input |
+| --- | --- |
+| `"text"` | The task description as text. |
+| `"messages"` | A message list such as `[{"role": "user", "content": "the task description"}]`. |
+| `"dict"` | A dictionary such as `{"input": "the task description"}`. |
+
+`serve()` claims and runs rollouts, reports their outcomes, and blocks until it reaches its clean exit condition. It returns an integer containing the number of completed rollouts.
+
+<Expandable title="Passing an already-constructed object">
+
+A live object cannot cross the process boundary used by default subprocess isolation. Pass an importable `module:attr` string when using that mode.
+
+If your isolation mode supports a live object, you can pass an object that already provides `invoke`, `run`, `execute`, or `chat`:
+
+```python
+import agent_flywheel as fw
+from my_package.agent import agent
+
+fw.serve(agent, agent_id="my-coding-agent", input_shape="text")
+```
+
+</Expandable>
+
+</Step>
+
+<Step title="Bound the first run">
+
+<Callout kind="warning">
+
+Rollouts are real runs. They execute your agent in your process tree and use your credentials. Bound the first run and choose an artifacts directory that you can safely write to.
+
+</Callout>
+
+Run no more than eight completed rollouts and print lifecycle events as they arrive:
+
+```python
+import agent_flywheel as fw
+
+completed = fw.serve(
+    "my_package.agent:build",
+    agent_id="my-coding-agent",
+    input_shape="text",
+    max_rollouts=8,
+    artifacts_dir="/tmp/percepteye-first-run",
+    on_event=lambda kind, event: print(kind, event),
+)
+```
+
+`artifacts_dir` is created when it does not exist. Each rollout uses a temporary `_percepteye/<rollout_id>/` directory beneath it. Agent Flywheel deletes that directory after reporting the result.
+
+| Argument | Default | Behavior |
+| --- | --- | --- |
+| `max_rollouts` | `None` | Stops after this many rollouts complete. The count includes crashes and graded passes. |
+| `artifacts_dir` | `./.percepteye-artifacts` | Directory for rollout artifacts. |
+| `concurrency` | `1` | Number of rollouts in flight under the default subprocess isolation. |
+| `rollout_timeout_s` | `900.0` | Per-rollout wall-clock limit. A real timeout applies only with subprocess isolation. |
+
+<Callout kind="tip">
+
+`max_rollouts` is the only clean exit from `serve()`. Agent Flywheel does not install a `SIGINT` or `SIGTERM` handler.
+
+</Callout>
+
+</Step>
+
+<Step title="Run a CLI agent">
+
+For an agent that starts from a command line, pass the command and its arguments as an `argv` list:
+
+```python
+import agent_flywheel as fw
+
+fw.serve(
+    ["my-agent", "run"],
+    agent_id="my-cli-agent",
+    input_shape="text",
+    max_rollouts=8,
+)
+```
+
+The task is available to the CLI process on standard input and in the `PERCEPTEYE_TURN_INPUT` environment variable. Ordinary standard output becomes the final response.
+
+If the CLI expects the task at a particular argument position, mark that position with `fw.TASK`:
+
+```python
+import agent_flywheel as fw
+
+fw.serve(
+    ["my-agent", "run", fw.TASK],
+    agent_id="my-cli-agent",
+    input_shape="text",
+    max_rollouts=8,
+)
+```
+
+</Step>
+</Steps>
+
+## Misconfiguration raises before the first rollout
+
+`serve()` completes its preflight checks before it claims any rollout. It resolves the mode, reads credentials, creates the artifact directory, checks the control plane, builds the runner, and registers the agent in this order.
+
+| Preflight check | Raises when |
+| --- | --- |
+| Resolve the mode | `PERCEPTEYE_AGENT_MODE` or `mode=` contains a value it cannot parse. |
+| Read the control-plane URL | Neither `control_plane_url=` nor `PERCEPTEYE_CONTROL_PLANE_URL` is set. |
+| Read the API key | Neither `api_key=` nor `PERCEPTEYE_API_KEY` is set. |
+| Create `artifacts_dir` | The directory cannot be created. |
+| `GET /health` | The control plane does not answer or does not speak Flywheel version 1. |
+| Build the runner | The entrypoint cannot be imported, does not resolve to a callable, or is incompatible with the isolation mode. |
+| `POST /agents` | Agent registration fails. |
+
+These failures occur before the first rollout. They are not discovered halfway through a run.
+
+## What you see
+
+Without an `on_event` callback, Agent Flywheel is silent apart from two status lines that `serve()` writes to standard output. Pass a callback when you need rollout activity in your logs:
+
+```python
+import agent_flywheel as fw
+
+def report_event(kind, event):
+    print(kind, event)
+
+fw.serve(
+    "my_package.agent:build",
+    agent_id="my-coding-agent",
+    input_shape="text",
+    max_rollouts=8,
+    on_event=report_event,
+)
+```
+
+The callback has the type `Callable[[str, dict], None]` and runs synchronously on the thread that produced the event. The `kind` value identifies the event and the dictionary contains its details, so the printed output varies by event.
+
+Exceptions raised by `on_event` are swallowed. Keep the callback inexpensive so observability does not delay rollout processing.
+
+<Callout kind="info">
+
+Use `on_event` for logs, counters, or lightweight monitoring. The callback cannot change rollout behavior because Agent Flywheel isolates exceptions from the observed run.
+
+</Callout>
+
+## Standing the same image up without contributing
+
+Set `PERCEPTEYE_AGENT_MODE=production` when you need the same image to start without contributing rollouts:
+
+```bash
+export PERCEPTEYE_AGENT_MODE=production
+```
+
+In production mode, `serve()` returns `0` immediately. The default mode is `training`, which contributes capacity:
+
+```bash
+export PERCEPTEYE_AGENT_MODE=training
+```
+
+This setting gates `serve()`, the call that performs training work. It does not gate `attach()`, which is the production capture surface.
+
+## Next steps
+
+<Columns cols={2}>
+<Card title="Understand outcomes" href="/outcomes" icon="bar-chart">
+
+Learn how per-call outcomes work, including why `unknown` is a supported answer.
+
+</Card>
+
+<Card title="Use Python agent frameworks" href="/python-agents" icon="code">
+
+Connect LangChain, LangGraph, or Google ADK agents without changing the agent implementation.
+
+</Card>
+
+<Card title="Run CLI and other languages" href="/cli" icon="terminal">
+
+Integrate a binary, Node CLI, or another command-line agent through its existing interface.
+
+</Card>
+
+<Card title="Deploy the trained agent" href="/production" icon="rocket">
+
+Pick up the trained model and prompt for production use.
+
+</Card>
+
+<Card title="Configure Agent Flywheel" href="/configuration" icon="settings">
+
+Review modes, isolation, credentials, and runtime configuration.
+
+</Card>
+</Columns>

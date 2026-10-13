@@ -1,0 +1,466 @@
+---
+title: "Configuration"
+description: "Every environment variable, serve() argument, isolation mode, timeout, reporting field, and OpenTelemetry option — the complete configuration reference for Agent Flywheel."
+---
+
+## Configuration at a glance
+
+Every configuration knob is either a keyword argument on `serve()` or one of seven environment variables. Only `PERCEPTEYE_AGENT_MODE` and `PERCEPTEYE_INTROSPECT` change SDK behavior. The remaining variables configure addresses, credentials, and locations.
+
+Use [`serve()`](/how-it-works) arguments for per-process configuration. Use environment variables when the same deployed image must run in different environments without code changes.
+
+## The mode switch
+
+`PERCEPTEYE_AGENT_MODE` decides whether the process performs training work. The default is `training`. Set the variable to `production` when the deployed process must exit before opening a connection.
+
+The same image can run in either mode without a code edit:
+
+```bash
+PERCEPTEYE_AGENT_MODE=training python agent.py
+```
+
+```bash
+PERCEPTEYE_AGENT_MODE=production python agent.py
+```
+
+The mode is resolved before the entrypoint is imported. Production mode returns before the SDK opens a connection to the control plane.
+
+### What production actually does
+
+Production mode is an explicit opt-out from training capacity. It does not start the flywheel and does not raise an exception.
+
+| Behavior | Production result | Why |
+| --- | --- | --- |
+| Resolve the mode | Resolves before importing the entrypoint | The process can opt out before loading agent code |
+| Open a control-plane connection | Does not open one | Production processes do not participate in training |
+| Return value | Returns `0` | The process exits successfully |
+| Exception behavior | Does not raise | Opting out is a normal process outcome |
+| Output | Prints exactly one line | Operators can identify the reason for the early exit |
+| Deployed image | Uses the same image as training | Environment configuration selects the behavior |
+
+The process prints one line and exits:
+
+```text
+Agent Flywheel: production mode, training disabled
+```
+
+### Accepted spellings
+
+Values are case-insensitive and have surrounding whitespace removed before validation.
+
+| Value | Meaning |
+| --- | --- |
+| `training` | Contribute capacity |
+| `train` | Contribute capacity |
+| `rollout` | Contribute capacity |
+| `rollouts` | Contribute capacity |
+| `fine-tuning` | Contribute capacity |
+| `finetuning` | Contribute capacity |
+| `improving` | Contribute capacity |
+| `production` | Do not contribute capacity |
+| `prod` | Do not contribute capacity |
+| `serving` | Do not contribute capacity |
+
+An unrecognized value raises `ConfigurationError`:
+
+```text
+ConfigurationError: unrecognized PERCEPTEYE_AGENT_MODE value: staging
+```
+
+### Precedence
+
+The SDK resolves the effective mode in this order:
+
+| Priority | Source | Rule |
+| --- | --- | --- |
+| 1 | `mode=` argument | Used when the argument is not an empty string |
+| 2 | `PERCEPTEYE_AGENT_MODE` | Used when `mode=` is not provided |
+| 3 | Default | `training` |
+
+An empty string passed as `mode=` means that the argument was not passed. The SDK then checks `PERCEPTEYE_AGENT_MODE`.
+
+When an explicit value overrides another source, the SDK announces the override in both directions, including a change from training to production and a change from production to training.
+
+Use `current_mode()` to read the currently resolved mode. Use `resolve_mode()` when you need to resolve a value using the normal precedence rules.
+
+<Callout kind="info">
+
+`PERCEPTEYE_AGENT_MODE` gates `serve()` and nothing else. It does not gate `attach()`.
+
+</Callout>
+
+## Stopping a running flywheel
+
+Set `max_rollouts=N` when you need a clean, bounded run. `max_rollouts` counts completed rollouts, not successful rollouts. It is the only clean exit mechanism.
+
+| Action | Behavior | Result |
+| --- | --- | --- |
+| `max_rollouts=N` | Stops after `N` completed rollouts | Clean exit |
+| `SIGTERM` | Nothing catches the signal | In-flight rollouts can become orphaned |
+| Ctrl-C | The parent waits for the subprocess child | In-flight work drains before exit |
+| Revoke the API key | The control plane returns `401` | The loop catches the error, sleeps for 5 seconds, and continues |
+| Control plane action | The control plane cannot stop a running flywheel | Stop the process locally |
+
+<Callout kind="alert">
+
+Ctrl-C is recorded as an SDK crash. The subprocess child receives `SIGINT`, exits non-zero, and the SDK maps the outcome to `flywheel_crash`.
+
+</Callout>
+
+## Watching a flywheel with on_event
+
+Pass `on_event` to receive lifecycle events as the flywheel runs. The callback has the type `Callable[[str, dict], None]`.
+
+```python
+def on_event(event_name, details):
+    if event_name == "claim_empty":
+        print("No rollout claim is available")
+    elif event_name == "rollout_crash":
+        print("Rollout crashed", details)
+
+serve(
+    entrypoint="agent:run",
+    on_event=on_event,
+)
+```
+
+The SDK invokes callbacks from three threads. Exceptions raised by the callback are swallowed, so an event handler cannot stop the flywheel.
+
+| Event | When it is emitted |
+| --- | --- |
+| `claim_empty` | No rollout claim is available |
+| `claim_failed` | Claiming work failed |
+| `rollout_start` | A rollout begins |
+| `rollout_reported` | A rollout report is accepted |
+| `rollout_crash` | The rollout process crashes |
+| `report_failed` | Reporting the rollout fails |
+| `artifact_failed` | Collecting or reporting an artifact fails |
+| `lease_lost` | The rollout lease is no longer held |
+| `heartbeat_failed` | A lease heartbeat fails |
+
+Wire `claim_empty` first when you are diagnosing an idle flywheel. It distinguishes an agent with no available work from an agent that failed to claim work.
+
+## Every serve() argument
+
+The following arguments configure the entrypoint, control-plane connection, execution environment, reporting behavior, and runtime limits.
+
+### Entrypoint and identity
+
+<ParamField body="entrypoint" param-type="string | list | object" required="true" show-location="false">The agent entrypoint. A string uses `module:attribute` resolution, a list starts a command entrypoint, and an object runs as a constructed callable. See [Entrypoints](#entrypoints).</ParamField>
+
+<ParamField body="agent_id" param-type="string" show-location="false">Identifier used to associate the running agent with reported rollouts.</ParamField>
+
+<ParamField body="input_shape" param-type="string" enum="text,messages,dict" show-location="false">Shape used to pass the rollout input to the agent. The default depends on the resolved entrypoint and adapter configuration. See [Input shapes](#input-shapes).</ParamField>
+
+<ParamField body="mode" param-type="string" show-location="false">Explicit mode override. Accepted values include the training and production spellings documented in [Accepted spellings](#accepted-spellings). An empty string means that the argument was not passed.</ParamField>
+
+<ParamField body="transport" param-type="string" show-location="false">Transport used to connect the SDK to the execution service. The default is `attach`.</ParamField>
+
+### Control-plane connection
+
+<ParamField body="control_plane_url" param-type="string" show-location="false">Base URL of the control plane. If omitted, the SDK uses its configured default or the corresponding environment variable.</ParamField>
+
+<ParamField body="api_key" param-type="string" show-location="false">Flywheel API key used to authenticate with the control plane.</ParamField>
+
+<ParamField body="artifacts_dir" param-type="string | path" show-location="false">Directory used for collected rollout artifacts.</ParamField>
+
+### Execution
+
+<ParamField body="isolation" param-type="string" enum="subprocess,inprocess" show-location="false">Execution isolation mode. The default is `subprocess`. Only subprocess isolation provides a real rollout timeout.</ParamField>
+
+<ParamField body="concurrency" param-type="integer" show-location="false">Maximum number of concurrent rollouts. The `inprocess` mode supports only `concurrency=1`.</ParamField>
+
+<ParamField body="rollout_timeout_s" param-type="float" show-location="false">Requested rollout timeout in seconds. The default is `900.0`. The actual budget also considers the server deadline.</ParamField>
+
+<ParamField body="gate_flag" param-type="string | boolean" show-location="false">Configuration used to gate whether the entrypoint is available for execution. The gate is evaluated before a rollout runs.</ParamField>
+
+<ParamField body="endpoint_env" param-type="dict[string, string]" show-location="false">Additional environment variables used to configure provider routing. These values are additive to the routing variables set by the SDK.</ParamField>
+
+<ParamField body="execution_snapshot" param-type="object | dict" show-location="false">Snapshot of execution configuration associated with the rollout.</ParamField>
+
+<ParamField body="harness_snapshot" param-type="object | dict" show-location="false">Snapshot of harness configuration associated with the rollout.</ParamField>
+
+<ParamField body="command_output_adapter" param-type="object | callable" show-location="false">Adapter that converts command output into the input expected by the reporting and rollout layers.</ParamField>
+
+<ParamField body="attested_execution_components" param-type="list" show-location="false">Execution components included in attestation metadata.</ParamField>
+
+<ParamField body="volatile_command_values" param-type="list | dict" show-location="false">Command values that can change between executions and should be represented as volatile metadata.</ParamField>
+
+### Reporting and introspection
+
+<ParamField body="reports_tool_calls" param-type="boolean" show-location="false">Controls whether tool calls are included in rollout reports. The default is `False`.</ParamField>
+
+<ParamField body="method" param-type="string | callable" show-location="false">Method used to invoke the configured agent when the entrypoint exposes more than one supported operation.</ParamField>
+
+<ParamField body="adapters" param-type="string | list" show-location="false">Input and output adapter selection. The default is `auto`.</ParamField>
+
+<ParamField body="introspect" param-type="boolean" show-location="false">Enables SDK introspection. The default is `True`. Introspection is also controlled by `PERCEPTEYE_INTROSPECT`; both settings must enable introspection for it to run.</ParamField>
+
+<ParamField body="describe" param-type="object | dict" show-location="false">Description metadata for the agent. Use this for descriptive information, not training workflow rules.</ParamField>
+
+<ParamField body="rules" param-type="string | list | None" show-location="false">Training guidance sent to the control plane. `None` sends nothing, while an empty list retracts existing rules. See [A Product's workflow rules](#a-products-workflow-rules-rules).</ParamField>
+
+### Lifecycle
+
+<ParamField body="max_rollouts" param-type="integer | None" show-location="false">Maximum number of completed rollouts before a clean exit. Completions count even when the rollout is unsuccessful.</ParamField>
+
+<ParamField body="on_event" param-type="Callable[[str, dict], None]" show-location="false">Callback invoked for flywheel lifecycle events. Callback exceptions are swallowed.</ParamField>
+
+## A Product's workflow rules: rules=
+
+`rules=` sends prose guidance that describes how the agent should work during training. The control plane decides whether the rules are valid and applies the last accepted writer's value.
+
+```python
+serve(
+    entrypoint="product_agent:run",
+    rules=[
+        "Confirm the user's account before changing subscription settings.",
+        "Explain the outcome after completing each requested action.",
+        "Do not expose internal identifiers in the final response.",
+    ],
+)
+```
+
+The rules value has three distinct states:
+
+| Value | Behavior |
+| --- | --- |
+| `None` | Sends nothing |
+| `[]` | Retracts the existing rules |
+| Non-empty value | Sends the supplied training guidance |
+
+Rules use last-writer-wins behavior. The control plane decides whether a value is valid. Rules do not stop the agent or terminate a rollout, regardless of what they say. Rules are not included in `describe=`.
+
+## Isolation
+
+`subprocess` is the default isolation mode and the only mode with a real timeout. Use `inprocess` only when the agent must share the current process and can satisfy its restrictions.
+
+| Property | `subprocess` | `inprocess` |
+| --- | --- | --- |
+| Default | Yes | No |
+| Process boundary | Fresh child process | Current process |
+| Real timeout | Yes | No, timeout is advisory |
+| Supported concurrency | Multiple rollouts | `1` only |
+| Hard termination | Child can be killed after the timeout budget | Not available |
+| Entrypoint objects | Not used | Supported |
+| Failure containment | Child failure is isolated from the parent | Agent failure occurs in the current process |
+
+### What the child gets
+
+The SDK prepares the child environment for each subprocess rollout.
+
+| Environment behavior | Result |
+| --- | --- |
+| `PERCEPTEYE_` variables from the parent | Scrubbed |
+| `PERCEPTEYE_ROLLOUT_ID` | Set by the SDK |
+| `PERCEPTEYE_TRAJECTORY_DIR` | Set by the SDK |
+| Provider routing variables | Set last |
+| Unroutable provider variables | Removed |
+| `endpoint_env` | Applied additively |
+| `AWS_ACCESS_KEY_ID` | Not removed by the unroutable-provider scrub |
+
+Provider routing is set last so the SDK's selected endpoint and credential values take precedence. The SDK sets `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `ANTHROPIC_BASE_URL`, and `ANTHROPIC_API_KEY` when the corresponding route is configured.
+
+<Expandable title="The provider variables removed from every child">
+
+The SDK removes these variables from every subprocess child:
+
+- `AZURE_OPENAI_*`
+- `GOOGLE_API_KEY`
+- `GEMINI_API_KEY`
+- `NVIDIA_API_KEY`
+- `AWS_BEARER_TOKEN_BEDROCK`
+- `GROQ_API_KEY`
+- `MISTRAL_API_KEY`
+- `TOGETHER_API_KEY`
+- `OPENROUTER_API_KEY`
+- `FIREWORKS_API_KEY`
+- `DEEPSEEK_API_KEY`
+- `PERPLEXITY_API_KEY`
+- `COHERE_API_KEY`
+- `XAI_API_KEY`
+
+`AWS_ACCESS_KEY_ID` is not part of this removal list.
+
+</Expandable>
+
+### Timeout calculation
+
+The SDK calculates the effective execution budget from the requested timeout and the server deadline.
+
+| Timeout | Value or rule |
+| --- | --- |
+| `rollout_timeout_s` default | `900.0` seconds |
+| Actual rollout budget | The smaller of `rollout_timeout_s` and the server deadline minus 10 seconds |
+| Subprocess hard-kill delay | Budget plus 15 seconds |
+| Final subprocess action | `SIGKILL` after the hard-kill delay |
+| Heartbeat interval | One third of the granted lease, with a minimum of 1 second |
+| Lease reclamation | The lease can be reclaimed after up to 30 minutes |
+
+## Entrypoints
+
+The SDK resolves string entrypoints at startup. For a module, it probes the following attributes in order:
+
+```text
+invoke
+run
+execute
+chat
+__call__
+```
+
+Resolution happens once at startup for the normal module entrypoint path. A module entrypoint is imported once per rollout in a fresh subprocess child.
+
+| Entrypoint form | Execution behavior | Input transport |
+| --- | --- | --- |
+| `module:attribute` | Imports the module and resolves the first supported attribute | Depends on the resolved callable |
+| Argument vector | Starts the command as a process | Process task on standard input and `PERCEPTEYE_TURN_INPUT` |
+| Argument vector containing `fw.TASK` | Starts the command as a process | Standard input is empty |
+| Constructed object | Invokes the object directly | In-process only, with `concurrency=1` |
+
+A command entrypoint runs in its own process group. This allows the SDK to manage the command and its descendants as one execution unit.
+
+`gate_flag` controls whether the configured entrypoint is eligible to run. Configure it when an external feature or deployment flag must determine whether the agent accepts rollout work.
+
+## Input shapes
+
+The selected input shape determines how the rollout task is passed to the agent.
+
+| Shape | Value passed to the agent |
+| --- | --- |
+| `text` | A string containing the task description |
+| `messages` | A list such as `[{"role": "user", "content": "Summarize the account activity"}]` |
+| `dict` | An object such as `{"input": "Summarize the account activity"}` |
+
+Choose the shape that matches the agent interface. Do not make the agent infer whether a string represents a task, a message list, or a structured request.
+
+## Reporting
+
+Each rollout produces a `RolloutOutput`. Artifacts are collected on every execution path, including crashes and failed reports.
+
+```python
+RolloutOutput(
+    final_text="The account has two active subscriptions.",
+    tool_calls=[],
+    tool_calls_omitted_count=0,
+    llm_call_count=2,
+    artifacts=["trajectory.json"],
+    reward=0.92,
+    success=True,
+    exclusion_reason=None,
+    exclusion_detail=None,
+    events=[],
+    timing={"duration_ms": 1840},
+    agent_fingerprint="sha256:7f8c..."
+)
+```
+
+### RolloutOutput fields
+
+<ResponseField name="final_text" field-type="string" required="false">Final text produced by the agent.</ResponseField>
+
+<ResponseField name="tool_calls" field-type="array | null" required="false">Tool calls observed during the rollout. `None` and an empty list have different meanings: `None` indicates that tool calls were not captured, while `[]` indicates that no tool calls occurred.</ResponseField>
+
+<ResponseField name="tool_calls_omitted_count" field-type="integer" required="false">Number of tool calls omitted from the report.</ResponseField>
+
+<ResponseField name="llm_call_count" field-type="integer" required="false">Number of language-model calls made during the rollout.</ResponseField>
+
+<ResponseField name="artifacts" field-type="array" required="false">Artifacts collected from the rollout.</ResponseField>
+
+<ResponseField name="reward" field-type="number | null" required="false">Reward assigned to the rollout, when available.</ResponseField>
+
+<ResponseField name="success" field-type="boolean | null" required="false">Whether the rollout completed successfully.</ResponseField>
+
+<ResponseField name="exclusion_reason" field-type="string | null" required="false">Reason the rollout was excluded from evaluation or reporting.</ResponseField>
+
+<ResponseField name="exclusion_detail" field-type="string | null" required="false">Additional detail about the exclusion.</ResponseField>
+
+<ResponseField name="events" field-type="array" required="false">Events captured during execution.</ResponseField>
+
+<ResponseField name="timing" field-type="object" required="false">Timing metadata for the rollout.</ResponseField>
+
+<ResponseField name="agent_fingerprint" field-type="string | null" required="false">Fingerprint identifying the executed agent version or execution configuration.</ResponseField>
+
+### Artifact limits
+
+| Limit | Value |
+| --- | --- |
+| Maximum size per file | 256 MB |
+| Maximum inline size per file | 64 KB |
+| Maximum total inline size | 256 KB |
+| Symbolic links | Never followed |
+
+The SDK collects artifacts on every path. A rollout can therefore produce artifacts even when the agent crashes, the report fails, or the rollout is excluded.
+
+## Environment variables
+
+The SDK supports seven environment variables. Only `PERCEPTEYE_AGENT_MODE` and `PERCEPTEYE_INTROSPECT` change SDK behavior. The remaining variables provide connection details or values that the SDK sets for child processes.
+
+| Variable | Accepted value or source | Behavior |
+| --- | --- | --- |
+| `PERCEPTEYE_AGENT_MODE` | Training or production spelling | Selects whether `serve()` performs training work |
+| `PERCEPTEYE_CONTROL_PLANE_URL` | Control-plane base URL | Configures the control-plane address |
+| `PERCEPTEYE_API_KEY` | Flywheel API key | Configures control-plane authentication |
+| `PERCEPTEYE_INTROSPECT` | `0`, `false`, `no`, or `off` disables introspection | Controls whether introspection is enabled |
+| `PERCEPTEYE_ROLLOUT_ID` | Set by the SDK | Identifies the current child rollout |
+| `PERCEPTEYE_TRAJECTORY_DIR` | Set by the SDK | Identifies the child trajectory directory |
+| `PERCEPTEYE_TURN_INPUT` | Set by the SDK for command entrypoints | Provides the current turn input |
+
+`PERCEPTEYE_INTROSPECT` and the `introspect=` argument are combined. Introspection runs only when both settings enable it.
+
+Use `apply_current_policy(set_env=True)` to write the current routing policy into the process environment. This writes `OPENAI_BASE_URL` and `OPENAI_API_KEY`.
+
+```python
+apply_current_policy(set_env=True)
+```
+
+## OpenTelemetry
+
+Install the OpenTelemetry integration with the `otel` extra:
+
+```bash
+pip install "agent-flywheel[otel]"
+```
+
+Agent Flywheel depends on `opentelemetry-api` only. It never installs or initializes the OpenTelemetry SDK. The integration emits into the existing `TracerProvider`.
+
+The SDK emits every outcome as a span named `execute_tool <name>`. It sets the span status to error only for failed outcomes. Unknown outcomes leave the span status unset.
+
+| Attribute | Meaning |
+| --- | --- |
+| `gen_ai.operation.name` | GenAI operation name |
+| `gen_ai.tool.name` | Tool name |
+| `gen_ai.tool.call.id` | Tool-call identifier |
+| `gen_ai.tool.call.arguments` | Tool-call arguments |
+| `gen_ai.agent.name` | Agent name |
+| `percepteye.tool.outcome` | Tool outcome |
+| `percepteye.tool.status_code` | Tool status code |
+| `percepteye.tool.latency_ms` | Tool latency in milliseconds |
+| `percepteye.rollout.id` | Rollout identifier |
+| `percepteye.turn.id` | Turn identifier |
+| `percepteye.task.id` | Task identifier |
+| `percepteye.agent.execution_sha256` | SHA-256 fingerprint of the agent execution |
+
+The SDK never reads telemetry back. OpenTelemetry configuration affects emitted spans only; it does not change rollout execution or agent behavior.
+
+<Columns cols={3}>
+
+<Card title="Production mode" href="/production" icon="shield" cta="Read the guide">
+
+Run the same deployment image without contributing training capacity.
+
+</Card>
+
+<Card title="How it works" href="/how-it-works" icon="book-open" cta="Understand the runtime">
+
+Review the flywheel lifecycle, leases, and rollout execution model.
+
+</Card>
+
+<Card title="Outcomes" href="/outcomes" icon="bar-chart" cta="Interpret reports">
+
+Learn how rollout results, failures, and exclusions are represented.
+
+</Card>
+
+</Columns>
