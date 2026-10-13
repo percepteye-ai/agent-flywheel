@@ -293,7 +293,7 @@ if kw:                                    # {} means keep your current config
     model = kw["model"]
 ```
 
-Training produces a better model **and** a better system prompt, gated by the same approval. They are separate reads on purpose: the policy is polled and identity-sized, a system prompt is unbounded text, and putting it in the poll would make every tick carry a payload the caller already has.
+Each round produces a new model **and** a new system prompt, and a person approves each before your agent runs it. They are separate reads on purpose: the policy is polled and identity-sized, a system prompt is unbounded text, and putting it in the poll would make every tick carry a payload the caller already has.
 
 ```python
 src = fw.policy_source(agent_id="my-coding-agent", on_change=reconfigure)
@@ -301,7 +301,7 @@ snap = src.current()                      # per turn; between TTLs it is a cache
 prompt = fw.current_prompt(agent_id="my-coding-agent")
 ```
 
-`policy_source()` exists for **rollback first, promotion second**. A delayed promotion is an inconvenience; a regressed candidate that can only be withdrawn by redeploying the customer's production agent is an incident, and it is an incident whose remedy sits in someone else's deploy pipeline. Nothing polls in the background — the refresh runs inside your call, no timer, no poller — and after its first success the handle keeps serving the last good policy, so a network blip can never silently demote production back to the untrained model.
+`policy_source()` exists for **rollback first, promotion second**. A delayed promotion is an inconvenience; a regressed candidate that can only be withdrawn by redeploying the customer's production agent is an incident, and it is an incident whose remedy sits in someone else's deploy pipeline. Nothing polls in the background — the refresh runs inside your call, no timer, no poller — and after its first success the handle keeps serving the last good policy, so a network blip can never silently move production back to the model it ran before.
 
 This is the beat that makes it a flywheel rather than a pipeline: **the better agent generates the better evidence**, and the ring closes.
 
@@ -327,13 +327,11 @@ Lane ⓪ opens once, and lane ④ once from `attach()`. The rest repeat, and **e
 
     Zero inbound ports, zero public DNS, zero TLS termination on your side. For a flywheel inside a corporate network that is the difference between "install a package" and "file a change request with the network team."
 
-!!! warning "Lane ④ does not ship yet"
+!!! note "Lane ④ waits for your permission"
 
-    `attach()` binds the same adapters, writes the same tri-state into the same trajectory format, and scopes it to a live user turn instead of a claimed rollout. `flywheel/1` gained `/turns` for exactly this, so captured turns are uploaded — but only once an org admin switches capture on for that agent (the **Permissions** step of adding it), which is off by default because a production turn carries your end users' own messages. Until then, and whenever the control plane is unreachable, they accumulate as directories under the `trajectory_root` you name and you own them. `trajectory_root` is required and undefaulted for exactly that reason: nothing deletes them unless you set `retention_turns`.
+    `attach()` binds the same adapters, writes the same tri-state into the same trajectory format, and scopes it to a live user turn instead of a claimed rollout. `flywheel/1` gained `/turns` for exactly this, so captured turns are uploaded — but only once an organization admin switches on the agent's [permissions](dashboard.md#allow-us-to-learn-from-its-conversations), which are off by default because a production turn carries your end users' own messages. Until then, and whenever the control plane is unreachable, they accumulate as directories under the `trajectory_root` you name and you own them. `trajectory_root` is required and undefaulted for exactly that reason: nothing deletes them unless you set `retention_turns`.
 
-    Writing a client for a route the server does not serve is how an earlier SDK ended up with five modes, four of which were strings nobody read.
-
-Everything fails open. An unreachable control plane costs you the observation and nothing else; `attach()` never raises on a control-plane failure, and `policy_current()` answering `{}` means *keep doing what you were doing*.
+Everything fails open. An unreachable control plane costs you the observation and nothing else; `attach()` never raises on a control-plane failure, and `apply_current_policy()` answering `{}` means *keep doing what you were doing*.
 
 ---
 

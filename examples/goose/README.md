@@ -8,14 +8,17 @@ an importable Python object, so there is no protocol to implement and nothing is
 added to goose itself.
 
 > [!IMPORTANT]
-> **This is the capacity-contribution path, and it is not the only one.** Here the
-> SDK drives goose: it claims a rollout, spawns the binary, and reports the
+> **This is the practice-task path, and it is not the only one.** Here the SDK
+> drives goose: it claims a practice task, spawns the binary, and reports the
 > outcome. That fits an operator who wants to lend the flywheel capacity.
 >
-> If instead you *run goose yourself* and want the turns you already serve to
-> feed the flywheel, you do not need this file or any worker process:
-> `pip install agent-flywheel`, `agent-flywheel install-hooks`, and you start goose
-> exactly as before.
+> If instead you *run goose yourself*, you do not need this file or any worker
+> process: `pip install agent-flywheel`, `agent-flywheel install-hooks`, and you
+> start goose exactly as before. Every tool call's outcome is then recorded on
+> your disk (`agent-flywheel report` prints the failure rate), and with
+> `PERCEPTEYE_CONTROL_PLANE_URL` and `PERCEPTEYE_API_KEY` set, each goose session
+> also takes one practice task when one is waiting and reports the session as
+> its result. goose's own conversations are not uploaded as production turns.
 
 ## The two halves
 

@@ -92,7 +92,7 @@ Your production agent is unaffected by any of this. It is a different process ca
 
 ## Watching a flywheel: `on_event`
 
-`serve(on_event=...)` takes a `Callable[[str, dict], None]`. There is no logger in this package; this is the only observability surface `serve()` has.
+`serve(on_event=...)` takes a `Callable[[str, dict], None]`. It is `serve()`'s observability surface; the events about held and refused results are also raised as Python warnings.
 
 ```python
 fw.serve(..., on_event=lambda kind, ev: print(kind, ev))
@@ -109,6 +109,17 @@ fw.serve(..., on_event=lambda kind, ev: print(kind, ev))
 | `artifact_failed` | collecting the rollout's artifacts failed; the rollout is still reported, excluded from training | `rollout_id`, `name` (always `"*"`), `error` |
 | `lease_lost` | the lease lapsed or was taken back | `rollout_id` |
 | `heartbeat_failed` | a renewal could not be delivered; two more beats remain | `rollout_id`, `error` |
+| `serve_failed` | the SDK itself failed while running a rollout; it is still reported | `rollout_id`, `error` |
+| `abandon_failed` | abandoning a crashed rollout could not be delivered | `rollout_id`, `error` |
+| `episode_plan` | how a rollout's budget was split | `rollout_id`, `budget_s`, `child_s`, `teardown_s`, `delivery_s` |
+| `harness_call_ceiling_inert` | the harness's per-call ceiling is longer than the time the episode leaves the agent; emitted once | `worst_case_call_s`, `child_s` |
+| `outcome_spooled` | the lease was lost before the deadline; the result is held in the outbox | `rollout_id`, `reason`, `path` |
+| `outcome_spool_failed` | the result could not be written to the outbox; delivery is attempted anyway | `rollout_id`, `error` |
+| `outcome_undeliverable` | the control plane refused the result in a way resending cannot fix; it is retired, never deleted | `rollout_id`, `status`, `error`, `path` |
+| `outcome_unrebuildable` | a held result could not be read back; it is moved aside | `rollout_id`, `error`, `path` |
+| `outcome_abandoned_in_outbox` | a held result is older than seven days and is no longer retried; it is kept | `rollout_id`, `age_s`, `path` |
+| `drain_failed` | delivering held results failed; they stay on disk and claiming continues | `error` |
+| `delivery_brake` | three deliveries in a row were refused permanently; the flywheel stops claiming | `consecutive_permanent_refusals`, `outbox` |
 
 **`claim_empty` is the one worth wiring first.** Without a callback a flywheel is silent, and an empty queue and a broken claim route look identical — `claim_empty` versus `claim_failed` is what tells them apart. This is the answer to "how do I know it's working."
 
@@ -317,7 +328,7 @@ Symlinks are **never** followed — one dropped in the agent's own directory wou
 | Variable | Meaning |
 |:--|:--|
 | `PERCEPTEYE_AGENT_MODE` | `training` (default) or `production`. In production `serve()` returns 0 without connecting. Gates capacity contribution only — not `attach()`. A value it cannot parse raises rather than being guessed. |
-| `PERCEPTEYE_CONTROL_PLANE_URL` | Control-plane base URL. Overridable with `control_plane_url=`. |
+| `PERCEPTEYE_CONTROL_PLANE_URL` | Control-plane base URL. No default: `serve()` refuses to start without it, and `attach()` records on disk only. Overridable with `control_plane_url=`. |
 | `PERCEPTEYE_API_KEY` | Your flywheel key. Overridable with `api_key=`. |
 | `PERCEPTEYE_INTROSPECT` | Set to `0`, `false`, `no` or `off` to disable agent discovery. |
 | `PERCEPTEYE_ROLLOUT_ID` | *Set by us* for the child. Read it to tag your own logs. |

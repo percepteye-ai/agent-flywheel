@@ -11,9 +11,10 @@ hide:
 # Your agent, made better by its own work
 
 <p class="fw-hero__sub">
-<code>agent-flywheel</code> turns the work your agent already does into training
-data, and delivers what it learns back as an endpoint your agent already calls. It runs
-in your process, behind your firewall, on your credentials — unchanged.
+<code>agent-flywheel</code> records your agent's real conversations. We learn from them,
+test each new version against your agent's current best on conversations it has never
+seen, and you approve the winner. Your agent runs in your process, behind your firewall,
+on your credentials — unchanged.
 </p>
 
 <div class="fw-cta" markdown>
@@ -40,7 +41,7 @@ in your process, behind your firewall, on your credentials — unchanged.
   <div class="fw-card__art fw-art--rose"><div class="fw-card__tile">🚀</div></div>
   <div class="fw-card__body">
     <h3>Quickstart</h3>
-    <p>One import, one call. Serve your first rollout in about two minutes, bounded so it cannot surprise you.</p>
+    <p>Record your agent's conversations, see your first trace arrive, and start improving.</p>
     <div class="fw-card__more">Get started</div>
   </div>
 </a>
@@ -98,9 +99,10 @@ in your process, behind your firewall, on your credentials — unchanged.
 
 **Register once, then loop forever.** The SDK describes your agent from inside its own
 process and registers it — once, before the first rollout. After that: it claims a task,
-your agent runs it, the outcomes go back, a policy is trained and promoted, and your
-production agent picks it up. Once capture is switched on for it (the **Permissions**
-step of adding it), its live turns feed the next lap too.
+your agent runs it, the outcomes go back, a new version is tested and you approve it,
+and your production agent picks it up. Once you switch on its
+[permissions](dashboard.md#allow-us-to-learn-from-its-conversations), its live conversations
+feed the next round too.
 
 That last step is what makes it a flywheel rather than a pipeline: **the better agent
 generates the better evidence.**
