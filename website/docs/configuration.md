@@ -180,7 +180,7 @@ fw.serve("my_package.agent:build", agent_id="widget-helper", input_shape="text",
 
 A rule is one prose sentence about how your agent should work — the conditional kind a reviewer would write down. **It is training guidance**: when a rule applies to a decision in your agent's traces, training sees it beside that decision. Nothing your agent is served changes — not its prompt, not what its model is sent.
 
-`serve()` and [`attach()`](production.md#attach-evidence-from-live-turns) take the same `rules=`, and send it once, after the registration, to `POST /agents/{agent_id}/rulebook`:
+`serve()` and [`attach()`](python.md#production-attach) take the same `rules=`, and send it once, after the registration, to `POST /agents/{agent_id}/rulebook`:
 
 - **The rules are the Product's, not the agent's.** The wire carries no Product: the control plane files them under the one active Product that declares this agent, as that Product's rulebook in force. An agent no Product declares, or more than one does, is refused (`409 rulebook_unattributed`, naming which) and nothing is registered.
 - **`None` sends nothing; `[]` retracts.** Leaving `rules=` out leaves the rulebook in force alone, whoever registered it; an empty list takes it away.
