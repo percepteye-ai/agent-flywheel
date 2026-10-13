@@ -1,30 +1,34 @@
 #!/usr/bin/env python3
-"""Render the README's closed-loop architecture figure as an SVG.
+"""Render the README's closed-loop figure as an SVG.
 
     flywheel-architecture.svg  <-  this file
 
-The two GIFs next door tell the story in time: the overview shows one agent
-going round, the loop shows the components in their trust zones. Neither shows
-the thing the README's "How the loop closes" section is actually claiming --
-that the four lanes form a *ring*, and that half of that ring is yours.
+The loop, as a ring, with a dashed trust boundary straight down the middle:
+the stations on the left are yours, the ones on the right are the part you do
+not build. One round of it, clockwise:
 
-So this figure is a ring. Four stations, clockwise, with a dashed trust
-boundary straight down the middle: the two stations on the left are processes
-you run, the two on the right are the part you do not build. The four lanes
-that cross the boundary are the four lanes in the prose, in the same order,
-with the same numbers.
+1. your agent's real conversations are recorded where it runs -- by our SDK,
+   by the OpenTelemetry traces it already exports, or read from your
+   observability provider -- and sent once you allow it;
+2. we learn from them;
+3. each new version is tested against your agent's current best, on
+   conversations it has never seen;
+4. a version that does better comes to you in Decisions, and you approve it
+   or not;
+5. your agent runs the winner, and the next round starts from it as new
+   conversations arrive.
 
-Above the ring sits the beat that is NOT part of it: onboarding. Registration
-happens once, at startup, before the first rollout -- and it is the step that
-makes everything below it possible, because the tasks are derived from the
-agent description rather than from a list the customer enumerates. Drawing it
-as a fifth lane in the ring would say it recurs, which it does not; drawing it
-as a band above says "once, then loop forever", which is what happens.
+Above the ring sits what happens once: connecting the agent and allowing it to
+be learned from. Drawing that as a lane in the ring would say it recurs, which
+it does not. Practice tasks are an optional extra and get a footnote, not a
+lane.
+
+Customer words only: no internal system, and the loop is described rather than
+summarised as "we train a model". Both SDK READMEs and the docs site use this
+same file.
 
 SVG rather than a GIF because this one is static, and a static figure that is
-text is one a reviewer can diff. Same palette as ``render_flywheel_loop.py`` --
-GitHub's dark canvas, blue for your side, purple for the platform -- because
-two figures on one page that disagree about what blue means are worse than one.
+text is one a reviewer can diff. Same palette as the two animations.
 
 No Pillow, no ffmpeg, no network. Run it and it prints where it wrote::
 
@@ -48,9 +52,9 @@ DIM = "#6e7681"
 
 BLUE = "#58a6ff"        # your side
 PURPLE = "#a371f7"      # platform
-GREEN = "#3fb950"       # ok
-RED = "#f85149"         # failed
-AMBER = "#d29922"       # unknown -- deliberately NOT green
+GREEN = "#3fb950"       # the winner, and what runs
+RED = "#f85149"
+AMBER = "#d29922"
 
 SANS = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
 MONO = "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace"
@@ -62,7 +66,7 @@ MONO = "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace"
 CARD_W, CARD_H = 380, 132
 ONB_H = 104                     # the onboarding band's cards are shorter
 L_X, R_X = 52, 768              # card left edges
-ONB_Y = 200                     # the band: once, at startup
+ONB_Y = 200                     # the band: once, to connect
 TOP_Y, BOT_Y = 380, 672         # the ring: then, every lap
 MID_X = 600                     # the trust boundary
 L_MID = L_X + CARD_W // 2       # 242 -- centre of the left column
@@ -176,13 +180,16 @@ def lane(y: float, direction: str, colour: str, num: str, label: str,
 # ── document ─────────────────────────────────────────────────────────────────
 add(f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}"'
     f' width="{W}" height="{H}" role="img"'
-    f' aria-label="The agent flywheel as a closed ring: your agent runs a'
-    f' rollout, PerceptEye scores the observed outcomes and trains a policy,'
-    f' your production agent picks it up, and, once an operator enables'
-    f' capture, its live evidence feeds the next lap. A dashed trust boundary'
-    f' runs down the middle; the two stations on the left are processes you'
-    f' run, the two on the right are the control plane. Four numbered lanes'
-    f' cross the boundary; the fourth is dashed because it is opt-in.">')
+    f' aria-label="The improvement loop as a ring. Once: you connect your'
+    f' agent, with our SDK, the OpenTelemetry traces it already exports, or'
+    f' your observability provider, and allow us to learn from its'
+    f' conversations. Then every round: its real conversations are sent from'
+    f' your side; we learn from them; each new version is tested against your'
+    f' agent&apos;s current best on conversations it has never seen; a version'
+    f' that does better comes to you in Decisions; and your agent runs the'
+    f' version you approved, and the next round starts from it. A dashed trust'
+    f' boundary runs down the middle; every connection is opened from your'
+    f' side.">')
 
 add('<defs>')
 for c in (BLUE, PURPLE, GREEN):
@@ -200,7 +207,7 @@ for a in (0, 90, 180, 270):
     add(f'<line x1="52" y1="52" x2="52" y2="35" stroke="{BLUE}" stroke-width="1.4"'
         f' transform="rotate({a} 52 52)" opacity="0.75"/>')
 text(84, 58, "the loop closes", size=21, weight="700")
-text(258, 58, "one import  ·  one call  ·  one runtime dependency",
+text(258, 58, "your agent gets better from its own conversations",
      size=13.5, fill=MUTED)
 text(W - 52, 58, "0 lines changed inside your agent", size=13, fill=GREEN,
      weight="600", anchor="end")
@@ -218,131 +225,120 @@ text(L_X, 134, "YOUR INFRASTRUCTURE", size=11.5, fill=BLUE, weight="700",
      spacing=1.2)
 text(L_X, 152, "your process · your credentials · your firewall",
      size=11.5, fill=DIM)
-text(W - L_X, 134, "PERCEPTEYE CONTROL PLANE", size=11.5, fill=PURPLE,
+text(W - L_X, 134, "PERCEPTEYE", size=11.5, fill=PURPLE,
      weight="700", spacing=1.2, anchor="end")
-text(W - L_X, 152, "you don't build it — you can watch every lap of it",
+text(W - L_X, 152, "you don't build it — you can watch every round of it",
      size=11.5, fill=DIM, anchor="end")
 
-# ── beat zero: onboarding, which happens once and then never again ──────────
-text(L_X, ONB_Y - 16, "ONCE, AT STARTUP", size=10.5, fill=MUTED, weight="700",
+# ── once: connect it, and allow it ───────────────────────────────────────────
+text(L_X, ONB_Y - 16, "ONCE", size=10.5, fill=MUTED, weight="700",
      spacing=1.2)
-text(L_X + 150, ONB_Y - 16, "before the first rollout, never during one",
+text(L_X + 46, ONB_Y - 16, "connect it, then allow it to be learned from",
      size=10.5, fill=DIM)
 
 rect(L_X, ONB_Y, CARD_W, ONB_H, fill=CARD, stroke=LINE, sw=1)
 add(f'<rect x="{L_X}" y="{ONB_Y + 14}" width="3" height="{ONB_H - 28}" rx="1.5"'
     f' fill="{BLUE}"/>')
-text(L_X + 24, ONB_Y + 32, "describes your agent", size=17, weight="700")
+text(L_X + 24, ONB_Y + 32, "connect your agent", size=17, weight="700")
 cx = L_X + 24
-for name in ("system prompt", "tool schemas", "sub-agent tree"):
+for name in ("our SDK", "OpenTelemetry", "your observability provider"):
     cx += chip(cx, ONB_Y + 46, name, BLUE, size=10.5) + 6
-text(L_X + 24, ONB_Y + 92, "read from inside the process, after templating",
+text(L_X + 24, ONB_Y + 92, "nothing inside your agent changes",
      size=11.5, fill=MUTED)
 
 rect(R_X, ONB_Y, CARD_W, ONB_H, fill=CARD, stroke=LINE, sw=1)
 add(f'<rect x="{R_X}" y="{ONB_Y + 14}" width="3" height="{ONB_H - 28}" rx="1.5"'
     f' fill="{PURPLE}"/>')
-text(R_X + 24, ONB_Y + 32, "the tasks worth training on", size=17, weight="700")
-text(R_X + 24, ONB_Y + 60, "derived from the tool surface you actually have",
+text(R_X + 24, ONB_Y + 32, "your permission", size=17, weight="700")
+text(R_X + 24, ONB_Y + 60, "none of its conversations are kept until you allow it",
      size=11.5, fill=MUTED)
-text(R_X + 24, ONB_Y + 84, "not a list you enumerate, not a rubric you write",
+text(R_X + 24, ONB_Y + 84, "switch it off at any time, without a restart",
      size=11.5, fill=DIM)
 
-lane(ONB_Y + 52, "out", BLUE, "0", "registers, on its own",
-     "fw.serve() and fw.attach() both do it")
+lane(ONB_Y + 52, "out", BLUE, "0", "connects, outbound",
+     "with a key that belongs to this one agent")
 
-text(L_X + 24, ONB_Y + ONB_H + 26,
-     "a CLI agent has no object to read, so it is warmed up once — well under a"
-     " second — and described from that", size=11, fill=DIM)
-text(W - L_X, ONB_Y + ONB_H + 26, "opt out with introspect=False", size=11,
-     fill=DIM, anchor="end")
-
-# ── then the ring, which runs for as long as you serve ──────────────────────
-text(L_X, TOP_Y - 22, "THEN, EVERY LAP", size=10.5, fill=MUTED, weight="700",
+# ── then the ring, every round ───────────────────────────────────────────────
+text(L_X, TOP_Y - 22, "THEN, EVERY ROUND", size=10.5, fill=MUTED, weight="700",
      spacing=1.2)
-text(L_X + 138, TOP_Y - 22, "four lanes, and every one of them opened from your"
-     " side", size=10.5, fill=DIM)
+text(L_X + 150, TOP_Y - 22, "each round starts from the best so far",
+     size=10.5, fill=DIM)
 
-# ── the four stations ────────────────────────────────────────────────────────
+
 def station(x: float, y: float, accent: str) -> None:
     rect(x, y, CARD_W, CARD_H, fill=CARD, stroke=LINE, sw=1)
     add(f'<rect x="{x}" y="{y + 16}" width="3" height="{CARD_H - 32}" rx="1.5"'
         f' fill="{accent}"/>')
 
 
-# top-left -- your agent
+# top-left -- the agent, serving its users
 station(L_X, TOP_Y, BLUE)
 text(L_X + 24, TOP_Y + 36, "your agent", size=18, weight="700")
 chip(L_X + 132, TOP_Y + 21, "unchanged", GREEN)
 cx = L_X + 24
-for name in ("Python", "Node", "any CLI"):
-    cx += chip(cx, TOP_Y + 54, name, BLUE, size=11) + 7
-text(L_X + 24, TOP_Y + 104, 'fw.serve("my_package.agent:build")', size=12.5,
-     fill=MUTED, mono=True)
+for name in ("what users asked", "what it did", "what it answered"):
+    cx += chip(cx, TOP_Y + 54, name, BLUE, size=10.5) + 6
+text(L_X + 24, TOP_Y + 104, "its real conversations, recorded where it runs",
+     size=12.5, fill=MUTED)
 
-# top-right -- scoring
+# top-right -- learning
 station(R_X, TOP_Y, PURPLE)
-text(R_X + 24, TOP_Y + 36, "scores what was observed", size=18, weight="700")
+text(R_X + 24, TOP_Y + 36, "2 · learns from them", size=18, weight="700")
 cx = R_X + 24
-for name, col in (("ok", GREEN), ("failed", RED), ("unknown", AMBER)):
-    cx += chip(cx, TOP_Y + 54, name, col, dot=True) + 8
-text(R_X + 24, TOP_Y + 104, "unknown is never rounded up to ok", size=12.5,
-     fill=MUTED)
+for name in ("what the model saw", "how it went on"):
+    cx += chip(cx, TOP_Y + 54, name, PURPLE, size=10.5) + 6
+text(R_X + 24, TOP_Y + 104, "personal data is found, and never learned from",
+     size=12.5, fill=MUTED)
 
-# bottom-right -- training
+# bottom-right -- testing
 station(R_X, BOT_Y, PURPLE)
-text(R_X + 24, BOT_Y + 36, "trains + promotes", size=18, weight="700")
+text(R_X + 24, BOT_Y + 36, "3 · tests the new version", size=18, weight="700")
 cx = R_X + 24
-cx += chip(cx, BOT_Y + 54, "the model", PURPLE, size=11) + 7
-chip(cx, BOT_Y + 54, "the system prompt", PURPLE, size=11)
-text(R_X + 24, BOT_Y + 104, "co-optimized, and gated by the same approval",
+cx += chip(cx, BOT_Y + 54, "against your current best", PURPLE, size=10.5) + 6
+text(R_X + 24, BOT_Y + 104, "on conversations it has never seen",
      size=12.5, fill=MUTED)
 
-# bottom-left -- production
-station(L_X, BOT_Y, BLUE)
-text(L_X + 24, BOT_Y + 36, "your production agent", size=18, weight="700")
-text(L_X + 24, BOT_Y + 62, "fw.apply_current_policy()", size=12.5, fill=BLUE,
-     mono=True)
-text(L_X + 24, BOT_Y + 104, "promotion and rollback reach it with no redeploy",
+# bottom-left -- the person who decides
+station(L_X, BOT_Y, GREEN)
+text(L_X + 24, BOT_Y + 36, "you approve the winner", size=18, weight="700")
+cx = L_X + 24
+for name in ("Decisions", "approve", "reject"):
+    cx += chip(cx, BOT_Y + 54, name, GREEN, size=10.5) + 6
+text(L_X + 24, BOT_Y + 104, "until you do, your agent keeps what it has",
      size=12.5, fill=MUTED)
 
-# ── the four crossing lanes ──────────────────────────────────────────────────
-lane(TOP_Y + 28, "in", PURPLE, "1", "claims a task",
-     "generated from your real tool surface")
-lane(TOP_Y + 110, "out", BLUE, "2", "rollout + per-call outcomes",
-     "ok · failed · unknown, per tool call")
-lane(BOT_Y + 28, "in", PURPLE, "3", "the promoted policy",
-     "an endpoint your agent already calls")
-# Opt-in per agent and off by default: `Attachment.flush()` uploads served
-# turns only once an operator enables capture for that agent. Before that
-# existed this lane was simply false, and it was deleted from the SVG by hand
-# -- which the renderer never learned, so a re-render quietly redrew it as an
-# unconditional flow. It is true again now, conditionally, and drawn that way.
-lane(BOT_Y + 110, "out", BLUE, "4", "live evidence, via fw.attach()",
-     "sent only once an operator enables capture", opt_in=True)
+# ── the two lanes that cross the boundary ────────────────────────────────────
+lane(TOP_Y + 66, "out", BLUE, "1", "its conversations",
+     "sent only once you allow it", opt_in=True)
+lane(BOT_Y + 66, "in", PURPLE, "4", "a version that did better",
+     "waits for your approval")
 
 # ── the two edges that close the ring ────────────────────────────────────────
-# Right: scoring feeds training, inside the control plane.
+# Right: what was learned becomes a new version, and is tested.
 arrow(R_MID, TOP_Y + CARD_H + 10, R_MID, BOT_Y - 12, PURPLE, sw=1.4)
-lw = tw("scored, then trained on", 11.5) + 20
+lw = tw("a new version", 11.5) + 20
 rect(R_MID - lw / 2, TOP_Y + CARD_H + 38, lw, 22, r=11, fill=BG)
-text(R_MID, TOP_Y + CARD_H + 53, "scored, then trained on", size=11.5,
+text(R_MID, TOP_Y + CARD_H + 53, "a new version", size=11.5,
      fill=DIM, anchor="middle")
 
-# Left: the better agent runs the next lap. This is the edge that makes it a
-# flywheel rather than a pipeline, so it is the one drawn in green.
+# Left: the approved version runs, and the next round starts from it. This is
+# the edge that makes it a loop rather than a pipeline, so it is the green one.
 arrow(L_MID, BOT_Y - 12, L_MID, TOP_Y + CARD_H + 10, GREEN, sw=1.4)
-lw = tw("the better agent runs the next lap", 11.5) + 20
+lw = tw("5 · runs the winner, and repeats", 11.5) + 20
 rect(L_MID - lw / 2, TOP_Y + CARD_H + 38, lw, 22, r=11, fill=BG)
-text(L_MID, TOP_Y + CARD_H + 53, "the better agent runs the next lap",
+text(L_MID, TOP_Y + CARD_H + 53, "5 · runs the winner, and repeats",
      size=11.5, fill=GREEN, anchor="middle", opacity=0.9)
+
+text(W - L_X, BOT_Y + CARD_H + 30,
+     "optional: practice tasks we write from your agent's own tools",
+     size=11, fill=DIM, anchor="end")
 
 # ── footer ───────────────────────────────────────────────────────────────────
 add(f'<line x1="{L_X}" y1="{H - 58}" x2="{W - L_X}" y2="{H - 58}"'
     f' stroke="{LINE}" stroke-width="1"/>')
-text(L_X, H - 32, "every lane is opened from your side", size=12.5, fill=TXT,
-     weight="600")
-text(L_X + 232, H - 32,
+text(L_X, H - 32, "every connection is opened from your side", size=12.5,
+     fill=TXT, weight="600")
+text(L_X + 292, H - 32,
      "no inbound port  ·  no public DNS  ·  no container  ·  no GPU",
      size=12.5, fill=DIM)
 text(W - L_X, H - 32, "outbound only", size=12.5, fill=BLUE, weight="600",

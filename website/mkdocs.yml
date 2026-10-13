@@ -101,7 +101,7 @@ nav:
   - Guides:
       - Overview: index.md
       - Quickstart: quickstart.md
-      - How the loop closes: how-it-works.md
+      - How practice tasks work: how-it-works.md
       - Outcomes: outcomes.md
       - Production: production.md
   - Integrations:

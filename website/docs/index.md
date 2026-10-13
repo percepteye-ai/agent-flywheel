@@ -19,7 +19,7 @@ on your credentials — unchanged.
 
 <div class="fw-cta" markdown>
 [Quickstart](quickstart.md){ .fw-btn .fw-btn--primary }
-[How the loop closes](how-it-works.md){ .fw-btn .fw-btn--ghost }
+[Production](production.md){ .fw-btn .fw-btn--ghost }
 </div>
 
 <p class="fw-note">pip install agent-flywheel · one runtime dependency · MIT</p>
@@ -30,7 +30,7 @@ on your credentials — unchanged.
 <div class="fw-stat"><div class="fw-stat__n">0</div><div class="fw-stat__l">lines changed inside your agent</div></div>
 <div class="fw-stat"><div class="fw-stat__n">1</div><div class="fw-stat__l">runtime dependency (<code>httpx</code>)</div></div>
 <div class="fw-stat"><div class="fw-stat__n">0</div><div class="fw-stat__l">inbound ports, containers, GPUs</div></div>
-<div class="fw-stat"><div class="fw-stat__n">1344</div><div class="fw-stat__l">tests, zero skips permitted</div></div>
+<div class="fw-stat"><div class="fw-stat__n">1347</div><div class="fw-stat__l">tests, zero skips permitted</div></div>
 </div>
 
 ## Start here
@@ -49,9 +49,9 @@ on your credentials — unchanged.
 <a class="fw-card" href="how-it-works/">
   <div class="fw-card__art fw-art--sky"><div class="fw-card__tile">🎡</div></div>
   <div class="fw-card__body">
-    <h3>How the loop closes</h3>
-    <p>Onboard once, then four lanes across a trust boundary — every one of them opened from your side.</p>
-    <div class="fw-card__more">See the architecture</div>
+    <h3>Practice tasks</h3>
+    <p>Optional: tasks written from your agent's own tools, worked through and graded, every lane opened from your side.</p>
+    <div class="fw-card__more">See how they run</div>
   </div>
 </a>
 
@@ -95,17 +95,17 @@ on your credentials — unchanged.
 
 ## The loop, in one figure
 
-![Onboarding once, then the flywheel as a closed ring: your agent and your production agent on the left inside your infrastructure, the PerceptEye control plane on the right, and four numbered lanes crossing a dashed trust boundary between them.](assets/flywheel-architecture.svg)
+![The improvement loop as a ring across a trust boundary: your agent's conversations, recorded where it runs, go out once you allow it; a new version is learned from them and tested against your agent's current best on conversations it has never seen; you approve the winner in Decisions; and your agent runs it, and the next round starts from it.](assets/flywheel-architecture.svg)
 
-**Register once, then loop forever.** The SDK describes your agent from inside its own
-process and registers it — once, before the first rollout. After that: it claims a task,
-your agent runs it, the outcomes go back, a new version is tested and you approve it,
-and your production agent picks it up. Once you switch on its
-[permissions](dashboard.md#allow-us-to-learn-from-its-conversations), its live conversations
-feed the next round too.
+**Connect once, then improve every round.** Your agent's real conversations are recorded
+where it runs, by the SDK, by the OpenTelemetry traces it already exports, or read from
+your observability provider, and sent once you
+[allow it](dashboard.md#allow-us-to-learn-from-its-conversations). A new version is
+learned from them and tested against your agent's current best on conversations it has
+never seen; you approve the winner in Decisions, and your agent runs it.
 
-That last step is what makes it a flywheel rather than a pipeline: **the better agent
-generates the better evidence.**
+That last step is what makes it a flywheel rather than a pipeline: **each round starts
+from the best so far.**
 
 ## What it costs to integrate
 

@@ -1,10 +1,10 @@
-# How the loop closes
+# How practice tasks work
+
+Practice tasks are an optional extra beside the main loop, which learns from your agent's real conversations ([Quickstart](quickstart.md)): tasks we write from your agent's own tools, which it works through and which are graded.
 
 `fw.serve()` does two things, in that order: it **describes your agent once**, then it **claims work forever**. Everything in between — isolation, routing, capture, reporting — repeats identically on every lap.
 
 **Every connection is opened from your side.** The SDK dials out; nothing dials in. That is not a deployment convenience, it is what makes the package installable inside a corporate network without a change request.
-
-![The flywheel as a closed ring](assets/flywheel-architecture.svg)
 
 | beat | what happens | who does the work |
 |:--|:--|:--|

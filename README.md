@@ -64,18 +64,19 @@ Your agent keeps running where it runs today, on your credentials, unchanged. We
      requires every published copy to match it, here and on the docs site, so
      editing one copy alone turns the suite red. Re-derive by hand with:
        .venv/bin/python -m pytest tests/ --collect-only -q -p no:warnings \
-         | awk -F': ' '/^tests\/.*: [0-9]+$/{n+=$2} END{print n}'   # -> 1344 -->
+         | awk -F': ' '/^tests\/.*: [0-9]+$/{n+=$2} END{print n}'   # -> 1347 -->
 [![pypi](https://img.shields.io/pypi/v/agent-flywheel?style=for-the-badge&logo=pypi&logoColor=white&label=pypi&color=3b82f6)](https://pypi.org/project/agent-flywheel/)
 [![python](https://img.shields.io/badge/python-3.10%20→%203.13-3b82f6?style=for-the-badge&logo=python&logoColor=white)](pyproject.toml)
 <br/>
 [![runtime dependencies](https://img.shields.io/badge/runtime_deps-1-f59e0b?style=for-the-badge)](pyproject.toml)
 [![lines changed in your agent](https://img.shields.io/badge/lines_changed_in_your_agent-0-ec4899?style=for-the-badge)](#-harnesses)
-[![tests](https://img.shields.io/badge/tests-1344_·_0_skips-22c55e?style=for-the-badge)](#-development)
+[![tests](https://img.shields.io/badge/tests-1347_·_0_skips-22c55e?style=for-the-badge)](#-development)
 [![license](https://img.shields.io/badge/license-MIT-14b8a6?style=for-the-badge)](LICENSE)
 
-<img src="docs/assets/flywheel-overview.gif" width="1040"
-     alt="Your agent — prompt, tools and model — sits inside your infrastructure. fw.serve() wraps it from the outside with zero lines changed inside. Rollouts and observed outcomes go out; a trained policy comes back. The model row flips from your-model to a policy trained on this agent's own work, while the prompt and tools rows stay untouched.">
 <!-- /lang -->
+
+<img src="docs/assets/flywheel-overview.gif" width="1040"
+     alt="Your agent sits inside your infrastructure, unchanged. Its real conversations are recorded where it runs, by our SDK, the OpenTelemetry traces it already exports, or your observability provider, and go out only once you allow it. PerceptEye learns a new version from them and tests it against your agent's current best on conversations it never saw. You approve the winner in Decisions, and the agent's prompt and model change to the version you approved, while its tools stay as they are.">
 
 **[Quickstart](website/docs/quickstart.md)** · [How it gets better](#-how-it-gets-better) · [Start](#-start) · [OpenTelemetry push](website/docs/otlp.md) · [What reaches us](#-what-reaches-us) · [Docs](#-docs)
 
@@ -84,6 +85,11 @@ Your agent keeps running where it runs today, on your credentials, unchanged. We
 ---
 
 ## 🔁 How it gets better
+
+<p align="center">
+  <img src="docs/assets/flywheel-loop.gif" width="980"
+       alt="One round of the loop, as a ring across a trust boundary: your agent's conversations, recorded where it runs, go out once you allow it; a new version is learned from them; it is tested against your agent's current best on conversations it has never seen; a version that did better waits for your approval in Decisions; and your agent runs the winner, and the next round starts from it. Practice tasks are an optional extra.">
+</p>
 
 1. **We learn from your agent's real conversations.** The SDK records what your users asked, what the model saw, what the tools did and what your agent answered, and sends it to us once you allow it.
 2. **Each new version is tested against your agent's current best,** on conversations it has never seen.
@@ -142,11 +148,6 @@ Send us the traces your agent already exports, as a second destination. With an 
 Your agent can also work through practice tasks we write from its own tools and system prompt, graded as it goes. You [start them](website/docs/dashboard.md#run-practice-tasks) from your agent's page.
 
 <!-- lang -->
-<p align="center">
-  <img src="docs/assets/flywheel-loop.gif" width="980"
-       alt="The SDK integrating into a customer's agent and talking to the control plane. On the left, inside your infrastructure: pip install, the harness, your agent unchanged, and its trajectory. A dashed trust boundary runs down the middle. On the right, the control plane generates tasks from your tool surface, scores every rollout, trains the policy, and hands a candidate back as an endpoint you can call.">
-</p>
-
 ```python
 fw.serve("my_package.agent:build", agent_id="support-agent", input_shape="text", max_rollouts=8)
 ```
@@ -204,7 +205,7 @@ The first two can be passed in code as `control_plane_url=` and `api_key=`. Ever
 - [In the dashboard](website/docs/dashboard.md): every click path, in one place.
 - [FAQ](website/docs/faq.md) and [Troubleshooting](website/docs/troubleshooting.md).
 <!-- lang -->
-- [Python agents](website/docs/python.md), [How the loop closes](website/docs/how-it-works.md), [Outcomes](website/docs/outcomes.md), [Configuration](website/docs/configuration.md) and [the contract](website/docs/contract.md): the reference, also built as a site from [`website/`](website/).
+- [Python agents](website/docs/python.md), [How practice tasks work](website/docs/how-it-works.md), [Outcomes](website/docs/outcomes.md), [Configuration](website/docs/configuration.md) and [the contract](website/docs/contract.md): the reference, also built as a site from [`website/`](website/).
 <!-- /lang -->
 
 ## 🛠 Development
@@ -219,7 +220,7 @@ python -m venv .venv
 
 The last one is **not** the Node package's own suite — that lives in the [Node repository](https://github.com/percepteye-ai/agent-flywheel-node) and runs there with `npm test`. This drives records through the Node writer and asserts the Python `Trajectory` reads them back with the same meaning, which is the half only this repo can check. **It needs a Node checkout**: point `PERCEPTEYE_NODE_SDK` at one, or keep it as a sibling directory. Without one it prints `SKIPPED` and exits 0, and the cross-language tests in the suite above skip with it.
 
-1344 tests, and CI permits **zero skips** — a skipped test and a passing test look identical in a green check mark. CI names `PERCEPTEYE_NODE_SDK` and `PRIME_AGENT_PACKAGE_ROOT` and installs both, so neither the cross-language half nor the tests that execute the real `prime-agent` binary can go green by skipping there. Other jobs assert that a bare install still works on Python 3.10→3.13, that the runtime dependency list never grows past `httpx`, and that the Node plugins never drift from the Python reader.
+1347 tests, and CI permits **zero skips** — a skipped test and a passing test look identical in a green check mark. CI names `PERCEPTEYE_NODE_SDK` and `PRIME_AGENT_PACKAGE_ROOT` and installs both, so neither the cross-language half nor the tests that execute the real `prime-agent` binary can go green by skipping there. Other jobs assert that a bare install still works on Python 3.10→3.13, that the runtime dependency list never grows past `httpx`, and that the Node plugins never drift from the Python reader.
 
 [`schema/flywheel-1.json`](schema/flywheel-1.json) is the wire contract and this repository owns it. Absence is never collapsed into zero: `tool_calls=None` means "I did not report tool calls"; `[]` means "I observed zero", a positive claim. The animations above are generated, not drawn — [`docs/assets/render.sh`](docs/assets/render.sh) rebuilds them.
 <!-- /lang -->

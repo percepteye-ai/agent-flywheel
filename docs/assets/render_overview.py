@@ -1,32 +1,31 @@
 """Render the PerceptEye Agent Flywheel OVERVIEW as PNG frames.
 
 This is the customer's story, and it has ONE subject: their agent. The whole
-animation happens *to* a single card. It is wrapped, it is observed, it sends
-evidence out, and at the end one row of it changes -- which is the entire
-product, in one beat.
+animation happens *to* a single card. Its conversations are recorded where it
+runs, they go out once the customer allows it, a new version is learned from
+them and tested against the agent's current best, the customer approves the
+winner, and at the end the card runs it -- which is the entire product, in one
+beat, and then it goes round again.
 
-Deliberately NOT an architecture drawing. ``render_flywheel_loop.py`` is that,
-and it earns its four lanes and its trust zones. Here there are two objects and
-two flows, drawn large, because a reader who has not decided to care yet will
-not count lanes.
+ONE FIGURE FOR BOTH SDKs. It used to come in a Python and a Node flavour, each
+naming the strings its own customer would type. The loop it shows now is the
+same for every way of connecting an agent (our SDK in either language, the
+OpenTelemetry traces it already exports, or an observability provider), so
+both READMEs carry these same bytes, and ``tests/test_node_figures_match.py``
+holds the Node repo's copy to them.
 
-What the returning token is allowed to say, and why it says exactly that:
-  ``/policy/current`` is read for five things and no others -- ``ttl_s``,
-  ``serving_generation``, and ``base_url`` / ``api_key`` / ``model`` through
-  ``endpoint_kwargs`` (see ``PolicySource._absorb``). A TRAINED MODEL therefore
-  arrives, as an endpoint. A PROMPT does not: ``PolicySnapshot`` says so in its
-  own docstring -- the system prompt is the thing the snapshot "does not carry",
-  and ``serving_generation`` exists precisely so a fleet can notice it moved and
-  cycle a replica. So the token names the endpoint, and names the generation as
-  the signal that the served configuration moved. Drawing prompt text arriving
-  on this wire would be a lie told in a picture, which is the hardest kind to
-  correct later.
+Deliberately NOT an architecture drawing. ``render_flywheel_loop.py`` steps
+through the loop; here there are two objects and two flows, drawn large,
+because a reader who has not decided to care yet will not count lanes.
 
 There is no score anywhere in this figure, and no bar chart. The repository
 ships no benchmark numbers; a diagram is the easiest place to imply one nobody
-measured. The superiority claim it does make is about PROVENANCE -- the policy
-was trained on this agent's own observed outcomes -- which is true, checkable,
-and the actual differentiator.
+measured. What it claims is the rule the product follows: a new version is
+tested on conversations it has never seen, and runs only once a person
+approves it.
+
+Customer words only: no internal system, and the loop is described rather than
+summarised as "we train a model".
 
 Usage:
     FRAMES=/tmp/frames python render_overview.py
@@ -39,41 +38,20 @@ import os
 
 from PIL import Image, ImageDraw, ImageFont
 
-#: WHICH SDK THIS FIGURE DESCRIBES -- see render_flywheel_loop.py for why the
-#: same picture cannot carry Python code into the Node README.
-FLAVOUR = os.environ.get("FLAVOUR", "python")
-_WRAP_TITLE = {"python": "one call", "node": "one plugin"}[FLAVOUR]
-_WRAP_BODY = {
-    "python": "fw.serve() wraps it where it already runs. Nothing inside it changes.",
-    "node": "The plugin loads beside it in your harness. Nothing inside it changes.",
-}[FLAVOUR]
-_WRAP_LABEL = {
-    "python": 'fw.serve("my.agent:build")',
-    "node": "agent-flywheel",
-}[FLAVOUR]
-#: The harnesses THIS package actually supports. The Python list in the Node
-#: figure advertised LangChain and ADK to an OpenClaw customer.
-#: The card's three rows, and which of them the SDK in question actually moves.
-#: A row with ``None`` is one this package leaves alone; the sweep animation is
-#: driven by that field, so this table IS the claim the figure makes.
-#: The AFTER line has to name the same halves the rows above moved, or the
-#: caption quietly contradicts the picture directly beneath it.
-_AFTER_CAPTION = {
-    "python": "your prompt  ·  a policy trained on this agent's own work",
-    "node": "the approved prompt  ·  a policy trained on this agent's own work",
-}[FLAVOUR]
-_ROWS = {
-    "python": [("system prompt", "yours, unchanged", None),
-               ("tools", "yours, unchanged", None),
-               ("model", "your-model", "policy · gw.percepteye.ai/r/…")],
-    "node": [("system prompt", "yours", "approved · v3"),
-             ("tools", "yours, unchanged", None),
-             ("model", "your-model", "policy · gw.percepteye.ai/r/…")],
-}[FLAVOUR]
-_HARNESS_CHIP = {
-    "python": "LangChain \u00b7 ADK \u00b7 a CLI",
-    "node": "OpenClaw \u00b7 DeepSeek Harness",
-}[FLAVOUR]
+_WRAP_TITLE = "recorded where it runs"
+_WRAP_BODY = "Our SDK, your OpenTelemetry traces, or your observability provider."
+_WRAP_LABEL = "its conversations, recorded"
+#: The card's three rows, and which of them the approved version moves. A row
+#: with ``None`` is one nothing changes; the sweep animation is driven by that
+#: field, so this table IS the claim the figure makes. Tools never move:
+#: nothing here rewrites a tool catalogue. The prompt and the model are
+#: approved together, and both SDKs run the pair a person approved (the Node
+#: plugin applies it, the Python SDK hands it to your code).
+_AFTER_CAPTION = "the version you approved  ·  tested on conversations it never saw"
+_ROWS = [("system prompt", "yours", "approved · v3"),
+         ("tools", "yours, unchanged", None),
+         ("model", "your-model", "approved · v3")]
+_HARNESS_CHIP = "in production"
 
 W, H = 1280, 720
 FPS = 20
@@ -264,16 +242,16 @@ BEATS = [
     ("today",    0.00,  3.30, "1", "your agent, today",
      "Your prompt, your tools, your model, your credentials."),
     ("wrap",     3.30,  6.40, "2", _WRAP_TITLE, _WRAP_BODY),
-    ("connect",  6.40,  8.90, "3", "outbound only",
+    ("connect",  6.40,  8.90, "3", "only once you allow it",
      "Your side opens the connection. No inbound port, no container, no GPU."),
-    ("work",     8.90, 12.60, "4", "it does the work",
-     "Real tasks, in your process. Every tool call observed: ok, failed, unknown."),
-    ("train",   12.60, 15.90, "5", "evidence, not transcripts",
-     "PerceptEye scores what your agent actually did, and trains on it."),
-    ("deliver", 15.90, 19.10, "6", "a trained policy comes home",
-     "base_url, model, and a marker that tells you when the served config moved."),
-    ("better",  19.10, 23.40, "7", "same agent. same code. better policy.",
-     "Trained on your agent's own observed work — not on a transcript that guessed."),
+    ("work",     8.90, 12.60, "4", "its real conversations",
+     "What your users asked, what the model saw, what your agent did."),
+    ("train",   12.60, 15.90, "5", "learn, then test",
+     "A new version, tested against your current best on conversations it never saw."),
+    ("deliver", 15.90, 19.10, "6", "you approve the winner",
+     "A version that did better waits for you in Decisions."),
+    ("better",  19.10, 23.40, "7", "same agent. same code. a better version.",
+     "Then again, as new conversations arrive: each round starts from the best."),
 ]
 
 REVEAL = {
@@ -282,16 +260,16 @@ REVEAL = {
     "chan": (8.05, 8.70), "traj": (9.10, 9.70), "strip": (19.90, 20.80),
 }
 
-CHIPS = [("ok", GREEN, 9.90), ("ok", GREEN, 10.35), ("unknown", AMBER, 10.80),
-         ("failed", RED, 11.30), ("ok", GREEN, 11.75)]
+CHIPS = [("asked", BLUE, 9.90), ("model call", CYAN, 10.35),
+         ("tool · ok", GREEN, 10.80), ("tool · failed", RED, 11.30),
+         ("answered", BLUE, 11.75)]
 
-PLAT_ROWS = [("generates the tasks", 13.00),
-             ("scores observed outcomes", 13.70),
-             ("trains the policy", 14.40)]
+PLAT_ROWS = [("learns from its conversations", 13.00),
+             ("tests it against your current best", 13.70),
+             ("on conversations it never saw", 14.40)]
 
-#: What actually comes back -- the three fields ``_absorb`` reads and hands on.
-#: Not a prompt: ``PolicySnapshot`` does not carry one.
-TOKEN_LINE = "base_url  ·  model  ·  generation"
+#: What comes back, and on whose word: nothing runs until a person approves it.
+TOKEN_LINE = "approved by you, in Decisions"
 
 
 def beat_at(t):
@@ -443,7 +421,7 @@ def draw_frame(i):
     wheel(d, 56, 40, 15, t * 1.6, fade(BLUE, .75 * seam))
     text(d, (82, 40), "the agent flywheel", F_TITLE, fade(TXT, seam), anchor="lm")
     text(d, (82 + tw("the agent flywheel", F_TITLE) + 14, 42),
-         "your agent, made better by its own work", F_SUB, fade(DIM, seam), anchor="lm")
+         "your agent, better from its own conversations", F_SUB, fade(DIM, seam), anchor="lm")
     idx = BEATS.index(beat_at(t))
     x0 = W - 40 - (len(BEATS) - 1) * 17
     for k, b in enumerate(BEATS):
@@ -510,13 +488,8 @@ def draw_frame(i):
          fade(MUTED, a_ag), anchor="lm")
     dashed_h(d, AGENT[1] + 80, AGENT[0] + 22, AGENT[2] - 22, fade(SOFT, a_ag))
 
-    # WHICH ROWS MOVE IS A PER-SDK FACT, not decoration. The Python SDK applies
-    # the model (apply_current_policy) and deliberately hands the prompt back
-    # WITHOUT applying it, so there only the model row may move. The Node plugin
-    # applies BOTH halves -- the approved prompt through before_prompt_build and
-    # the served model through before_model_resolve + its own provider -- and a
-    # figure showing its prompt row "unchanged" would contradict the package.
-    # Tools never move in either: nothing here rewrites a tool catalogue.
+    # WHICH ROWS MOVE is `_ROWS`, the claim the figure makes: the prompt and
+    # the model a person approved, never the tools.
     swap = ease(prog(t, 17.55, 18.25)) * seam
     rows = _ROWS
     for k, (key, val, newval) in enumerate(rows):
@@ -542,7 +515,7 @@ def draw_frame(i):
 
     # what the SDK observed, on the same card
     if a_tj > .01:
-        text(d, (AGENT[0] + 22, AGENT[1] + 244), "OBSERVED THIS RUN", F_ZONE,
+        text(d, (AGENT[0] + 22, AGENT[1] + 244), "RECORDED THIS CONVERSATION", F_ZONE,
              fade(LBL, a_tj), anchor="lm")
         cx = AGENT[0] + 22
         for label, col, at in CHIPS:
@@ -551,7 +524,7 @@ def draw_frame(i):
         say = ease(prog(t, 11.95, 12.35)) * (1 - ease(prog(t, 15.60, 15.90)))
         if say > .01:
             text(d, (AGENT[0] + 22, AGENT[1] + 296),
-                 "unknown is never rounded up to ok", F_TINY,
+                 "personal data is found, and never learned from", F_TINY,
                  fade(AMBER, .95 * say * seam), anchor="lm")
 
     # ── the other party: one box, no internal names ──
@@ -575,16 +548,16 @@ def draw_frame(i):
 
     # ── two flows, both opened from the left ──
     if a_ch > .01:
-        for y, lab, sub in ((CH_OUT, "rollouts + observed outcomes", None),
-                            (CH_BACK, "the trained policy", TOKEN_LINE)):
+        for y, lab, sub in ((CH_OUT, "its conversations", None),
+                            (CH_BACK, "the version you approved", TOKEN_LINE)):
             dashed_h(d, y, CH_X0, CH_X1, fade(SOFT, a_ch), dash=4, gap=5)
             text(d, ((CH_X0 + CH_X1) / 2, y - 18), lab, F_TINY, fade(DIM, a_ch),
                  anchor="mm")
             if sub:
-                on = ease(prog(t, 16.85, 17.55)) * seam
+                on = ease(prog(t, 16.30, 16.90)) * seam
                 if on > .01:
                     text(d, ((CH_X0 + CH_X1) / 2, y + 18), sub, F_TINY,
-                         fade(PF_TITLE, on), anchor="mm")
+                         fade(GREEN, on), anchor="mm")
 
     def rail(y, c, upto=1.0):
         d.line([S(CH_X0), S(y), S(CH_X0 + (CH_X1 - CH_X0) * upto), S(y)], fill=c,
@@ -598,31 +571,28 @@ def draw_frame(i):
         rail(CH_BACK, fade(SOFT, .9 * seam))
 
     if name == "work":
+        # The conversations go out, on the connection your side opened.
         q = prog(t, t0, t1)
-        rail(CH_OUT, fade(BLUE, .34 * seam), min(1, q / .25))
-        if q > .2:
-            packet(d, CH_X1 - (CH_X1 - CH_X0) * ((t * .75) % 1), CH_BACK, CYAN,
-                   w=14, h=5, a=.6 * seam, trail=2)
-            text(d, ((CH_X0 + CH_X1) / 2, CH_BACK + 18),
-                 "← a task, on your connection", F_TINY, fade(CYAN, .8 * seam),
-                 anchor="mm")
-    elif name == "train":
-        q = prog(t, t0, t1)
-        rail(CH_OUT, fade(GREEN, .40 * seam), min(1, q / .2))
+        rail(CH_OUT, fade(BLUE, .40 * seam), min(1, q / .2))
         if q > .15:
             for k in range(3):
                 packet(d, CH_X0 + (CH_X1 - CH_X0) * (((t * .8) - k * .17) % 1),
-                       CH_OUT, GREEN, a=seam)
+                       CH_OUT, BLUE, a=seam)
+    elif name == "train":
+        rail(CH_OUT, fade(SOFT, .9 * seam))
     elif name in ("deliver", "better"):
         q = prog(t, BEATS[5][1], BEATS[5][2])
         rail(CH_BACK, fade(PURPLE, .34 * seam), 1.0)
         if name == "deliver":
-            packet(d, CH_X1 - (CH_X1 - CH_X0) * min(1, q / .7), CH_BACK, PURPLE,
-                   a=seam, trail=3)
+            # Nothing comes back until a person says yes: the approval line
+            # under this rail lights first, and only then does it travel.
+            if q > .40:
+                packet(d, CH_X1 - (CH_X1 - CH_X0) * min(1, (q - .40) / .45),
+                       CH_BACK, PURPLE, a=seam, trail=3)
     # ── the payoff, stated as provenance rather than as a score ──
     if a_st > .01:
         text(d, (AGENT[0], BA_Y), "BEFORE", F_ZONE, fade(DIM, a_st), anchor="lm")
-        text(d, (AGENT[0] + 74, BA_Y), "your prompt  ·  a general-purpose model",
+        text(d, (AGENT[0] + 74, BA_Y), "your prompt  ·  your model",
              F_TINY, fade(MUTED, a_st), anchor="lm")
         text(d, (AGENT[0], BA_Y + 24), "AFTER", F_ZONE, fade(ZR_LABEL, a_st),
              anchor="lm")
