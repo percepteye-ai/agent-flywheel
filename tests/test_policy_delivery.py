@@ -466,7 +466,7 @@ def test_the_default_control_plane_does_not_open_another_address(
     any other address is still refused."""
     monkeypatch.delenv("PERCEPTEYE_CONTROL_PLANE_URL")
     body = _answer("policy_current_gateway.json")
-    body["endpoint"]["base_url"] = "http://10.0.0.7:8000/v1"
+    body["endpoint"]["base_url"] = "http://203.0.113.7:8000/v1"
     assert fw.endpoint_kwargs(body) == {}
 
 
