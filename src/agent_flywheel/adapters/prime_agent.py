@@ -977,9 +977,13 @@ class PrimeHarnessSnapshot:
     directory is a valid empty harness.  Symlinks and special files are
     rejected so the digest always names owned bytes rather than ambient data.
 
-    ``kernel_venv`` is optional at the SDK level.  The Prime example requires
-    it because changing HOME would otherwise make every concurrent child try
-    to bootstrap a separate runtime. It is runtime state, not continual
+    ``kernel_venv`` is required: a venv Prime's own bootstrap provisioned.
+    Without one, Prime bootstraps a runtime itself at every session start --
+    ``uv python install``, then ``uv pip install`` -- in the background, into
+    that rollout's private HOME. The bootstrap outlives the rollout, orphaned,
+    and is still writing there when the child is removed, so the release
+    fails with ``Directory not empty``, the runner excludes the rollout, and
+    the orphan runs on. The kernel is runtime state, not continual
     harness state, so it receives its own ``kernel_sha256`` identity and a
     metadata seal checked before and after every child. A write poisons the
     snapshot rather than silently changing later replicas. Prime receives it
@@ -992,9 +996,9 @@ class PrimeHarnessSnapshot:
     files or link-free trees, such as Prime's bundled package and the explicit
     routing extension. Core execution reconciliation sees only their opaque
     digests; it never needs Prime-specific path or package knowledge. This
-    adapter declares complete example coverage only when a kernel and the
-    ``prime_distribution``, ``prime_package_manifest``, and ``route_extension``
-    artifacts are all present.
+    adapter declares complete example coverage only when the route
+    configuration and the ``prime_distribution``, ``prime_package_manifest``,
+    and ``route_extension`` artifacts are all present; the kernel always is.
     """
 
     def __init__(
@@ -1002,7 +1006,7 @@ class PrimeHarnessSnapshot:
         source_dir: str | os.PathLike[str],
         *,
         workspace_dir: str | os.PathLike[str],
-        kernel_venv: str | os.PathLike[str] | None = None,
+        kernel_venv: str | os.PathLike[str],
         execution_artifacts: Mapping[str, str | os.PathLike[str]] | None = None,
         route_configuration: Mapping[str, str] | None = None,
     ) -> None:
@@ -1019,6 +1023,15 @@ class PrimeHarnessSnapshot:
         # A malformed optional adapter configuration must not leak a temporary
         # directory merely because construction failed before the main cleanup
         # guard was entered.
+        if kernel_venv is None:
+            raise ConfigurationError(
+                "a Prime harness snapshot needs kernel_venv, a venv Prime's own "
+                "bootstrap provisioned (the example's PRIME_AGENT_KERNEL_VENV). "
+                "Without one, Prime bootstraps a runtime at every session "
+                "start, in the background, into that rollout's private HOME, "
+                "where it is still writing when the child is removed: the "
+                "release fails and the rollout is excluded"
+            )
         try:
             supplied_route = dict(route_configuration or {})
         except (TypeError, ValueError) as exc:
@@ -1076,18 +1089,11 @@ class PrimeHarnessSnapshot:
         self._route_configuration = normalized_route
         self._route_configuration_sha256 = route_configuration_sha256
 
-        if kernel_venv is None:
-            self._kernel_venv: Path | None = None
-            self._kernel_sha256: str | None = None
-            self._kernel_seal: tuple[_MetadataEntry, ...] | None = None
-        else:
-            candidate = Path(kernel_venv).expanduser()
-            if not candidate.is_dir():
-                _remove_tree(self._root)
-                raise ConfigurationError("PRIME_AGENT_KERNEL_VENV must name an existing directory")
-            self._kernel_venv = candidate.resolve()
-            self._kernel_sha256 = None
-            self._kernel_seal = None
+        candidate = Path(kernel_venv).expanduser()
+        if not candidate.is_dir():
+            _remove_tree(self._root)
+            raise ConfigurationError("PRIME_AGENT_KERNEL_VENV must name an existing directory")
+        self._kernel_venv = candidate.resolve()
 
         try:
             # The fixed master lives as immutable bytes in this parent
@@ -1099,15 +1105,14 @@ class PrimeHarnessSnapshot:
                 raise ConfigurationError("Prime harness source changed while being snapshotted")
             self._manifest = manifest
             self._sha256 = _manifest_sha256(manifest)
-            if self._kernel_venv is not None:
-                _refuse_unprovisioned_kernel(
-                    self._kernel_venv,
-                    env=self._scrubbed_daemon_environment(),
-                    cwd=self._daemon_cwd,
-                )
-                self._kernel_sha256, self._kernel_seal = _kernel_tree_state(
-                    self._kernel_venv
-                )
+            _refuse_unprovisioned_kernel(
+                self._kernel_venv,
+                env=self._scrubbed_daemon_environment(),
+                cwd=self._daemon_cwd,
+            )
+            self._kernel_sha256, self._kernel_seal = _kernel_tree_state(
+                self._kernel_venv
+            )
             artifacts: list[_ExecutionArtifact] = []
             for name, path in (execution_artifacts or {}).items():
                 if not isinstance(name, str) or _COMPONENT_NAME.fullmatch(name) is None:
@@ -1149,7 +1154,7 @@ class PrimeHarnessSnapshot:
         return self._sha256
 
     @property
-    def kernel_sha256(self) -> str | None:
+    def kernel_sha256(self) -> str:
         """Canonical kernel-venv identity, separate from continual harness."""
         return self._kernel_sha256
 
@@ -1162,8 +1167,7 @@ class PrimeHarnessSnapshot:
         }
         if self._route_configuration_sha256 is not None:
             components["prime.route_configuration"] = self._route_configuration_sha256
-        if self._kernel_sha256 is not None:
-            components["prime.kernel_venv"] = self._kernel_sha256
+        components["prime.kernel_venv"] = self._kernel_sha256
         components.update({
             f"prime.artifact.{artifact.name}": artifact.digest
             for artifact in self._execution_artifacts
@@ -1181,17 +1185,13 @@ class PrimeHarnessSnapshot:
         }
         return (
             self._route_configuration_sha256 is not None
-            and self._kernel_sha256 is not None
             and required.issubset(names)
         )
 
     @property
     def diagnostic_fingerprint(self) -> dict[str, str]:
         """Prime-specific evidence retained for diagnosis, not OPSD binding."""
-        diagnostics = {"harness_sha256": self._sha256}
-        if self._kernel_sha256 is not None:
-            diagnostics["kernel_sha256"] = self._kernel_sha256
-        return diagnostics
+        return {"harness_sha256": self._sha256, "kernel_sha256": self._kernel_sha256}
 
     @property
     def daemon_working_directory(self) -> Path:
@@ -1203,10 +1203,8 @@ class PrimeHarnessSnapshot:
             raise _HarnessDrift("run-scoped Prime harness master drifted")
         if _attest_fixed_settings(self._daemon_settings) != self._daemon_settings_seal:
             raise _HarnessDrift("run-scoped Prime fixed settings were mutated")
-        if self._kernel_venv is not None:
-            assert self._kernel_seal is not None
-            if _kernel_metadata_seal(self._kernel_venv) != self._kernel_seal:
-                raise _HarnessDrift("run-scoped Prime kernel venv was mutated")
+        if _kernel_metadata_seal(self._kernel_venv) != self._kernel_seal:
+            raise _HarnessDrift("run-scoped Prime kernel venv was mutated")
         for artifact in self._execution_artifacts:
             _attest_execution_artifact(artifact)
 
@@ -1226,11 +1224,15 @@ class PrimeHarnessSnapshot:
             # longest of those sockets, or no session ever starts.
             "TMPDIR": unix_socket_directory(_PRIME_WORKER_SOCKET.format(
                 uid=os.getuid() if hasattr(os, "getuid") else "user")),
-            # Always set, so an interpreter from the serving shell's
-            # configuration can never stand in for the attested venv: Prime
-            # prefers this variable over any venv. Without a kernel it is
-            # empty, which Prime treats as unset.
-            "PRIME_AGENT_KERNEL_PYTHON": "",
+            # Prime's documented way to use an existing environment without
+            # auto-bootstrap (see _KERNEL_IMPORT_PROBE): the sealed venv's own
+            # interpreter, which Prime checks and then uses as it is. Prime
+            # prefers this variable over any venv, so an interpreter from the
+            # serving shell's configuration can never stand in for it. This
+            # is the exact path Prime would derive from PRIME_AGENT_KERNEL_VENV,
+            # so the kernel process is the same one; what goes is Prime's
+            # private readiness marker and the delete-and-rebuild behind it.
+            "PRIME_AGENT_KERNEL_PYTHON": str(self._kernel_venv / "bin" / "python"),
             # Import caches are runtime writes, not policy behavior. Suppress
             # them so a clean Python import cannot poison the shared kernel
             # seal; an explicit package/runtime mutation still fails closed.
@@ -1242,19 +1244,11 @@ class PrimeHarnessSnapshot:
             _ROUTE_ENV[name]: value
             for name, value in self._route_configuration.items()
         })
-        if self._kernel_venv is not None:
-            # Prime's documented way to use an existing environment without
-            # auto-bootstrap (see _KERNEL_IMPORT_PROBE): the sealed venv's own
-            # interpreter, which Prime checks and then uses as it is. This is
-            # the exact path Prime would derive from PRIME_AGENT_KERNEL_VENV,
-            # so the kernel process is the same one; what goes is Prime's
-            # private readiness marker and the delete-and-rebuild behind it.
-            env["PRIME_AGENT_KERNEL_PYTHON"] = str(self._kernel_venv / "bin" / "python")
-            # Prime reads this only to find a venv to manage, which it never
-            # does once the interpreter is given. It stays set to the same
-            # sealed tree so an ambient value cannot name a different one to
-            # anything that does read it.
-            env["PRIME_AGENT_KERNEL_VENV"] = str(self._kernel_venv)
+        # Prime reads this only to find a venv to manage, which it never does
+        # once the interpreter is given. It stays set to the same sealed tree
+        # so an ambient value cannot name a different one to anything that
+        # does read it.
+        env["PRIME_AGENT_KERNEL_VENV"] = str(self._kernel_venv)
         return env
 
     def prepare_child(self, label: str = "rollout") -> PrimeHarnessChild:

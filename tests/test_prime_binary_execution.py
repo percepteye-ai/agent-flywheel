@@ -32,7 +32,6 @@ machine where this file skips.
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import pathlib
@@ -53,6 +52,7 @@ from agent_flywheel.adapters.prime_agent import (
 )
 from agent_flywheel.isolation import build_child_env
 from agent_flywheel.runner import run_rollout_as_command
+from tests.test_prime_agent_example import _load_example
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 #: Ceiling used for the wedged-gateway case only. The SHIPPED value has to be
@@ -225,13 +225,17 @@ class _Gateway:
         self._server.server_close()
 
 
-def _example():
-    spec = importlib.util.spec_from_file_location(
-        "_executed_serve_prime", ROOT / "examples" / "prime_agent" / "serve_prime.py")
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def _example(tmp_path: pathlib.Path):
+    """The example, imported by the one loader its other tests use.
+
+    That loader gives it a PRIME_WORKSPACE under ``tmp_path``. A loader of
+    this file's own imported it with none, and the example then created its
+    default workspace, ``~/.percepteye/prime-agent-workspace``, in the
+    developer's real home on every run that had the binary. What the loader
+    sets is undone once the import is done: the module keeps what it read.
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        return _load_example(patch, tmp_path)
 
 
 @pytest.fixture(scope="module")
@@ -248,7 +252,8 @@ def provisioned_kernel(tmp_path_factory):
     """
     launcher = pathlib.Path(_runnable_launcher()[-1])
     _, named = _package_root()
-    bootstrap = _example()._prime_kernel_check(launcher.parents[2])
+    bootstrap = _example(tmp_path_factory.mktemp("prime-example"))._prime_kernel_check(
+        launcher.parents[2])
     node = shutil.which("node")
     kernel = tmp_path_factory.mktemp("prime-kernel") / "kernel-venv"
     env = {k: v for k, v in os.environ.items() if k != "PRIME_AGENT_KERNEL_PYTHON"}
@@ -312,7 +317,7 @@ def _run_one_rollout(
     passing. ``preflight=False`` serves a kernel the preflight would refuse,
     as a kernel the preflight accepted and Prime then refused in a rollout.
     """
-    module = _example()
+    module = _example(tmp_path)
     launcher = pathlib.Path(launch[-1])
     package_root = launcher.parents[2]
     source = tmp_path / "empty-harness"
@@ -699,7 +704,7 @@ def test_a_kernel_prime_would_refuse_is_refused_before_serving(
     kernel = _kernel_without_a_default_package(
         provisioned_kernel, tmp_path / "kernel-venv")
 
-    module = _example()
+    module = _example(tmp_path)
     launcher = pathlib.Path(_runnable_launcher()[-1])
     source = tmp_path / "empty-harness"
     source.mkdir()

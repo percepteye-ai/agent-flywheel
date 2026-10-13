@@ -1,0 +1,21 @@
+{
+  "arm": "candidate",
+  "reason": "an operator put this agent on the candidate",
+  "candidate_available": true,
+  "endpoint": {
+    "base_url": "https://launch.percepteye.ai/llm/v1/o/7b0c3f9e-2d41-4c8a-9f6e-1a2b3c4d5e6f/agents/support-agent/v1",
+    "model": "policy_support_agent_3f9a1c0d2b7e4a65",
+    "api_key_env": "PERCEPTEYE_API_KEY"
+  },
+  "model": {
+    "artifact_id": "5d2e8a41-7c3b-4f90-8e1d-6a5b4c3d2e1f",
+    "uri": "gs://example-artifacts/agent-artifacts/7b0c3f9e-2d41-4c8a-9f6e-1a2b3c4d5e6f/models/5d2e8a41-7c3b-4f90-8e1d-6a5b4c3d2e1f/opsd_arm_a_policy/3f9a1c0d2b7e4a65d8c0b1a2e3f4a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c/",
+    "kind": "vllm_lora"
+  },
+  "prompt": null,
+  "bundle_digest": "5d2e8a41-7c3b-4f90-8e1d-6a5b4c3d2e1f",
+  "resolved_at": "2026-10-02T12:00:00+00:00",
+  "ttl_s": 60.0,
+  "withdrawn": false,
+  "serving_generation": "4cb601dcb5157267"
+}

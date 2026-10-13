@@ -125,7 +125,7 @@ fw.serve(..., on_event=lambda kind, ev: print(kind, ev))
 | `input_shape` | required | `"text"` · `"messages"` · `"dict"`. Declared, never inferred |
 | `mode` | `None` | see [the mode switch](#the-mode-switch) |
 | `transport` | `"attach"` | the only value in contract `flywheel/1`; anything else raises `ModeNotAvailable` |
-| `control_plane_url` | `None` | falls back to `PERCEPTEYE_CONTROL_PLANE_URL` |
+| `control_plane_url` | `None` | falls back to `PERCEPTEYE_CONTROL_PLANE_URL`, then `https://launch.percepteye.ai/api/flywheel/v1` |
 | `api_key` | `None` | falls back to `PERCEPTEYE_API_KEY` |
 | `artifacts_dir` | `None` | falls back to `./.percepteye-artifacts`, created if absent |
 | `isolation` | `"subprocess"` | or `"inprocess"`; any other value raises |
@@ -317,7 +317,7 @@ Symlinks are **never** followed — one dropped in the agent's own directory wou
 | Variable | Meaning |
 |:--|:--|
 | `PERCEPTEYE_AGENT_MODE` | `training` (default) or `production`. In production `serve()` returns 0 without connecting. Gates capacity contribution only — not `attach()`. A value it cannot parse raises rather than being guessed. |
-| `PERCEPTEYE_CONTROL_PLANE_URL` | Control-plane base URL. Overridable with `control_plane_url=`. |
+| `PERCEPTEYE_CONTROL_PLANE_URL` | Control-plane base URL, default `https://launch.percepteye.ai/api/flywheel/v1`. Overridable with `control_plane_url=`. |
 | `PERCEPTEYE_API_KEY` | Your flywheel key. Overridable with `api_key=`. |
 | `PERCEPTEYE_INTROSPECT` | Set to `0`, `false`, `no` or `off` to disable agent discovery. |
 | `PERCEPTEYE_ROLLOUT_ID` | *Set by us* for the child. Read it to tag your own logs. |

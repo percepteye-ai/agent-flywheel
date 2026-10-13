@@ -48,7 +48,7 @@ def test_unset_means_training_so_existing_calls_are_unaffected():
 def test_training_still_reaches_the_ordinary_preflight():
     """Proof the switch is not swallowing the run: with mode on, the missing
     credential is still what stops it, exactly as before the switch existed."""
-    with pytest.raises(ConfigurationError, match="control_plane_url"):
+    with pytest.raises(ConfigurationError, match="API key"):
         fw.serve("m:b", **CALL)
 
 
@@ -123,7 +123,7 @@ def test_the_legacy_value_still_means_what_it_meant(monkeypatch):
     it meant "contribute". It still does."""
     monkeypatch.setenv("PERCEPTEYE_AGENT_MODE", "rollout")
     assert fw.current_mode() == "training"
-    with pytest.raises(ConfigurationError, match="control_plane_url"):
+    with pytest.raises(ConfigurationError, match="API key"):
         fw.serve("m:b", mode="rollout", **CALL)
 
 

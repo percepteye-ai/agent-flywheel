@@ -25,7 +25,7 @@
 |:--|:--|:--|
 | 1 | resolve the mode — `mode=` argument, else `PERCEPTEYE_AGENT_MODE`, else `training` | `ConfigurationError` on a value it cannot parse |
 | 2 | `transport` must be `"attach"` | `ModeNotAvailable` |
-| 3 | `control_plane_url` or `PERCEPTEYE_CONTROL_PLANE_URL` | `ConfigurationError` |
+| 3 | `control_plane_url`, else `PERCEPTEYE_CONTROL_PLANE_URL`, else `https://launch.percepteye.ai/api/flywheel/v1` | never: it has a default |
 | 4 | `api_key` or `PERCEPTEYE_API_KEY` | `ConfigurationError` |
 | 5 | create `artifacts_dir` (default `./.percepteye-artifacts`) | `OSError` |
 | 6 | `GET /health`, and assert it serves `flywheel/1` | `ConfigurationError` naming both versions |

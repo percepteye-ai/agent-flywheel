@@ -16,9 +16,9 @@ in its environment ran the untrained model forever, and:
   prompt", sending an operator to the dashboard to look for an approval that
   was never the problem.
 
-Python also ships no default control-plane URL (Node bakes one in), so this is
-not an edge case: it is what a customer who followed the key-only onboarding
-had.
+Both SDKs now default the control-plane URL to the production origin
+(``agent_flywheel.control_plane``, the Node SDK's rule), so the key is the one
+variable that can be missing, and it is what every refusal below names.
 """
 from __future__ import annotations
 
@@ -38,15 +38,14 @@ def unset(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("url", "key", "expected"),
+    ("key", "expected"),
     [
-        (None, None, f"neither {URL} nor {KEY} is set"),
-        (None, "pefw_x", f"{URL} is not set"),
-        ("https://cp.example", None, f"{KEY} is not set"),
-        ("https://cp.example", "pefw_x", None),
+        (None, f"{KEY} is not set"),
+        ("", f"{KEY} is not set"),
+        ("pefw_x", None),
     ],
 )
-def test_the_cause_names_the_variable_that_is_missing(url, key, expected):
+def test_the_cause_names_the_variable_that_is_missing(key, expected):
     """One wrong cause for every case is worse than no cause at all.
 
     ``agent-flywheel install-hooks`` used to close by telling the customer to set
@@ -54,15 +53,16 @@ def test_the_cause_names_the_variable_that_is_missing(url, key, expected):
     exported it was told to export it, while the URL that was actually blocking
     them went unnamed.
     """
-    assert missing_credentials_cause(url, key) == expected
+    assert missing_credentials_cause(key) == expected
 
 
 @pytest.mark.parametrize("call", ["current_policy", "current_prompt"])
 def test_the_one_shot_reads_say_which_variable_is_missing(unset, caplog, call):
     with caplog.at_level("WARNING", logger="agent_flywheel"):
         assert getattr(fw, call)(agent_id="a") == {}
-    assert any(URL in r.getMessage() and KEY in r.getMessage()
-               for r in caplog.records), caplog.text
+    assert any(KEY in r.getMessage() for r in caplog.records), caplog.text
+    assert not any(f"{URL} is not set" in r.getMessage()
+                   for r in caplog.records), caplog.text
 
 
 def test_apply_current_policy_says_it_too(unset, caplog):
@@ -79,7 +79,7 @@ def test_a_handle_that_can_never_refresh_does_not_report_success(unset, caplog):
     assert snap.last_refresh_ok is False, (
         "a handle with no control plane configured reported a successful "
         "refresh, so an operator watching this signal sees nothing wrong")
-    assert any(URL in r.getMessage() for r in caplog.records), caplog.text
+    assert any(KEY in r.getMessage() for r in caplog.records), caplog.text
 
 
 def test_it_is_said_once_per_handle_not_once_per_call(unset, caplog):
@@ -88,7 +88,7 @@ def test_it_is_said_once_per_handle_not_once_per_call(unset, caplog):
     with caplog.at_level("WARNING", logger="agent_flywheel"):
         for _ in range(5):
             src.current()
-    assert len([r for r in caplog.records if URL in r.getMessage()]) == 1
+    assert len([r for r in caplog.records if KEY in r.getMessage()]) == 1
 
 
 def test_staleness_grows_through_a_total_outage():

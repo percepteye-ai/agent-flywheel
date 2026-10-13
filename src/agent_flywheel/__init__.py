@@ -61,6 +61,13 @@ from .contract import (
     RulebookReceipt,
     ToolCallOutcome,
 )
+from .control_plane import (
+    DEFAULT_CONTROL_PLANE_URL as DEFAULT_CONTROL_PLANE_URL,
+)
+from .control_plane import (
+    ENV_CONTROL_PLANE_URL as ENV_CONTROL_PLANE_URL,
+)
+from .control_plane import resolve_control_plane_url
 from .declaration import Describe
 from .entrypoint import TASK, InputShape, resolve_entrypoint
 from .errors import (
@@ -96,7 +103,9 @@ from .policy import (
     ARCHIVE_REF_PREFIXES,
     PolicySnapshot,
     PolicySource,
+    _origin,
     is_archive_ref,
+    is_withdrawn,
     missing_credentials_cause,
     policy_source,
 )
@@ -172,6 +181,7 @@ __all__ = [
     "endpoint_kwargs",
     "introspect_agent",
     "is_archive_ref",
+    "is_withdrawn",
     "policy_source",
     "prompt_decision",
     "record_tool_call",
@@ -196,7 +206,9 @@ __all__ = [
 #: rollout child along with everything else PERCEPTEYE_, which is correct: it
 #: configures the process that DONATES capacity, and a child does not call
 #: serve().
-ENV_CONTROL_PLANE_URL = "PERCEPTEYE_CONTROL_PLANE_URL"
+#:
+#: ENV_CONTROL_PLANE_URL is imported from ``control_plane``, where it is
+#: defined beside its default and the one rule that resolves it.
 ENV_API_KEY = "PERCEPTEYE_API_KEY"
 ENV_MODE = "PERCEPTEYE_AGENT_MODE"
 ENV_ROLLOUT_ID = "PERCEPTEYE_ROLLOUT_ID"      # set by us, for the child
@@ -324,23 +336,26 @@ def current_policy(
     plane must never stop a customer's agent from serving its users.
 
     What comes back is an ENDPOINT, because that is the only form an agent
-    can act on — an artifact URI is not callable. It is shaped for an
-    OpenAI-compatible client::
+    can act on — an artifact URI is not callable. Turn it into client
+    arguments with :func:`endpoint_kwargs` rather than by hand, because the
+    credential is the part a hand-rolled reading gets wrong: the flywheel key
+    opens the control plane's own gateway and nothing else::
 
         pol = fw.current_policy(agent_id="coding-agent")
-        ep = pol.get("endpoint")
-        if ep:
-            client = OpenAI(base_url=ep["base_url"],
-                            api_key=os.environ[ep["api_key_env"]])
-            model = ep["model"]
+        kw = fw.endpoint_kwargs(pol)
+        if kw:
+            client = OpenAI(base_url=kw["base_url"], api_key=kw["api_key"])
+            model = kw["model"]
 
     ``endpoint`` is absent when the control plane has nothing deployed to
     hand you — keep your current configuration, do not fall back to
-    something you guessed.
+    something you guessed. The exception is :func:`is_withdrawn`: a body with
+    ``withdrawn: true`` takes back a policy it served, so go back to your own
+    configuration. :func:`policy_source` tells the two apart for you.
     """
-    url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL) or ""
+    url = resolve_control_plane_url(control_plane_url)
     key = api_key or os.environ.get(ENV_API_KEY) or ""
-    cause = missing_credentials_cause(url, key)
+    cause = missing_credentials_cause(key)
     if cause:
         _log.warning(
             "agent-flywheel: not reading the served policy for agent_id=%r: %s, so "
@@ -409,9 +424,9 @@ def current_prompt(
     the same bundles for the same stated reason. See
     :mod:`agent_flywheel.prompt`.
     """
-    url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL) or ""
+    url = resolve_control_plane_url(control_plane_url)
     key = api_key or os.environ.get(ENV_API_KEY) or ""
-    cause = missing_credentials_cause(url, key)
+    cause = missing_credentials_cause(key)
     if cause:
         # SAID, because `prompt_decision({})` blames the control plane for
         # serving no approved prompt -- true of the empty answer and wrong
@@ -437,7 +452,11 @@ def current_prompt(
 
 
 def endpoint_kwargs(
-    policy: Mapping[str, Any] | None, *, api_key: str | None = None,
+    policy: Mapping[str, Any] | None,
+    *,
+    api_key: str | None = None,
+    flywheel_key: str | None = None,
+    control_plane_url: str | None = None,
 ) -> dict[str, Any]:
     """The ONE place a ``/policy/current`` body becomes client kwargs.
 
@@ -447,47 +466,49 @@ def endpoint_kwargs(
     trained" applies at least as much between two of OUR surfaces as it does
     between two of the customer's.
 
-    ``{}`` means nothing to apply: no endpoint, no ``base_url``, or no
-    credential we can authenticate with. That last one is deliberate — an
-    endpoint we cannot authenticate to is not usable, and returning it would
-    produce 401s at the caller's first request rather than a legible "nothing
-    to apply" here.
+    ``{}`` means nothing to apply: a withdrawal, no endpoint, no ``base_url``
+    or ``model``, a stored-artifact ``model``, or no credential we can
+    authenticate with. That last one is deliberate — an endpoint we cannot
+    authenticate to is not usable, and returning it would produce 401s at the
+    caller's first request rather than a legible "nothing to apply" here.
+
+    ``api_key=`` is YOUR credential for the endpoint, and wins over every
+    other source; neither :func:`apply_current_policy` nor
+    :func:`policy_source` ever passes one. ``flywheel_key=`` and
+    ``control_plane_url=`` are the agent's flywheel key and the control plane
+    it authenticates to (``PERCEPTEYE_API_KEY``, and the URL every other
+    reader resolves -- :func:`resolve_control_plane_url`, so the variable and
+    then the default -- when not given): the flywheel key goes to
+    an endpoint only when the control plane names ``PERCEPTEYE_API_KEY`` for
+    it AND it sits at the control plane's own origin -- see
+    :func:`_endpoint_credential`.
+
+    The same questions, in the same order, as the Node SDK's ``modelDecision``:
+    withdrawn, then an address and a model, then an archive ``model``, then the
+    credential.
     """
     if not isinstance(policy, Mapping):
         return {}
+    if is_withdrawn(policy):
+        # WITHDRAWN WINS over any endpoint beside it, as in the Node SDK's
+        # modelDecision. The control plane sends it with `endpoint: null`, so
+        # this changes no answer it gives today; it keeps the two SDKs from
+        # applying different models if one ever arrives with an endpoint.
+        # `{}` is the right one-shot answer -- at startup the configuration
+        # you have IS your own -- and PolicySource tells the withdrawal apart
+        # from "nothing deployed" itself, through the same predicate. Each
+        # caller says so once, where it knows whether it is news.
+        return {}
     ep = policy.get("endpoint")
-    if not isinstance(ep, Mapping) or not ep.get("base_url"):
+    if not isinstance(ep, Mapping):
         return {}
-    # PRECEDENCE, and the order is the contract:
-    #
-    #   1. an explicit ``api_key=`` argument — the caller's own override always
-    #      wins, so a customer who wants full control keeps it;
-    #   2. ``endpoint.api_key`` from the control plane, when it sent one;
-    #   3. the environment variable the control plane NAMED;
-    #   4. ``PERCEPTEYE_API_KEY``.
-    #
-    # (2) exists for one case, and without it that case fails silently. A
-    # checkpoint promotion normally moves only ``model`` — base_url and the
-    # credential stay put, so an agent upgrades with nothing new. They do NOT
-    # stay put when the control plane moves an agent to a DIFFERENT provider:
-    # then base_url and the credential both change, and an agent cannot read an
-    # env var it was never given. Without (2) this function returns ``{}``, the
-    # caller keeps its previous configuration, and the agent FREEZES on its
-    # last policy — receiving no further upgrades and reporting nothing wrong.
-    #
-    # The value is never persisted or logged here; it goes straight into the
-    # client kwargs the caller builds, exactly like a key read from the
-    # environment.
-    key_env = str(ep.get("api_key_env") or ENV_API_KEY)
-    key = (
-        api_key
-        or str(ep.get("api_key") or "").strip()
-        or os.environ.get(key_env)
-        or os.environ.get(ENV_API_KEY)
-    )
-    if not key:
-        return {}
+    base_url = str(ep.get("base_url") or "")
     model = str(ep.get("model") or "")
+    # NO MODEL IS NO ENDPOINT, as Node's modelDecision reads it: an OpenAI
+    # client sends `model` on every request, and `""` is not a name anything
+    # serves. The control plane always names one beside a base_url.
+    if not base_url or not model:
+        return {}
     # AN ARCHIVE URI IS NOT A MODEL NAME, and this is the model half of the
     # pair rule `prompt_decision` enforces for the prompt half. The control
     # plane already refuses to serve one; re-asserted here on the same argument
@@ -509,11 +530,98 @@ def endpoint_kwargs(
             "Keeping the model you are on.", model,
         )
         return {}
-    return {
-        "base_url": str(ep["base_url"]),
-        "api_key": str(key),
-        "model": model,
-    }
+    key, why_not = _endpoint_credential(
+        ep, base_url=base_url, api_key=api_key, flywheel_key=flywheel_key,
+        control_plane_url=control_plane_url,
+    )
+    if not key:
+        # SAID, for the same reason as the archive line: `{}` here reads as
+        # "nothing deployed", and the cause is one an operator can fix.
+        _log.warning(
+            "agent-flywheel: NOT applying the served policy for this agent: "
+            "no credential for its endpoint %s: %s. Keeping the model you are "
+            "on.", base_url, why_not,
+        )
+        return {}
+    return {"base_url": base_url, "api_key": key, "model": model}
+
+
+def _endpoint_credential(
+    ep: Mapping[str, Any],
+    *,
+    base_url: str,
+    api_key: str | None,
+    flywheel_key: str | None,
+    control_plane_url: str | None,
+) -> tuple[str, str]:
+    """``(key, "")`` for the served endpoint, or ``("", why_not)``.
+
+    PRECEDENCE, and the order is the contract:
+
+      1. ``api_key=`` -- the caller's own credential for this endpoint;
+      2. ``endpoint.api_key`` -- the key the control plane sent for it;
+      3. the variable the control plane NAMED in ``endpoint.api_key_env``,
+         where ``PERCEPTEYE_API_KEY`` means the flywheel key and is honoured
+         only at the control plane's own origin.
+
+    Nothing else. In particular the flywheel key is never a FALLBACK.
+
+    (2) exists for one case, and without it that case fails silently. A
+    checkpoint promotion normally moves only ``model`` — base_url and the
+    credential stay put, so an agent upgrades with nothing new. They do NOT
+    stay put when the control plane moves an agent to a DIFFERENT provider:
+    then base_url and the credential both change, and an agent cannot read an
+    env var it was never given. Without (2) the agent FREEZES on its last
+    policy — receiving no further upgrades and reporting nothing wrong. The
+    value is never persisted or logged; it goes straight into the client
+    kwargs, exactly like a key read from the environment.
+
+    WHY THE FLYWHEEL KEY IS FENCED. It used to be fallback (4), and it was
+    reached three ways, each one sending a ``pefw_`` key somewhere it had
+    never gone: a provider endpoint whose ``api_key_env`` the control plane
+    OMITS (a provider whose key travels in the body: omission means "I cannot
+    name a variable", never "use ours"); a provider endpoint whose named
+    variable is unset; and a self-hosted box's RAW address, for which a
+    control plane without the gateway projection names ``PERCEPTEYE_API_KEY``
+    exactly as it does for the gateway. So the name is necessary, not
+    sufficient, and the key also goes only to the origin the transport already
+    sends it to -- the Node SDK's ``flywheelKeyDecision``, the same two
+    questions in the same order. And the CALLER's flywheel key (the
+    ``api_key=`` of :func:`apply_current_policy` and :func:`policy_source`)
+    arrives here as ``flywheel_key=``, not as (1): passed as (1), it beat a
+    provider's own key and went to that provider.
+    """
+    if api_key:
+        return str(api_key), ""
+    sent = str(ep.get("api_key") or "").strip()
+    if sent:
+        return sent, ""
+    key_env = str(ep.get("api_key_env") or "").strip()
+    if not key_env:
+        return "", ("the control plane names no variable for it and sent no "
+                    "key for it")
+    if key_env != ENV_API_KEY:
+        if os.environ.get(key_env):
+            return str(os.environ[key_env]), ""
+        return "", (f"{key_env}, the variable the control plane names for it, "
+                    "is not set")
+    # WHERE THE KEY ALREADY GOES is the transport's own answer, default
+    # included: an agent on the default control plane sends its key there on
+    # every call, so its gateway URL there is the key's home too. Reading the
+    # variable alone refused the gateway to every agent on the default.
+    home = _origin(resolve_control_plane_url(control_plane_url))
+    there = _origin(base_url)
+    if not home or there != home:
+        return "", (
+            f"the control plane names {ENV_API_KEY} for it, but it is at "
+            f"{there or repr(base_url)}, not at "
+            f"{home or 'a known control-plane address'} -- the one address "
+            "this agent already sends its flywheel key to -- so the key is not "
+            "sent there")
+    key = flywheel_key or os.environ.get(ENV_API_KEY) or ""
+    if not key:
+        return "", f"{ENV_API_KEY} is not set"
+    return str(key), ""
 
 
 def apply_current_policy(
@@ -540,6 +648,11 @@ def apply_current_policy(
     ``current_policy``, for the same reason: an unreachable control plane must
     never stop a customer's agent from serving its users.
 
+    ``control_plane_url`` and ``api_key`` are where the control plane is and
+    the agent's flywheel key to it, as for :func:`current_policy`. The key
+    opens the served endpoint only where :func:`endpoint_kwargs` says the
+    flywheel key may go; it never stands in for a provider's key.
+
     NOT FOR :func:`serve`, and that is a correctness boundary rather than a
     style preference. A ``serve`` rollout samples through the per-rollout
     GATEWAY url, which is what attributes the completion to that rollout and
@@ -556,7 +669,15 @@ def apply_current_policy(
     pol = current_policy(
         agent_id=agent_id, control_plane_url=control_plane_url, api_key=api_key,
     )
-    out = endpoint_kwargs(pol, api_key=api_key)
+    if is_withdrawn(pol):
+        _log.warning(
+            "agent-flywheel: the control plane WITHDREW the policy it served "
+            "agent_id=%r (%s), so this agent runs on its own configuration.",
+            agent_id, pol.get("reason") or "withdrawn=true",
+        )
+    out = endpoint_kwargs(
+        pol, flywheel_key=api_key, control_plane_url=control_plane_url,
+    )
     if not out:
         return {}
     if set_env:
@@ -977,11 +1098,7 @@ def serve(
     # would otherwise surface as a rulebook that never registered.
     rulebook = declared_rulebook(rules)
 
-    url = control_plane_url or os.environ.get(ENV_CONTROL_PLANE_URL)
-    if not url:
-        raise ConfigurationError(
-            f"control_plane_url is required (or set {ENV_CONTROL_PLANE_URL})"
-        )
+    url = resolve_control_plane_url(control_plane_url)
     key = api_key or os.environ.get(ENV_API_KEY)
     if not key:
         raise ConfigurationError(f"an API key is required (or set {ENV_API_KEY})")

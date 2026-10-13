@@ -52,10 +52,18 @@ def _env_names_read(source: str) -> set[str]:
 
 
 def test_the_recorder_reads_the_control_plane_under_one_name():
+    """It asks the library's resolver, so it cannot reach a second answer:
+    no other spelling, and no reading of the variable that skips the
+    default the SDKs share."""
     source = RECORDER.read_text(encoding="utf-8")
     read = _env_names_read(source)
-    assert ENV_CONTROL_PLANE_URL in read, (
-        "the recorder no longer reads the documented control-plane variable")
+    assert "resolve_control_plane_url()" in source, (
+        "the recorder no longer resolves the control plane through the "
+        "library's one rule")
+    assert ENV_CONTROL_PLANE_URL not in read, (
+        "the recorder reads the control-plane variable itself instead of "
+        "asking resolve_control_plane_url, so it can disagree with the SDK "
+        "about the default")
     for foreign in _FOREIGN:
         assert foreign.rstrip('"') not in read, (
             f"the recorder reads {foreign!r} as well as "

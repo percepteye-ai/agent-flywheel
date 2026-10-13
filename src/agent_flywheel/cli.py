@@ -14,24 +14,53 @@ from collections.abc import Sequence
 from .errors import ConfigurationError
 
 
-def _contribution_line() -> str:
-    """Whether this install will claim rollouts, and if not WHICH variable.
+def _load_script(path, name):
+    """One of the host scripts this wheel ships, loaded from its file.
 
-    Both variables are required and neither has a default, so the message that
-    named only ``PERCEPTEYE_API_KEY`` was wrong for the customer who had
-    already exported it: they were told to set the thing they had set, while
-    the thing that was actually missing went unnamed. Asked through the same
-    predicate the library asks, so the CLI and the SDK cannot disagree about
-    what "configured" means.
+    Loaded, never reimplemented: the scripts are standard-library-only on
+    purpose, and each is the one place that knows what it reads and writes.
     """
-    from .policy import missing_credentials_cause
+    import importlib.util
 
-    cause = missing_credentials_cause(
-        os.environ.get("PERCEPTEYE_CONTROL_PLANE_URL"),
-        os.environ.get("PERCEPTEYE_API_KEY"),
-    )
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:      # pragma: no cover
+        raise ImportError(f"cannot load {path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _contribution_line() -> str:
+    """Whether this install will claim rollouts, where, and if not WHY.
+
+    Asked through the two gates the hook itself passes before it claims, in
+    its order: the recorder's own ``capture_off`` (capture off records
+    nothing, the claim included), then ``claim_refusal`` -- training mode,
+    then the library's own credentials check, where the key is the one thing
+    that can be missing. So the line and the hook cannot disagree: a
+    production install with a key is told it claims nothing, because it does
+    not.
+
+    The control-plane URL resolves through the one rule the library uses (a
+    default when unset), and the line names the URL it resolved to, because a
+    default a customer cannot see is a default they cannot tell apart from a
+    control plane that is down.
+    """
+    from .control_plane import resolve_control_plane_url
+    from .hosts import RECORDER
+    from .install_hooks import claim_refusal
+
+    try:
+        recorder = _load_script(RECORDER, "_percepteye_record")
+    except (OSError, ImportError) as exc:
+        return f"rollouts  NOT claimed — the recorder cannot be loaded: {exc}"
+    if recorder.capture_off():
+        cause = f"{recorder.CAPTURE_ENV} turns recording off, the claim with it"
+    else:
+        cause = claim_refusal()
     if cause is None:
-        return "rollouts  claimed — the control plane URL and key are both set"
+        return ("rollouts  claimed — training mode, from "
+                f"{resolve_control_plane_url()}")
     return f"rollouts  NOT claimed — {cause}"
 
 
@@ -73,21 +102,11 @@ def _cmd_report(args: argparse.Namespace) -> int:
     script is standard-library-only on purpose and is the one place that knows
     how to read the file the recorder writes.
     """
-    import importlib.util
-
     from .hosts import RECORDER, REPORTER
 
-    def _load(path, name):
-        spec = importlib.util.spec_from_file_location(name, path)
-        if spec is None or spec.loader is None:      # pragma: no cover
-            raise ImportError(f"cannot load {path}")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod
-
     try:
-        reporter = _load(REPORTER, "_percepteye_report")
-        recorder = _load(RECORDER, "_percepteye_record")
+        reporter = _load_script(REPORTER, "_percepteye_report")
+        recorder = _load_script(RECORDER, "_percepteye_record")
     except (OSError, ImportError) as exc:
         print(f"agent-flywheel: this install is missing its reporter: {exc}",
               file=sys.stderr)

@@ -109,14 +109,15 @@ def test_an_unconfigured_control_plane_names_the_variable(monkeypatch, tmp_path)
     """The other way to get ``may_upload=False``, and it had no sentence either.
 
     Nothing is asked of the control plane at all here, so "capture is not
-    enabled for this agent" would be a refusal naming the wrong subsystem.
+    enabled for this agent" would be a refusal naming the wrong subsystem. The
+    URL has a default now, the Node SDK's, so the key is what can be missing.
     """
     monkeypatch.delenv("PERCEPTEYE_CONTROL_PLANE_URL", raising=False)
-    monkeypatch.setenv("PERCEPTEYE_API_KEY", "pefw_x")
+    monkeypatch.delenv("PERCEPTEYE_API_KEY", raising=False)
     px = fw.attach(agent_id="support", trajectory_root=str(tmp_path))
     try:
         assert px.may_upload is False
-        assert "PERCEPTEYE_CONTROL_PLANE_URL" in (px.upload_refusal or "")
+        assert "PERCEPTEYE_API_KEY" in (px.upload_refusal or "")
     finally:
         px.close()
 

@@ -182,6 +182,45 @@ def installed_state(plugins_dir: Path | None = None) -> dict[str, Any]:
     return data
 
 
+def claim_refusal() -> str | None:
+    """Why the goose hook claims no practice task, or ``None`` when it does.
+
+    ONE answer, asked by the hook before it claims on ``SessionStart`` and
+    before it reports on ``Stop``, and by ``install-hooks`` and ``status``
+    when they say whether rollouts are claimed -- so what the customer reads
+    and what the hook does cannot disagree.
+
+    THE MODE FIRST, then the credentials. The key is consent to talk to the
+    control plane; it is not consent to lease a practice task into the session
+    a customer is serving and POST that session as its result. The hook used
+    to claim on the URL and key alone, so a production install with a key did
+    exactly that whenever a run was minting work for its agent id, past the
+    per-agent production-capture consent. Every other surface claims in
+    training only: ``serve()`` returns before opening a connection, and the
+    Node plugin subscribes no rollout hook in production.
+
+    An unreadable mode claims nothing. ``resolve_mode`` refuses to guess one,
+    and a hook cannot refuse to run, so the cause is returned instead: the
+    guess that claims is the one that sends a customer's session out on their
+    key after they may have meant to stop it.
+
+    Returns the CAUSE only, like
+    :func:`~agent_flywheel.policy.missing_credentials_cause`.
+    """
+    from . import ENV_API_KEY, ENV_MODE, resolve_mode
+    from .errors import ConfigurationError
+    from .policy import missing_credentials_cause
+
+    try:
+        mode = resolve_mode()
+    except ConfigurationError as exc:
+        return str(exc)
+    if mode != "training":
+        return f"{ENV_MODE} selects {mode} mode"
+    # The key only: the URL resolves to the library's default when unset.
+    return missing_credentials_cause(os.environ.get(ENV_API_KEY))
+
+
 def reconcile_endpoint(
     *,
     mode: str | None = None,
