@@ -110,6 +110,7 @@ nav:
       - CLI and other languages: cli.md
       - OpenTelemetry push: otlp.md
   - Reference:
+      - In the dashboard: dashboard.md
       - Configuration: configuration.md
       - The contract: contract.md
       - FAQ: faq.md
