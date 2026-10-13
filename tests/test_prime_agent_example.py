@@ -8,6 +8,7 @@ import secrets
 import signal
 
 from agent_flywheel.isolation import build_child_env
+from tests.test_prime_harness_snapshot import _provisioned
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -62,6 +63,7 @@ def test_parent_selection_and_child_route_configuration_have_identity_parity(
     snapshot = module.PrimeHarnessSnapshot(
         source,
         workspace_dir=tmp_path / "snapshot-runs",
+        kernel_venv=_provisioned(tmp_path / "kernel-venv"),
         route_configuration={
             "model_id": selected,
             "context_window": "32768",
