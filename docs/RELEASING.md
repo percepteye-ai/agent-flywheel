@@ -371,8 +371,11 @@ repository's CI checks the Node one out.
 - **History:** scan for secrets with a scanner such as `gitleaks detect` or
   `trufflehog git file://.`. Then search `git log -p -m --all` for the name lists
   in `tests/test_oss_boundary.py` (without `-m`, text a merge brought in is not shown).
-- **Rewrite history to remove the real machine address** that commit 0ed1d42 put in the Node
-  repository's `test/policy.test.js` (replaced by `203.0.113.7` in 0.2.0, but still in history).
+- **The real machine address that Node commit 0ed1d42 put in `test/policy.test.js`** was
+  scrubbed from every Node branch and tag on 2026-10-14 (history rewritten from that commit on;
+  `main` became 550c409 and `v0.2.0` was re-pointed; `v0.1.2` was untouched). One copy remains:
+  GitHub's read-only `refs/pull/10/head`. Before going public, ask GitHub Support to purge PR #10's
+  head ref and cached views of the old commits.
 - **Planning notes:** decide on `docs/plan-*.md` and
   `docs/nemoclaw-sandbox.md`. They are tracked, so they go public with
   everything else, and they stay in history either way.
