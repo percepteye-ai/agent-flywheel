@@ -36,6 +36,7 @@ from ..binding import AdapterCapabilities
 from ..errors import RoutingNotInstallable
 from ..genai_otlp import new_span_id, now_unix_nano
 from ..outcomes import model_capture_active, record_model_boundary, record_tool_call
+from ._media import data_url_part, media_part, modality_of
 
 __all__ = ["LangChainAdapter"]
 
@@ -302,20 +303,64 @@ def _parts(content: Any) -> list[dict[str, Any]]:
             # Anthropic-style content blocks duplicate `message.tool_calls`,
             # which is what is read below; counting both would double a call.
             continue
-        elif kind == "image_url":
-            url = (block.get("image_url") or {}).get("url") \
-                if isinstance(block.get("image_url"), dict) \
-                else block.get("image_url")
-            if isinstance(url, str) and url.startswith("data:") and ";base64," in url:
-                head, _, data = url.partition(";base64,")
-                parts.append({"type": "blob", "modality": "image",
-                              "mime_type": head[len("data:"):] or None,
-                              "content": data})
-            elif isinstance(url, str):
-                parts.append({"type": "uri", "modality": "image", "uri": url})
+        elif (media := _media_block(block)) is not None:
+            parts.append(media)
         elif isinstance(kind, str):
+            # Kept as recorded -- an image whose address was not recorded
+            # included (it used to be dropped): Mission Control's decoder
+            # sees media there and refuses the decision that saw it.
             parts.append(dict(block))
     return parts
+
+
+#: OpenAI ``input_audio`` formats whose MIME type is not ``audio/<format>``.
+_AUDIO_FORMATS = {"mp3": "audio/mpeg", "wav": "audio/wav"}
+
+
+def _media_block(block: dict[str, Any]) -> dict[str, Any] | None:
+    """A LangChain content block that is a medium, as the GenAI part both
+    SDKs emit (``_media``): OpenAI's ``image_url`` and ``input_audio``;
+    LangChain's standard ``image`` / ``audio`` / ``video`` / ``file`` blocks,
+    both the ``source_type`` spelling (langchain-core 0.3) and the
+    ``base64`` / ``url`` / ``file_id`` one (1.x); and an Anthropic ``source``
+    passed through. A provider-held file id is a GenAI ``file`` part.
+    ``None`` for any other block."""
+    kind = block.get("type")
+    if kind == "image_url":
+        url = block.get("image_url")
+        url = url.get("url") if isinstance(url, dict) else url
+        return data_url_part(url, modality="image")
+    if kind == "input_audio" and isinstance(block.get("input_audio"), dict):
+        body = block["input_audio"]
+        fmt = body.get("format")
+        mime = _AUDIO_FORMATS.get(fmt, f"audio/{fmt}") if isinstance(fmt, str) and fmt else None
+        return media_part(mime_type=mime, data=body.get("data"), modality="audio") \
+            if isinstance(body.get("data"), str) else None
+    if kind not in ("image", "audio", "video", "file"):
+        return None
+    modality = None if kind == "file" else kind
+    mime = block.get("mime_type")
+    source = block.get("source")
+    if isinstance(source, dict):  # Anthropic's block, passed through
+        mime = source.get("media_type") or mime
+        if source.get("type") == "base64" and isinstance(source.get("data"), str):
+            return media_part(mime_type=mime, data=source["data"], modality=modality)
+        if source.get("type") == "url":
+            return data_url_part(source.get("url"), modality=modality, mime_type=mime)
+        return None
+    source_type = block.get("source_type")
+    if source_type == "base64" and isinstance(block.get("data"), str):
+        return media_part(mime_type=mime, data=block["data"], modality=modality)
+    if isinstance(block.get("base64"), str):
+        return media_part(mime_type=mime, data=block["base64"], modality=modality)
+    if source_type in (None, "url") and isinstance(block.get("url"), str):
+        return data_url_part(block["url"], modality=modality, mime_type=mime)
+    file_id = block.get("file_id") or (block.get("id") if source_type == "id" else None)
+    if isinstance(file_id, str) and file_id:
+        return {"type": "file", "modality": modality or modality_of(mime),
+                "mime_type": mime if isinstance(mime, str) and mime else None,
+                "file_id": file_id}
+    return None
 
 
 def _message(m: Any) -> dict[str, Any]:
@@ -334,10 +379,17 @@ def _message(m: Any) -> dict[str, Any]:
                           "arguments": call.get("args")})
         return {"role": "assistant", "parts": parts}
     if role == "tool":
+        content = m.content
+        if isinstance(content, list) and any(
+                isinstance(b, dict) and _media_block(b) is not None for b in content):
+            # A tool that returned media (a screenshot): its blocks as the
+            # GenAI parts both SDKs emit, as the Node SDK records a tool
+            # result's image. A result without media is sent as it was.
+            content = _parts(content)
         return {"role": "tool", "parts": [{
             "type": "tool_call_response",
             "id": getattr(m, "tool_call_id", None),
-            "response": m.content,
+            "response": content,
         }]}
     if role == "system":
         return {"role": "system", "parts": _parts(m.content)}

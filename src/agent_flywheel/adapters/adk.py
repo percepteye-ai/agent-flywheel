@@ -48,6 +48,7 @@ from .._body_bound import bounded
 from ..binding import AdapterCapabilities
 from ..genai_otlp import new_span_id, now_unix_nano
 from ..outcomes import model_capture_active, record_model_boundary, record_tool_call
+from ._media import media_part
 
 __all__ = ["ADKAdapter"]
 
@@ -349,21 +350,16 @@ def _part(part: Any) -> dict[str, Any] | None:
         return {"type": "tool_call_response",
                 "id": getattr(response, "id", None),
                 "response": _jsonable(getattr(response, "response", None))}
+    # Media as the GenAI part both SDKs emit (``_media``): inline bytes a
+    # ``blob``, a file Gemini reads by address a ``uri``.
     blob = getattr(part, "inline_data", None)
     if blob is not None:
-        import base64
-
-        mime = getattr(blob, "mime_type", None)
-        data = getattr(blob, "data", None) or b""
-        return {"type": "blob", "modality": (mime or "").partition("/")[0]
-                or "unknown", "mime_type": mime,
-                "content": base64.b64encode(data).decode("ascii")}
+        return media_part(mime_type=getattr(blob, "mime_type", None),
+                          data=getattr(blob, "data", None) or b"")
     file_data = getattr(part, "file_data", None)
     if file_data is not None:
-        mime = getattr(file_data, "mime_type", None)
-        return {"type": "uri", "modality": (mime or "").partition("/")[0]
-                or "unknown", "mime_type": mime,
-                "uri": getattr(file_data, "file_uri", None)}
+        return media_part(mime_type=getattr(file_data, "mime_type", None),
+                          uri=getattr(file_data, "file_uri", None))
     dumped = _jsonable(part)
     if isinstance(dumped, dict) and dumped:
         kind = next(iter(dumped))

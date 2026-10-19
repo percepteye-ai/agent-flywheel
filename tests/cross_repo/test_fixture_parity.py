@@ -54,6 +54,15 @@ SHARED = {
         "b370a3ae9b5742b78d6b97c5774fc51089822d8be7aac119eeb14e2c788ccbe9",
 }
 
+#: The fixtures the two SDKs alone share (the control plane holds no copy):
+#: each and the sha256 every copy of it was made from.
+SDK_SHARED = {
+    # One medium as the GenAI part both SDKs emit (``adapters._media``,
+    # the Node SDK's ``mediaPart``).
+    "media_parts.json":
+        "a317549fe426f8351a4aabf8e97bda99f35ab7af0dd74b5587eac5e50f0eccac",
+}
+
 #: Names the control plane's checkout. Read by these tests alone.
 CONTROL_PLANE_CHECKOUT = "PERCEPTEYE_CONTROL_PLANE_CHECKOUT"
 
@@ -95,3 +104,21 @@ def test_the_node_sdk_tests_against_the_same_bytes(name):
     assert theirs.read_bytes() == _ours(name), (
         f"test/fixtures/{name} in the Node SDK differs from this SDK's copy")
 
+
+
+@pytest.mark.parametrize("name", sorted(SDK_SHARED))
+def test_an_sdk_shared_fixture_has_its_digest_and_the_node_sdks_bytes(name):
+    """The fixtures only the two SDKs share: the digest always, the Node
+    SDK's copy whenever its checkout is found (``tests/node_sdk.py``)."""
+    assert hashlib.sha256(_ours(name)).hexdigest() == SDK_SHARED[name], (
+        f"tests/fixtures/{name} is not the shared fixture. Change both SDKs' "
+        f"copies together, never one alone.")
+    sdk, _named = node_sdk()
+    if sdk is None:
+        return
+    theirs = sdk / "test" / "fixtures" / name
+    assert theirs.is_file(), (
+        f"the Node SDK at {sdk} has no test/fixtures/{name}: the two SDKs are "
+        f"testing different parts")
+    assert theirs.read_bytes() == _ours(name), (
+        f"test/fixtures/{name} in the Node SDK differs from this SDK's copy")
