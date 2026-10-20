@@ -5,6 +5,44 @@ What changed in `agent-flywheel`, by release. The Node SDK,
 ships the same version number in the same release. Commit hashes are this
 repository's.
 
+## 0.3.0
+
+### Added
+
+- **`agent-flywheel login --agent-id X` gets an agent its key without leaving
+  the terminal.** It starts the control plane's device login for that one agent,
+  prints a short code, opens launch.percepteye.ai with the code filled in, and,
+  once a person signs up or signs in and clicks Approve, stores the returned
+  `pefw_` key in `$PERCEPTEYE_HOME/credentials.json` (0600, written atomically,
+  the file and format the Node SDK shares). `agent-flywheel logout` forgets it.
+  An explicit `api_key=` wins, then `PERCEPTEYE_API_KEY`, then the stored key for
+  that agent on that control plane; `serve()`, `attach()`, `current_policy()`,
+  `current_prompt()` and `policy_source()` say once when they use a stored key.
+  A stored key is consent to send, exactly as the variable is.
+- **`serve()` offers a key in a terminal.** With no key and a person at the
+  terminal, it asks `Create one now (free)? [Y/n]`, runs the same device login,
+  and carries on with the new key. It never asks in CI, with
+  `PERCEPTEYE_NO_PROMPT=1`, or without a terminal; there it raises as before.
+- **Neither SDK sends a `pefw_` key in a request body:** any it finds is
+  replaced with `pefw_[REDACTED]`.
+
+### Changed
+
+- **Every refusal a missing key causes says where a key comes from.**
+  `serve()`'s error, the `current_policy()`, `current_prompt()` and
+  `policy_source()` warnings, `attach()`'s `upload_refusal`, and
+  `agent-flywheel install-hooks` / `status` now name `agent-flywheel login` for
+  a known agent and end with "sign up free at
+  https://launch.percepteye.ai/onboard/agent-sdk and connect this agent to get
+  its key". They named only `PERCEPTEYE_API_KEY` before. The address is
+  `agent_flywheel.control_plane.SIGN_UP_URL`, the Node SDK's byte for byte.
+- **The README leads with both halves:** the SDK and the hosted control plane
+  that issues its key, with screenshots of connecting an agent, and a
+  Quickstart whose first step is getting the key. It no longer says
+  `PERCEPTEYE_CONTROL_PLANE_URL` is required: it has had a default since 0.2.0.
+- **The README's figures and links are absolute URLs,** now that the
+  repository is public, so this page on PyPI shows them for the first time.
+
 ## 0.2.0
 
 ### Added

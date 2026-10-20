@@ -1,37 +1,30 @@
-"""The README's own figures and in-repo links, checked against a PRIVATE repo.
+"""The README's figures and in-repo links, checked for the surfaces that show it.
 
-WHY THIS FILE EXISTS. The figures have now broken TWICE the same way. Both
-times an edit rewrote every relative ``docs/assets/*.gif`` src to an absolute
-``https://raw.githubusercontent.com/...`` URL, reasoning correctly that
-``README.md`` is copied verbatim into ``PKG-INFO`` and that relative paths do
-not resolve on PyPI. The reasoning is sound and the conclusion is wrong here,
-because of a fact neither edit checked: **this repository is private.**
+The README is shown in two places: on github.com, and as every release's PyPI
+page, because ``README.md`` is copied verbatim into ``PKG-INFO``. PyPI cannot
+resolve a relative path, and ``docs/assets/`` is deliberately excluded from
+the wheel and the sdist (``test_packaging.py`` builds the real artifacts and
+asserts it). So a figure reaches a PyPI reader only by absolute URL, and until
+2026-10-20 the PyPI page showed alt text for every one of them.
 
-``raw.githubusercontent.com`` is fetched by the browser anonymously and does
-not carry a github.com session, so for a private repo it answers 404 to
-everybody -- including the owner, viewing their own README while signed in.
-The first time, that shipped as "I don't see any GIFs in the readmes today".
-A relative src, by contrast, is resolved by GitHub against the repo you are
-already authenticated to, so it renders.
+WHY THIS FILE EXISTS, AND WHY IT USED TO SAY THE OPPOSITE. While this
+repository was PRIVATE the rule had to be the reverse. ``raw.githubusercontent
+.com`` is fetched by the browser anonymously and does not carry a github.com
+session, so for a private repository it answered 404 to everybody, the owner
+included, and the figures broke on GitHub twice when an edit made them
+absolute. This test then enforced relative paths, and its docstring said it was
+"what tells you it is now safe to flip". The repository went public on
+2026-10-20, the URLs were flipped, and this test was flipped with them.
 
-The trade-off is settled and it is not close: GitHub is the target surface for
-these figures. The package is on PyPI, whose page is this README, but an
-absolute URL would not rescue the figures there either: while the repo is
-private, ``raw.githubusercontent.com`` answers PyPI's visitors with the same
-404. And ``docs/assets/`` is deliberately excluded from the wheel and the
-sdist -- ``test_packaging.py`` builds the real artifacts and asserts it -- so
-no shipped artifact carries the files. Absolute URLs become correct only once
-the repo is PUBLIC, and on that day this test is what tells you it is now safe
-to flip.
+If the repository ever goes private again, flip both back together: absolute
+URLs 404 for every reader of a private repository.
 
-A comment saying "keep these relative" is what was there the first time. This
-is a mechanism: it fails the suite instead of the page.
-
-The last two tests are the bill for choosing relative. A relative path can be
-typo'd or outlived by the file it names and GitHub renders that as a dead link
-with no error anywhere, so every one of them is resolved against the tree, and
-every in-page anchor against the headings actually present -- which is also
-what keeps a section move from silently orphaning the nav bar at the top.
+A comment saying "keep these absolute" is not a mechanism. This is: it fails the
+suite instead of the page. It also pays the bill for absolute URLs, which can be
+typo'd or outlived by the file they name just as a relative path can: every
+in-repository URL is resolved against the tree, and every in-page anchor against
+the headings actually present, which also keeps a section move from silently
+orphaning the nav bar at the top.
 """
 from __future__ import annotations
 
@@ -43,18 +36,18 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 README = ROOT / "README.md"
 
-#: This repository. The sibling Node SDK is a DIFFERENT repo, so absolute links
-#: to it are correct and must keep working -- every pattern below is anchored so
-#: that ``agent-flywheel-node`` can never match ``agent-flywheel``.
+#: This repository. The sibling Node SDK is a DIFFERENT repo, so every prefix
+#: below ends in ``/`` and ``agent-flywheel-node`` can never match it.
 SLUG = "percepteye-ai/agent-flywheel"
+RAW = f"https://raw.githubusercontent.com/{SLUG}/main/"
+BLOB_OR_TREE = re.compile(rf"https://github\.com/{re.escape(SLUG)}/(?:blob|tree)/main/(.+)")
 
 
 def _readable(text: str) -> str:
     """The README as a reader's browser sees it.
 
-    HTML comments and fenced code are dropped: the badge block deliberately
-    parks the absolute URLs to restore ON PUBLISH, and the note beside the
-    first figure has to be able to name the broken form to explain it.
+    HTML comments and fenced code are dropped: a comment may name a broken
+    form in order to explain it, and code is not a link.
     """
     text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
     return re.sub(r"```.*?```", "", text, flags=re.S)
@@ -77,45 +70,57 @@ def body() -> str:
 
 
 @pytest.fixture(scope="module")
-def targets(body: str) -> list[str]:
+def images(body: str) -> list[str]:
+    return [m.group(1) for m in re.finditer(r'<img[^>]*?\ssrc="([^"]+)"', body, re.S)]
+
+
+@pytest.fixture(scope="module")
+def targets(body: str, images: list[str]) -> list[str]:
     """Every link target and image source a reader can follow."""
-    return [m.group(1) for m in re.finditer(r'<img[^>]*?\ssrc="([^"]+)"', body, re.S)] + [
-        m.group(1) for m in re.finditer(r"\]\(([^)\s]+)\)", body)
-    ]
+    return images + [m.group(1) for m in re.finditer(r"\]\(([^)\s]+)\)", body)]
 
 
-def test_no_figure_is_fetched_from_raw_githubusercontent(body):
-    """The regression itself: an anonymous fetch of a private repo is a 404."""
-    bad = re.findall(rf"raw\.githubusercontent\.com/{SLUG}/\S*", body)
-    assert not bad, (
-        "README figures point at raw.githubusercontent.com. This repo is "
-        "PRIVATE, so that URL 404s for every unauthenticated fetch -- which is "
-        "every <img> fetch, including the owner's own browser -- and the page "
-        "renders with broken images:\n  " + "\n  ".join(bad)
-        + "\nUse a relative path (docs/assets/...). These become correct only "
-          "once the repo is public; see the note above the first figure.")
-
-
-def test_no_link_into_this_repo_is_an_absolute_github_url(body):
-    """Same edit, non-image half. A relative link follows the ref you are
-    browsing; ``blob/main`` pins to main and buys nothing on the one surface
-    these links are for."""
-    bad = re.findall(rf"https://github\.com/{SLUG}/(?:blob|tree)/\S*", body)
-    assert not bad, (
-        "links to files IN THIS REPO are absolute; keep them relative so they "
-        "resolve against whatever ref the reader is on:\n  " + "\n  ".join(bad))
-
-
-def test_every_relative_target_exists(targets):
-    """The cost of relative paths, paid here instead of by the reader."""
-    missing = [
+def test_nothing_is_a_relative_path(targets):
+    """PyPI renders this README and resolves no relative path at all."""
+    relative = [
         t for t in targets
         if not t.startswith(("http://", "https://", "#", "mailto:"))
-        and not (ROOT / t).exists()
     ]
+    assert not relative, (
+        "README targets are relative. PyPI cannot resolve them, so its page "
+        "shows alt text and dead links. Use "
+        f"{RAW}<path> for a figure and https://github.com/{SLUG}/blob/main/<path> "
+        "for a link:\n  " + "\n  ".join(relative))
+
+
+def test_every_figure_of_this_repo_comes_from_raw_githubusercontent(images):
+    """A github.com/blob URL is an HTML page, not an image: it renders as a
+    broken image on both surfaces."""
+    wrong = [
+        src for src in images
+        if f"/{SLUG}/" in src and not src.startswith(RAW)
+    ]
+    assert not wrong, (
+        f"figures of this repository must be served from {RAW}:\n  "
+        + "\n  ".join(wrong))
+
+
+def test_every_in_repo_target_exists(targets):
+    """The cost of absolute URLs, paid here instead of by the reader."""
+    missing = []
+    for t in targets:
+        if t.startswith(RAW):
+            rel = t[len(RAW):]
+        else:
+            m = BLOB_OR_TREE.match(t)
+            if not m:
+                continue
+            rel = m.group(1)
+        if not (ROOT / rel.split("#")[0]).exists():
+            missing.append(t)
     assert not missing, (
-        "README points at paths that are not in the tree -- GitHub renders "
-        "these as dead links with no error:\n  " + "\n  ".join(missing))
+        "README points at paths that are not in the tree -- GitHub and PyPI "
+        "render these as dead links with no error:\n  " + "\n  ".join(missing))
 
 
 def test_every_internal_anchor_resolves(body, targets):

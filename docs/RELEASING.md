@@ -11,8 +11,9 @@ repository takes copies of both.
 | version lives in | `src/agent_flywheel/_version.py`; `pyproject.toml` and the goose manifest repeat it, and `tests/test_one_version.py` holds all three together | `package.json`; the User-Agent derives from it, and `test/version.test.js` holds `openclaw.plugin.json` (version *and* description) equal to it |
 | publishes through | `.github/workflows/workflow.yml` on a `v*` tag, via PyPI trusted publishing. Works: 0.1.0, 0.1.1 and 0.1.2 went out this way | `.github/workflows/publish.yml` on a `v*` tag, via npm trusted publishing: the rehearsal's token exchange has succeeded since 2026-09-15 ([§3](#3-node-release-npm)). 0.1.0 and 0.1.2 went out by hand ([§3b](#3b-publishing-to-npm-by-hand)), the fallback if a tag is ever refused |
 
-Neither repository is public yet. That is why the PyPI page shows the figures'
-alt text; [§4](#4-making-the-repositories-public--not-done-yet) is the checklist
+Both repositories are public since 2026-10-20, and the Python README's figures
+and links are absolute URLs so the PyPI page renders them;
+[§4](#4-making-the-repositories-public--done-2026-10-20) records how. It was the checklist
 for fixing it.
 
 Run every command below from the repository root, not from `docs/`. On this
@@ -172,8 +173,8 @@ this repository's `test-full` job checks out the Node repository's `main`.
   payments fail or its spending limit is reached, jobs are "not started" and
   fail in seconds with no logs. The reason is only in the run's annotation.
   macOS jobs bill at 10× on private repositories.
-- **CI needs `NODE_SDK_DEPLOY_KEY`,** the private half of a read-only deploy key on `agent-flywheel-node`. The `test-full` and `node-plugins` jobs
-  check out the private Node repository with it and stop at checkout without it. Neither half is set up yet.
+- **CI no longer needs `NODE_SDK_DEPLOY_KEY`.** The `test-full` and `node-plugins` jobs
+  check out the Node repository, public since 2026-10-20, with no credential; `ci.yml` dropped the `ssh-key:` lines.
 - **A version bump is a new execution identity.** The `sdk` string is part of
   the hashed descriptor, so every agent's `execution_sha256` changes on every
   release.
@@ -339,7 +340,17 @@ no provenance, which is all a private repository can have anyway.
 - **npm is append-only too.** A version can never be published twice, not
   even after an unpublish.
 
-## 4. Making the repositories public — not done yet
+## 4. Making the repositories public — done 2026-10-20
+
+**Done on 2026-10-20**, in this order: the audit below (no credentials in any
+branch, tag, pull-request ref, PR or issue text; internal codenames and module
+paths remain in old commits and a few PR descriptions; the machine address
+remains only in the read-only `refs/pull/10/head`), both repositories flipped
+public, then the Python README's figures and in-repository links made absolute
+with `tests/test_readme_renders_on_github.py` flipped to enforce it, the
+deploy key dropped from `ci.yml`, and 0.3.0 released. The `ci` badge was not
+restored: the `ci` workflows are disabled on GitHub (2026-09-25). What follows
+is the checklist as it was written.
 
 **Why.** Both READMEs point at their figures by relative path
 (`docs/assets/*.gif`) and link to files in the repository the same way. GitHub

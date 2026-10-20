@@ -1,31 +1,22 @@
 <div align="center">
 
-<!-- IMAGE PATHS ARE RELATIVE ON PURPOSE, and it is a one-way door while this
-     repo is private. GitHub resolves a relative src against the repo you are
-     already authenticated to, so these render. An absolute
-     https://raw.githubusercontent.com/... src does NOT: raw.githubusercontent
-     is fetched anonymously and does not carry your github.com session, so a
-     PRIVATE repo answers 404 and every image on this page breaks -- for the
-     owner too, looking at their own README. Verified 2026-09-06: all four
-     raw.githubusercontent URLs a previous edit introduced returned 404, as did
-     the repo page itself.
+<!-- IMAGE AND LINK URLS ARE ABSOLUTE ON PURPOSE, since the repository went
+     public on 2026-10-20. This README is also every release's PyPI page
+     (README.md is copied into PKG-INFO), and PyPI cannot resolve a relative
+     path: it showed alt text for every figure until then. docs/assets/ is
+     deliberately excluded from both the wheel and the sdist
+     (tests/test_packaging.py builds the real artifacts and asserts it), so
+     the figures have to be fetched from GitHub by URL.
 
-     This has now regressed TWICE, both times reasoning from PyPI: README.md is
-     copied into PKG-INFO and relative paths do not resolve there. That is true
-     and it is not the trade-off we are making. GitHub is the target surface for
-     these figures while the repo is private. PyPI cannot resolve them, so its
-     page shows their alt text instead -- and an absolute URL would not fix
-     that, because it 404s for PyPI's readers exactly as it does for GitHub's.
-     docs/assets/ is also deliberately excluded from both the wheel and the
-     sdist (tests/test_packaging.py builds the real artifacts and asserts it).
+     While the repository was PRIVATE this had to be the other way round:
+     raw.githubusercontent.com is fetched anonymously and answered 404 for a
+     private repository, so absolute figures broke on github.com for every
+     reader, the owner included (verified 2026-09-06). If the repository ever
+     goes private again, flip these back to relative paths.
+     tests/test_readme_renders_on_github.py enforces the absolute form and
+     that every in-repository target exists on disk. -->
 
-     ON PUBLISH, and only once the repo is PUBLIC, absolute raw.githubusercontent
-     URLs become correct and are then required for PyPI rendering. Public first;
-     flipping these while the repo is private just breaks GitHub again.
-     tests/test_readme_renders_on_github.py enforces the relative form and that
-     every relative target exists. -->
-
-# <img src="docs/assets/flywheel-spinner.gif" height="44" alt="" align="middle"> Agent Flywheel
+# <img src="https://raw.githubusercontent.com/percepteye-ai/agent-flywheel/main/docs/assets/flywheel-spinner.gif" height="44" alt="" align="middle"> Agent Flywheel
 
 Built and Maintained by **[PerceptEye](https://percepteye.ai)**
 
@@ -41,7 +32,10 @@ Ship one line. Your agent keeps running in your process, behind your firewall, o
 
      ONCE THE REPO IS PUBLIC restore it verbatim. Do not hand-write a
      "passing" into a static badge to fill the gap — that asserts a state
-     nothing checks.
+     nothing checks. The repo went public on 2026-10-20, but the `ci` workflow
+     has been disabled on GitHub since 2026-09-25 (an owner ruling, for cost),
+     so a restored badge would report a pipeline that no longer runs. Restore
+     it on the day the workflow is enabled again.
        [![ci](https://img.shields.io/github/actions/workflow/status/percepteye-ai/agent-flywheel/ci.yml?branch=main&label=ci&style=for-the-badge&logo=githubactions&logoColor=white&color=22c55e)](https://github.com/percepteye-ai/agent-flywheel/actions)
      `pypi` is live and asks PyPI for the published version of
      `agent-flywheel`. PyPI answers anonymous callers, so unlike `ci` it
@@ -59,12 +53,12 @@ Ship one line. Your agent keeps running in your process, behind your firewall, o
        .venv/bin/python -m pytest tests/ --collect-only -q -p no:warnings \
          | awk -F': ' '/^tests\/.*: [0-9]+$/{n+=$2} END{print n}'   # -> 1440 -->
 [![pypi](https://img.shields.io/pypi/v/agent-flywheel?style=for-the-badge&logo=pypi&logoColor=white&label=pypi&color=3b82f6)](https://pypi.org/project/agent-flywheel/)
-[![python](https://img.shields.io/badge/python-3.10%20→%203.13-3b82f6?style=for-the-badge&logo=python&logoColor=white)](pyproject.toml)
+[![python](https://img.shields.io/badge/python-3.10%20→%203.13-3b82f6?style=for-the-badge&logo=python&logoColor=white)](https://github.com/percepteye-ai/agent-flywheel/blob/main/pyproject.toml)
 <br/>
-[![runtime dependencies](https://img.shields.io/badge/runtime_deps-1-f59e0b?style=for-the-badge)](pyproject.toml)
+[![runtime dependencies](https://img.shields.io/badge/runtime_deps-1-f59e0b?style=for-the-badge)](https://github.com/percepteye-ai/agent-flywheel/blob/main/pyproject.toml)
 [![lines changed in your agent](https://img.shields.io/badge/lines_changed_in_your_agent-0-ec4899?style=for-the-badge)](#-zero-instrumentation-concretely)
 [![tests](https://img.shields.io/badge/tests-1440_·_0_skips-22c55e?style=for-the-badge)](#-development)
-[![license](https://img.shields.io/badge/license-MIT-14b8a6?style=for-the-badge)](LICENSE)
+[![license](https://img.shields.io/badge/license-MIT-14b8a6?style=for-the-badge)](https://github.com/percepteye-ai/agent-flywheel/blob/main/LICENSE)
 
 <br/>
 
@@ -72,16 +66,16 @@ Ship one line. Your agent keeps running in your process, behind your firewall, o
 
 <sub>Hosted control plane · free plan · no credit card · your first key in about a minute</sub>
 
-<img src="docs/assets/flywheel-overview.gif" width="1040"
+<img src="https://raw.githubusercontent.com/percepteye-ai/agent-flywheel/main/docs/assets/flywheel-overview.gif" width="1040"
      alt="Your agent — prompt, tools and model — sits inside your infrastructure. fw.serve() wraps it from the outside with zero lines changed inside. Rollouts and observed outcomes go out; a trained policy comes back. The model row flips from your-model to a policy trained on this agent's own work, while the prompt and tools rows stay untouched.">
 
-**[Quickstart](#-quickstart)** · [Control plane](#-the-control-plane) · [Harnesses](#-harnesses-supported) · [How the loop closes](#-how-the-loop-closes) · [Training vs production](#-two-modes-one-image) · [Production capture](#-production-observability) · [Docs](website/docs/)
+**[Quickstart](#-quickstart)** · [Control plane](#-the-control-plane) · [Harnesses](#-harnesses-supported) · [How the loop closes](#-how-the-loop-closes) · [Training vs production](#-two-modes-one-image) · [Production capture](#-production-observability) · [Docs](https://github.com/percepteye-ai/agent-flywheel/tree/main/website/docs)
 
 </div>
 
 ---
 
-## <img src="docs/assets/flywheel-spinner.gif" height="26" alt="" align="middle"> A continual-learning loop around the agent you already have
+## <img src="https://raw.githubusercontent.com/percepteye-ai/agent-flywheel/main/docs/assets/flywheel-spinner.gif" height="26" alt="" align="middle"> A continual-learning loop around the agent you already have
 
 Your agent already does real work. **This turns that work into training data, and delivers what it learns back as an endpoint your agent already calls.**
 
@@ -108,7 +102,7 @@ That is the whole product. Not a dashboard you read, not a benchmark you run —
 `pip install agent-flywheel` is half of the flywheel. **The other half writes the tasks, grades every rollout and trains the model. That half is the control plane at [launch.percepteye.ai](https://launch.percepteye.ai/onboard/agent-sdk).** PerceptEye runs it on PerceptEye's GPUs, so there is nothing for you to deploy, scale or keep on call. It is also where you watch every lap, and where you approve what ships.
 
 <p align="center">
-  <a href="https://launch.percepteye.ai/onboard/agent-sdk"><img src="docs/assets/control-plane-sdk.png" width="920"
+  <a href="https://launch.percepteye.ai/onboard/agent-sdk"><img src="https://raw.githubusercontent.com/percepteye-ai/agent-flywheel/main/docs/assets/control-plane-sdk.png" width="920"
      alt="The control plane's 'Add our SDK to your agent's code' screen for an agent named support-agent: Python and Node (OpenClaw) tabs, three numbered steps (pip install, an attach() snippet, and an export of the agent's pefw_ key), and a status panel reading Agent created and Connected."></a>
   <br/><sub>Connecting an agent at launch.percepteye.ai. The screens on this page show a sample agent.</sub>
 </p>
@@ -125,15 +119,15 @@ That is the whole product. Not a dashboard you read, not a benchmark you run —
 <table>
   <tr>
     <td width="33%" valign="top">
-      <img src="docs/assets/control-plane-signup.png" alt="The Create your account card: email, password, confirm password, and a note that a six-digit code confirms the address."><br/>
+      <img src="https://raw.githubusercontent.com/percepteye-ai/agent-flywheel/main/docs/assets/control-plane-signup.png" alt="The Create your account card: email, password, confirm password, and a note that a six-digit code confirms the address."><br/>
       <b>① Create a workspace.</b> An email, a password and a six-digit code. Free plan, no credit card.
     </td>
     <td width="33%" valign="top">
-      <img src="docs/assets/control-plane-choose.png" alt="Choose one way to connect your agent: add our SDK to your agent's code, send the traces it already exports, connect where your traces live, or upload a trace file, with what happens next listed beside the choice."><br/>
+      <img src="https://raw.githubusercontent.com/percepteye-ai/agent-flywheel/main/docs/assets/control-plane-choose.png" alt="Choose one way to connect your agent: add our SDK to your agent's code, send the traces it already exports, connect where your traces live, or upload a trace file, with what happens next listed beside the choice."><br/>
       <b>② Connect your agent.</b> Add the SDK, or start from the traces you already export. Name the agent and get its <code>pefw_</code> key, shown once and scoped to that one agent.
     </td>
     <td width="33%" valign="top">
-      <img src="docs/assets/control-plane-agent.png" alt="An agent's page: it runs the champion, with a Try the candidate button, and a candidate-versus-base table showing two improved verdicts with mean-reward and pass-rate gains."><br/>
+      <img src="https://raw.githubusercontent.com/percepteye-ai/agent-flywheel/main/docs/assets/control-plane-agent.png" alt="An agent's page: it runs the champion, with a Try the candidate button, and a candidate-versus-base table showing two improved verdicts with mean-reward and pass-rate gains."><br/>
       <b>③ Watch, then approve.</b> Every candidate is measured against the model you run today. Nothing moves until a person clicks <i>Try the candidate</i>, and moving back is the same click.
     </td>
   </tr>
@@ -204,7 +198,7 @@ The task arrives on **stdin** and as `PERCEPTEYE_TURN_INPUT`; ordinary **stdout*
 | **LangChain** · **LangGraph** · **Google ADK** | 🐍 Python | adapter auto-binds — **zero code in your agent** |
 | **any CLI agent** | ⌘ CLI | `fw.serve(["my-agent", "run"], ...)` — nothing added to the binary |
 | **any structured CLI** | ⌘ CLI | provide a `CommandOutputAdapter`; the generic `StreamFormat` parser can reconcile tool lifecycles |
-| **prime-agent** *(optional example)* | ⌘ CLI | argv + explicit `PrimeAgentOutputAdapter` — **[worked example →](examples/prime_agent/)** |
+| **prime-agent** *(optional example)* | ⌘ CLI | argv + explicit `PrimeAgentOutputAdapter` — **[worked example →](https://github.com/percepteye-ai/agent-flywheel/tree/main/examples/prime_agent)** |
 
 Adapters are on by default (`adapters="auto"`) and bind every built-in whose framework is installed. No adapter imports its framework until you bind it, so they add **zero dependencies**. Shipping your own is one entry-point factory in the `agent_flywheel.adapters` group.
 
@@ -215,7 +209,7 @@ The command adapter is explicit and optional. Capture from it survives clean exi
 ## 🔁 How the loop closes
 
 <p align="center">
-  <img src="docs/assets/flywheel-loop.gif" width="980"
+  <img src="https://raw.githubusercontent.com/percepteye-ai/agent-flywheel/main/docs/assets/flywheel-loop.gif" width="980"
        alt="The SDK integrating into a customer's agent and talking to the control plane. On the left, inside your infrastructure: pip install, the harness, your agent unchanged, and its trajectory. A dashed trust boundary runs down the middle. On the right, the control plane generates tasks from your tool surface, scores every rollout, trains the policy, and hands a candidate back as an endpoint you can call.">
 </p>
 
@@ -305,7 +299,7 @@ snap = src.current()                     # per turn; between refreshes it's a ca
 
 **Nothing polls in the background.** The refresh runs inside your call — no timer, no poller — so a promotion *or a rollback* reaches production with no redeploy. After its first success `policy_source()` keeps serving the last good policy, so a network blip can never silently demote production back to the untrained model.
 
-`prompt_decision()` is the whole rule in one call, and the SDK never applies a prompt for you: it checks that a prompt is actually being served, that your own baseline prompt has not changed since the pair was certified, that the bundle's status is one a person approved, and that the prompt's identity matches the checkpoint it was certified against. `apply` is false unless all four hold, `reason` says which one failed, and `text` is `None` rather than `""` — so a refusal can never blank the instructions your agent is already running on. The Node SDK asks the identical question, and [`tests/test_prompt_decision_parity.py`](tests/test_prompt_decision_parity.py) drives one table of cases through both implementations and asserts every field of the answer agrees.
+`prompt_decision()` is the whole rule in one call, and the SDK never applies a prompt for you: it checks that a prompt is actually being served, that your own baseline prompt has not changed since the pair was certified, that the bundle's status is one a person approved, and that the prompt's identity matches the checkpoint it was certified against. `apply` is false unless all four hold, `reason` says which one failed, and `text` is `None` rather than `""` — so a refusal can never blank the instructions your agent is already running on. The Node SDK asks the identical question, and [`tests/test_prompt_decision_parity.py`](https://github.com/percepteye-ai/agent-flywheel/blob/main/tests/test_prompt_decision_parity.py) drives one table of cases through both implementations and asserts every field of the answer agrees.
 
 ## ✋ Nothing reaches your users until a person approves it
 
@@ -315,7 +309,7 @@ snap = src.current()                     # per turn; between refreshes it's a ca
 
 1. **A person with the operator role moves that agent onto the candidate**, from the dashboard. It is an explicit, role-gated call on that one agent. No promotion applies it, no percentage rollout applies it, and there is no automatic path to it — moving *back* is the same call with the other value, which is what makes rollback fast enough to use during an incident.
 2. **The candidate's certification did not go against it.** A verdict of *regressed*, *inconclusive* or *escalated* makes it unservable — the same set the promotion gate itself refuses on, so a candidate your agent could be moved onto is one that gate would also have accepted.
-3. **It is genuinely deployed somewhere your agent can call.** An address that is a stored artifact rather than a running endpoint — a bucket or file path — is refused, so an approved candidate that nobody has served yet keeps the champion in place instead of pointing your agent at something that answers nothing. **The SDK re-checks this itself** rather than trusting the answer: `endpoint_kwargs()` — the one place a served policy becomes client arguments, and what both `apply_current_policy()` and `policy_source()` go through — returns `{}` and logs why, on the same prefix set the Node SDK refuses on. [`tests/test_served_model_is_servable.py`](tests/test_served_model_is_servable.py) drives both implementations and asserts the two agree.
+3. **It is genuinely deployed somewhere your agent can call.** An address that is a stored artifact rather than a running endpoint — a bucket or file path — is refused, so an approved candidate that nobody has served yet keeps the champion in place instead of pointing your agent at something that answers nothing. **The SDK re-checks this itself** rather than trusting the answer: `endpoint_kwargs()` — the one place a served policy becomes client arguments, and what both `apply_current_policy()` and `policy_source()` go through — returns `{}` and logs why, on the same prefix set the Node SDK refuses on. [`tests/test_served_model_is_servable.py`](https://github.com/percepteye-ai/agent-flywheel/blob/main/tests/test_served_model_is_servable.py) drives both implementations and asserts the two agree.
 
 **The prompt** is a separate chain with its own approval: the control plane serves a prompt only from a delivery a person approved, and `prompt_decision()` above re-checks that status on your side before anything is applied.
 
@@ -364,7 +358,7 @@ dataset services validate any later trace-to-task binding.
 
 Production turns are **graded advisory, always** — they were produced by whatever you run, so they inform training rather than being scored as rollouts are. Training capacity still comes from `serve()`.
 
-**Your Product's workflow rules** travel with `rules=[...]` on `attach()` or `serve()` — prose rules such as *"ask for the widget colour before placing any order"*, declared once after the registration and filed under the one Product that declares the agent, as training guidance for the decisions they apply to. Nothing your agent is served changes. `None` sends nothing, `[]` retracts, the last writer wins, and a refusal never stops the agent: `px.rulebook_refusal` says why, in the control plane's own words. See *A Product's workflow rules* in [the configuration docs](website/docs/configuration.md).
+**Your Product's workflow rules** travel with `rules=[...]` on `attach()` or `serve()` — prose rules such as *"ask for the widget colour before placing any order"*, declared once after the registration and filed under the one Product that declares the agent, as training guidance for the decisions they apply to. Nothing your agent is served changes. `None` sends nothing, `[]` retracts, the last writer wins, and a refusal never stops the agent: `px.rulebook_refusal` says why, in the control plane's own words. See *A Product's workflow rules* in [the configuration docs](https://github.com/percepteye-ai/agent-flywheel/blob/main/website/docs/configuration.md).
 
 ## 🧪 Zero instrumentation, concretely
 
@@ -396,7 +390,7 @@ Served with the two-line `fw.serve()` integration from the [Quickstart](#-quicks
                 "output": "found: count to three", "latency_ms": 0.199}]
 ```
 
-**Not one `agent_flywheel` import produced that record**, and it is enforced by [`tests/test_zero_instrumentation.py`](tests/test_zero_instrumentation.py). One `record_tool_call` where you *do* know the answer gets you the rest:
+**Not one `agent_flywheel` import produced that record**, and it is enforced by [`tests/test_zero_instrumentation.py`](https://github.com/percepteye-ai/agent-flywheel/blob/main/tests/test_zero_instrumentation.py). One `record_tool_call` where you *do* know the answer gets you the rest:
 
 ```python
 from agent_flywheel import record_tool_call
@@ -449,7 +443,7 @@ The last one is **not** the Node package's own suite — that lives in the [Node
 
 1440 tests, and CI permits **zero skips** — a skipped test and a passing test look identical in a green check mark. CI names `PERCEPTEYE_NODE_SDK` and `PRIME_AGENT_PACKAGE_ROOT` and installs both, so neither the cross-language half nor the tests that execute the real `prime-agent` binary can go green by skipping there. Other jobs assert that a bare install still works on Python 3.10→3.13, that the runtime dependency list never grows past `httpx`, and that the Node plugins never drift from the Python reader.
 
-[`schema/flywheel-1.json`](schema/flywheel-1.json) is the wire contract and this repository owns it. Absence is never collapsed into zero: `tool_calls=None` means "I did not report tool calls"; `[]` means "I observed zero", a positive claim. The animations above are generated, not drawn — [`docs/assets/render.sh`](docs/assets/render.sh) rebuilds them.
+[`schema/flywheel-1.json`](https://github.com/percepteye-ai/agent-flywheel/blob/main/schema/flywheel-1.json) is the wire contract and this repository owns it. Absence is never collapsed into zero: `tool_calls=None` means "I did not report tool calls"; `[]` means "I observed zero", a positive claim. The animations above are generated, not drawn — [`docs/assets/render.sh`](https://github.com/percepteye-ai/agent-flywheel/blob/main/docs/assets/render.sh) rebuilds them.
 
 ---
 
@@ -465,4 +459,4 @@ The last one is **not** the Node package's own suite — that lives in the [Node
 
 **Contributing** — issues and PRs welcome; a new adapter must not import its framework at module scope, must report `unknown` rather than guess, and must fail loudly at bind time. ·
 **Security** — please report vulnerabilities privately to **security@percepteye.ai**. ·
-**License** — [MIT](LICENSE) © PerceptEye.
+**License** — [MIT](https://github.com/percepteye-ai/agent-flywheel/blob/main/LICENSE) © PerceptEye.
