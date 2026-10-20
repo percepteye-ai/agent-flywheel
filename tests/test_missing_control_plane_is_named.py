@@ -25,6 +25,7 @@ from __future__ import annotations
 import pytest
 
 import agent_flywheel as fw
+from agent_flywheel.control_plane import GET_A_KEY
 from agent_flywheel.policy import PolicySource, missing_credentials_cause
 
 URL = "PERCEPTEYE_CONTROL_PLANE_URL"
@@ -40,8 +41,8 @@ def unset(monkeypatch):
 @pytest.mark.parametrize(
     ("key", "expected"),
     [
-        (None, f"{KEY} is not set"),
-        ("", f"{KEY} is not set"),
+        (None, f"{KEY} is not set ({GET_A_KEY})"),
+        ("", f"{KEY} is not set ({GET_A_KEY})"),
         ("pefw_x", None),
     ],
 )

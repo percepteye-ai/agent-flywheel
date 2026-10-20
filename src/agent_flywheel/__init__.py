@@ -67,7 +67,7 @@ from .control_plane import (
 from .control_plane import (
     ENV_CONTROL_PLANE_URL as ENV_CONTROL_PLANE_URL,
 )
-from .control_plane import resolve_control_plane_url
+from .control_plane import GET_A_KEY, resolve_control_plane_url
 from .declaration import Describe
 from .entrypoint import TASK, InputShape, resolve_entrypoint
 from .errors import (
@@ -619,8 +619,9 @@ def _endpoint_credential(
             "this agent already sends its flywheel key to -- so the key is not "
             "sent there")
     key = flywheel_key or os.environ.get(ENV_API_KEY) or ""
-    if not key:
-        return "", f"{ENV_API_KEY} is not set"
+    cause = missing_credentials_cause(key)
+    if cause:
+        return "", cause
     return str(key), ""
 
 
@@ -1101,7 +1102,9 @@ def serve(
     url = resolve_control_plane_url(control_plane_url)
     key = api_key or os.environ.get(ENV_API_KEY)
     if not key:
-        raise ConfigurationError(f"an API key is required (or set {ENV_API_KEY})")
+        raise ConfigurationError(
+            f"an API key is required: pass api_key= or set {ENV_API_KEY}. "
+            f"No key yet? {GET_A_KEY[:1].upper()}{GET_A_KEY[1:]}.")
 
     adir = artifacts_dir or os.path.join(os.getcwd(), ".percepteye-artifacts")
     os.makedirs(adir, exist_ok=True)

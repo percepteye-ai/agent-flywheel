@@ -57,19 +57,25 @@ Ship one line. Your agent keeps running in your process, behind your firewall, o
      requires every published copy to match it, here and on the docs site, so
      editing one copy alone turns the suite red. Re-derive by hand with:
        .venv/bin/python -m pytest tests/ --collect-only -q -p no:warnings \
-         | awk -F': ' '/^tests\/.*: [0-9]+$/{n+=$2} END{print n}'   # -> 1386 -->
+         | awk -F': ' '/^tests\/.*: [0-9]+$/{n+=$2} END{print n}'   # -> 1393 -->
 [![pypi](https://img.shields.io/pypi/v/agent-flywheel?style=for-the-badge&logo=pypi&logoColor=white&label=pypi&color=3b82f6)](https://pypi.org/project/agent-flywheel/)
 [![python](https://img.shields.io/badge/python-3.10%20→%203.13-3b82f6?style=for-the-badge&logo=python&logoColor=white)](pyproject.toml)
 <br/>
 [![runtime dependencies](https://img.shields.io/badge/runtime_deps-1-f59e0b?style=for-the-badge)](pyproject.toml)
 [![lines changed in your agent](https://img.shields.io/badge/lines_changed_in_your_agent-0-ec4899?style=for-the-badge)](#-zero-instrumentation-concretely)
-[![tests](https://img.shields.io/badge/tests-1386_·_0_skips-22c55e?style=for-the-badge)](#-development)
+[![tests](https://img.shields.io/badge/tests-1393_·_0_skips-22c55e?style=for-the-badge)](#-development)
 [![license](https://img.shields.io/badge/license-MIT-14b8a6?style=for-the-badge)](LICENSE)
+
+<br/>
+
+[![Connect your agent at launch.percepteye.ai](https://img.shields.io/badge/connect_your_agent-launch.percepteye.ai_%E2%86%92-10b981?style=for-the-badge&labelColor=0f172a)](https://launch.percepteye.ai/onboard/agent-sdk)
+
+<sub>Hosted control plane · free plan · no credit card · your first key in about a minute</sub>
 
 <img src="docs/assets/flywheel-overview.gif" width="1040"
      alt="Your agent — prompt, tools and model — sits inside your infrastructure. fw.serve() wraps it from the outside with zero lines changed inside. Rollouts and observed outcomes go out; a trained policy comes back. The model row flips from your-model to a policy trained on this agent's own work, while the prompt and tools rows stay untouched.">
 
-**[Start in one call](#-start-in-one-call)** · [Harnesses](#-harnesses-supported) · [How the loop closes](#-how-the-loop-closes) · [Training vs production](#-two-modes-one-image) · [Production capture](#-production-observability) · [Docs](website/docs/)
+**[Quickstart](#-quickstart)** · [Control plane](#-the-control-plane) · [Harnesses](#-harnesses-supported) · [How the loop closes](#-how-the-loop-closes) · [Training vs production](#-two-modes-one-image) · [Production capture](#-production-observability) · [Docs](website/docs/)
 
 </div>
 
@@ -89,13 +95,62 @@ That is the whole product. Not a dashboard you read, not a benchmark you run —
 | 🔭 **Honest evidence** | every tool call is recorded as `ok`, `failed`, or `unknown` — the third is legal, expected, and never rounded up to `ok`, so a verifier abstains instead of learning from a lie |
 | 🔒 **Nothing moves** | no container, no cluster, no GPU, no inbound port; every connection is dialled out from your side |
 
-**And you can watch every lap.** The control plane is the part you don't build — not a part you can't see. [Sign in](https://launch.percepteye.ai) and the tasks it generated, how each rollout scored, and what got promoted are all there to inspect.
+## 🌐 The control plane
 
-## ⚡ Start in one call
+<!-- SCREENSHOTS (docs/assets/control-plane-*.png): the dashboard's own
+     onboarding and agent-page components, from the dashboard's code as of
+     2026-10-20 (the release that follows the one live that day), rendered
+     over SAMPLE data. The agent
+     "support-agent", its pefw_demo_ key and its scores are illustrative, and
+     the caption says so. Re-take them when those screens change: a picture of
+     a screen that no longer exists sends a new user looking for it. -->
+
+`pip install agent-flywheel` is half of the flywheel. **The other half writes the tasks, grades every rollout and trains the model. That half is the control plane at [launch.percepteye.ai](https://launch.percepteye.ai/onboard/agent-sdk).** PerceptEye runs it on PerceptEye's GPUs, so there is nothing for you to deploy, scale or keep on call. It is also where you watch every lap, and where you approve what ships.
+
+<p align="center">
+  <a href="https://launch.percepteye.ai/onboard/agent-sdk"><img src="docs/assets/control-plane-sdk.png" width="920"
+     alt="The control plane's 'Add our SDK to your agent's code' screen for an agent named support-agent: Python and Node (OpenClaw) tabs, three numbered steps (pip install, an attach() snippet, and an export of the agent's pefw_ key), and a status panel reading Agent created and Connected."></a>
+  <br/><sub>Connecting an agent at launch.percepteye.ai. The screens on this page show a sample agent.</sub>
+</p>
+
+| | **the SDK** · this package | **the control plane** · launch.percepteye.ai |
+|:--|:--|:--|
+| **runs** | in your process, beside your agent | hosted by PerceptEye |
+| **does** | runs rollouts, records every tool outcome, captures the turns you serve, picks up the approved model | writes tasks from your agent's real tools, grades every rollout, trains the policy, measures each candidate against the model you run today |
+| **shows you** | one log line per lap | every agent, what it could read of each, every candidate against the champion, and the switch that moves an agent between them |
+| **you bring** | `pip install agent-flywheel` | an email address |
+
+**A key joins the two halves.** Without one, `serve()` stops before the first rollout and `attach()` keeps every turn on your own disk: nothing is sent, so nothing is trained. Both say so in one line, and the line names the page where you get a key.
+
+<table>
+  <tr>
+    <td width="33%" valign="top">
+      <img src="docs/assets/control-plane-signup.png" alt="The Create your account card: email, password, confirm password, and a note that a six-digit code confirms the address."><br/>
+      <b>① Create a workspace.</b> An email, a password and a six-digit code. Free plan, no credit card.
+    </td>
+    <td width="33%" valign="top">
+      <img src="docs/assets/control-plane-choose.png" alt="Choose one way to connect your agent: add our SDK to your agent's code, send the traces it already exports, connect where your traces live, or upload a trace file, with what happens next listed beside the choice."><br/>
+      <b>② Connect your agent.</b> Add the SDK, or start from the traces you already export. Name the agent and get its <code>pefw_</code> key, shown once and scoped to that one agent.
+    </td>
+    <td width="33%" valign="top">
+      <img src="docs/assets/control-plane-agent.png" alt="An agent's page: it runs the champion, with a Try the candidate button, and a candidate-versus-base table showing two improved verdicts with mean-reward and pass-rate gains."><br/>
+      <b>③ Watch, then approve.</b> Every candidate is measured against the model you run today. Nothing moves until a person clicks <i>Try the candidate</i>, and moving back is the same click.
+    </td>
+  </tr>
+</table>
+
+## ⚡ Quickstart
+
+**1 · Get a key.** Sign up at **[launch.percepteye.ai](https://launch.percepteye.ai/onboard/agent-sdk)**, name your agent, and copy its `pefw_` key. It is shown once and scoped to that one agent.
+
+**2 · Install it, and export the key.**
 
 ```bash
 pip install agent-flywheel      # one runtime dependency: httpx
+export PERCEPTEYE_API_KEY=pefw_...
 ```
+
+**3 · Serve.**
 
 ```python
 import agent_flywheel as fw
@@ -103,31 +158,24 @@ import agent_flywheel as fw
 fw.serve("my_package.agent:build", agent_id="my-coding-agent", input_shape="text")
 ```
 
-**That is the integration.** You pass an importable `"module:attr"` factory so each rollout can rebuild your agent in a fresh child process. `serve()` claims rollouts, runs them, reports outcomes, and blocks until you stop it.
+**That is the integration.** You pass an importable `"module:attr"` factory so each rollout can rebuild your agent in a fresh child process. `serve()` claims rollouts, runs them, reports outcomes, and blocks until you stop it. Pass the `agent_id` you named in the dashboard: the key is bound to it.
 
-It needs two things from the environment — there is no baked-in address:
+**4 · Watch the first lap land.** The dashboard marks your agent *Connected* on its first call, and every rollout after that is graded where you can see it. Already serving users? [`attach()`](#-production-observability) records the turns you serve instead, and the dashboard shows that snippet too.
 
-```bash
-export PERCEPTEYE_CONTROL_PLANE_URL=https://launch.percepteye.ai/api/flywheel/v1
-export PERCEPTEYE_API_KEY=pefw_...        # free: sign in at https://launch.percepteye.ai
-```
-
-Either one missing and `serve()` raises before the first rollout, naming it.
+The key is the only thing your environment has to supply. The control plane's address defaults to `https://launch.percepteye.ai/api/flywheel/v1`; set `PERCEPTEYE_CONTROL_PLANE_URL`, or pass `control_plane_url=`, to point somewhere else. Without a key, `serve()` raises before the first rollout and names the page where you get one.
 
 Everything that can be misconfigured — entrypoint, credential, contract version, isolation mode — is checked **before the first rollout** and raises there, never mid-run.
 
-<!-- THE KEY ROUTE, confirmed by the owner 2026-09-14: PerceptEye operates the
-     control plane, and sign-in is free and self-serve at
-     https://launch.percepteye.ai (HTTP 200, "Mission Control · PerceptEye").
-     Connecting an agent there issues its key -- shown once, bound to that
-     agent -- and prints the control-plane URL to export. The Node README says
-     the same; keep the two in step. -->
-
-**Where a `pefw_` key comes from:** PerceptEye runs the control plane, and signing in is free and self-serve at **[launch.percepteye.ai](https://launch.percepteye.ai)**. Connect your agent there and you get its key — shown once, and scoped to that one agent — along with the exact `PERCEPTEYE_CONTROL_PLANE_URL` to export.
+<!-- THE KEY ROUTE, confirmed by the owner 2026-09-14 and re-pointed
+     2026-10-20: PerceptEye operates the control plane, and sign-up is free and
+     self-serve. Every link on this page that asks for a key goes to
+     https://launch.percepteye.ai/onboard/agent-sdk, the dashboard's screen for
+     connecting an agent with the SDK, which is also the SIGN_UP_URL the SDK's
+     own missing-key errors print (agent_flywheel.control_plane). The Node
+     README says the same; keep the two in step. -->
 
 > [!TIP]
 > Rollouts are real runs on your real credentials. Bound the first one with `max_rollouts=8` and point `artifacts_dir=` somewhere you don't mind it writing. `max_rollouts` is also the only clean exit: there is no signal handler, and Ctrl-C drains in-flight rollouts first.
-
 ### Your agent is a binary? Pass its command line.
 
 Any CLI agent is an argv list — no protocol to implement, no change to the binary:
@@ -329,7 +377,7 @@ def build():
     return Agent()
 ```
 
-Served with the two-line `fw.serve()` integration from [Start in one call](#-start-in-one-call), the rollout reports:
+Served with the two-line `fw.serve()` integration from the [Quickstart](#-quickstart), the rollout reports:
 
 ```json
 "tool_calls": [{"name": "lookup", "arguments": {"q": "count to three"},
@@ -350,7 +398,7 @@ record_tool_call("charge_card", {"amount": 4200}, outcome="ok", status_code=201)
 | variable | meaning |
 |:--|:--|
 | `PERCEPTEYE_CONTROL_PLANE_URL` | control-plane base URL; unset, it defaults to `https://launch.percepteye.ai/api/flywheel/v1` |
-| `PERCEPTEYE_API_KEY` | your flywheel key |
+| `PERCEPTEYE_API_KEY` | your flywheel key, from [launch.percepteye.ai](https://launch.percepteye.ai/onboard/agent-sdk) |
 | `PERCEPTEYE_AGENT_MODE` | `training` (default) or `production` — [one switch, both ways](#-two-modes-one-image) |
 | `PERCEPTEYE_INTROSPECT` | `0` disables agent discovery |
 | `PERCEPTEYE_TRAJECTORY_DIR` | one explicit trajectory directory, for a single run |
@@ -388,9 +436,19 @@ python -m venv .venv
 
 The last one is **not** the Node package's own suite — that lives in the [Node repository](https://github.com/percepteye-ai/agent-flywheel-node) and runs there with `npm test`. This drives records through the Node writer and asserts the Python `Trajectory` reads them back with the same meaning, which is the half only this repo can check. **It needs a Node checkout**: point `PERCEPTEYE_NODE_SDK` at one, or keep it as a sibling directory. Without one it prints `SKIPPED` and exits 0, and the cross-language tests in the suite above skip with it.
 
-1386 tests, and CI permits **zero skips** — a skipped test and a passing test look identical in a green check mark. CI names `PERCEPTEYE_NODE_SDK` and `PRIME_AGENT_PACKAGE_ROOT` and installs both, so neither the cross-language half nor the tests that execute the real `prime-agent` binary can go green by skipping there. Other jobs assert that a bare install still works on Python 3.10→3.13, that the runtime dependency list never grows past `httpx`, and that the Node plugins never drift from the Python reader.
+1393 tests, and CI permits **zero skips** — a skipped test and a passing test look identical in a green check mark. CI names `PERCEPTEYE_NODE_SDK` and `PRIME_AGENT_PACKAGE_ROOT` and installs both, so neither the cross-language half nor the tests that execute the real `prime-agent` binary can go green by skipping there. Other jobs assert that a bare install still works on Python 3.10→3.13, that the runtime dependency list never grows past `httpx`, and that the Node plugins never drift from the Python reader.
 
 [`schema/flywheel-1.json`](schema/flywheel-1.json) is the wire contract and this repository owns it. Absence is never collapsed into zero: `tool_calls=None` means "I did not report tool calls"; `[]` means "I observed zero", a positive claim. The animations above are generated, not drawn — [`docs/assets/render.sh`](docs/assets/render.sh) rebuilds them.
+
+---
+
+<div align="center">
+
+**Your agent already does the work. Let it learn from it.**
+
+[![Connect your agent at launch.percepteye.ai](https://img.shields.io/badge/connect_your_agent-launch.percepteye.ai_%E2%86%92-10b981?style=for-the-badge&labelColor=0f172a)](https://launch.percepteye.ai/onboard/agent-sdk)
+
+</div>
 
 ---
 

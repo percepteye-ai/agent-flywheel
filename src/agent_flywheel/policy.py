@@ -126,9 +126,13 @@ def missing_credentials_cause(key: str | None) -> str | None:
     costs more than one that says nothing.
     """
     from . import ENV_API_KEY
+    from .control_plane import GET_A_KEY
 
     if not key:
-        return f"{ENV_API_KEY} is not set"
+        # The remedy rides with the cause: it is the same for every call
+        # site, and this line is where a developer who installed the SDK and
+        # never signed up first learns that a key exists at all.
+        return f"{ENV_API_KEY} is not set ({GET_A_KEY})"
     return None
 
 

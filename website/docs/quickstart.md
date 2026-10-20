@@ -20,14 +20,13 @@ import agent_flywheel as fw
 fw.serve("my_package.agent:build", agent_id="my-coding-agent", input_shape="text")
 ```
 
-Two environment variables carry the address and the credential. They are the only two required:
+One environment variable carries the credential, and it is the only one required:
 
 ```bash
-export PERCEPTEYE_CONTROL_PLANE_URL=https://launch.percepteye.ai/api/flywheel/v1
-export PERCEPTEYE_API_KEY=pefw_...        # free: sign in at https://launch.percepteye.ai
+export PERCEPTEYE_API_KEY=pefw_...        # from https://launch.percepteye.ai/onboard/agent-sdk
 ```
 
-PerceptEye runs the control plane, and signing in is free and self-serve at [launch.percepteye.ai](https://launch.percepteye.ai). Connect your agent there and you get its key — shown once, and scoped to that one agent — along with the exact control-plane URL to export.
+PerceptEye runs the control plane, and signing up is free and self-serve at [launch.percepteye.ai](https://launch.percepteye.ai/onboard/agent-sdk). Name your agent there and you get its key, shown once and scoped to that one agent. The control plane's address defaults to `https://launch.percepteye.ai/api/flywheel/v1`; `PERCEPTEYE_CONTROL_PLANE_URL` points it somewhere else. Without a key, `serve()` raises before the first rollout and names that page.
 
 Both are overridable in code as `control_plane_url=` and `api_key=`, and the argument wins. Everything else `serve()` takes has a default.
 

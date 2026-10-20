@@ -26,6 +26,8 @@ from collections.abc import Mapping
 __all__ = [
     "DEFAULT_CONTROL_PLANE_URL",
     "ENV_CONTROL_PLANE_URL",
+    "GET_A_KEY",
+    "SIGN_UP_URL",
     "resolve_control_plane_url",
 ]
 
@@ -36,6 +38,19 @@ ENV_CONTROL_PLANE_URL = "PERCEPTEYE_CONTROL_PLANE_URL"
 #: the dashboard shows when it issues a key. The Node SDK's default, byte for
 #: byte.
 DEFAULT_CONTROL_PLANE_URL = "https://launch.percepteye.ai/api/flywheel/v1"
+
+#: Where a developer with no key gets one: the dashboard's screen for
+#: connecting an agent with this SDK, on the default's own origin. Signed out,
+#: it offers sign-in and "Create an account" and keeps its address through
+#: both, so a new developer lands where the key is issued rather than on Home.
+#: Every refusal a missing ``PERCEPTEYE_API_KEY`` causes names it, because that
+#: refusal is the moment the developer needs it. They used to name only the
+#: variable, which says what is missing and not where it comes from. The Node
+#: SDK's ``SIGN_UP_URL``, byte for byte.
+SIGN_UP_URL = "https://launch.percepteye.ai/onboard/agent-sdk"
+
+#: The remedy for a missing key, one wording for every message that needs it.
+GET_A_KEY = f"sign up free at {SIGN_UP_URL} and connect this agent to get its key"
 
 
 def _non_blank(value: object) -> str | None:
