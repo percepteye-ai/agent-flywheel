@@ -24,22 +24,16 @@ Built and Maintained by **[PerceptEye](https://percepteye.ai)**
 
 Ship one line. Your agent keeps running in your process, behind your firewall, on your credentials — **unchanged** — and the model it calls keeps improving.
 
-<!-- BADGES — `ci` was a live shields.io badge and rendered as a red error
-     image, because shields.io queries GitHub anonymously and this repo is
-     PRIVATE, so GitHub's API 404s for an anonymous caller whatever
-     .github/workflows/ci.yml — which does exist, and is pushed — actually did.
-     Verified against the live service 2026-09-06.
-
-     ONCE THE REPO IS PUBLIC restore it verbatim. Do not hand-write a
-     "passing" into a static badge to fill the gap — that asserts a state
-     nothing checks. The repo went public on 2026-10-20, but the `ci` workflow
-     has been disabled on GitHub since 2026-09-25 (an owner ruling, for cost),
-     so a restored badge would report a pipeline that no longer runs. Restore
-     it on the day the workflow is enabled again.
-       [![ci](https://img.shields.io/github/actions/workflow/status/percepteye-ai/agent-flywheel/ci.yml?branch=main&label=ci&style=for-the-badge&logo=githubactions&logoColor=white&color=22c55e)](https://github.com/percepteye-ai/agent-flywheel/actions)
+<!-- BADGES — `ci` is live: shields.io asks GitHub for the latest ci.yml run
+     on main. While this repo was PRIVATE it rendered as a red error image,
+     because shields.io queries GitHub anonymously and a private repo 404s
+     (verified 2026-09-06), and from 2026-09-25 the workflow was disabled for
+     cost. The repo went public and the workflow was enabled again on
+     2026-10-20, so the badge is back, verbatim. Never hand-write a "passing"
+     into a static badge in its place: that asserts a state nothing checks.
      `pypi` is live and asks PyPI for the published version of
-     `agent-flywheel`. PyPI answers anonymous callers, so unlike `ci` it
-     renders while the repo is private, and it has shown the current release
+     `agent-flywheel`. PyPI answers anonymous callers, so it rendered
+     even while the repo was private, and it has shown the current release
      since 0.1.0 went out on 2026-09-14. This README is also each release's
      PyPI page, so it must never claim the package is unreleased.
      `ci` gets no static stand-in: the hardcoded `tests` badge below already
@@ -52,6 +46,7 @@ Ship one line. Your agent keeps running in your process, behind your firewall, o
      editing one copy alone turns the suite red. Re-derive by hand with:
        .venv/bin/python -m pytest tests/ --collect-only -q -p no:warnings \
          | awk -F': ' '/^tests\/.*: [0-9]+$/{n+=$2} END{print n}'   # -> 1440 -->
+[![ci](https://img.shields.io/github/actions/workflow/status/percepteye-ai/agent-flywheel/ci.yml?branch=main&label=ci&style=for-the-badge&logo=githubactions&logoColor=white&color=22c55e)](https://github.com/percepteye-ai/agent-flywheel/actions)
 [![pypi](https://img.shields.io/pypi/v/agent-flywheel?style=for-the-badge&logo=pypi&logoColor=white&label=pypi&color=3b82f6)](https://pypi.org/project/agent-flywheel/)
 [![python](https://img.shields.io/badge/python-3.10%20→%203.13-3b82f6?style=for-the-badge&logo=python&logoColor=white)](https://github.com/percepteye-ai/agent-flywheel/blob/main/pyproject.toml)
 <br/>
