@@ -126,7 +126,7 @@ fw.serve(..., on_event=lambda kind, ev: print(kind, ev))
 | `mode` | `None` | see [the mode switch](#the-mode-switch) |
 | `transport` | `"attach"` | the only value in contract `flywheel/1`; anything else raises `ModeNotAvailable` |
 | `control_plane_url` | `None` | falls back to `PERCEPTEYE_CONTROL_PLANE_URL`, then `https://launch.percepteye.ai/api/flywheel/v1` |
-| `api_key` | `None` | falls back to `PERCEPTEYE_API_KEY` |
+| `api_key` | `None` | falls back to `PERCEPTEYE_API_KEY`, then to the key `agent-flywheel login` stored for this agent on this control plane; in a terminal with neither, `serve()` offers to create one |
 | `artifacts_dir` | `None` | falls back to `./.percepteye-artifacts`, created if absent |
 | `isolation` | `"subprocess"` | or `"inprocess"`; any other value raises |
 | `concurrency` | `1` | rollouts in flight. A single claim asks for at most 16 whatever you set |
@@ -318,7 +318,9 @@ Symlinks are **never** followed — one dropped in the agent's own directory wou
 |:--|:--|
 | `PERCEPTEYE_AGENT_MODE` | `training` (default) or `production`. In production `serve()` returns 0 without connecting. Gates capacity contribution only — not `attach()`. A value it cannot parse raises rather than being guessed. |
 | `PERCEPTEYE_CONTROL_PLANE_URL` | Control-plane base URL, default `https://launch.percepteye.ai/api/flywheel/v1`. Overridable with `control_plane_url=`. |
-| `PERCEPTEYE_API_KEY` | Your flywheel key. Overridable with `api_key=`. |
+| `PERCEPTEYE_API_KEY` | Your flywheel key. Overridable with `api_key=`. When it is unset, the key `agent-flywheel login` stored for this agent on this control plane is used, and said once on stderr. |
+| `PERCEPTEYE_HOME` | Where this SDK keeps its files, default `~/.percepteye`: captured turns, and `credentials.json`, the keys `agent-flywheel login` stores (mode 0600, shared with the Node SDK). |
+| `PERCEPTEYE_NO_PROMPT` | Set to anything to stop `serve()` offering to create a key in a terminal. It never offers in CI, or when stdin or stderr is not a terminal. |
 | `PERCEPTEYE_INTROSPECT` | Set to `0`, `false`, `no` or `off` to disable agent discovery. |
 | `PERCEPTEYE_ROLLOUT_ID` | *Set by us* for the child. Read it to tag your own logs. |
 | `PERCEPTEYE_TRAJECTORY_DIR` | *Set by us* for the child — already this rollout's directory. Append to `$PERCEPTEYE_TRAJECTORY_DIR/tool_calls.jsonl`; any other file you leave there is collected as an artifact. Also the variable the Node plugins read. |

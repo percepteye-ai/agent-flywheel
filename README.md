@@ -57,13 +57,13 @@ Ship one line. Your agent keeps running in your process, behind your firewall, o
      requires every published copy to match it, here and on the docs site, so
      editing one copy alone turns the suite red. Re-derive by hand with:
        .venv/bin/python -m pytest tests/ --collect-only -q -p no:warnings \
-         | awk -F': ' '/^tests\/.*: [0-9]+$/{n+=$2} END{print n}'   # -> 1393 -->
+         | awk -F': ' '/^tests\/.*: [0-9]+$/{n+=$2} END{print n}'   # -> 1440 -->
 [![pypi](https://img.shields.io/pypi/v/agent-flywheel?style=for-the-badge&logo=pypi&logoColor=white&label=pypi&color=3b82f6)](https://pypi.org/project/agent-flywheel/)
 [![python](https://img.shields.io/badge/python-3.10%20→%203.13-3b82f6?style=for-the-badge&logo=python&logoColor=white)](pyproject.toml)
 <br/>
 [![runtime dependencies](https://img.shields.io/badge/runtime_deps-1-f59e0b?style=for-the-badge)](pyproject.toml)
 [![lines changed in your agent](https://img.shields.io/badge/lines_changed_in_your_agent-0-ec4899?style=for-the-badge)](#-zero-instrumentation-concretely)
-[![tests](https://img.shields.io/badge/tests-1393_·_0_skips-22c55e?style=for-the-badge)](#-development)
+[![tests](https://img.shields.io/badge/tests-1440_·_0_skips-22c55e?style=for-the-badge)](#-development)
 [![license](https://img.shields.io/badge/license-MIT-14b8a6?style=for-the-badge)](LICENSE)
 
 <br/>
@@ -150,6 +150,16 @@ pip install agent-flywheel      # one runtime dependency: httpx
 export PERCEPTEYE_API_KEY=pefw_...
 ```
 
+**Or skip the browser tab.** Once the package is installed, the terminal can get the key for you:
+
+```bash
+agent-flywheel login --agent-id my-coding-agent
+```
+
+It prints a short code and opens launch.percepteye.ai with the code filled in. Sign up or sign in, check that the code matches, and click **Approve**. The key comes back to the terminal and is stored in `~/.percepteye/credentials.json` (or `$PERCEPTEYE_HOME/credentials.json`), readable only by you, for that one agent on that one control plane. `serve()`, `attach()`, `current_policy()`, `current_prompt()` and `policy_source()` use it whenever no `api_key=` is passed and `PERCEPTEYE_API_KEY` is unset, and say so once when they first do. A stored key is consent to send, exactly as the variable is. `agent-flywheel logout --agent-id my-coding-agent` forgets it here; revoking it in Mission Control (Settings) stops it everywhere.
+
+`serve()` offers the same thing when it starts with no key in a terminal: `No PerceptEye key found for agent 'my-coding-agent'. Create one now (free)? [Y/n]`. Answer yes and it continues with the new key. It asks only a person: in CI (`CI`, `GITHUB_ACTIONS` and the other usual CI variables), with `PERCEPTEYE_NO_PROMPT=1`, or when stdin or stderr is not a terminal, it raises the missing-key error exactly as before.
+
 **3 · Serve.**
 
 ```python
@@ -162,7 +172,7 @@ fw.serve("my_package.agent:build", agent_id="my-coding-agent", input_shape="text
 
 **4 · Watch the first lap land.** The dashboard marks your agent *Connected* on its first call, and every rollout after that is graded where you can see it. Already serving users? [`attach()`](#-production-observability) records the turns you serve instead, and the dashboard shows that snippet too.
 
-The key is the only thing your environment has to supply. The control plane's address defaults to `https://launch.percepteye.ai/api/flywheel/v1`; set `PERCEPTEYE_CONTROL_PLANE_URL`, or pass `control_plane_url=`, to point somewhere else. Without a key, `serve()` raises before the first rollout and names the page where you get one.
+The key is the only thing your environment has to supply. The control plane's address defaults to `https://launch.percepteye.ai/api/flywheel/v1`; set `PERCEPTEYE_CONTROL_PLANE_URL`, or pass `control_plane_url=`, to point somewhere else. With no key at all, `serve()` offers to create one when a person is at the terminal, and otherwise raises before the first rollout, naming `agent-flywheel login` and the page where you get one.
 
 Everything that can be misconfigured — entrypoint, credential, contract version, isolation mode — is checked **before the first rollout** and raises there, never mid-run.
 
@@ -176,6 +186,7 @@ Everything that can be misconfigured — entrypoint, credential, contract versio
 
 > [!TIP]
 > Rollouts are real runs on your real credentials. Bound the first one with `max_rollouts=8` and point `artifacts_dir=` somewhere you don't mind it writing. `max_rollouts` is also the only clean exit: there is no signal handler, and Ctrl-C drains in-flight rollouts first.
+
 ### Your agent is a binary? Pass its command line.
 
 Any CLI agent is an argv list — no protocol to implement, no change to the binary:
@@ -436,7 +447,7 @@ python -m venv .venv
 
 The last one is **not** the Node package's own suite — that lives in the [Node repository](https://github.com/percepteye-ai/agent-flywheel-node) and runs there with `npm test`. This drives records through the Node writer and asserts the Python `Trajectory` reads them back with the same meaning, which is the half only this repo can check. **It needs a Node checkout**: point `PERCEPTEYE_NODE_SDK` at one, or keep it as a sibling directory. Without one it prints `SKIPPED` and exits 0, and the cross-language tests in the suite above skip with it.
 
-1393 tests, and CI permits **zero skips** — a skipped test and a passing test look identical in a green check mark. CI names `PERCEPTEYE_NODE_SDK` and `PRIME_AGENT_PACKAGE_ROOT` and installs both, so neither the cross-language half nor the tests that execute the real `prime-agent` binary can go green by skipping there. Other jobs assert that a bare install still works on Python 3.10→3.13, that the runtime dependency list never grows past `httpx`, and that the Node plugins never drift from the Python reader.
+1440 tests, and CI permits **zero skips** — a skipped test and a passing test look identical in a green check mark. CI names `PERCEPTEYE_NODE_SDK` and `PRIME_AGENT_PACKAGE_ROOT` and installs both, so neither the cross-language half nor the tests that execute the real `prime-agent` binary can go green by skipping there. Other jobs assert that a bare install still works on Python 3.10→3.13, that the runtime dependency list never grows past `httpx`, and that the Node plugins never drift from the Python reader.
 
 [`schema/flywheel-1.json`](schema/flywheel-1.json) is the wire contract and this repository owns it. Absence is never collapsed into zero: `tool_calls=None` means "I did not report tool calls"; `[]` means "I observed zero", a positive claim. The animations above are generated, not drawn — [`docs/assets/render.sh`](docs/assets/render.sh) rebuilds them.
 
