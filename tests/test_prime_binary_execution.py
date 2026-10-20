@@ -411,7 +411,20 @@ def _ci_pinned_prime_version() -> str:
     consumer of that single declaration.
     """
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    found = re.findall(r"npm install -g prime-agent@(\S+)", workflow)
+    # Two spellings of one pin. `prime-agent` was unpublished from the npm
+    # registry in October 2026, so CI installs the identical npm tarball from
+    # the upstream GitHub release instead (its own dependencies are pinned
+    # tarball URLs). A release URL whose tag and file name disagree is two
+    # versions, not one, and is refused below.
+    registry = re.findall(r"npm install -g prime-agent@(\S+)", workflow)
+    release = re.findall(
+        r"npm install -g https://github\.com/PrimeIntellect-ai/prime-agent/"
+        r"releases/download/v(\S+?)/prime-agent-(\S+?)\.tgz", workflow)
+    for tag, filename in release:
+        assert tag == filename, (
+            f"ci.yml installs prime-agent from release v{tag} but its file "
+            f"names version {filename}")
+    found = registry + [tag for tag, _ in release]
     assert len(found) == 1, (
         f"ci.yml must install prime-agent at exactly one pinned version, found "
         f"{found}"

@@ -186,6 +186,7 @@ def _run_loop(model, tools, messages):
 
 def test_a_langchain_turn_uploads_its_model_calls_whole_input_and_output(
         monkeypatch, tmp_path):
+    pytest.importorskip("langchain_core")
     from langchain_core.messages import HumanMessage, SystemMessage
 
     tr = _Transport()
@@ -482,6 +483,7 @@ def test_an_adk_client_call_id_is_not_put_on_the_tool_span(monkeypatch, tmp_path
 
 
 def _one_langchain_turn(px, tid="t1"):
+    pytest.importorskip("langchain_core")
     from langchain_core.messages import HumanMessage
 
     ScriptedChat = _scripted_chat()
@@ -639,6 +641,7 @@ def test_a_rollout_records_no_model_boundary_whatever_it_is_passed(tmp_path):
     """The SDK rollout lane's report is its own contract (GRPO reads it byte
     for byte), so a rollout scope never records model content -- not even
     when a caller hands it the flag a turn uses."""
+    pytest.importorskip("langchain_core")
     from langchain_core.messages import HumanMessage
 
     from agent_flywheel.binding import bind_selected
@@ -689,6 +692,7 @@ def test_a_rollout_pays_for_no_model_call_conversion(monkeypatch, tmp_path):
     """The LangChain callbacks return before converting a single message
     outside a consented turn: a rollout's model calls cost one context-variable
     read, not a copy of every prompt."""
+    pytest.importorskip("langchain_core")
     from langchain_core.messages import HumanMessage
 
     from agent_flywheel.adapters import langchain as lc

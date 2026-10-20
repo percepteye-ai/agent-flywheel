@@ -93,7 +93,7 @@ jobs:
       # the pin back out of this line and asserts `--version` against it, so an
       # install that resolved to something else fails the suite rather than
       # silently changing the attested identity.
-      - run: npm install -g prime-agent@0.7.2
+      - run: npm install -g https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.7.2/prime-agent-0.7.2.tgz
       # Those tests roll out against a REAL kernel venv, because the example
       # refuses one Prime would refuse to run, and the installed prime-agent
       # builds it with its own bootstrap, which needs `uv`. Without uv the
