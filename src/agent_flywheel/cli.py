@@ -138,6 +138,62 @@ def _cmd_report(args: argparse.Namespace) -> int:
     return int(reporter.main(["agent-flywheel report", target]))
 
 
+def _agent_id(args: argparse.Namespace) -> str | None:
+    """``--agent-id``, else ``PERCEPTEYE_AGENT_ID``."""
+    return (args.agent_id or os.environ.get("PERCEPTEYE_AGENT_ID") or "").strip() or None
+
+
+def _cmd_login(args: argparse.Namespace) -> int:
+    """Get this agent a key through the browser, and store it.
+
+    The device login (:mod:`agent_flywheel.login`): a code here, Approve in
+    the browser, the key back here -- for ONE agent, named by ``--agent-id``.
+    """
+    from .login import LoginError, device_login
+
+    agent_id = _agent_id(args)
+    if agent_id is None:
+        print("agent-flywheel: name the agent the key is for: "
+              "`agent-flywheel login --agent-id my-agent`", file=sys.stderr)
+        return 2
+    try:
+        device_login(
+            agent_id, control_plane_url=args.control_plane_url,
+            open_browser=not args.no_browser,
+        )
+    except KeyboardInterrupt:
+        print("\nagent-flywheel: login cancelled; no key was stored.",
+              file=sys.stderr)
+        return 130
+    except LoginError as exc:
+        print(f"agent-flywheel: {exc}", file=sys.stderr)
+        return 1
+    print(f"agent-flywheel: serve(agent_id={agent_id!r}) and attach() now use "
+          "this key when PERCEPTEYE_API_KEY is not set.", file=sys.stderr)
+    return 0
+
+
+def _cmd_logout(args: argparse.Namespace) -> int:
+    """Forget the key stored for this agent. Local only, and says so."""
+    from .control_plane import resolve_control_plane_url
+    from .credentials import credentials_path, remove_stored
+
+    agent_id = _agent_id(args)
+    if agent_id is None:
+        print("agent-flywheel: name the agent: "
+              "`agent-flywheel logout --agent-id my-agent`", file=sys.stderr)
+        return 2
+    url = resolve_control_plane_url(args.control_plane_url)
+    if not remove_stored(url, agent_id):
+        print(f"agent-flywheel: no key is stored for agent {agent_id!r} on "
+              f"{url} in {credentials_path()}.")
+        return 0
+    print(f"agent-flywheel: forgot the key stored for agent {agent_id!r} "
+          f"({credentials_path()}). The key itself stays valid until it is "
+          "revoked in Mission Control (Settings).")
+    return 0
+
+
 def _print_endpoint(ep: dict) -> None:
     """Say where the agent's traffic goes, and who decided.
 
@@ -203,7 +259,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="agent-flywheel",
-        description="Agent Flywheel — CLI-agent setup.",
+        description="Agent Flywheel — CLI-agent setup, and keys for your agents.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -228,6 +284,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         "directory", nargs="?", default=None,
         help="a trajectory directory; defaults to the most recent session")
     p_report.set_defaults(func=_cmd_report)
+
+    for name, func, help_text in (
+        ("login", _cmd_login,
+         "create a key for one agent in your browser and store it here"),
+        ("logout", _cmd_logout, "forget the key stored here for one agent"),
+    ):
+        p = sub.add_parser(name, help=help_text)
+        p.add_argument(
+            "--agent-id", default=None,
+            help="the agent the key is for (default: $PERCEPTEYE_AGENT_ID)")
+        p.add_argument(
+            "--control-plane-url", default=None,
+            help="the control plane (default: $PERCEPTEYE_CONTROL_PLANE_URL, "
+                 "else the hosted one)")
+        if name == "login":
+            p.add_argument(
+                "--no-browser", action="store_true",
+                help="print the link instead of opening a browser")
+        p.set_defaults(func=func)
 
     args = parser.parse_args(argv)
     try:

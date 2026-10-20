@@ -318,6 +318,23 @@ def _env_true(name: str, *, default: bool) -> bool:
     return raw.strip().lower() not in ("0", "false", "no", "off")
 
 
+def _api_key_for(
+    api_key: str | None, *, agent_id: str, control_plane_url: str,
+) -> str:
+    """The key this agent speaks to the control plane with, or ``""``.
+
+    THE ONE RULE (:func:`agent_flywheel.credentials.resolve_api_key`): the
+    argument, then ``PERCEPTEYE_API_KEY``, then the key stored for this agent
+    on this control plane by ``agent-flywheel login``.
+    """
+    from .credentials import resolve_api_key
+
+    resolved = resolve_api_key(
+        api_key, agent_id=agent_id, control_plane_url=control_plane_url,
+    )
+    return resolved.value if resolved else ""
+
+
 def current_policy(
     *,
     agent_id: str,
@@ -354,8 +371,10 @@ def current_policy(
     configuration. :func:`policy_source` tells the two apart for you.
     """
     url = resolve_control_plane_url(control_plane_url)
-    key = api_key or os.environ.get(ENV_API_KEY) or ""
-    cause = missing_credentials_cause(key)
+    key = _api_key_for(api_key, agent_id=agent_id, control_plane_url=url)
+    cause = missing_credentials_cause(
+        key, agent_id=agent_id, control_plane_url=control_plane_url,
+    )
     if cause:
         _log.warning(
             "agent-flywheel: not reading the served policy for agent_id=%r: %s, so "
@@ -425,8 +444,10 @@ def current_prompt(
     :mod:`agent_flywheel.prompt`.
     """
     url = resolve_control_plane_url(control_plane_url)
-    key = api_key or os.environ.get(ENV_API_KEY) or ""
-    cause = missing_credentials_cause(key)
+    key = _api_key_for(api_key, agent_id=agent_id, control_plane_url=url)
+    cause = missing_credentials_cause(
+        key, agent_id=agent_id, control_plane_url=control_plane_url,
+    )
     if cause:
         # SAID, because `prompt_decision({})` blames the control plane for
         # serving no approved prompt -- true of the empty answer and wrong
@@ -675,8 +696,16 @@ def apply_current_policy(
             "agent_id=%r (%s), so this agent runs on its own configuration.",
             agent_id, pol.get("reason") or "withdrawn=true",
         )
+    # The SAME key ``current_policy`` read with (argument, variable or the one
+    # stored for this agent), so the served endpoint is opened with the
+    # credential the policy was read with and no other.
     out = endpoint_kwargs(
-        pol, flywheel_key=api_key, control_plane_url=control_plane_url,
+        pol,
+        flywheel_key=_api_key_for(
+            api_key, agent_id=agent_id,
+            control_plane_url=resolve_control_plane_url(control_plane_url),
+        ) or None,
+        control_plane_url=control_plane_url,
     )
     if not out:
         return {}
@@ -1099,9 +1128,22 @@ def serve(
     rulebook = declared_rulebook(rules)
 
     url = resolve_control_plane_url(control_plane_url)
-    key = api_key or os.environ.get(ENV_API_KEY)
+    key = _api_key_for(api_key, agent_id=agent_id, control_plane_url=url)
     if not key:
-        raise ConfigurationError(f"an API key is required (or set {ENV_API_KEY})")
+        # A PERSON AT A TERMINAL is offered the key in place (owner ruling
+        # 2026-10-20): the device login, then this call carries on with what
+        # it stored. Nobody else is ever asked -- CI, a service, a pipe --
+        # and they get the refusal below exactly as before.
+        from .login import offer_login
+
+        key = offer_login(agent_id, control_plane_url=url) or ""
+    if not key:
+        from .credentials import login_hint
+
+        raise ConfigurationError(
+            f"an API key is required (pass api_key= or set {ENV_API_KEY}; or "
+            f"{login_hint(agent_id)})"
+        )
 
     adir = artifacts_dir or os.path.join(os.getcwd(), ".percepteye-artifacts")
     os.makedirs(adir, exist_ok=True)

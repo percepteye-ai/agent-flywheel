@@ -101,7 +101,12 @@ __all__ = [
 ]
 
 
-def missing_credentials_cause(key: str | None) -> str | None:
+def missing_credentials_cause(
+    key: str | None,
+    *,
+    agent_id: str | None = None,
+    control_plane_url: str | None = None,
+) -> str | None:
     """Why the control plane cannot be asked, or ``None`` when it can.
 
     Only the key can be missing. The URL has a default
@@ -124,12 +129,28 @@ def missing_credentials_cause(key: str | None) -> str | None:
     Returns the CAUSE only, never the consequence: each call site knows what it
     could not do and says so itself. A refusal that names the wrong subsystem
     costs more than one that says nothing.
+
+    A caller that knows which agent it speaks for passes ``agent_id``: a key
+    can also be STORED for that agent (``agent-flywheel login``,
+    :func:`~agent_flywheel.credentials.resolve_api_key`), so the cause then
+    says that none is, or that the one stored has expired, and names the
+    command that gets one.
     """
     from . import ENV_API_KEY
 
-    if not key:
-        return f"{ENV_API_KEY} is not set"
-    return None
+    if key:
+        return None
+    cause = f"{ENV_API_KEY} is not set"
+    if agent_id is None:
+        return cause
+    from .control_plane import resolve_control_plane_url
+    from .credentials import login_hint, stored_key_refusal
+
+    stored = stored_key_refusal(resolve_control_plane_url(control_plane_url), agent_id)
+    return (
+        f"{cause} and {stored or f'no key is stored for agent {agent_id!r}'} "
+        f"({login_hint(agent_id)})"
+    )
 
 
 #: Prefixes that mean STORED ARTIFACT, not sampling address.
@@ -348,6 +369,9 @@ class PolicySource:
         self._now = _now
         self._on_change = on_change
         self._api_key_arg = api_key
+        #: The key ``_fetch`` resolved (argument, variable or stored), once it
+        #: has: the endpoint half is handed the same one.
+        self._resolved_key: str | None = None
         self._url_arg = control_plane_url
         self._base_ttl = max(MIN_TTL_S, float(ttl_s))
         # Decided ONCE, so this handle's cadence is stable and differs from its
@@ -483,7 +507,7 @@ class PolicySource:
         # This handle's key and URL are the FLYWHEEL key and where it goes,
         # never a credential for the endpoint: see `_endpoint_credential`.
         kw = endpoint_kwargs(
-            body, flywheel_key=self._api_key_arg,
+            body, flywheel_key=self._resolved_key or self._api_key_arg,
             control_plane_url=self._url_arg,
         )
         if not kw and not withdrawn and self._last_identity is not None:
@@ -550,16 +574,23 @@ class PolicySource:
         if self._fetch_override is not None:
             return self._fetch_override()
         if self._client is None:
-            import os
-
-            from . import ENV_API_KEY
             from ._http import ControlPlaneClient
             from .control_plane import resolve_control_plane_url
+            from .credentials import resolve_api_key
             from .errors import ConfigurationError
 
             url = resolve_control_plane_url(self._url_arg)
-            key = self._api_key_arg or os.environ.get(ENV_API_KEY) or ""
-            cause = missing_credentials_cause(key)
+            resolved = resolve_api_key(
+                self._api_key_arg, agent_id=self.agent_id, control_plane_url=url,
+            )
+            key = resolved.value if resolved else ""
+            # The endpoint half (``_absorb``) reads the SAME key: one
+            # resolution per handle, so the policy read and the served
+            # endpoint cannot be handed different credentials.
+            self._resolved_key = key or None
+            cause = missing_credentials_cause(
+                key, agent_id=self.agent_id, control_plane_url=self._url_arg,
+            )
             if cause:
                 if not self._warned_no_credentials:
                     self._warned_no_credentials = True

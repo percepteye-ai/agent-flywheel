@@ -29,6 +29,8 @@ export PERCEPTEYE_API_KEY=pefw_...        # free: sign in at https://launch.perc
 
 PerceptEye runs the control plane, and signing in is free and self-serve at [launch.percepteye.ai](https://launch.percepteye.ai). Connect your agent there and you get its key — shown once, and scoped to that one agent — along with the exact control-plane URL to export.
 
+Or skip the copying: `agent-flywheel login --agent-id my-coding-agent` opens the same sign-in with a code filled in, and once you click **Approve** the key comes back to your terminal and is stored for that agent (`~/.percepteye/credentials.json`, readable only by you). `serve()` uses it whenever `PERCEPTEYE_API_KEY` is unset, and when it starts in a terminal with no key at all it offers to do this for you. It never asks in CI or when nobody is at a terminal. See [the key `login` stores](configuration.md#environment-variables).
+
 Both are overridable in code as `control_plane_url=` and `api_key=`, and the argument wins. Everything else `serve()` takes has a default.
 
 `serve()` blocks and returns an `int` — the number of rollouts that completed.

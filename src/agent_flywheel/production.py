@@ -1759,7 +1759,14 @@ def attach(
     policy: dict[str, Any] = {}
     register_error: Exception | None = None
     url = resolve_control_plane_url(control_plane_url)
-    key = api_key or os.environ.get(ENV_API_KEY)
+    # THE ONE RULE: the argument, the variable, then the key stored for this
+    # agent (``credentials.resolve_api_key``).
+    from .credentials import resolve_api_key
+
+    _resolved_key = resolve_api_key(
+        api_key, agent_id=agent_id, control_plane_url=url,
+    )
+    key = _resolved_key.value if _resolved_key else None
     may_upload = False
     may_capture_model_content = False
     model_content_refusal: str | None = None
@@ -1771,7 +1778,9 @@ def attach(
     #
     # WHICH VARIABLE is asked through the same helper `policy_source` and the
     # CLI ask, so "configured" means one thing across the package.
-    cause = missing_credentials_cause(key)
+    cause = missing_credentials_cause(
+        key, agent_id=agent_id, control_plane_url=control_plane_url,
+    )
     if not register:
         upload_refusal: str | None = (
             "attach(register=False) was asked for, so the control plane was "

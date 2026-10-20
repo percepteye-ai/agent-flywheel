@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -20,7 +21,62 @@ from ._version import __version__
 from .contract import CONTRACT_VERSION
 from .errors import LeaseLost, TransportError
 
-__all__ = ["ControlPlaneClient", "default_delivery_envelope_s", "delivery_envelope_s"]
+__all__ = [
+    "REDACTED_KEY",
+    "ControlPlaneClient",
+    "default_delivery_envelope_s",
+    "delivery_envelope_s",
+    "redact_keys",
+]
+
+#: What a Flywheel key in an outgoing body is replaced with.
+REDACTED_KEY = "pefw_[REDACTED]"
+#: A Flywheel key as the control plane mints one: the prefix and 32 random
+#: bytes, URL-safe base64 (43 characters). Matched WHOLE, so a longer token
+#: that merely starts like one is left alone.
+_FLYWHEEL_KEY = re.compile(r"pefw_[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])")
+#: A secret shorter than this is not a key anyone minted (a minted one is 48
+#: characters) and is not searched for by value: replacing every ``"k"`` in a
+#: report because a test authenticated as ``"k"`` would corrupt the report.
+_MIN_SECRET_LEN = 16
+
+
+def redact_keys(value: Any, secret: str | None = None) -> Any:
+    """``value`` with every Flywheel key in it -- and ``secret`` -- replaced.
+
+    NO BODY THIS SDK SENDS CARRIES A FLYWHEEL KEY (owner ruling 2026-10-20,
+    R2b). A rollout child is code the customer's agent runs, often written by
+    a model with a shell, and it reaches whatever its user can read: the key
+    ``agent-flywheel login`` stored under ``~/.percepteye`` included. What it
+    prints flows into the trajectory this SDK reports, so a key it read would
+    otherwise travel inside a report into the training data. Every key the
+    control plane mints is matched by its shape, and the key this client
+    authenticates with -- whatever its shape, an environment key included --
+    by its exact value.
+
+    Strings are replaced wherever they sit, dictionary keys too. A structure
+    with nothing to replace is returned AS IS, not copied, so the common case
+    costs one walk and no allocation.
+    """
+    if isinstance(value, str):
+        out = _FLYWHEEL_KEY.sub(REDACTED_KEY, value)
+        if secret and len(secret) >= _MIN_SECRET_LEN and secret in out:
+            out = out.replace(secret, REDACTED_KEY)
+        return out
+    if isinstance(value, Mapping):
+        changed = False
+        items = []
+        for k, v in value.items():
+            nk, nv = redact_keys(k, secret), redact_keys(v, secret)
+            changed = changed or nk is not k or nv is not v
+            items.append((nk, nv))
+        return dict(items) if changed else value
+    if isinstance(value, (list, tuple)):
+        redacted = [redact_keys(v, secret) for v in value]
+        if any(r is not v for r, v in zip(redacted, value, strict=True)):
+            return type(value)(redacted) if isinstance(value, tuple) else redacted
+        return value
+    return value
 
 #: Transient. Retry these, honouring Retry-After when present.
 _RETRY_STATUS = frozenset({408, 429, 500, 502, 503, 504})
@@ -110,6 +166,9 @@ class ControlPlaneClient:
                 "an API key is required; refusing to start with no credential"
             )
         self.base_url = base_url.rstrip("/")
+        #: Kept so :func:`redact_keys` can find this exact value in a body,
+        #: whatever its shape.
+        self._secret = api_key
         self._max_attempts = max(1, max_attempts)
         #: Kept, not merely handed to httpx. It is half of what one call can
         #: cost, and the runner has to reserve that cost before it spends it.
@@ -173,6 +232,8 @@ class ControlPlaneClient:
         left: refusing to try at all loses exactly the results this bounds.
         """
         url = f"{self.base_url}{path}"
+        if json_body is not None:
+            json_body = redact_keys(json_body, self._secret)
         request_headers: dict[str, str] = dict(headers or {})
         if idempotency_key:
             request_headers["Idempotency-Key"] = idempotency_key
