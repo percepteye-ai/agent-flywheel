@@ -511,17 +511,31 @@ def test_concurrent_children_are_distinct_but_have_one_identity(tmp_path):
         assert all(out.agent_fingerprint == _fingerprint(snapshot, runner) for out in outputs)
 
         signal = tmp_path / "kernel-mutated"
+        # The observer must already be RUNNING -- its child prepared and
+        # attested against the unmutated master -- before the master changes.
+        # Otherwise prepare_child rightly refuses to start it ("could not
+        # prepare an attested child") and the test proves nothing about a
+        # child that saw the mutation. Thread scheduling alone ordered the two
+        # on macOS and reversed them on Linux, so the mutator now waits for the
+        # observer to say it is running (bounded, so a lost observer fails the
+        # assertions below instead of hanging the suite).
+        running = tmp_path / "observer-running"
         kernel_runner = _runner(
             tmp_path,
             snapshot,
             'KERNEL="$PRIME_AGENT_KERNEL_VENV/runtime.txt"\n'
             'if [ "$PERCEPTEYE_TURN_INPUT" = mutate ]; then\n'
+            "  i=0\n"
+            f"  while [ ! -e {shlex.quote(str(running))} ] && [ $i -lt 3000 ]; do\n"
+            "    sleep 0.01; i=$((i + 1))\n"
+            "  done\n"
             '  ORIGINAL=$(cat "$KERNEL")\n'
             '  printf "changed runtime\\n" > "$KERNEL"\n'
             f"  touch {shlex.quote(str(signal))}\n"
             "  sleep 1\n"
             '  printf "%s\\n" "$ORIGINAL" > "$KERNEL"\n'
             "else\n"
+            f"  touch {shlex.quote(str(running))}\n"
             f"  while [ ! -e {shlex.quote(str(signal))} ]; do sleep 0.01; done\n"
             '  cat "$KERNEL"\n'
             "fi\n",
