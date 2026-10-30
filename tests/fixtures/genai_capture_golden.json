@@ -2014,6 +2014,217 @@
           }
         ]
       }
+    },
+    {
+      "name": "a_requested_output_format_rides_whole",
+      "agent_name": "acme-risk",
+      "conversation_id": "5b9e1d3c-2a4f-4e6b-8c7d-9f0a1b2c3d4e",
+      "observation": {
+        "trace_id": "4f1c2a9e7b3d4e5fa6b7c8d9e0f1a2b3",
+        "span_id": "1a2b3c4d5e6f7081",
+        "start_time_unix_nano": "1758000100000000000",
+        "end_time_unix_nano": "1758000100090000000",
+        "operations": [
+          {
+            "operation": "chat",
+            "span_id": "8172635445362718",
+            "start_time_unix_nano": "1758000100010000000",
+            "end_time_unix_nano": "1758000100080000000",
+            "provider_name": "openai",
+            "request_model": "gpt-4o-mini",
+            "response_model": "gpt-4o-mini-2024-07-18",
+            "finish_reasons": [
+              "stop"
+            ],
+            "input_messages": [
+              {
+                "role": "user",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "Rate the risk of claim 88."
+                  }
+                ]
+              }
+            ],
+            "output_messages": [
+              {
+                "role": "assistant",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "{\"risk\":\"B\",\"score\":6}"
+                  }
+                ],
+                "finish_reason": "stop"
+              }
+            ],
+            "response_format": {
+              "type": "json_schema",
+              "json_schema": {
+                "name": "risk_batch",
+                "strict": true,
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "risk": {
+                      "type": "string",
+                      "enum": [
+                        "A",
+                        "B",
+                        "C"
+                      ],
+                      "description": "Risikoklasse für den Fall"
+                    },
+                    "score": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 10
+                    }
+                  },
+                  "required": [
+                    "risk",
+                    "score"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        ]
+      },
+      "genai_trace": {
+        "resourceSpans": [
+          {
+            "resource": {
+              "attributes": [
+                {
+                  "key": "service.name",
+                  "value": {
+                    "stringValue": "acme-risk"
+                  }
+                }
+              ]
+            },
+            "scopeSpans": [
+              {
+                "scope": {
+                  "name": "percepteye.agent_flywheel"
+                },
+                "spans": [
+                  {
+                    "traceId": "4f1c2a9e7b3d4e5fa6b7c8d9e0f1a2b3",
+                    "spanId": "1a2b3c4d5e6f7081",
+                    "name": "invoke_agent acme-risk",
+                    "kind": 1,
+                    "startTimeUnixNano": "1758000100000000000",
+                    "endTimeUnixNano": "1758000100090000000",
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "invoke_agent"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "openai"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.agent.name",
+                        "value": {
+                          "stringValue": "acme-risk"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.conversation.id",
+                        "value": {
+                          "stringValue": "5b9e1d3c-2a4f-4e6b-8c7d-9f0a1b2c3d4e"
+                        }
+                      }
+                    ],
+                    "status": {}
+                  },
+                  {
+                    "traceId": "4f1c2a9e7b3d4e5fa6b7c8d9e0f1a2b3",
+                    "spanId": "8172635445362718",
+                    "parentSpanId": "1a2b3c4d5e6f7081",
+                    "name": "chat gpt-4o-mini",
+                    "kind": 3,
+                    "startTimeUnixNano": "1758000100010000000",
+                    "endTimeUnixNano": "1758000100080000000",
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "chat"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "openai"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.request.model",
+                        "value": {
+                          "stringValue": "gpt-4o-mini"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.model",
+                        "value": {
+                          "stringValue": "gpt-4o-mini-2024-07-18"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.conversation.id",
+                        "value": {
+                          "stringValue": "5b9e1d3c-2a4f-4e6b-8c7d-9f0a1b2c3d4e"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.finish_reasons",
+                        "value": {
+                          "arrayValue": {
+                            "values": [
+                              {
+                                "stringValue": "stop"
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      {
+                        "key": "gen_ai.input.messages",
+                        "value": {
+                          "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Rate the risk of claim 88.\"}]}]"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.output.messages",
+                        "value": {
+                          "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"{\\\"risk\\\":\\\"B\\\",\\\"score\\\":6}\"}],\"finish_reason\":\"stop\"}]"
+                        }
+                      },
+                      {
+                        "key": "percepteye.request.response_format",
+                        "value": {
+                          "stringValue": "{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"risk_batch\",\"strict\":true,\"schema\":{\"type\":\"object\",\"properties\":{\"risk\":{\"type\":\"string\",\"enum\":[\"A\",\"B\",\"C\"],\"description\":\"Risikoklasse für den Fall\"},\"score\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":10}},\"required\":[\"risk\",\"score\"],\"additionalProperties\":false}}}"
+                        }
+                      }
+                    ],
+                    "status": {}
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
     }
   ],
   "runtime_asymmetry": {

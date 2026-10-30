@@ -270,6 +270,38 @@ def test_a_langchain_turn_uploads_its_model_calls_whole_input_and_output(
     assert max(ends) <= int(root["endTimeUnixNano"])
 
 
+def test_a_langchain_call_bound_to_a_response_format_carries_it_whole(
+        monkeypatch, tmp_path):
+    """``bind(response_format=...)`` -- what ``with_structured_output``
+    does -- puts the format in the call's invocation params, and its chat
+    span carries it whole as ``percepteye.request.response_format``.
+    Mutation: leave ``response_format`` out of the recorded operation ->
+    red."""
+    pytest.importorskip("langchain_core")
+    from langchain_core.messages import HumanMessage
+
+    from agent_flywheel.genai_otlp import RESPONSE_FORMAT_ATTR
+
+    fmt = {"type": "json_schema", "json_schema": {
+        "name": "risk_batch", "strict": True,
+        "schema": {"type": "object", "properties": {
+            "risk": {"type": "string"}}, "required": ["risk"]}}}
+    tr = _Transport()
+    ScriptedChat = _scripted_chat()
+    model = ScriptedChat(script=[_ai('{"risk":"B"}')])
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        with px.turn(turn_id="t1", conversation_id=CONVERSATION,
+                     input_text="Rate claim 88."):
+            answer = model.bind(response_format=fmt).invoke(
+                [HumanMessage("Rate claim 88.")]).content
+        px.record_answer("t1", answer)
+        assert px.flush()["sent"] == 1
+    [turn] = tr.sent
+    _root, chat = _spans(turn["genai_trace"])
+    assert _attrs(chat)[RESPONSE_FORMAT_ATTR] == json.dumps(
+        fmt, separators=(",", ":"))
+
+
 def test_langgraphs_own_agent_is_captured_with_no_instrumentation(
         monkeypatch, tmp_path):
     """The README's zero-instrumentation claim, for model content: a

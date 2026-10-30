@@ -23,12 +23,14 @@ from pathlib import Path
 import pytest
 
 from agent_flywheel.genai_otlp import (
+    RESPONSE_FORMAT_ATTR,
     SCOPE_NAME,
     content_json,
     new_span_id,
     new_trace_id,
     observation_from_lines,
     render_turn_trace,
+    requested_output_format,
 )
 
 GOLDEN_PATH = Path(__file__).resolve().parent / "fixtures" / "genai_capture_golden.json"
@@ -197,3 +199,54 @@ def test_fresh_ids_are_the_otlp_encodings():
         assert len(t) == 32 and len(s) == 16
         assert int(t, 16) and int(s, 16)
         assert t == t.lower() and s == s.lower()
+
+
+# ── the requested output format ─────────────────────────────────────────────
+
+#: The SAME input and the SAME expected bytes as the Node SDK's
+#: test/genai-otlp.test.js: the object as given (key order kept, never
+#: sorted), compact content JSON, non-ASCII unescaped.
+FORMAT = {"type": "json_schema", "json_schema": {
+    "strict": True, "name": "risk_batch",
+    "schema": {"type": "object", "properties": {"größe": {"type": "integer"}},
+               "required": ["größe"]}}}
+FORMAT_BYTES = (
+    '{"type":"json_schema","json_schema":{"strict":true,"name":"risk_batch",'
+    '"schema":{"type":"object","properties":{"größe":{"type":"integer"}},'
+    '"required":["größe"]}}}')
+
+
+def test_a_requested_output_format_rides_whole_on_its_chat_span():
+    """The span carries the format the call asked for WHOLE, in the content
+    encoding, under the attribute Mission Control's decoder reads first.
+    Mutation: drop the attribute in ``_chat_span`` -> red."""
+    assert RESPONSE_FORMAT_ATTR == "percepteye.request.response_format"
+    [_root, chat] = _spans(render_turn_trace(
+        _observation(response_format=FORMAT), agent_name="a"))
+    assert _attrs(chat)[RESPONSE_FORMAT_ATTR] == {"stringValue": FORMAT_BYTES}
+
+
+def test_a_call_that_asked_for_no_format_carries_no_format_attribute():
+    """Its span is byte-identical to before. Mutation: render a format for
+    any recorded value -> red."""
+    plain = render_turn_trace(_observation(), agent_name="a")
+    for junk in (None, {}, "json_schema", ["x"]):
+        obs = _observation(response_format=junk)
+        [_root, chat] = _spans(render_turn_trace(obs, agent_name="a"))
+        assert RESPONSE_FORMAT_ATTR not in _attrs(chat)
+        assert _attrs(chat).keys() == _attrs(_spans(plain)[1]).keys()
+
+
+def test_the_requested_format_is_response_format_else_responses_text_format():
+    """Chat Completions' ``response_format`` first, the Responses API's
+    ``text.format`` otherwise; only an object is a format. Mutation: read
+    only ``response_format`` -> red."""
+    flat = {"type": "json_schema", "name": "risk_batch", "schema": {}}
+    assert requested_output_format({"response_format": FORMAT}) == FORMAT
+    assert requested_output_format({"text": {"format": flat}}) == flat
+    assert requested_output_format(
+        {"response_format": FORMAT, "text": {"format": flat}}) == FORMAT
+    for request in (None, {}, {"response_format": "json"},
+                    {"response_format": {}}, {"text": {"format": "json"}},
+                    {"response_format": object}):
+        assert requested_output_format(request) is None

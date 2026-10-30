@@ -34,7 +34,7 @@ from typing import Any
 from .._body_bound import bounded
 from ..binding import AdapterCapabilities
 from ..errors import RoutingNotInstallable
-from ..genai_otlp import new_span_id, now_unix_nano
+from ..genai_otlp import new_span_id, now_unix_nano, requested_output_format
 from ..outcomes import model_capture_active, record_model_boundary, record_tool_call
 
 __all__ = ["LangChainAdapter"]
@@ -375,7 +375,10 @@ def _tools(tools: Any) -> list[dict[str, Any]] | None:
 
 def _chat_request(messages: list[Any], kw: dict[str, Any]) -> dict[str, Any]:
     """The request as it was sent: leading system messages as the
-    conventions' system instructions, everything else as the input."""
+    conventions' system instructions, everything else as the input, and the
+    output format it asked for (``response_format`` or ``text.format`` in
+    the invocation params, where ``with_structured_output`` and ``bind`` put
+    it)."""
     params = kw.get("invocation_params") or {}
     meta = kw.get("metadata") or {}
     system: list[dict[str, Any]] = []
@@ -394,6 +397,7 @@ def _chat_request(messages: list[Any], kw: dict[str, Any]) -> dict[str, Any]:
         "system_instructions": system,
         "input_messages": inputs,
         "tool_definitions": _tools(params.get("tools")),
+        "response_format": requested_output_format(params),
     }
 
 
@@ -414,6 +418,8 @@ def _chat_operation(state: dict[str, Any], *, end: str, response: Any = None,
     op["input_messages"] = request["input_messages"]
     if request["tool_definitions"]:
         op["tool_definitions"] = request["tool_definitions"]
+    if request.get("response_format"):
+        op["response_format"] = request["response_format"]
     if error_type:
         op["error_type"] = error_type
         return op

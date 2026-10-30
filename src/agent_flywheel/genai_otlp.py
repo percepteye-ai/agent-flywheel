@@ -30,6 +30,16 @@ reason this module exists rather than the customer's own TracerProvider:
   customer's own traffic, and a span carrying that id is dropped downstream as
   our training traffic.
 
+THE REQUESTED OUTPUT FORMAT. The conventions carry only a call's output TYPE
+(``gen_ai.output.type``), never the schema it asked the model to answer in.
+When a call was sent a ``response_format`` (Chat Completions) or a
+``text.format`` (the Responses API) -- :func:`requested_output_format` is the
+one reading of a request for it -- its chat span carries that object WHOLE,
+in the content encoding below, as :data:`RESPONSE_FORMAT_ATTR`: what Mission
+Control's decoder reads to grade the reply against the schema and to pose the
+decision with it. A call that asked for none carries no such attribute, so
+its span is byte-identical to before.
+
 ONE ENCODING FOR CONTENT. Content attributes (``gen_ai.input.messages`` and
 the rest) are JSON strings, the form the OTel attribute APIs can carry. They
 are compact JSON in the value's own key order, because that order is what the
@@ -50,6 +60,7 @@ from typing import Any
 
 __all__ = [
     "OBSERVATION_FILENAME",
+    "RESPONSE_FORMAT_ATTR",
     "SCOPE_NAME",
     "content_json",
     "end_record",
@@ -59,6 +70,7 @@ __all__ = [
     "observation_from_lines",
     "operation_record",
     "render_turn_trace",
+    "requested_output_format",
     "trace_record",
 ]
 
@@ -66,6 +78,11 @@ __all__ = [
 #: per line (see :func:`observation_from_lines`). Both SDKs write and read
 #: this one format.
 OBSERVATION_FILENAME = "genai_observation.jsonl"
+
+#: The chat-span attribute carrying the call's requested output format, the
+#: WHOLE object as content JSON. The Node SDK's ``genai-otlp.js`` writes the
+#: same name with the same bytes; Mission Control's decoder reads it first.
+RESPONSE_FORMAT_ATTR = "percepteye.request.response_format"
 
 #: The instrumentation scope every rendered trace names.
 SCOPE_NAME = "percepteye.agent_flywheel"
@@ -86,6 +103,25 @@ _STATUS_ERROR = 2
 def content_json(value: Any) -> str:
     """A content value as the JSON string carried on the span."""
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
+def requested_output_format(request: Any) -> dict[str, Any] | None:
+    """The output format a model request asked for, as it was sent: Chat
+    Completions' ``response_format``, else the Responses API's
+    ``text.format``; ``None`` when it asked for neither. Only an object is a
+    format (both APIs take one): a class or a bare string handed to a
+    framework is not what went on the wire, and is not guessed at."""
+    if not isinstance(request, Mapping):
+        return None
+    value = request.get("response_format")
+    if isinstance(value, Mapping) and value:
+        return dict(value)
+    text = request.get("text")
+    if isinstance(text, Mapping):
+        value = text.get("format")
+        if isinstance(value, Mapping) and value:
+            return dict(value)
+    return None
 
 
 def now_unix_nano() -> str:
@@ -180,6 +216,10 @@ def _chat_span(
     tools = op.get("tool_definitions")
     if isinstance(tools, list) and tools:
         attrs.append(_attr("gen_ai.tool.definitions", _s(content_json(tools))))
+    response_format = op.get("response_format")
+    if isinstance(response_format, Mapping) and response_format:
+        attrs.append(_attr(RESPONSE_FORMAT_ATTR,
+                           _s(content_json(response_format))))
     return _finish_span(
         op, attrs,
         trace_id=trace_id, span_id=span_id, parent=parent,
