@@ -46,7 +46,7 @@ from typing import Any
 
 from .._body_bound import bounded
 from ..binding import AdapterCapabilities
-from ..genai_otlp import new_span_id, now_unix_nano
+from ..genai_otlp import new_span_id, now_unix_nano, requested_output_format
 from ..outcomes import model_capture_active, record_model_boundary, record_tool_call
 
 __all__ = ["ADKAdapter"]
@@ -386,6 +386,44 @@ def _message(content: Any) -> dict[str, Any]:
     return {"role": role, "parts": parts}
 
 
+def _wire_schema(value: Any, transform: str) -> Any:
+    """A config schema as the google-genai client SENDS it: through the
+    client's own transformer (``t_schema`` turns a pydantic class, a list
+    type, a dict or a ``Schema`` into the wire ``Schema``), dumped as JSON.
+    ``None`` when it cannot be read; never guessed at."""
+    if value is None:
+        return None
+    try:
+        from google.genai import _transformers
+
+        if transform == "t_schema":
+            value = _transformers.t_schema(None, value)
+        else:
+            value = _transformers.t_json_schema(value)
+    except Exception:
+        pass
+    value = _jsonable(value)
+    return value if isinstance(value, dict) and value else None
+
+
+def _response_format(config: Any) -> dict[str, Any] | None:
+    """The structured output the request asked for (``response_mime_type``
+    with ``response_json_schema`` or ``response_schema``), read by the one
+    reader of a request's format, ``genai_otlp.requested_output_format``."""
+    if config is None:
+        return None
+    request: dict[str, Any] = {
+        "response_mime_type": getattr(config, "response_mime_type", None)}
+    json_schema = _wire_schema(
+        getattr(config, "response_json_schema", None), "t_json_schema")
+    if json_schema is not None:
+        request["response_json_schema"] = json_schema
+    schema = _wire_schema(getattr(config, "response_schema", None), "t_schema")
+    if schema is not None:
+        request["response_schema"] = schema
+    return requested_output_format(request)
+
+
 def _system(config: Any) -> list[dict[str, Any]]:
     value = getattr(config, "system_instruction", None)
     if value is None:
@@ -442,6 +480,9 @@ def _chat_operation(state: dict[str, Any], *, end: str, response: Any = None,
     tools = _tools(config)
     if tools:
         op["tool_definitions"] = tools
+    response_format = _response_format(config)
+    if response_format:
+        op["response_format"] = response_format
     if error_type is None and response is not None \
             and getattr(response, "error_code", None) \
             and getattr(response, "content", None) is None:

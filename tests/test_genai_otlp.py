@@ -246,6 +246,19 @@ def test_the_requested_format_is_response_format_else_responses_text_format():
     assert requested_output_format({"text": {"format": flat}}) == flat
     assert requested_output_format(
         {"response_format": FORMAT, "text": {"format": flat}}) == FORMAT
+    # Gemini's config, when it asks for JSON: only its MIME type and schema
+    # keys, in the request's order, as passed (either spelling).
+    gemini = {"temperature": 0, "responseMimeType": "application/json",
+              "responseSchema": {"type": "OBJECT"}, "response_json_schema": "x"}
+    assert content_json(requested_output_format(gemini)) == (
+        '{"responseMimeType":"application/json","responseSchema":{"type":"OBJECT"}}')
+    assert requested_output_format(
+        {"response_mime_type": "application/json"}) == {
+        "response_mime_type": "application/json"}
+    for request in ({"response_mime_type": "text/plain",
+                     "response_schema": {"type": "STRING"}},
+                    {"response_schema": {"type": "OBJECT"}}):
+        assert requested_output_format(request) is None
     for request in (None, {}, {"response_format": "json"},
                     {"response_format": {}}, {"text": {"format": "json"}},
                     {"response_format": object}):

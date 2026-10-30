@@ -32,9 +32,11 @@ reason this module exists rather than the customer's own TracerProvider:
 
 THE REQUESTED OUTPUT FORMAT. The conventions carry only a call's output TYPE
 (``gen_ai.output.type``), never the schema it asked the model to answer in.
-When a call was sent a ``response_format`` (Chat Completions) or a
-``text.format`` (the Responses API) -- :func:`requested_output_format` is the
-one reading of a request for it -- its chat span carries that object WHOLE,
+When a call was sent a ``response_format`` (Chat Completions), a
+``text.format`` (the Responses API) or Gemini's structured-output config
+(``response_mime_type: "application/json"`` with ``response_json_schema`` or
+``response_schema``, either spelling) -- :func:`requested_output_format` is
+the one reading of a request for it -- its chat span carries that object WHOLE,
 in the content encoding below, as :data:`RESPONSE_FORMAT_ATTR`: what Mission
 Control's decoder reads to grade the reply against the schema and to pose the
 decision with it. A call that asked for none carries no such attribute, so
@@ -108,8 +110,9 @@ def content_json(value: Any) -> str:
 def requested_output_format(request: Any) -> dict[str, Any] | None:
     """The output format a model request asked for, as it was sent: Chat
     Completions' ``response_format``, else the Responses API's
-    ``text.format``; ``None`` when it asked for neither. Only an object is a
-    format (both APIs take one): a class or a bare string handed to a
+    ``text.format``, else Gemini's structured-output config when it asks
+    for JSON (:func:`_gemini_output_format`); ``None`` when it asked for
+    none. Only an object is a format: a class or a bare string handed to a
     framework is not what went on the wire, and is not guessed at."""
     if not isinstance(request, Mapping):
         return None
@@ -121,7 +124,28 @@ def requested_output_format(request: Any) -> dict[str, Any] | None:
         value = text.get("format")
         if isinstance(value, Mapping) and value:
             return dict(value)
-    return None
+    return _gemini_output_format(request)
+
+
+#: Gemini's structured-output keys (``GenerateContentConfig``), both
+#: spellings: the MIME type that asks for JSON, and the two schemas.
+_GEMINI_MIME_KEYS = ("response_mime_type", "responseMimeType")
+_GEMINI_SCHEMA_KEYS = ("response_json_schema", "responseJsonSchema",
+                       "response_schema", "responseSchema")
+
+
+def _gemini_output_format(request: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Gemini's structured-output config, when the request asks for JSON:
+    ONLY its MIME type and schema keys, in the request's own order, values
+    as passed (a schema only when it is an object). ``None`` for any other
+    MIME type, or none."""
+    mime = next((request[k] for k in _GEMINI_MIME_KEYS
+                 if request.get(k) is not None), None)
+    if not isinstance(mime, str) or mime.strip().lower() != "application/json":
+        return None
+    return {k: v for k, v in request.items()
+            if (k in _GEMINI_MIME_KEYS and isinstance(v, str))
+            or (k in _GEMINI_SCHEMA_KEYS and isinstance(v, Mapping))}
 
 
 def now_unix_nano() -> str:

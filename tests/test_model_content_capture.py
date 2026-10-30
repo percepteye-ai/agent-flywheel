@@ -302,6 +302,39 @@ def test_a_langchain_call_bound_to_a_response_format_carries_it_whole(
         fmt, separators=(",", ":"))
 
 
+def test_a_gemini_chat_models_structured_output_rides_whole(
+        monkeypatch, tmp_path):
+    """``ChatGoogleGenerativeAI.with_structured_output`` (json_schema) binds
+    ``response_mime_type="application/json"`` and ``response_json_schema``
+    beside ``ls_structured_output_format``; the invocation params carry
+    them, and the span carries ONLY the MIME type and the schema, as bound.
+    Mutation: drop the Gemini reading from ``requested_output_format`` ->
+    red."""
+    pytest.importorskip("langchain_core")
+    from langchain_core.messages import HumanMessage
+
+    from agent_flywheel.genai_otlp import RESPONSE_FORMAT_ATTR
+
+    schema = {"type": "object", "properties": {"risk": {"type": "string"}},
+              "required": ["risk"]}
+    tr = _Transport()
+    model = _scripted_chat()(script=[_ai('{"risk":"B"}')])
+    bound = model.bind(
+        response_mime_type="application/json", response_json_schema=schema,
+        ls_structured_output_format={"kwargs": {"method": "json_schema"},
+                                     "schema": schema})
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        with px.turn(turn_id="t1", conversation_id=CONVERSATION,
+                     input_text="Rate claim 88."):
+            answer = bound.invoke([HumanMessage("Rate claim 88.")]).content
+        px.record_answer("t1", answer)
+        px.flush()
+    _root, chat = _spans(tr.sent[0]["genai_trace"])
+    assert json.loads(_attrs(chat)[RESPONSE_FORMAT_ATTR]) == {
+        "response_mime_type": "application/json",
+        "response_json_schema": schema}
+
+
 def test_langgraphs_own_agent_is_captured_with_no_instrumentation(
         monkeypatch, tmp_path):
     """The README's zero-instrumentation claim, for model content: a
@@ -432,6 +465,71 @@ def test_an_adk_turn_uploads_its_model_calls_whole_input_and_output(
         "finish_reason": "tool_call"}]
     # ADK sends a non-dict result as {"result": ...}; a dict as itself.
     assert _content(tool_span, "gen_ai.tool.call.result") == {"status": "shipped"}
+
+
+def _adk_format_span(monkeypatch, tmp_path, configure):
+    request, response = _adk_request_response()
+    configure(request)
+    tr = _Transport()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        with px.turn(turn_id="a1", conversation_id=CONVERSATION):
+            _adk_turn(px, request, response)
+        px.record_answer("a1", "{}")
+        px.flush()
+    _root, chat = _spans(tr.sent[0]["genai_trace"])
+    return _attrs(chat)
+
+
+def test_an_adk_output_schema_rides_as_the_schema_the_client_sends(
+        monkeypatch, tmp_path):
+    """An agent's ``output_schema`` (``LlmRequest.set_output_schema``: a
+    pydantic class) is sent by google-genai as the wire ``Schema`` its own
+    ``t_schema`` builds; the span carries exactly that, beside the MIME type
+    that asks for JSON, and nothing else of the config. Mutation: leave
+    ``response_format`` out of the ADK operation -> red."""
+    pytest.importorskip("google.adk")
+    from pydantic import BaseModel
+
+    from agent_flywheel.genai_otlp import RESPONSE_FORMAT_ATTR
+
+    class Risk(BaseModel):
+        risk: str
+
+    attrs = _adk_format_span(
+        monkeypatch, tmp_path, lambda r: r.set_output_schema(Risk))
+    assert json.loads(attrs[RESPONSE_FORMAT_ATTR]) == {
+        "response_mime_type": "application/json",
+        "response_schema": {
+            "properties": {"risk": {"title": "Risk", "type": "STRING"}},
+            "required": ["risk"],
+            "title": "Risk", "type": "OBJECT"}}
+
+
+def test_an_adk_json_schema_rides_as_passed_and_other_mime_types_do_not(
+        monkeypatch, tmp_path):
+    """``response_json_schema`` is a JSON Schema already and rides as passed.
+    A MIME type other than JSON asks for nothing gradable: no attribute.
+    Mutation: record the config whatever its MIME type -> red."""
+    pytest.importorskip("google.adk")
+    from agent_flywheel.genai_otlp import RESPONSE_FORMAT_ATTR
+
+    schema = {"type": "object", "properties": {"risk": {"type": "string"}}}
+
+    def json_schema(request):
+        request.config.response_mime_type = "application/json"
+        request.config.response_json_schema = schema
+
+    attrs = _adk_format_span(monkeypatch, tmp_path / "a", json_schema)
+    assert json.loads(attrs[RESPONSE_FORMAT_ATTR]) == {
+        "response_mime_type": "application/json",
+        "response_json_schema": schema}
+
+    def enum_only(request):
+        request.config.response_mime_type = "text/x.enum"
+        request.config.response_schema = {"type": "STRING", "enum": ["A"]}
+
+    attrs = _adk_format_span(monkeypatch, tmp_path / "b", enum_only)
+    assert RESPONSE_FORMAT_ATTR not in attrs
 
 
 def test_adk_reads_the_request_the_model_was_sent_not_an_early_copy(
