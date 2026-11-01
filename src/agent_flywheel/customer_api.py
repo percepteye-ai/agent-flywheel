@@ -1,4 +1,4 @@
-"""Reads of the customer-automation API (customer contract 1.29.0).
+"""Reads of the customer-automation API (customer contract 1.30.0).
 
 The rest of this package speaks the agent contract (``flywheel/1``) under
 ``/api/flywheel/v1`` with an agent's ``pefw_`` key. The runs list, training
@@ -43,7 +43,7 @@ __all__ = [
 ]
 
 #: The customer contract this client was written against.
-CUSTOMER_CONTRACT_VERSION = "1.29.0"
+CUSTOMER_CONTRACT_VERSION = "1.30.0"
 _MAJOR = CUSTOMER_CONTRACT_VERSION.split(".", 1)[0]
 
 #: Where the customer-automation key is read from when none is passed.
@@ -212,7 +212,9 @@ class CustomerApiClient:
         prompt runs are on, and with ``agent_id`` or ``product_id`` the path
         that agent takes: ``mode`` (``live`` / ``offline`` / ``None``),
         ``can_run``, ``needs`` and ``message``, the ``preparation_run_id`` an
-        offline run reads, the ``algorithms``, and ``affordable``."""
+        offline run reads, the ``algorithms``, ``affordable``, and (1.30.0)
+        ``model_under_test``: the model a prompt run would test on, and whether
+        it is the customer's own or a labelled open-weight stand-in."""
         return self._get("/training/eligibility", _params(
             agent_id=agent_id, product_id=product_id))
 

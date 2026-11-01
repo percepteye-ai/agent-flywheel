@@ -1,4 +1,4 @@
-"""The customer API reads (contract 1.29.0), case for case with the Node
+"""The customer API reads (contract 1.30.0), case for case with the Node
 SDK's test/customer-api.test.js."""
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def _client(status, body, calls):
 
 
 def test_pins_contract_and_new_codes():
-    assert CUSTOMER_CONTRACT_VERSION == "1.29.0"
+    assert CUSTOMER_CONTRACT_VERSION == "1.30.0"
     assert RUN_LIST_REFUSAL_CODES == ("launch_uri_outside_org", "run_page_too_deep")
     assert PROMPT_RUN_REFUSAL_CODES == (
         "prompt_run_balance_too_small", "recorded_prompt_absent",
@@ -70,9 +70,12 @@ def test_list_runs_parameters():
 def test_eligibility_and_eval_sets():
     calls: list = []
     c = _client(200, {"prompt_optimization": {
-        "enabled": True, "mode": "offline", "needs": "prepared_corpus", "algorithms": []}}, calls)
+        "enabled": True, "mode": "offline", "needs": "prepared_corpus", "algorithms": [],
+        "model_under_test": {"model": "m", "label": "l", "customer_model": False,
+                             "reason": "r"}}}, calls)
     e = c.training_eligibility(agent_id="a1")
     assert e["prompt_optimization"]["needs"] == "prepared_corpus"
+    assert e["prompt_optimization"]["model_under_test"]["customer_model"] is False
     assert calls[0].url.query == b"agent_id=a1"
     c.list_eval_sets(product_id="p1", limit=5, offset=10)
     assert calls[1].url.path == "/api/v2/eval-sets"
