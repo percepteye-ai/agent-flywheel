@@ -1,4 +1,4 @@
-"""The customer API reads (contract 1.30.0), case for case with the Node
+"""The customer API reads (contract 1.29.0), case for case with the Node
 SDK's test/customer-api.test.js."""
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def _client(status, body, calls):
 
 
 def test_pins_contract_and_new_codes():
-    assert CUSTOMER_CONTRACT_VERSION == "1.30.0"
+    assert CUSTOMER_CONTRACT_VERSION == "1.29.0"
     assert RUN_LIST_REFUSAL_CODES == ("launch_uri_outside_org", "run_page_too_deep")
     assert PROMPT_RUN_REFUSAL_CODES == (
         "prompt_run_balance_too_small", "recorded_prompt_absent",
@@ -112,3 +112,47 @@ def test_supports_contract():
     assert _client(200, {"customer_contract_versions_supported": ["1"]}, calls).supports_contract()
     assert calls[0].url.path == "/api/v2/health"
     assert not _client(200, {"customer_contract_versions_supported": ["2"]}, []).supports_contract()
+
+
+def test_supports_contract_is_false_for_a_body_that_is_not_an_object():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<html>ok</html>")
+    c = CustomerApiClient(KEY, base_url=BASE, environ={},
+                          client=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert c.supports_contract() is False
+    assert _client(200, ["1"], []).supports_contract() is False
+
+
+def test_the_injected_environ_chooses_the_control_plane(monkeypatch):
+    """``environ=`` is the whole environment the client reads: the URL as
+    well as the key (the Node SDK's ``env`` does the same)."""
+    monkeypatch.setenv("PERCEPTEYE_CONTROL_PLANE_URL", "https://ambient.test/api/flywheel/v1")
+    env = {"PERCEPTEYE_MC_API_KEY": KEY,
+           "PERCEPTEYE_CONTROL_PLANE_URL": "http://localhost:8000/api/flywheel/v1"}
+    assert CustomerApiClient(environ=env).base_url == "http://localhost:8000/api/v2"
+    assert customer_api_base(None, env) == "http://localhost:8000/api/v2"
+    assert (CustomerApiClient(environ={"PERCEPTEYE_MC_API_KEY": KEY}).base_url
+            == "https://launch.percepteye.ai/api/v2")
+
+
+def test_refusal_codes_are_the_control_planes():
+    """The codes are copies of the control plane's; when
+    ``PERCEPTEYE_CONTROL_PLANE_CHECKOUT`` names its checkout (a release,
+    ``docs/RELEASING.md``), each must be one its published contract lists
+    (``x-refusal-codes``) with the status this SDK documents. A variable that
+    is set is a promise: a missing document fails."""
+    import os
+    from pathlib import Path
+
+    checkout = os.environ.get("PERCEPTEYE_CONTROL_PLANE_CHECKOUT")
+    if not checkout:
+        return
+    doc = json.loads((Path(checkout) / "docs" / "openapi.json").read_text())
+    published = {e["code"]: e["http_status"] for e in doc["x-refusal-codes"]}
+    expected = {"launch_uri_outside_org": 403, "run_page_too_deep": 422,
+                "prompt_run_balance_too_small": 402, "recorded_prompt_absent": 422,
+                "recorded_decisions_too_few": 422, "recorded_prompt_mismatch": 422}
+    assert set(RUN_LIST_REFUSAL_CODES + PROMPT_RUN_REFUSAL_CODES) == set(expected)
+    for code, status in expected.items():
+        assert published.get(code) == status, code
+    assert doc["x-customer-contract-version"] == CUSTOMER_CONTRACT_VERSION

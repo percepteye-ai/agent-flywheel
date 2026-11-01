@@ -1,4 +1,4 @@
-"""Reads of the customer-automation API (customer contract 1.30.0).
+"""Reads of the customer-automation API (customer contract 1.29.0).
 
 The rest of this package speaks the agent contract (``flywheel/1``) under
 ``/api/flywheel/v1`` with an agent's ``pefw_`` key. The runs list, training
@@ -43,7 +43,7 @@ __all__ = [
 ]
 
 #: The customer contract this client was written against.
-CUSTOMER_CONTRACT_VERSION = "1.30.0"
+CUSTOMER_CONTRACT_VERSION = "1.29.0"
 _MAJOR = CUSTOMER_CONTRACT_VERSION.split(".", 1)[0]
 
 #: Where the customer-automation key is read from when none is passed.
@@ -63,14 +63,17 @@ _FLYWHEEL_SUFFIX = "/api/flywheel/v1"
 _CUSTOMER_PREFIX = "/api/v2"
 
 
-def customer_api_base(control_plane_url: str | None = None) -> str:
+def customer_api_base(
+    control_plane_url: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> str:
     """``/api/v2`` beside the Flywheel API, on the control plane's origin.
 
     The device login's rule (``login.device_endpoint``): a URL ending in
     ``/api/flywheel/v1`` keeps what precedes it; any other path is a control
     plane mounted elsewhere, and its origin is asked.
     """
-    parts = urlsplit(resolve_control_plane_url(control_plane_url).strip())
+    parts = urlsplit(resolve_control_plane_url(control_plane_url, environ).strip())
     path = parts.path.rstrip("/")
     prefix = path[: -len(_FLYWHEEL_SUFFIX)] if path.endswith(_FLYWHEEL_SUFFIX) else ""
     return urlunsplit((parts.scheme, parts.netloc, prefix + _CUSTOMER_PREFIX, "", ""))
@@ -146,7 +149,8 @@ class CustomerApiClient:
                 "this is an agent key (pefw_), which the customer API refuses; "
                 "it needs a customer-automation key (mck_): run `pe login`, or "
                 "issue one in the dashboard under Settings, control-plane keys")
-        self.base_url = (base_url or customer_api_base(control_plane_url)).rstrip("/")
+        self.base_url = (
+            base_url or customer_api_base(control_plane_url, env)).rstrip("/")
         self._client = client or httpx.Client(timeout=timeout)
         self._headers = {
             "Authorization": f"Bearer {key}",
@@ -177,7 +181,11 @@ class CustomerApiClient:
     def supports_contract(self) -> bool:
         """Whether the server speaks this client's contract major (GET /health)."""
         body = self._get("/health", {})
-        served = (body or {}).get("customer_contract_versions_supported") or []
+        if not isinstance(body, Mapping):
+            return False
+        served = body.get("customer_contract_versions_supported") or []
+        if not isinstance(served, (list, tuple)):
+            return False
         return _MAJOR in [str(v) for v in served]
 
     def list_runs(
@@ -212,7 +220,7 @@ class CustomerApiClient:
         prompt runs are on, and with ``agent_id`` or ``product_id`` the path
         that agent takes: ``mode`` (``live`` / ``offline`` / ``None``),
         ``can_run``, ``needs`` and ``message``, the ``preparation_run_id`` an
-        offline run reads, the ``algorithms``, ``affordable``, and (1.30.0)
+        offline run reads, the ``algorithms``, ``affordable``, and (1.29.0)
         ``model_under_test``: the model a prompt run would test on, and whether
         it is the customer's own or a labelled open-weight stand-in."""
         return self._get("/training/eligibility", _params(
