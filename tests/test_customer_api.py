@@ -1,4 +1,4 @@
-"""The customer API reads (contract 1.29.0), case for case with the Node
+"""The customer API reads (contract 1.30.0), case for case with the Node
 SDK's test/customer-api.test.js."""
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from agent_flywheel.customer_api import (
-    CUSTOMER_CONTRACT_VERSION, PROMPT_RUN_REFUSAL_CODES, RUN_LIST_REFUSAL_CODES,
+    ATTACK_REFUSAL_CODES, CUSTOMER_CONTRACT_VERSION, PROMPT_RUN_REFUSAL_CODES, RUN_LIST_REFUSAL_CODES,
     CustomerApiClient, CustomerRefusal, customer_api_base,
 )
 from agent_flywheel.errors import ConfigurationError
@@ -27,7 +27,8 @@ def _client(status, body, calls):
 
 
 def test_pins_contract_and_new_codes():
-    assert CUSTOMER_CONTRACT_VERSION == "1.29.0"
+    assert CUSTOMER_CONTRACT_VERSION == "1.30.0"
+    assert ATTACK_REFUSAL_CODES == ("attack_set_is_sealed",)
     assert RUN_LIST_REFUSAL_CODES == ("launch_uri_outside_org", "run_page_too_deep")
     assert PROMPT_RUN_REFUSAL_CODES == (
         "prompt_run_balance_too_small", "recorded_prompt_absent",
@@ -80,6 +81,17 @@ def test_eligibility_and_eval_sets():
     c.list_eval_sets(product_id="p1", limit=5, offset=10)
     assert calls[1].url.path == "/api/v2/eval-sets"
     assert calls[1].url.query == b"product_id=p1&limit=5&offset=10"
+
+
+def test_hillclimb_security_reads_the_runs_record():
+    calls: list = []
+    c = _client(200, {"measurement": {"state": "not_measured"}}, calls)
+    assert c.hillclimb_security("r/1")["measurement"]["state"] == "not_measured"
+    assert calls[0].url.raw_path == b"/api/v2/hillclimbs/r%2F1/security"
+    c = _client(404, {"detail": {"code": "hillclimb_not_found", "message": "no"}}, calls)
+    with pytest.raises(CustomerRefusal) as info:
+        c.hillclimb_security("r2")
+    assert info.value.code == "hillclimb_not_found"
 
 
 def test_refusal_code_and_plain_words():
@@ -151,8 +163,10 @@ def test_refusal_codes_are_the_control_planes():
     published = {e["code"]: e["http_status"] for e in doc["x-refusal-codes"]}
     expected = {"launch_uri_outside_org": 403, "run_page_too_deep": 422,
                 "prompt_run_balance_too_small": 402, "recorded_prompt_absent": 422,
-                "recorded_decisions_too_few": 422, "recorded_prompt_mismatch": 422}
-    assert set(RUN_LIST_REFUSAL_CODES + PROMPT_RUN_REFUSAL_CODES) == set(expected)
+                "recorded_decisions_too_few": 422, "recorded_prompt_mismatch": 422,
+                "attack_set_is_sealed": 409}
+    assert set(RUN_LIST_REFUSAL_CODES + PROMPT_RUN_REFUSAL_CODES
+               + ATTACK_REFUSAL_CODES) == set(expected)
     for code, status in expected.items():
         assert published.get(code) == status, code
     assert doc["x-customer-contract-version"] == CUSTOMER_CONTRACT_VERSION

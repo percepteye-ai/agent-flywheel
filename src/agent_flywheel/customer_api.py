@@ -1,4 +1,4 @@
-"""Reads of the customer-automation API (customer contract 1.29.0).
+"""Reads of the customer-automation API (customer contract 1.30.0).
 
 The rest of this package speaks the agent contract (``flywheel/1``) under
 ``/api/flywheel/v1`` with an agent's ``pefw_`` key. The runs list, training
@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
@@ -35,6 +35,7 @@ from .errors import ConfigurationError
 __all__ = [
     "CUSTOMER_CONTRACT_VERSION",
     "ENV_CUSTOMER_API_KEY",
+    "ATTACK_REFUSAL_CODES",
     "PROMPT_RUN_REFUSAL_CODES",
     "RUN_LIST_REFUSAL_CODES",
     "CustomerApiClient",
@@ -43,7 +44,7 @@ __all__ = [
 ]
 
 #: The customer contract this client was written against.
-CUSTOMER_CONTRACT_VERSION = "1.29.0"
+CUSTOMER_CONTRACT_VERSION = "1.30.0"
 _MAJOR = CUSTOMER_CONTRACT_VERSION.split(".", 1)[0]
 
 #: Where the customer-automation key is read from when none is passed.
@@ -58,6 +59,8 @@ PROMPT_RUN_REFUSAL_CODES = (
     "recorded_decisions_too_few",
     "recorded_prompt_mismatch",
 )
+#: 1.30.0: the held-out attack set a promotion is measured on never changes.
+ATTACK_REFUSAL_CODES = ("attack_set_is_sealed",)
 
 _FLYWHEEL_SUFFIX = "/api/flywheel/v1"
 _CUSTOMER_PREFIX = "/api/v2"
@@ -222,7 +225,10 @@ class CustomerApiClient:
         ``can_run``, ``needs`` and ``message``, the ``preparation_run_id`` an
         offline run reads, the ``algorithms``, ``affordable``, and (1.29.0)
         ``model_under_test``: the model a prompt run would test on, and whether
-        it is the customer's own or a labelled open-weight stand-in."""
+        it is the customer's own or a labelled open-weight stand-in, and
+        (1.30.0) ``security``: the ``default``, whether it is ``enabled``, the
+        mode each of the ``objectives`` runs under, and
+        ``measurement_funding`` (always ``platform``)."""
         return self._get("/training/eligibility", _params(
             agent_id=agent_id, product_id=product_id))
 
@@ -236,3 +242,12 @@ class CustomerApiClient:
         """GET /eval-sets: a Product's evaluation sets, one page."""
         return self._get("/eval-sets", _params(
             product_id=product_id, limit=limit, offset=offset))
+
+    def hillclimb_security(self, run_id: str) -> dict[str, Any]:
+        """GET /hillclimbs/{run_id}/security (1.30.0): the run's security mode
+        and why, and its attack-resistance measurement. ``measurement.state``
+        is never a pass by omission: ``not_measured``, ``measuring``,
+        ``not_enough_attacks``, ``attacks_unpaired``, ``no_regression`` or
+        ``regressed``. A run that is not a hill climb of this organization is
+        refused 404 ``hillclimb_not_found``."""
+        return self._get(f"/hillclimbs/{quote(str(run_id), safe='')}/security", {})
