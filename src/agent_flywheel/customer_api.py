@@ -1,4 +1,4 @@
-"""Reads of the customer-automation API (customer contract 1.30.0).
+"""Reads of the customer-automation API (customer contract 1.31.0).
 
 The rest of this package speaks the agent contract (``flywheel/1``) under
 ``/api/flywheel/v1`` with an agent's ``pefw_`` key. The runs list, training
@@ -44,7 +44,7 @@ __all__ = [
 ]
 
 #: The customer contract this client was written against.
-CUSTOMER_CONTRACT_VERSION = "1.30.0"
+CUSTOMER_CONTRACT_VERSION = "1.31.0"
 _MAJOR = CUSTOMER_CONTRACT_VERSION.split(".", 1)[0]
 
 #: Where the customer-automation key is read from when none is passed.
@@ -60,7 +60,19 @@ PROMPT_RUN_REFUSAL_CODES = (
     "recorded_prompt_mismatch",
 )
 #: 1.30.0: the held-out attack set a promotion is measured on never changes.
-ATTACK_REFUSAL_CODES = ("attack_set_is_sealed",)
+#: 1.31.0: the attack gate and the attack measurement refuse by name.
+ATTACK_REFUSAL_CODES = (
+    "attack_set_is_sealed",
+    "attack_resistance_measuring",
+    "attack_regression_not_accepted",
+    "attack_approval_stale",
+    "attack_regression_not_stated",
+    "measurement_deadline_passed",
+    "prompt_changed",
+    "hillclimb_not_found",
+    "round_not_found",
+    "event_kind_is_the_platforms",
+)
 
 _FLYWHEEL_SUFFIX = "/api/flywheel/v1"
 _CUSTOMER_PREFIX = "/api/v2"

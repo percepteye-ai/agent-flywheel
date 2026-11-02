@@ -395,7 +395,7 @@ record_tool_call("charge_card", {"amount": 4200}, outcome="ok", status_code=201)
 
 ## 📋 Runs, eligibility and evaluation sets
 
-`agent_flywheel.customer_api` reads the customer-automation API (customer contract 1.30.0) on the same origin as the control plane, under `/api/v2`. It needs a customer-automation key (`mck_`, from `pe login` or the dashboard's Settings), passed as `api_key=` or set as `PERCEPTEYE_MC_API_KEY`. An agent key (`pefw_`) is refused before anything is sent.
+`agent_flywheel.customer_api` reads the customer-automation API (customer contract 1.31.0) on the same origin as the control plane, under `/api/v2`. It needs a customer-automation key (`mck_`, from `pe login` or the dashboard's Settings), passed as `api_key=` or set as `PERCEPTEYE_MC_API_KEY`. An agent key (`pefw_`) is refused before anything is sent.
 
 ```python
 from agent_flywheel.customer_api import CustomerApiClient, CustomerRefusal
