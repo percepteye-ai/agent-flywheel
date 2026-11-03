@@ -108,6 +108,7 @@ nav:
       - Python agents: python.md
       - Node harnesses: node.md
       - CLI and other languages: cli.md
+      - OpenTelemetry push: otlp.md
   - Reference:
       - Configuration: configuration.md
       - The contract: contract.md
