@@ -1,0 +1,19 @@
+{
+  "about": "One medium as the OTel GenAI part both Agent Flywheel SDKs emit: the Python SDK's agent_flywheel.adapters._media.media_part and the Node SDK's mediaPart (src/model-boundary.js) must return each vector's part, key order included. Byte-identical copies live in both repositories (tests/fixtures/media_parts.json, test/fixtures/media_parts.json), held by their digest.",
+  "vectors": [
+    {"input": {"mime_type": "image/png", "data": "iVBORw0KGgo="},
+     "part": {"type": "blob", "modality": "image", "mime_type": "image/png", "content": "iVBORw0KGgo="}},
+    {"input": {"mime_type": "image/jpeg", "data": "/9j/4A==", "modality": "image"},
+     "part": {"type": "blob", "modality": "image", "mime_type": "image/jpeg", "content": "/9j/4A=="}},
+    {"input": {"mime_type": "audio/wav", "data": "UklGRg=="},
+     "part": {"type": "blob", "modality": "audio", "mime_type": "audio/wav", "content": "UklGRg=="}},
+    {"input": {"mime_type": "video/mp4", "uri": "gs://bucket/clip.mp4"},
+     "part": {"type": "uri", "modality": "video", "mime_type": "video/mp4", "uri": "gs://bucket/clip.mp4"}},
+    {"input": {"mime_type": "application/pdf", "data": "JVBERi0="},
+     "part": {"type": "blob", "modality": "document", "mime_type": "application/pdf", "content": "JVBERi0="}},
+    {"input": {"uri": "https://example.com/tram.jpg", "modality": "image"},
+     "part": {"type": "uri", "modality": "image", "mime_type": null, "uri": "https://example.com/tram.jpg"}},
+    {"input": {"data": "AAAA"},
+     "part": {"type": "blob", "modality": "document", "mime_type": null, "content": "AAAA"}}
+  ]
+}
