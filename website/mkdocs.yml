@@ -101,7 +101,7 @@ nav:
   - Guides:
       - Overview: index.md
       - Quickstart: quickstart.md
-      - How the loop closes: how-it-works.md
+      - How practice tasks work: how-it-works.md
       - Outcomes: outcomes.md
       - Production: production.md
   - Integrations:
@@ -110,6 +110,8 @@ nav:
       - CLI and other languages: cli.md
       - OpenTelemetry push: otlp.md
   - Reference:
+      - In the dashboard: dashboard.md
       - Configuration: configuration.md
       - The contract: contract.md
       - FAQ: faq.md
+      - Troubleshooting: troubleshooting.md

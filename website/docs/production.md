@@ -1,37 +1,32 @@
 # Production
 
-Your production agent is a **different process** from the one that does training work. [`serve()`](quickstart.md) claims rollouts and runs them in child processes. This page is about the process that serves your users, and it does three things: picks up the model training produced, picks up the prompt training produced, and — optionally — contributes evidence from the turns it is already serving.
+Your production agent records the conversations it serves, sends them to us once you allow it, and runs the version you approved. This page covers what is sent and when, what happens when a request fails, and what we do with personal data. Setting it up is the [Quickstart](quickstart.md).
 
-None of it requires a redeploy of your agent's code, and none of it opens an inbound port.
+## Recording conversations
 
-!!! warning "For your production agent, never for `serve()`"
-    A `serve()` rollout samples through the **per-rollout gateway**, which is what attributes the completion to that rollout and captures it — and the gateway already rewrites the model field to the policy under test. Pointing a donor agent at the policy endpoint bypasses capture entirely and silently produces a run with nothing to train on. `apply_current_policy()`, `policy_source()` and `current_prompt()` belong in the agent serving your users.
+<!-- lang -->
+`attach()` records each turn your agent serves: what the user asked (`input_text=`), every tool call and its outcome, and the answer (`record_answer()`). For a LangChain, LangGraph or Google ADK agent it also records each model call inside the turn: the system prompt, the whole conversation so far, the tool definitions and every tool result. That is what we learn from, and the turn sends it as one [OpenTelemetry GenAI](https://opentelemetry.io/docs/specs/semconv/gen-ai/) trace. An agent on another framework records tool outcomes and the turn's text, but no model calls; to learn from it, [push its OpenTelemetry traces](otlp.md).
 
-## One shot, at startup
+The adapters only observe. No model call, response or tool result is changed, and nothing in `turn()` can fail the turn: if capture breaks, the turn still runs.
+<!-- /lang -->
 
-```python
-import agent_flywheel as fw
-from openai import OpenAI
+Two [permissions](dashboard.md#allow-us-to-learn-from-its-conversations) decide what leaves your machine: the conversations, and their message text. Without the second, what the model saw is not recorded at all, not even on your disk. Learning needs both.
 
-kw = fw.apply_current_policy(agent_id="my-coding-agent")
-if kw:                                    # {} means keep your current config
-    client = OpenAI(base_url=kw["base_url"], api_key=kw["api_key"])
-    model = kw["model"]
-```
+## When turns are sent
 
-One `GET /policy/current`. **It contributes nothing** — no registration, no rollouts, no capture — so it is the whole integration for a team that wants the trained model and nothing else.
+<!-- lang -->
+Every 32 turns, a short-lived background thread sends the turns that have an answer. When the process exits, the rest go too, including turns that never recorded one. `px.flush()` sends now. A request carries at most 64 turns, and the network is never on your request path.
+<!-- /lang -->
 
-| key | value |
-|:--|:--|
-| `base_url` | OpenAI-compatible base URL, e.g. `https://gw.percepteye.ai/v1` |
-| `api_key` | resolved credential (see below) |
-| `model` | the model name to send; `""` when the control plane did not name one |
+A turn that could not be sent stays on disk and goes with a later batch. Each batch carries an idempotency key, so a batch that arrives twice is stored once.
 
 **`{}` means keep your current configuration.** It is the answer for every reason you cannot act, and they deliberately read the same: nothing deployed, a model the control plane has withdrawn (`withdrawn: true`), no `endpoint` in the body, no `base_url` or `model`, no credential to authenticate with, an unreachable control plane, or no key configured at all. An endpoint you cannot authenticate to is not usable, so it is returned as "nothing to apply" here rather than as 401s at your first request.
 
-**It never raises into your startup.** An unreachable control plane must never stop an agent from serving its users.
+Every request to the control plane gets up to four attempts, with a 30-second timeout each.
 
-The credential is resolved in this order, and never invented:
+- **`429`** is always retried, after the server's `Retry-After` (at most 8 seconds), or after a short random backoff when there is none.
+- **`408`, `500`, `502`, `503` and `504`, and a connection that drops mid-request,** are retried, except for a claim for practice tasks: that is resent only when it never reached us, because a claim that did may already have handed work out.
+- **Any other `4xx`** is final; sending it again would get the same answer. A `403` on upload is a refusal, such as a permission switched off or a key that may not carry this agent's conversations: the SDK stops uploading, says why, keeps the turns on disk, and starts again once the permission is back.
 
 | order | source |
 |:--|:--|
@@ -39,61 +34,46 @@ The credential is resolved in this order, and never invented:
 | 2 | the response's own `endpoint.api_key`, when the control plane sends one |
 | 3 | the env var named by the response's `endpoint.api_key_env`; `PERCEPTEYE_API_KEY` there is sent only to an endpoint at the control plane's own address, never as a fallback |
 
-`set_env=True` additionally exports `OPENAI_BASE_URL` and `OPENAI_API_KEY` for libraries that read the environment instead of accepting arguments. It is off by default because mutating the process environment is a side effect a caller should ask for, and it does **not** export the model.
+## Personal data
 
-Two lower-level functions sit underneath, both exported:
+The SDK sends what your agent saw and said as it was; it masks nothing on your side. The control plane scans everything it receives for email addresses, phone numbers, card numbers, US social security numbers and IP addresses before it stores it:
 
-| function | returns |
-|:--|:--|
-| `current_policy(agent_id=...)` | the raw `/policy/current` body, unparsed |
-| `endpoint_kwargs(body, api_key=None)` | the one place a body becomes client kwargs |
+- **In the tool-call records** sent beside each turn, a match is masked, as `[redacted:email]` for example.
+- **In the user's message, your agent's answer, and everything the model saw**, a match is kept as sent, because masking would change the conversation. The turn is marked as holding personal data and is never learned from. [Your agent's page](dashboard.md#see-what-arrived) counts these turns.
 
-`endpoint_kwargs()` is extracted rather than inlined because it now has two callers — `apply_current_policy()` and `PolicySource` — and a caller who unpacks the body slightly differently is a caller sampling from something other than what was trained.
+[Pushed traces](otlp.md) follow the same rule. How long we keep it all is in the [FAQ](faq.md#what-data-do-you-keep-and-for-how-long).
 
-## A handle that keeps up
+## What stays on your machine
 
-`apply_current_policy()` is one-shot, and the client you build from it lives for the process. So the policy your agent runs is the policy that was current when that process started.
+<!-- lang -->
+Every turn is a directory under the `trajectory_root` you named, and uploading does not delete it. Nothing does unless you ask: `attach(retention_turns=50_000)` keeps the most recent 50,000 turns, and `px.prune(keep_last=...)` or `px.prune(older_than_s=...)` prunes when you choose. Left alone, it grows by roughly 2.4 GB per million turns, more if your tool outputs are large.
 
-The obvious cost is that a promotion waits for your next deploy. **The larger cost runs the other way: a regressed candidate could only be withdrawn by redeploying your production agent.** The control plane can demote it instantly and nothing happens — every running process keeps sampling the bad model until someone ships. Delayed promotion is an inconvenience; delayed rollback is an incident, and one whose remedy sits in your deploy pipeline rather than ours. `policy_source()` is the transport for rollback first and promotion second, and its design follows from that ordering.
+Records are flushed, not fsynced: they survive your process dying, and a machine that loses power can lose the most recent ones.
+<!-- /lang -->
 
-```python
-policy = fw.policy_source(agent_id="my-coding-agent", ttl_s=300)
+## Run the approved version
 
-while True:                       # per turn, or per request
-    snap = policy.current()
-    if snap.changed:              # rebuild ONLY on an actual change
-        client = OpenAI(base_url=snap.base_url, api_key=snap.api_key)
-        model = snap.model
-    ...
-```
+<!-- lang -->
+The SDK hands you the approved model and prompt; applying them is your code's decision.
 
-**Call `current()` per turn.** It is the natural unit for an agent and it is the recommendation. A caller who calls it once has re-created the problem the handle exists to solve.
-
-### The snapshot
-
-`PolicySnapshot` is a frozen dataclass returned by value, because production agents are concurrent: a caller holding a snapshot across an in-flight request must be unaffected by a refresh completing underneath them.
-
-| field | type | meaning |
+| call | when | what it returns |
 |:--|:--|:--|
-| `base_url` · `api_key` · `model` | `str` | what to run; empty when nothing is deployed or the control plane has never answered |
-| `changed` | `bool` | `True` on the **one** snapshot that first reports a change |
-| `stale_for_s` | `float` | `0.0` while refreshes succeed; seconds **past the TTL** while they fail |
-| `last_refresh_ok` | `bool` | `False` after a failed attempt — the snapshot still stands |
-| `serving_generation` | `str` | the control plane's own answer to "is what I booted with still current?" |
+| `fw.apply_current_policy(agent_id=...)` | once, at startup | `{"base_url", "api_key", "model"}` for your client, or `{}` |
+| `fw.policy_source(agent_id=...)` | `.current()` on each turn | a snapshot; `.changed` is true when you must rebuild your client |
+| `fw.prompt_decision(fw.current_prompt(agent_id=...))` | when you load your prompt | `.apply`, `.text`, and `.reason` when it may not be applied |
 
-`bool(snap)` is truthy only when there is something to act on — the same meaning as `apply_current_policy()`'s `{}`. `snap.as_kwargs()` returns a dict identical in shape to it, so migrating from the one-shot function changes where the dict comes from and nothing else.
+`policy_source()` refreshes once its answer is about five minutes old, or sooner when the control plane asks, but never more often than every 30 seconds. A refresh is one attempt with a one-second budget, made inside your `current()` call; no thread polls in the background. When a refresh fails, it keeps serving the last answer, so a network blip never moves you back to your old model. Watch `snap.stale_for_s`: it counts the seconds past the refresh interval while refreshes fail.
 
-**`changed` is an edge, and it is consumed by whoever observes it** — so a second caller does not rebuild a client that is already correct. Two threads sharing one handle will not both see the edge. Build one client per handle.
+`prompt_decision()` refuses when there is no approved text, when your own baseline prompt changed after the pair was approved, when the status is not one a person approved, or when the prompt was approved against a different checkpoint. `.text` is `None` on a refusal, never `""`, so applying it cannot blank your prompt.
+<!-- /lang -->
 
-**`serving_generation` is deliberately not what `changed` is computed from.** `changed` asks "must I rebuild my client?" and moves only when the endpoint does. The generation moves when *anything* about what to run moves — including the system prompt, which the snapshot does not carry and a client rebuild would not apply. A fleet holds this value and cycles a replica when it differs; a turn loop reads `changed`.
+Until you approve a new version in [Decisions](dashboard.md#approve-the-winner-in-decisions), your agent keeps the one it has, and you can [try a new version on one agent](dashboard.md#try-a-new-version-on-one-agent) first. An empty answer always means "keep what you run", never "run with nothing".
 
-**`stale_for_s` is the number to alert on.** It is the only outward sign that an agent is running a policy the control plane may have moved on from.
+## When the control plane is unreachable
 
-### `on_change`
+Your agent keeps serving. Recording carries on to disk, turns wait for a later batch, and your agent keeps the model and prompt it has. Nothing on this page raises into your process because the control plane did not answer.
 
-```python
-src = fw.policy_source(agent_id="my-coding-agent", on_change=reconfigure)
-```
+## Reference
 
 It fires on **promotion and rollback alike** — any move in the `(base_url, api_key, model)` triple, including the first actionable answer, since without that the documented `if snap.changed:` usage would never build a client at all. It does **not** fire when a refresh fails, and it does not fire when the control plane answers "nothing deployed" without `withdrawn: true`. A withdrawal (`withdrawn: true`, which `is_withdrawn(body)` tests) after a served policy fires it with an empty snapshot and `snap.withdrawn` set: go back to your own configuration. Exceptions it raises are swallowed.
 

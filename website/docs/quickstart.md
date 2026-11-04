@@ -1,23 +1,53 @@
 # Quickstart
 
-Install the package, add two lines to the process that already runs your agent, and it starts claiming rollouts. **Your agent does not move and does not change.**
+Connect your agent, let it send us its real conversations, and start improving it. Your agent keeps running where it runs today, and its code does not change.
+
+## What you need
+
+<!-- lang -->
+- Python 3.10 to 3.13.
+- An agent built with LangChain, LangGraph or Google ADK. These are the frameworks whose model calls the SDK can record, and what the model saw and said is what we learn from. Any other agent that already exports OpenTelemetry traces can [send us those](otlp.md) instead.
+<!-- /lang -->
+- A free sign-in at [launch.percepteye.ai](https://launch.percepteye.ai).
 
 ## Install
 
+<!-- lang -->
 ```bash
 pip install agent-flywheel
 ```
 
-One runtime dependency: `httpx`. Python 3.10 → 3.13. Nothing else is needed to integrate.
+One runtime dependency, `httpx`.
+<!-- /lang -->
 
-The `[otel]` extra is available and optional — `pip install "agent-flywheel[otel]"` additionally emits each outcome as a span. It pulls the OpenTelemetry **API** only: this package emits into a `TracerProvider` you already registered and never installs one.
+## Get your key
 
-## The integration
+[Get your key](dashboard.md#get-your-key) in the dashboard, then put it, and the control-plane URL shown with it, in your agent's environment:
+
+```bash
+export PERCEPTEYE_CONTROL_PLANE_URL=https://launch.percepteye.ai/api/flywheel/v1
+export PERCEPTEYE_API_KEY=pefw_...
+```
+
+<!-- lang -->
+The URL is also the SDK's default. Without a key the SDK still records on your disk, and sends nothing.
+<!-- /lang -->
+
+## Record its conversations
+
+<!-- lang -->
+Call `attach()` once, at startup, and wrap each turn your agent serves:
 
 ```python
 import agent_flywheel as fw
 
-fw.serve("my_package.agent:build", agent_id="my-coding-agent", input_shape="text")
+px = fw.attach(agent_id="support-agent", trajectory_root="/var/lib/percepteye")
+
+def answer(conversation_id: str, user_text: str) -> str:
+    with px.turn(conversation_id=conversation_id, input_text=user_text) as turn_id:
+        reply = agent.invoke(user_text)          # your agent, unchanged
+    px.record_answer(turn_id, reply)             # its answer, as text
+    return reply
 ```
 
 One environment variable carries the credential, and it is the only one required:
@@ -30,76 +60,45 @@ PerceptEye runs the control plane, and signing up is free and self-serve at [lau
 
 Or skip the copying: `agent-flywheel login --agent-id my-coding-agent` opens the same sign-in with a code filled in, and once you click **Approve** the key comes back to your terminal and is stored for that agent (`~/.percepteye/credentials.json`, readable only by you). `serve()` uses it whenever `PERCEPTEYE_API_KEY` is unset, and when it starts in a terminal with no key at all it offers to do this for you. It never asks in CI or when nobody is at a terminal. See [the key `login` stores](configuration.md#environment-variables).
 
-Both are overridable in code as `control_plane_url=` and `api_key=`, and the argument wins. Everything else `serve()` takes has a default.
+## See your first trace
 
-`serve()` blocks and returns an `int` — the number of rollouts that completed.
+The SDK sends turns in batches, so a turn does not appear the moment it happens.
 
-## The entrypoint is `"module:attr"`
+<!-- lang -->
+Every 32 turns it sends the ones that have an answer, and it sends the rest when the process exits. To send now, call `px.flush()`. It checks the permissions again and returns what it did, such as `{'sent': 1, 'skipped': 0, 'failed': 0}`; `'not_permitted': 1` means the permission is not on yet, and `px.upload_refusal` says why.
+<!-- /lang -->
 
-Subprocess isolation is the default, and a child process cannot receive a live Python object. So the entrypoint is a string the child can import, and what it names has to build the agent on its own:
+Then open [your agent's page](dashboard.md#see-what-arrived) to see it counted. Nothing there? See [Troubleshooting](troubleshooting.md#nothing-arrives-in-the-dashboard).
 
-| you pass | what happens |
-|:--|:--|
-| `"my_package.agent:build"` — a zero-argument factory | called; the return value is your agent |
-| `"my_package.agent:Agent"` — a class | instantiated with no arguments |
-| `"my_package.agent:agent"` — an object that already has `invoke`/`run`/`execute`/`chat` | used as-is |
+## Start improving
 
-A class that needs constructor arguments is refused, by name, at startup:
+When conversations have arrived, [start improving](dashboard.md#start-improving). The loop:
 
-```text
-ConfigurationError: 'my_package.agent:Agent' names a class that cannot be
-constructed with no arguments (Agent.__init__() missing 1 required positional
-argument: 'model'). Point the entrypoint at a zero-argument factory that
-builds a configured instance instead.
-```
+1. We learn from your agent's real conversations.
+2. Each new version is tested against your agent's current best, on conversations it has never seen.
+3. A version that does better comes to you in [Decisions](dashboard.md#approve-the-winner-in-decisions). You approve it or not.
+4. The next round starts from the best so far. Run it again whenever new conversations have arrived.
 
-A class is instantiated rather than probed for methods on purpose: probing first would find `Agent.invoke` on the class — an unbound function — and call it with the turn input as `self`.
+If there is not yet enough to learn from, Start improving says so.
 
-Once the object exists, the method is probed in this order, first match wins: `invoke`, `run`, `execute`, `chat`, `__call__`. Pass `method="..."` to name one. **Resolution happens once, at startup, and never mid-rollout** — a rollout that fails to emit because a method name was wrong does not merely lose itself, it biases the score of every sibling it was supposed to be compared against.
+## Run the approved version
 
-??? note "Passing an already-constructed object"
-
-    `fw.serve(my_agent, ...)` works, but only under `isolation="inprocess"`, which is capped at `concurrency=1` and has no real timeout — Python cannot interrupt a synchronous call in another thread. Under the default it raises at startup:
-
-    ```text
-    ConfigurationError: isolation='subprocess' needs an importable entrypoint
-    so the child can rebuild the agent -- pass 'my_package.agent:build' instead
-    of a constructed object, or set isolation='inprocess' (concurrency=1).
-    ```
-
-## `input_shape` is declared, never guessed
-
-| `input_shape` | your entrypoint receives |
-|:--|:--|
-| `"text"` | `"the task description"` |
-| `"messages"` | `[{"role": "user", "content": "the task description"}]` |
-| `"dict"` | `{"input": "the task description"}` |
-
-There is no default and no inference. An earlier SDK guessed the call convention from which method name it happened to find, so `run(str)` and `run(dict)` were indistinguishable until something failed at depth.
-
-## Bound the first run
-
-!!! warning "A rollout is a real run"
-
-    Rollouts execute your agent, in your process tree, on your credentials, against whatever your tools actually talk to. Bound the first one with `max_rollouts=8` and point `artifacts_dir=` somewhere you don't mind it writing.
+<!-- lang -->
+Ask which model to run on each turn, and rebuild your client only when the answer changes:
 
 ```python
-fw.serve(
-    "my_package.agent:build",
-    agent_id="my-coding-agent",
-    input_shape="text",
-    max_rollouts=8,
-    artifacts_dir="/tmp/percepteye-first-run",
-    on_event=lambda kind, ev: print(kind, ev),
-)
+from openai import OpenAI
+
+policy = fw.policy_source(agent_id="support-agent")
+
+snap = policy.current()                 # each turn; a cache read between refreshes
+if snap.changed:
+    client = OpenAI(base_url=snap.base_url, api_key=snap.api_key)
+    model = snap.model
 ```
 
-| argument | default | what it does |
-|:--|:--|:--|
-| `max_rollouts` | `None` | stop after this many rollouts **complete**, then return. The count is completions, not successes — a crash and a graded pass both increment it. |
-| `artifacts_dir` | `./.percepteye-artifacts` | created if absent. Each rollout gets `_percepteye/<rollout_id>/` beneath it, deleted once the result is reported, so a long-running flywheel does not grow without bound. |
-| `concurrency` | `1` | rollouts in flight, under the default subprocess isolation. |
-| `rollout_timeout_s` | `900.0` | per-rollout wall clock. Subprocess isolation is the only mode with a real timeout, because a child process can actually be killed. |
+The approved prompt is a separate read, and the SDK never applies it for you: `fw.prompt_decision(fw.current_prompt(agent_id="support-agent"))` says whether it may be applied, and if not, why.
+<!-- /lang -->
 
 **`max_rollouts` is the only clean exit `serve()` has.** Nothing in this package installs a SIGINT or SIGTERM handler, there is no environment equivalent, and it cannot be changed on a running process — so without it the loop runs until the process is killed and any in-flight rollout is orphaned rather than abandoned, to be reclaimed by lease expiry. See [configuration](configuration.md) for what stopping a live flywheel actually costs.
 
@@ -155,7 +154,9 @@ The switch gates `serve()` — the call that does training work. It does not gat
 
 ## Next
 
-- Per-call outcomes, and why `unknown` is a supported answer — [outcomes](outcomes.md)
-- LangChain, LangGraph and Google ADK with zero code in your agent — [Python agents](python.md)
-- A binary, a Node CLI, anything with a command line — [CLI and other languages](cli.md)
-- Picking up the trained model and prompt — [production](production.md)
+- [Production](production.md): what is sent and when, retries, rate limits and personal data.
+- [OpenTelemetry push](otlp.md): send the traces your agent already exports.
+- [FAQ](faq.md) and [Troubleshooting](troubleshooting.md).
+<!-- lang -->
+- [Python agents](python.md): every option, and practice tasks your agent can work through with `serve()`.
+<!-- /lang -->

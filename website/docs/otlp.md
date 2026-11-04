@@ -1,24 +1,31 @@
-# Push OpenTelemetry spans
+# OpenTelemetry push
 
-If your agent already records its model calls as OpenTelemetry spans — the [GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/), with message content — you can point its OTLP exporter, or your OpenTelemetry Collector, at the control plane instead of installing this SDK. The control plane learns from the conversations those spans record as they arrive, exactly as it does from the turns this SDK uploads, and each improvement of your agent starts from them.
+If your agent already exports OpenTelemetry traces of its model calls, in the [GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) and with message content, you can send them to us as well. We learn from the conversations they record exactly as we do from the conversations this SDK sends. Many instrumentations record message content only when you switch it on; without it there is nothing to learn from.
 
-**When to push instead of using the SDK.** Push when the agent is already instrumented with OpenTelemetry, or runs where this SDK cannot be installed, and what you want is for its production traffic to drive the improvement loop. Use the SDK when you also want rollouts — practice tasks written for your agent, which it works through and which are graded — because spans only carry what your agent already did. Send each conversation one way only: pushed spans and uploaded turns are both kept, so the same traffic sent both ways is learned from twice.
+## A second destination
 
-**The endpoint** is per agent, under your control plane's URL (the `PERCEPTEYE_CONTROL_PLANE_URL` the dashboard shows when you add the agent):
+We are one more place your traces go, not a replacement for the place they go now.
+
+- **With an OpenTelemetry Collector**, you add us as one more exporter. Your current destination keeps receiving everything, unchanged.
+- **Without a Collector**, setting your agent's own `OTEL_EXPORTER_OTLP_TRACES_*` variables *moves* its traces to us. An exporter has one destination, so they stop going where they went before. To keep both, run a Collector, or add a second exporter in your code.
+
+If your traces already go to an observability provider, we can also read them from there, with nothing to change in your agent: [connect your observability provider](dashboard.md#connect-your-observability-provider).
+
+## Create the agent and its key
+
+[Send us its OpenTelemetry traces](dashboard.md#send-us-its-opentelemetry-traces) in the dashboard. That names the agent, gives it its key, and registers it. Give it [permission](dashboard.md#allow-us-to-learn-from-its-conversations) to learn from its conversations: until then, every push is refused with `403` and nothing in it is read.
+
+The endpoint is per agent, under your control-plane URL:
 
 ```
 POST $PERCEPTEYE_CONTROL_PLANE_URL/agents/<agent_id>/otlp/v1/traces
 ```
 
-In the dashboard, add the agent with **New mission → An agent → It sends OpenTelemetry**: one click names it, gives it its key and registers it, then its **Permissions** step opens, then its full endpoint is shown, ready to copy (and again on the agent's own page, its **Agent** tab). With the OpenTelemetry SDK's exporter:
+The dashboard shows it ready to copy. Send the agent's own key as a Bearer token; a key made for another agent is refused.
 
-```bash
-export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="$PERCEPTEYE_CONTROL_PLANE_URL/agents/support-agent/otlp/v1/traces"
-export OTEL_EXPORTER_OTLP_TRACES_HEADERS="Authorization=Bearer%20$PERCEPTEYE_API_KEY"
-export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
-```
+## With a Collector
 
-`%20` is the space: OpenTelemetry reads these headers URL-encoded. If the process exports only traces, `OTEL_EXPORTER_OTLP_ENDPOINT` set to the same URL without `/v1/traces` works too; the exporter appends it. From a Collector, add an exporter to the traces pipeline you already run:
+Add an exporter for us, and add it to the traces pipeline beside the exporter you already have. Set `PERCEPTEYE_CONTROL_PLANE_URL` and `PERCEPTEYE_API_KEY` in the Collector's environment.
 
 ```yaml
 exporters:
@@ -26,15 +33,51 @@ exporters:
     traces_endpoint: ${env:PERCEPTEYE_CONTROL_PLANE_URL}/agents/support-agent/otlp/v1/traces
     headers:
       Authorization: "Bearer ${env:PERCEPTEYE_API_KEY}"
+
 service:
   pipelines:
     traces:
-      exporters: [otlphttp/percepteye]
+      receivers: [otlp]                                     # as you have them
+      processors: [batch]                                   # as you have them
+      exporters: [otlp/your-backend, otlphttp/percepteye]   # yours, and ours
 ```
 
-**Auth** is the agent's own key (`pefw_…`), sent as a Bearer token: the key you get when you add the agent in the dashboard (**New mission → An agent**). A key bound to a different agent is refused.
+Keep your own exporter in the list: a pipeline sends only to the exporters it names. The endpoint and the key both belong to one agent, so each agent needs an exporter of its own.
 
-**Consent comes first, and nothing is read without it.** The agent has to be known to the control plane, and both capture switches have to be on in the **Permissions** step of adding it: its conversations, and their message text. Until both are on, every push is answered `403` and nothing in it is read. The model-content tier is granted only while exactly one active Product declares the agent, as for the SDK. The dashboard's **It sends OpenTelemetry** path registers the agent for you; the push endpoint never registers an agent itself. Through the API instead, an agent that never runs this SDK registers once, so that its Permissions can be switched on:
+## Without a Collector
+
+Set these in your agent's environment. Its traces then go to us, and no longer to where they went before; metrics and logs are not affected.
+
+```bash
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="$PERCEPTEYE_CONTROL_PLANE_URL/agents/support-agent/otlp/v1/traces"
+export OTEL_EXPORTER_OTLP_TRACES_HEADERS="Authorization=Bearer%20$PERCEPTEYE_API_KEY"
+export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
+```
+
+`%20` is the space: OpenTelemetry reads these headers URL-encoded.
+
+## See it arrive
+
+[Your agent's page](dashboard.md#see-what-arrived) counts the spans it has pushed, and how many we keep but do not learn from, and why. Then [start improving](dashboard.md#start-improving).
+
+## What the endpoint answers
+
+- **A request** is an OTLP `ExportTraceServiceRequest`, as `application/x-protobuf` or `application/json`, optionally with `Content-Encoding: gzip`. There is no size limit: each request is written to disk as it arrives and read in bounded memory.
+- **`200`** carries an `ExportTraceServiceResponse` in the same content type. Its `partial_success` counts the spans not kept, and says why.
+- **`429`** when your organization is over 600 requests a minute or already has a request being read, and **`503`** when the control plane is busy, each with `Retry-After`. The OTLP specification asks every exporter to retry these, and the Collector does.
+- **`408`** when a request's body arrives too slowly, and **`507`** when the control plane is short of disk space. Neither is the request's fault, but OTLP exporters do not retry them, so that batch is lost.
+- **`400`, `403` and `415`** for a request that will never be taken: a body that is not OTLP; permissions that are off; a content type or `Content-Encoding` it does not read. Sending it again does not help.
+
+## What we keep
+
+- **Personal data is kept, and never learned from.** The message content of every span is scanned for personal data. A request whose spans hold any is kept, marked, and excluded from learning, and `partial_success` says so, with no span rejected.
+- **Practice tasks do not come this way.** Spans that carry this SDK's own rollout marker (`percepteye.rollout.id`) are not kept, and are counted as rejected.
+- **Send each conversation one way.** Pushed spans and the turns this SDK sends are both kept, so a conversation sent both ways is learned from twice.
+- **The agent must belong to exactly one agent or product in your dashboard.** One added in the dashboard does. A push for an agent that two of them declare, or none, is refused with `403`.
+
+## Without the dashboard
+
+The push endpoint never registers an agent. To register one through the API instead, so that its permissions can be switched on:
 
 ```bash
 curl -X POST "$PERCEPTEYE_CONTROL_PLANE_URL/agents" \
@@ -43,17 +86,4 @@ curl -X POST "$PERCEPTEYE_CONTROL_PLANE_URL/agents" \
   -d '{"agent_id": "support-agent", "mode": "production", "discovered_agent": null}'
 ```
 
-`"discovered_agent": null` records that the agent describes nothing about itself, as a production process does, rather than that you switched that description off.
-
-**What the endpoint takes and answers**, per the OTLP/HTTP specification:
-
-- an `ExportTraceServiceRequest` as `application/x-protobuf` or `application/json`, optionally with `Content-Encoding: gzip`;
-- `200` with an `ExportTraceServiceResponse` in the same content type, whose `partial_success` counts the spans not kept and says why;
-- `429` when your organization's share of the endpoint is busy or over its rate, and `503` when the control plane is, each with `Retry-After`; the OpenTelemetry exporters and the Collector retry these on their own;
-- `400`, `403` and `415` for a request it will never take: retrying it does not help.
-
-There is no size cap. Each request is spooled to disk and read in bounded memory, and one this host's disk cannot hold is answered `507` with a `google.rpc.Status` before it is read. Batches, as the OpenTelemetry SDK's batch processor and the Collector send by default, are learned from soonest.
-
-**Personal data is kept, and never learned from.** The message content of every span is scanned for personal data. A request whose spans hold any is kept, recorded and excluded from training, and the response's `partial_success` message says so (with no span rejected). Spans that carry this SDK's own rollout marker (`percepteye.rollout.id`) are not kept, and are counted as rejected: rollouts reach the control plane through the SDK.
-
-**Seeing it arrive.** The agent's **Agent** tab in the dashboard counts the spans it has pushed, beside the turns the SDK uploaded, and how many of each are kept but not learned from, and why.
+`"discovered_agent": null` records that the agent describes nothing about itself, rather than that you switched that description off.

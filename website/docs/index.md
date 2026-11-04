@@ -11,14 +11,15 @@ hide:
 # Your agent, made better by its own work
 
 <p class="fw-hero__sub">
-<code>agent-flywheel</code> turns the work your agent already does into training
-data, and delivers what it learns back as an endpoint your agent already calls. It runs
-in your process, behind your firewall, on your credentials — unchanged.
+<code>agent-flywheel</code> records your agent's real conversations. We learn from them,
+test each new version against your agent's current best on conversations it has never
+seen, and you approve the winner. Your agent runs in your process, behind your firewall,
+on your credentials — unchanged.
 </p>
 
 <div class="fw-cta" markdown>
 [Quickstart](quickstart.md){ .fw-btn .fw-btn--primary }
-[How the loop closes](how-it-works.md){ .fw-btn .fw-btn--ghost }
+[Production](production.md){ .fw-btn .fw-btn--ghost }
 </div>
 
 <p class="fw-note">pip install agent-flywheel · one runtime dependency · MIT</p>
@@ -29,7 +30,7 @@ in your process, behind your firewall, on your credentials — unchanged.
 <div class="fw-stat"><div class="fw-stat__n">0</div><div class="fw-stat__l">lines changed inside your agent</div></div>
 <div class="fw-stat"><div class="fw-stat__n">1</div><div class="fw-stat__l">runtime dependency (<code>httpx</code>)</div></div>
 <div class="fw-stat"><div class="fw-stat__n">0</div><div class="fw-stat__l">inbound ports, containers, GPUs</div></div>
-<div class="fw-stat"><div class="fw-stat__n">1459</div><div class="fw-stat__l">tests, zero skips permitted</div></div>
+<div class="fw-stat"><div class="fw-stat__n">1484</div><div class="fw-stat__l">tests, zero skips permitted</div></div>
 </div>
 
 ## Start here
@@ -40,7 +41,7 @@ in your process, behind your firewall, on your credentials — unchanged.
   <div class="fw-card__art fw-art--rose"><div class="fw-card__tile">🚀</div></div>
   <div class="fw-card__body">
     <h3>Quickstart</h3>
-    <p>One import, one call. Serve your first rollout in about two minutes, bounded so it cannot surprise you.</p>
+    <p>Record your agent's conversations, see your first trace arrive, and start improving.</p>
     <div class="fw-card__more">Get started</div>
   </div>
 </a>
@@ -48,9 +49,9 @@ in your process, behind your firewall, on your credentials — unchanged.
 <a class="fw-card" href="how-it-works/">
   <div class="fw-card__art fw-art--sky"><div class="fw-card__tile">🎡</div></div>
   <div class="fw-card__body">
-    <h3>How the loop closes</h3>
-    <p>Onboard once, then four lanes across a trust boundary — every one of them opened from your side.</p>
-    <div class="fw-card__more">See the architecture</div>
+    <h3>Practice tasks</h3>
+    <p>Optional: tasks written from your agent's own tools, worked through and graded, every lane opened from your side.</p>
+    <div class="fw-card__more">See how they run</div>
   </div>
 </a>
 
@@ -94,7 +95,7 @@ in your process, behind your firewall, on your credentials — unchanged.
 
 ## The loop, in one figure
 
-![Onboarding once, then the flywheel as a closed ring: your agent and your production agent on the left inside your infrastructure, the PerceptEye control plane on the right, and four numbered lanes crossing a dashed trust boundary between them.](assets/flywheel-architecture.svg)
+![The improvement loop as a ring across a trust boundary: your agent's conversations, recorded where it runs, go out once you allow it; a new version is learned from them and tested against your agent's current best on conversations it has never seen; you approve the winner in Decisions; and your agent runs it, and the next round starts from it.](assets/flywheel-architecture.svg)
 
 **Register once, then loop forever.** The SDK describes your agent from inside its own
 process and registers it — once, before the first rollout. After that: it claims a task,
@@ -102,8 +103,8 @@ your agent runs it, the outcomes go back, a policy is trained and promoted, and 
 production agent picks it up. Once an operator enables capture for it, its live
 turns feed the next lap too.
 
-That last step is what makes it a flywheel rather than a pipeline: **the better agent
-generates the better evidence.**
+That last step is what makes it a flywheel rather than a pipeline: **each round starts
+from the best so far.**
 
 ## What it costs to integrate
 

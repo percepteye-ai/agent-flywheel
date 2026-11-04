@@ -6,20 +6,19 @@
 #   flywheel-architecture.svg    <- render_architecture.py     (the closed loop)
 #   flywheel-spinner.gif         <- render_spinner.py          (the title mark)
 #
-# The overview and loop figures come in TWO FLAVOURS. They show what a customer
-# would type, and that differs per package -- so `./render.sh node` writes
-# *-node.gif variants carrying `openclaw plugins install` instead of
-# `pip install`. Shipping the Python frames in the Node README advertised the
-# wrong SDK to everyone who opened it.
+# ONE SET OF FIGURES FOR BOTH SDKs. They show the improvement loop, which is
+# the same however an agent is connected, so the Node README carries these
+# same files under the same names: copy flywheel-{overview,loop}.{gif,png}
+# and flywheel-spinner.gif into the Node repo's docs/assets/ after a render.
+# tests/test_node_figures_match.py compares the two byte for byte.
 #
 # Both are checked in, because a README cannot fetch a build artifact -- and
 # both are generated, so a checked-in asset with no build script drifts from
 # its source the first time someone edits one without the other. Run this after
 # touching either renderer.
 #
-#   ./render.sh            # every figure, BOTH flavours
-#   ./render.sh overview   # just one (Python flavour)
-#   ./render.sh node       # just the Node flavour
+#   ./render.sh            # every figure
+#   ./render.sh overview   # just one
 #
 # Needs: python with Pillow, and ffmpeg -- EXCEPT for the architecture figure,
 # which is an SVG and needs neither. It is static, so it does not need a frame
@@ -35,9 +34,9 @@ PY=${PY:-python3}
 # encoder's inter-frame diffing, which is what keeps these files small.
 #
 # The colour budgets are not interchangeable, and both were measured rather than
-# guessed: the overview is 1.70 MB at 128 and 1.84 MB at 192 with no visible
-# difference, so it takes 128; the loop has more simultaneous fades and keeps 224.
-render() {   # name renderer colours poster   (honours $FLAVOUR)
+# guessed: the overview is 1.55 MB at 112 and 1.66 MB at 128 with no visible
+# difference, so it takes 112; the loop has more simultaneous fades and keeps 224.
+render() {   # name renderer colours poster
   local name=$1 renderer=$2 colours=$3 poster=$4
   local frames; frames=$(mktemp -d)
   trap 'rm -rf "$frames"' RETURN
@@ -76,32 +75,19 @@ spinner() {
 }
 
 case "${1:-all}" in
-  overview)     render flywheel-overview render_overview.py 128 f0455.png ;;
+  overview)     render flywheel-overview render_overview.py 112 f0455.png ;;
   spinner)      spinner ;;
-  loop)         render flywheel-loop render_flywheel_loop.py 224 f0466.png ;;
+  loop)         render flywheel-loop render_flywheel_loop.py 224 f0360.png ;;
   architecture) architecture ;;
-  node)
-    # The Node README's copies. Same diagrams, the customer-facing strings
-    # swapped; copied into the sibling repo, which has no renderer of its own.
-    FLAVOUR=node render flywheel-overview-node render_overview.py 128 f0455.png
-    FLAVOUR=node render flywheel-loop-node render_flywheel_loop.py 224 f0466.png
-    ;;
   all)
-    render flywheel-overview render_overview.py 128 f0455.png
-    render flywheel-loop render_flywheel_loop.py 224 f0466.png
+    render flywheel-overview render_overview.py 112 f0455.png
+    render flywheel-loop render_flywheel_loop.py 224 f0360.png
     spinner
     architecture
-    # BOTH FLAVOURS, always. `all` used to mean "everything except the Node
-    # figures", so the ordinary way to rebuild after editing a renderer left
-    # the Node README advertising the previous version of the same diagram --
-    # and `_ROWS` in render_overview.py encodes a CLAIM about which halves each
-    # package applies, so a stale copy is wrong even when it looks right.
-    FLAVOUR=node render flywheel-overview-node render_overview.py 128 f0455.png
-    FLAVOUR=node render flywheel-loop-node render_flywheel_loop.py 224 f0466.png
     echo
-    echo "Now copy the four *-node.{gif,png} files into the Node repo as its"
-    echo "plain-named docs/assets/flywheel-{overview,loop}.{gif,png}."
-    echo "tests/test_node_figures_match.py fails until you do."
+    echo "Now copy flywheel-{overview,loop}.{gif,png} and flywheel-spinner.gif"
+    echo "into the Node repo's docs/assets/, and flywheel-architecture.svg into"
+    echo "../../website/docs/assets/. The tests fail until you do."
     ;;
-  *) echo "usage: $0 [all|overview|loop|spinner|architecture|node]" >&2; exit 2 ;;
+  *) echo "usage: $0 [all|overview|loop|spinner|architecture]" >&2; exit 2 ;;
 esac

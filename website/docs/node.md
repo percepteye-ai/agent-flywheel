@@ -14,7 +14,7 @@ dsh plugin --profile <name> add @percepteye/agent-flywheel     # DeepSeek Harnes
 | **OpenClaw** | `src/index.js` (default export + `register`) | `api.on("after_tool_call", …)` | no — the hook returns `void` |
 | **DeepSeek Harness** | `src/dsh.js` (`apply`, no default) | `ctx.on("tools/result", …)` | no — `@mode emit`, over a deep-frozen object |
 
-No mutation seam is registered, in either mode. Every hook below is void-returning or observe-only, and the suite asserts the boundary rather than trusting review: no `registerAgentToolResultMiddleware`, and the OpenClaw manifest declares no `contracts`, because an observer claims no capability seam.
+No tool-result mutation seam is registered, in either mode, and the suite asserts the boundary rather than trusting review: no `registerAgentToolResultMiddleware`, and the OpenClaw manifest declares no `contracts`. The hooks that can change a run are listed by name below: in production, the two that apply the approved prompt and model; in training, the two that stop a rollout whose lease has lapsed.
 
 ## The mode decides which hooks are subscribed
 
@@ -26,9 +26,11 @@ The split is structural. `registerRolloutDriver` is called from one place under 
 |:--|:--|:--|
 | both | `after_tool_call` · `llm_input` | record one tool outcome; describe the agent |
 | **`production`** | `message_received` · `agent_end` · `gateway_stop` | capture the served turn — the user's message, its tool calls, and (with `allowConversationAccess`) the answer — and upload on the cadence |
+| **`production`**, with a key | `before_prompt_build` · `before_model_resolve` | apply the approved system prompt and model to this agent's own turns; off with `PERCEPTEYE_APPLY_PROMPT=0` / `PERCEPTEYE_APPLY_MODEL=0` |
 | **`training`**, and only once it can claim | `session_start` · `agent_end` · `session_end` · `gateway_start` · `cron_changed` · `gateway_stop` | claim a rollout, deliver its task, report the result, and run claimed rollouts in their own `percepteye-rollout-*` sessions |
+| **`training`**, the same condition | `before_agent_run` · `before_tool_call` | block a queued turn, or a later tool call, once its rollout's lease has lapsed |
 
-Those six are subscribed only when the driver can actually claim: with no `apiKey` configured, or on a host that exposes no next-turn injection API, it declines and registers none of them. An install with no account is therefore the first row and nothing else.
+The training hooks are subscribed only when the driver can actually claim: with no `apiKey` configured, or on a host that exposes no next-turn injection API, it declines and registers none of them. An install with no account is therefore the first row and nothing else.
 
 The DeepSeek Harness entry is unchanged by any of this: it subscribes `tools/result` and nothing more.
 
@@ -43,7 +45,7 @@ That is the kill switch, and it is the only one: it returns from `register` befo
 **`PERCEPTEYE_TRAJECTORY_DIR` is not that switch.** It names the directory one *training* rollout records into, and is read **per call, not cached at construction**, so a host that sets it late still gets capture. In production mode it is not consulted at all — a trajectory there belongs to one **turn**, so each call is routed to its own turn directory under `PERCEPTEYE_CAPTURE_DIR` (default `~/.percepteye/captured`), because one shared directory would merge every end user's calls into a single trajectory.
 
 !!! warning "A production install is not inert"
-    Production mode captures every served turn to disk **with `PERCEPTEYE_TRAJECTORY_DIR` unset** — the user's message, the tool calls, and the agent's answer. Nothing leaves the machine without both a key and the control plane's per-agent consent, but it is on disk either way. An operator leaving the plugin installed "because it does nothing without the variable" is accumulating their end users' messages. `PERCEPTEYE_CAPTURE=0` is what makes an install record nothing.
+    Production mode captures every served turn to disk **with `PERCEPTEYE_TRAJECTORY_DIR` unset** — the user's message, the tool calls, and the agent's answer. Nothing leaves the machine without both a key and the control plane's per-agent consent, but it is on disk either way. An operator leaving the plugin installed "because it does nothing without the variable" is accumulating their end users' messages. `PERCEPTEYE_CAPTURE=0` is what makes an install record nothing, and `retentionTurns` in the plugin's config bounds how many turns stay on disk, as `retention_turns=` does for `attach()`.
 
 !!! note
     `fw.serve()` sets `PERCEPTEYE_TRAJECTORY_DIR` for the child it spawns, already pointed at that rollout's directory — see [CLI harnesses](cli.md). Setting it by hand is for a run you are driving yourself.
@@ -139,7 +141,7 @@ dsh's exec tools declare a real output schema — `kind`, `exitCode`, `signal`, 
 
 The OpenClaw entry also registers `llm_input` and writes `discovered_agent.json` into `PERCEPTEYE_TRAJECTORY_DIR` — the rollout's directory, in either mode, and nothing is written when the variable is unset. This is the only way a CLI agent reaches `introspection_state = described` — Python reflection cannot cross a process *and* a language boundary, so a command entrypoint would otherwise register as `unreadable`, and an agent with no tool catalogue gets no generated workflows.
 
-`llm_input` is typed `(event, ctx) => Promise<void> | void`, the same structurally non-mutating class as `after_tool_call`. The mutation seams OpenClaw does expose — `before_prompt_build`'s `{systemPrompt}`, `before_tool_call`'s `{block: true}` — stay unused. Introspection is a read.
+`llm_input` is typed `(event, ctx) => Promise<void> | void`, the same structurally non-mutating class as `after_tool_call`. Introspection is a read; the hooks that can change a run, above, are separate subscriptions with their own switches.
 
 | behavior | why |
 |:--|:--|
@@ -193,10 +195,10 @@ The operator declares the Product's workflow rules in the plugin's config, and t
 
 | | |
 |:--|:--|
-| dependencies · peerDependencies · optionalDependencies | **none** — `node:fs` and `node:path` only |
+| dependencies · peerDependencies · optionalDependencies | **none** — Node builtins only |
 | `engines.node` | `>=22.22.3` |
 | module type | ESM (`"type": "module"`) |
-| exports | `.` · `./classify` · `./trajectory` · `./dsh` |
+| exports | `.` · `./classify` · `./trajectory` · `./dsh` · `./tracing` |
 
 Zero dependencies is a hard constraint, not a preference: this runs inside someone else's agent process, and every dependency added here is a version conflict imposed on a customer who did not ask for one. The Node repo's own CI asserts all three dependency keys stay empty.
 

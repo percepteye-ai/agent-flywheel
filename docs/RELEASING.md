@@ -85,14 +85,15 @@ npm pack --dry-run                         # percepteye-agent-flywheel-<version>
 
 **If a figure renderer changed**, re-render on macOS (the GIF/PNG renderers use
 the system SF fonts; on this setup the output reproduces the committed bytes
-exactly, which is what makes a re-render reviewable), then copy the four Node
-flavours across under their plain names:
+exactly, which is what makes a re-render reviewable), then copy them into the
+Node repo under the same names -- both READMEs show the same figures -- and the
+architecture SVG into the docs site:
 
 ```bash
-./docs/assets/render.sh                    # every figure, both flavours
-for f in overview loop; do for e in gif png; do
-  cp docs/assets/flywheel-$f-node.$e ../agent-flywheel-node/docs/assets/flywheel-$f.$e
-done; done
+./docs/assets/render.sh                    # every figure
+cp docs/assets/flywheel-{overview,loop}.{gif,png} docs/assets/flywheel-spinner.gif \
+   ../agent-flywheel-node/docs/assets/
+cp docs/assets/flywheel-architecture.svg website/docs/assets/
 ```
 
 `tests/test_node_figures_match.py` fails until the copies land, and

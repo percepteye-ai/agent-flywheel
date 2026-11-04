@@ -92,7 +92,7 @@ Your production agent is unaffected by any of this. It is a different process ca
 
 ## Watching a flywheel: `on_event`
 
-`serve(on_event=...)` takes a `Callable[[str, dict], None]`. There is no logger in this package; this is the only observability surface `serve()` has.
+`serve(on_event=...)` takes a `Callable[[str, dict], None]`. It is `serve()`'s observability surface; the events about held and refused results are also raised as Python warnings.
 
 ```python
 fw.serve(..., on_event=lambda kind, ev: print(kind, ev))
@@ -109,6 +109,17 @@ fw.serve(..., on_event=lambda kind, ev: print(kind, ev))
 | `artifact_failed` | collecting the rollout's artifacts failed; the rollout is still reported, excluded from training | `rollout_id`, `name` (always `"*"`), `error` |
 | `lease_lost` | the lease lapsed or was taken back | `rollout_id` |
 | `heartbeat_failed` | a renewal could not be delivered; two more beats remain | `rollout_id`, `error` |
+| `serve_failed` | the SDK itself failed while running a rollout; it is still reported | `rollout_id`, `error` |
+| `abandon_failed` | abandoning a crashed rollout could not be delivered | `rollout_id`, `error` |
+| `episode_plan` | how a rollout's budget was split | `rollout_id`, `budget_s`, `child_s`, `teardown_s`, `delivery_s` |
+| `harness_call_ceiling_inert` | the harness's per-call ceiling is longer than the time the episode leaves the agent; emitted once | `worst_case_call_s`, `child_s` |
+| `outcome_spooled` | the lease was lost before the deadline; the result is held in the outbox | `rollout_id`, `reason`, `path` |
+| `outcome_spool_failed` | the result could not be written to the outbox; delivery is attempted anyway | `rollout_id`, `error` |
+| `outcome_undeliverable` | the control plane refused the result in a way resending cannot fix; it is retired, never deleted | `rollout_id`, `status`, `error`, `path` |
+| `outcome_unrebuildable` | a held result could not be read back; it is moved aside | `rollout_id`, `error`, `path` |
+| `outcome_abandoned_in_outbox` | a held result is older than seven days and is no longer retried; it is kept | `rollout_id`, `age_s`, `path` |
+| `drain_failed` | delivering held results failed; they stay on disk and claiming continues | `error` |
+| `delivery_brake` | three deliveries in a row were refused permanently; the flywheel stops claiming | `consecutive_permanent_refusals`, `outbox` |
 
 **`claim_empty` is the one worth wiring first.** Without a callback a flywheel is silent, and an empty queue and a broken claim route look identical — `claim_empty` versus `claim_failed` is what tells them apart. This is the answer to "how do I know it's working."
 
@@ -180,7 +191,7 @@ fw.serve("my_package.agent:build", agent_id="widget-helper", input_shape="text",
 
 A rule is one prose sentence about how your agent should work — the conditional kind a reviewer would write down. **It is training guidance**: when a rule applies to a decision in your agent's traces, training sees it beside that decision. Nothing your agent is served changes — not its prompt, not what its model is sent.
 
-`serve()` and [`attach()`](production.md#attach-evidence-from-live-turns) take the same `rules=`, and send it once, after the registration, to `POST /agents/{agent_id}/rulebook`:
+`serve()` and [`attach()`](python.md#production-attach) take the same `rules=`, and send it once, after the registration, to `POST /agents/{agent_id}/rulebook`:
 
 - **The rules are the Product's, not the agent's.** The wire carries no Product: the control plane files them under the one active Product that declares this agent, as that Product's rulebook in force. An agent no Product declares, or more than one does, is refused (`409 rulebook_unattributed`, naming which) and nothing is registered.
 - **`None` sends nothing; `[]` retracts.** Leaving `rules=` out leaves the rulebook in force alone, whoever registered it; an empty list takes it away.
