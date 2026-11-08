@@ -78,6 +78,26 @@ WHAT IT WILL NOT DO
 * **It is never for** :func:`serve`. A donor rollout samples through the
   per-rollout gateway, which is what attributes and captures the completion.
   Pointing one at the policy endpoint bypasses capture entirely.
+
+THE SYSTEM PROMPT RIDES ALONG
+-----------------------------
+Prompt optimization keeps going after the first approval: Mission Control
+evolves the prompt from the traces this agent keeps producing, and every
+approval is the best prompt found so far. ``snap.prompt`` is the
+:class:`~agent_flywheel.PromptDecision` for the approved prompt served NOW --
+the same answer :func:`~agent_flywheel.prompt_decision` gives at start --
+re-read from ``/prompt/current`` only when ``/policy/current``'s
+``prompt_generation`` names a different one, so the text is not pulled on
+every poll::
+
+    snap = policy.current()
+    system_prompt = snap.prompt.text if snap.prompt.apply else MY_PROMPT
+
+Read it per turn, like the model: a turn never changes prompt halfway, and the
+next one runs the newest approval. Applying it stays your decision -- this
+hands back the decision and stops, as :func:`~agent_flywheel.current_prompt`
+does. An empty or failed read never takes an applied prompt away
+(:func:`~agent_flywheel.prompt.refreshed_prompt`).
 """
 from __future__ import annotations
 
@@ -89,6 +109,13 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import urlsplit
+
+from .prompt import (
+    PENDING_PROMPT,
+    PromptDecision,
+    prompt_needs_refresh,
+    refreshed_prompt,
+)
 
 __all__ = [
     "ARCHIVE_REF_PREFIXES",
@@ -297,12 +324,18 @@ class PolicySnapshot:
     #: DELIBERATELY NOT what ``changed`` is computed from, and the two answer
     #: different questions. ``changed`` asks "must I rebuild my client?" and
     #: moves only when the endpoint does. This moves when ANYTHING about what
-    #: to run moves — including the system prompt, which this snapshot does
-    #: not carry and a client rebuild would not apply. A fleet holds this
-    #: value and cycles a replica when it differs; a turn loop reads
-    #: ``changed``. Folding them together would either cycle replicas for
-    #: endpoint-only changes or miss prompt changes entirely.
+    #: to run moves — including a newly approved system prompt, which a
+    #: client rebuild would not apply (``prompt`` below does). A fleet holds
+    #: this value and cycles a replica when it differs; a turn loop reads
+    #: ``changed`` and ``prompt``. Folding them together would either cycle
+    #: replicas for endpoint-only changes or miss prompt changes entirely.
     serving_generation: str = ""
+
+    #: May the approved system prompt served NOW be applied, and its text --
+    #: :func:`~agent_flywheel.prompt_decision`'s answer, kept current as new
+    #: prompts are approved. ``apply`` is false (with the reason) until one
+    #: is served, and the host's own prompt stands. Read it per turn.
+    prompt: PromptDecision = PENDING_PROMPT
 
     #: True when this snapshot is empty because the control plane WITHDREW
     #: the policy it served (:func:`is_withdrawn`), until it serves one again:
@@ -368,6 +401,7 @@ class PolicySource:
         _now: Callable[[], float] = time.monotonic,
         _fetch: Callable[[], dict[str, Any]] | None = None,
         _rand: Callable[[float, float], float] = random.uniform,
+        _fetch_prompt: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.agent_id = agent_id
         self._now = _now
@@ -407,6 +441,10 @@ class PolicySource:
         self._next_refresh_at: float = -1.0     # -1 => never fetched
         self._last_identity: tuple[str, str, str] | None = None
         self._fetch_override = _fetch
+        self._fetch_prompt_override = _fetch_prompt
+        #: The ``/prompt/current`` generation ``snap.prompt`` was read at;
+        #: ``""`` before one was.
+        self._prompt_generation = ""
         self._client: Any = None
 
     # ── public surface ────────────────────────────────────────────────────
@@ -489,17 +527,47 @@ class PolicySource:
                 with self._state_lock:
                     self._snap = replace(self._snap, last_refresh_ok=False)
                 return
+            # The PROMPT TEXT, read only when the served prompt is not the
+            # one held -- still outside the state lock, still one bounded
+            # attempt. Fail-open: a failed read is held as "not read", and
+            # the next refresh asks again.
+            answer: dict[str, Any] | None = None
             with self._state_lock:
-                self._absorb(body, now)
+                held_generation = self._prompt_generation
+            if prompt_needs_refresh(held_generation, body):
+                try:
+                    answer = self._fetch_prompt()
+                except Exception:
+                    answer = None
+            with self._state_lock:
+                self._absorb(body, now, answer)
         finally:
             self._refresh_lock.release()
 
-    def _absorb(self, body: dict[str, Any], now: float) -> None:
+    def _absorb(self, body: dict[str, Any], now: float,
+                answer: dict[str, Any] | None = None) -> None:
         """Fold a successful response into the cache. Called under
-        ``_state_lock``."""
+        ``_state_lock``. ``answer`` is the ``/prompt/current`` body when it
+        was read this refresh."""
         from . import endpoint_kwargs
 
         self._last_ok_at = now
+        # THE PROMPT HALF, decided before either branch below so both carry
+        # it: an agent whose only improvement is its prompt has no endpoint,
+        # and it is exactly the agent that lands in the early return.
+        prompt, prompt_generation = refreshed_prompt(
+            self._snap.prompt, self._prompt_generation, body, answer)
+        if prompt_generation != self._prompt_generation:
+            _log.info(
+                "agent-flywheel: agent_id=%r is now served approved system "
+                "prompt %r v%s (sha256 %s): %s", self.agent_id,
+                (answer or {}).get("name") or "unnamed",
+                (answer or {}).get("version", "?"),
+                str((answer or {}).get("sha256") or "")[:12] or "none",
+                "apply it from the next turn" if prompt.apply
+                else f"NOT applicable -- {prompt.reason}",
+            )
+        self._prompt_generation = prompt_generation
         hint = body.get("ttl_s") if isinstance(body, dict) else None
         if isinstance(hint, (int, float)) and not isinstance(hint, bool) and hint > 0:
             self._server_ttl = float(hint)
@@ -533,6 +601,7 @@ class PolicySource:
                     str(body.get("serving_generation") or "")
                     if isinstance(body, dict) else ""
                 ) or self._snap.serving_generation,
+                prompt=prompt,
             )
             return
 
@@ -556,6 +625,7 @@ class PolicySource:
             base_url=identity[0], api_key=identity[1], model=identity[2],
             changed=changed, last_refresh_ok=True,
             serving_generation=generation, withdrawn=withdrawn,
+            prompt=prompt,
         )
         if changed and withdrawn:
             # SAID ONCE, on the edge: the empty snapshot is otherwise the same
@@ -573,6 +643,19 @@ class PolicySource:
                 self._on_change(self._snap)
             except Exception:
                 pass
+
+    def _fetch_prompt(self) -> dict[str, Any]:
+        """``/prompt/current`` through the client ``_fetch`` built. Fail-open
+        (``{}``): to :func:`refreshed_prompt` a failed read and an empty one
+        are the same "keep what you have"."""
+        if self._fetch_prompt_override is not None:
+            return self._fetch_prompt_override()
+        if self._client is None:
+            return {}
+        from .transport import AttachTransport
+
+        return AttachTransport(
+            self._client, agent_id=self.agent_id).prompt_current() or {}
 
     def _fetch(self) -> dict[str, Any]:
         if self._fetch_override is not None:

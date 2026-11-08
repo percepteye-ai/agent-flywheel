@@ -17,5 +17,6 @@
   "resolved_at": "2026-10-02T12:00:00+00:00",
   "ttl_s": 60.0,
   "withdrawn": false,
+  "prompt_generation": null,
   "serving_generation": "4cb601dcb5157267"
 }

@@ -463,3 +463,108 @@ def test_an_endpoint_change_moves_BOTH():
 def test_a_missing_generation_is_empty_not_invented():
     src, _ = _source([_body()])
     assert src.current().serving_generation == ""
+
+
+# ── the system prompt rides along: newer approvals reach a running agent ──
+
+
+_SHA1, _SHA2 = "1" * 64, "2" * 64
+
+
+def _prompt(text, *, gen, sha, status="approved", stale=False):
+    return {"name": "support-triage", "version": 3, "text": text,
+            "sha256": sha, "model_prompt_checksum": sha, "status": status,
+            "stale_baseline": stale, "generation": gen}
+
+
+def _prompt_source(policies, prompts, *, clock):
+    """A handle whose /policy/current and /prompt/current reads are both
+    scripted, counting the prompt reads."""
+    src, calls = _source(policies, clock=clock)
+    reads = {"n": 0}
+
+    def _fetch_prompt():
+        i = min(reads["n"], len(prompts) - 1)
+        reads["n"] += 1
+        item = prompts[i]
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    src._fetch_prompt_override = _fetch_prompt
+    return src, reads
+
+
+def test_a_newly_approved_prompt_reaches_a_RUNNING_agent():
+    """Prompt optimization keeps going after the first approval, so a prompt
+    read once at start ran the first approval forever. The handle re-reads
+    the text when /policy/current names a different approved prompt, and the
+    next turn runs it -- with no endpoint at all, the prompt-only case."""
+    clock = _Clock()
+    src, reads = _prompt_source(
+        [{"prompt_generation": "g1"}, {"prompt_generation": "g2"}],
+        [_prompt("FIRST", gen="g1", sha=_SHA1),
+         _prompt("SECOND, BETTER", gen="g2", sha=_SHA2)],
+        clock=clock,
+    )
+    first = src.current().prompt
+    assert first.apply and first.text == "FIRST"
+    clock.advance(301)
+    second = src.current().prompt
+    assert second.apply and second.text == "SECOND, BETTER"
+    assert reads["n"] == 2
+
+
+def test_the_text_is_NOT_re_read_while_the_served_prompt_is_unchanged():
+    """The poll is identity-sized and the text is not: re-reading the prompt
+    every TTL would ship the customer's whole prompt for nothing."""
+    clock = _Clock()
+    src, reads = _prompt_source(
+        [{"prompt_generation": "g1"}],
+        [_prompt("FIRST", gen="g1", sha=_SHA1)], clock=clock,
+    )
+    for _ in range(4):
+        src.current()
+        clock.advance(301)
+    assert reads["n"] == 1
+
+
+def test_a_failed_or_empty_read_never_takes_an_applied_prompt_away():
+    """``{}`` from /prompt/current also means "could not answer"; and a
+    /policy/current that stops naming a prompt is absence, not withdrawal."""
+    clock = _Clock()
+    src, reads = _prompt_source(
+        [{"prompt_generation": "g1"}, {"prompt_generation": "g2"}, {}],
+        [_prompt("FIRST", gen="g1", sha=_SHA1), {}], clock=clock,
+    )
+    assert src.current().prompt.text == "FIRST"
+    clock.advance(301)
+    assert src.current().prompt.text == "FIRST"   # g2 read came back empty
+    clock.advance(301)
+    assert src.current().prompt.text == "FIRST"   # nothing served: keep
+
+
+def test_a_stale_newer_bundle_is_refused_as_it_would_be_at_start():
+    """Converge on what a fresh start applies: a bundle whose baseline moved
+    is refused there, so it is refused here, and the host's prompt stands."""
+    clock = _Clock()
+    src, _ = _prompt_source(
+        [{"prompt_generation": "g1"}, {"prompt_generation": "g1s"}],
+        [_prompt("FIRST", gen="g1", sha=_SHA1),
+         _prompt("FIRST", gen="g1s", sha=_SHA1, stale=True)], clock=clock,
+    )
+    assert src.current().prompt.apply
+    clock.advance(301)
+    held = src.current().prompt
+    assert not held.apply and "stale_baseline=true" in held.reason
+
+
+def test_before_any_answer_the_prompt_is_not_applied_and_says_why():
+    snap = PolicySnapshot()
+    assert not snap.prompt.apply and snap.prompt.text is None
+    assert snap.prompt.reason == "the control plane has not been asked yet"
+    clock = _Clock()
+    src, reads = _prompt_source([{}], [{}], clock=clock)
+    told = src.current().prompt
+    assert not told.apply and "empty answer" in told.reason
+    assert reads["n"] == 0

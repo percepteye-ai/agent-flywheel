@@ -47,6 +47,27 @@ FAIL-OPEN, AT EVERY BRANCH. Every answer other than "apply" leaves the caller
 holding the prompt it already had. Nothing here raises, an empty answer is a
 refusal rather than an error, and there is no path through this module that
 ends with an agent running on no prompt at all.
+
+A NEWER APPROVED PROMPT, WITHOUT A RESTART
+------------------------------------------
+Prompt optimization does not stop at the first approval. Mission Control keeps
+evolving the prompt from the traces this agent keeps producing -- including
+while an operator has not yet decided the last improvement -- and each round
+has to beat the candidate already waiting, so every approval is the best
+prompt found so far. A process that read its prompt once at start ran the
+first approval forever.
+
+So ``/policy/current``, which a :class:`~agent_flywheel.PolicySource` polls
+anyway, names WHICH approved prompt is served as ``prompt_generation``, and
+``/prompt/current`` returns the same token as ``generation``. Two pure rules
+decide what a running handle does with them, and the Node SDK asks the same
+two with the same answers (``tests/test_prompt_decision_parity.py``):
+
+* :func:`prompt_needs_refresh` -- re-read the text only when the served token
+  differs from the one held. The text is unbounded and the poll is not.
+* :func:`refreshed_prompt` -- converge on what a fresh start would apply,
+  except that an empty or failed answer never takes an applied prompt away:
+  the control plane says "keep what you have" exactly that way.
 """
 from __future__ import annotations
 
@@ -176,3 +197,73 @@ def prompt_decision(prompt: Mapping[str, Any] | None) -> PromptDecision:
     # made on. Leading whitespace in an approved system prompt is part of what
     # was certified, and this side does not get to edit it.
     return PromptDecision(apply=True, text=text, checksum=checksum, reason="")
+
+
+#: Why nothing is applied before the control plane has been asked. Word for
+#: word the Node SDK's ``PENDING_ANSWER_REASON``.
+PENDING_ANSWER_REASON = "the control plane has not been asked yet"
+
+#: The decision a handle holds before its first answer: apply nothing, so the
+#: prompt the host assembles stands.
+PENDING_PROMPT = PromptDecision(
+    apply=False, text=None, checksum=None, reason=PENDING_ANSWER_REASON,
+)
+
+
+def served_prompt_generation(policy: Mapping[str, Any] | None) -> str:
+    """Which approved prompt ``/policy/current`` says is served, or ``""``.
+
+    The token ``/prompt/current`` returns beside the text as ``generation``.
+    ``""`` when the control plane serves none -- or predates the field, which
+    then disables refreshing rather than forcing a read every poll."""
+    raw = policy.get("prompt_generation") if isinstance(policy, Mapping) else None
+    return _str(raw)
+
+
+def prompt_needs_refresh(held_generation: str,
+                         policy: Mapping[str, Any] | None) -> bool:
+    """Should the text be re-read? Only when a prompt is served and it is not
+    the one held. Absence is never a reason to read: it is the answer
+    "keep what you have"."""
+    served = served_prompt_generation(policy)
+    return bool(served) and served != _str(held_generation)
+
+
+def refreshed_prompt(
+    held: PromptDecision, held_generation: str,
+    policy: Mapping[str, Any] | None, answer: Mapping[str, Any] | None,
+) -> tuple[PromptDecision, str]:
+    """The decision and generation to hold after a poll. Pure.
+
+    :param held: the decision held now (:data:`PENDING_PROMPT` at first).
+    :param held_generation: the generation it was read at, ``""`` for none.
+    :param policy: the ``/policy/current`` body just read.
+    :param answer: the ``/prompt/current`` body read because
+        :func:`prompt_needs_refresh` said so, or ``None`` when not read.
+
+    THE RULE: converge on what a fresh start would apply, with one exception.
+
+    * Nothing served and nothing ever held: the fresh start's answer to an
+      empty read, said as such rather than "not asked yet".
+    * An answer with text: whatever :func:`prompt_decision` says of it --
+      a newer approved prompt applies; a stale or mispaired one is refused
+      and the host's own prompt stands, exactly as at start -- held at the
+      answer's ``generation`` (or the served one, if it carries none), so the
+      same answer is not re-read every poll.
+    * THE EXCEPTION -- no answer, an empty one, or nothing served after a
+      prompt was held: keep what is held. ``/prompt/current`` answers ``{}``
+      for "could not answer" too, and an unreachable control plane must never
+      blank a running agent's instructions.
+    """
+    held_gen = _str(held_generation)
+    served = served_prompt_generation(policy)
+    if not served:
+        if held_gen or held.apply:
+            return held, held_gen
+        return prompt_decision({}), ""
+    if isinstance(answer, Mapping):
+        raw = answer.get("text")
+        if isinstance(raw, str) and raw.strip():
+            return (prompt_decision(answer),
+                    _str(answer.get("generation")) or served)
+    return held, held_gen
