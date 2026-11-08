@@ -353,8 +353,9 @@ class AttachTransport:
         run; training also produces a system prompt, co-optimized with that
         model and gated by the same kind of human approval — and until this
         existed an agent could learn only THAT the prompt had moved, never what
-        it moved to. ``PolicySnapshot.serving_generation`` changes for a prompt
-        change, and there was nothing to fetch in response.
+        it moved to. ``/policy/current``'s ``prompt_generation`` names which
+        approved prompt is served, and :class:`~agent_flywheel.PolicySource`
+        reads this only when that differs from the one it holds.
 
         A SEPARATE call from ``policy_current`` on purpose. That one is polled
         and identity-sized; a system prompt is unbounded text, so putting it in

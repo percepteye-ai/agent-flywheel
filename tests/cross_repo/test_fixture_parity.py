@@ -49,9 +49,9 @@ FIXTURES = pathlib.Path(__file__).resolve().parents[1] / "fixtures"
 #: Each shared fixture and the sha256 every copy of it was made from.
 SHARED = {
     "policy_current_gateway.json":
-        "46871a1b96401e321df5a19501f0bbcaa0413970ad1629be56cc276d25a0a3a6",
+        "42b03bb8d72404564ccb86e1532aa84a1bb2614f9bb042f1681897abafcd4c02",
     "policy_current_withdrawn.json":
-        "b370a3ae9b5742b78d6b97c5774fc51089822d8be7aac119eeb14e2c788ccbe9",
+        "46ccbd0bfe1f64cdd92cbce38526c5ffc59e3856f544abda7b92c1356ac0f7fa",
 }
 
 #: The fixtures the two SDKs alone share (the control plane holds no copy):

@@ -404,16 +404,22 @@ def current_prompt(
     The other half of :func:`current_policy`. That one answers "which model";
     training also produces a system PROMPT, co-optimized with that model and
     gated by the same human approval — and until this existed an agent could
-    learn only that the prompt had moved, never what it moved to. The snapshot
-    in :class:`PolicySource` says as much in its own comment: its generation
-    changes for a prompt change, "which this snapshot does not carry and a
-    client rebuild would not apply".
+    learn only that the prompt had moved, never what it moved to.
+
+    ONE-SHOT, like :func:`current_policy`. Prompt optimization keeps going
+    after the first approval, so a long-running agent reads
+    ``policy_source(...).current().prompt`` per turn instead: the same
+    decision, kept current as newer prompts are approved.
 
     Returns the deliverable::
 
         {"name": ..., "version": 3, "sha256": ..., "text": "...",
          "candidate_kind": "replacement", "status": "approved",
-         "model_prompt_checksum": ..., "stale_baseline": false}
+         "model_prompt_checksum": ..., "stale_baseline": false,
+         "generation": "..."}
+
+    ``generation`` is the token ``/policy/current`` repeats as
+    ``prompt_generation`` while this is the approved prompt served.
 
     ``{}`` means KEEP THE PROMPT YOU HAVE — nothing has passed the approval
     gate for this agent, or the control plane could not answer. It never means

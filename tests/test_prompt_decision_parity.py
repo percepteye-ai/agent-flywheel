@@ -210,3 +210,108 @@ def test_the_table_reaches_every_branch(node_answers):
     assert not unclassified, (
         "the Node SDK refused with a cause this table does not know:\n"
         + "\n".join(sorted(set(unclassified))))
+
+
+# ── the refresh rule: when a running agent re-reads, and what it then holds ──
+
+from agent_flywheel.prompt import (  # noqa: E402
+    PENDING_PROMPT,
+    prompt_needs_refresh,
+    refreshed_prompt,
+)
+
+_APPLIED = {"apply": True, "text": "OLD", "checksum": _SHA, "reason": ""}
+_PENDING = dataclasses.asdict(PENDING_PROMPT)
+_NEW = {"text": "NEW", "status": "approved", "sha256": _OTHER,
+        "model_prompt_checksum": _OTHER, "generation": "g2"}
+
+#: (held decision, held generation, /policy/current body, /prompt/current
+#: answer or None). Each row is one situation a running agent meets.
+REFRESH_CASES: dict[str, list] = {
+    "same prompt served: nothing to read":
+        [_APPLIED, "g1", {"prompt_generation": "g1"}, None],
+    "a newer approval is served and read":
+        [_APPLIED, "g1", {"prompt_generation": "g2"}, _NEW],
+    "a newer approval, its read failed or came back empty":
+        [_APPLIED, "g1", {"prompt_generation": "g2"}, {}],
+    "a newer approval, the read returned junk":
+        [_APPLIED, "g1", {"prompt_generation": "g2"}, "junk"],
+    "nothing served any more, after a prompt was held":
+        [_APPLIED, "g1", {}, None],
+    "nothing served, nothing ever held":
+        [_PENDING, "", {"prompt_generation": None}, None],
+    "an older control plane with no field":
+        [_PENDING, "", {"arm": "base"}, None],
+    "first prompt served to a fresh handle":
+        [_PENDING, "", {"prompt_generation": "g2"}, _NEW],
+    "the newer bundle is stale: refused, held at its generation":
+        [_APPLIED, "g1", {"prompt_generation": "g2"},
+         {**_NEW, "stale_baseline": True}],
+    "an answer without a generation is held at the served one":
+        [_APPLIED, "g1", {"prompt_generation": "g2"},
+         {k: v for k, v in _NEW.items() if k != "generation"}],
+    "the generation is trimmed on both sides":
+        [_APPLIED, " g1 ", {"prompt_generation": "g1  "}, None],
+    "a non-string generation is no generation":
+        [_APPLIED, "g1", {"prompt_generation": 7}, None],
+}
+
+
+def _py_refresh(held, held_gen, policy, answer) -> dict:
+    from agent_flywheel import PromptDecision
+
+    decision, gen = refreshed_prompt(
+        PromptDecision(**held), held_gen, policy, answer)
+    return {"needs": prompt_needs_refresh(held_gen, policy),
+            "decision": dataclasses.asdict(decision), "generation": gen}
+
+
+@pytest.fixture(scope="module")
+def node_refresh_answers() -> dict[str, dict]:
+    sdk, node = require_node_sdk()
+    script = (
+        "import {promptNeedsRefresh, refreshedPrompt} from './src/policy.js';\n"
+        "let raw='';\n"
+        "for await (const chunk of process.stdin) raw += chunk;\n"
+        "const cases = JSON.parse(raw);\n"
+        "const out = {};\n"
+        "for (const [name, [held, gen, policy, answer]] of Object.entries(cases)) {\n"
+        "  const [decision, generation] = refreshedPrompt(held, gen, policy, answer);\n"
+        "  out[name] = {needs: promptNeedsRefresh(gen, policy), decision, generation};\n"
+        "}\n"
+        "process.stdout.write(JSON.stringify(out));\n"
+    )
+    answers = json.loads(run_node(sdk, node, script,
+                                  stdin=json.dumps(REFRESH_CASES)))
+    assert set(answers) == set(REFRESH_CASES)
+    return answers
+
+
+@pytest.mark.parametrize("name", list(REFRESH_CASES))
+def test_both_sdks_refresh_a_running_prompt_the_same_way(
+        name, node_refresh_answers):
+    """When to re-read, and what to hold after, field for field: a customer
+    who migrates SDKs must not find a newer approval reaching one language's
+    agents and not the other's, nor an empty read blanking one and not the
+    other."""
+    mine = _py_refresh(*REFRESH_CASES[name])
+    theirs = node_refresh_answers[name]
+    assert mine == theirs, (
+        f"the two SDKs disagree about {name!r}:\n"
+        f"  python: {json.dumps(mine, indent=2)}\n"
+        f"  node  : {json.dumps(theirs, indent=2)}")
+
+
+def test_the_refresh_table_reaches_every_outcome():
+    """Adopt a newer one, refuse a stale one, keep on an empty read, keep on
+    absence, and the fresh-start empty answer -- each reached at least once."""
+    outs = {n: _py_refresh(*c) for n, c in REFRESH_CASES.items()}
+    assert any(o["decision"]["text"] == "NEW" for o in outs.values())
+    assert any(not o["decision"]["apply"]
+               and "stale_baseline=true" in o["decision"]["reason"]
+               for o in outs.values())
+    assert any(o["needs"] and o["decision"]["text"] == "OLD"
+               for o in outs.values())
+    assert any(not o["needs"] and o["decision"]["text"] == "OLD"
+               for o in outs.values())
+    assert any("empty answer" in o["decision"]["reason"] for o in outs.values())
