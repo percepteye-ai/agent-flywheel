@@ -232,3 +232,37 @@ def test_serve_refuses_an_incompatible_control_plane_before_registering(
             max_rollouts=0,
         )
     assert box["tr"].registered is None
+
+
+# ── practice's two switches: the control plane names the one that is off ──
+
+
+@pytest.mark.parametrize("answer, says", [
+    ({"missing": [{"switch": "practice_consent",
+                   "code": "practice_rollouts_not_enabled",
+                   "detail": "practice runs are not allowed for this agent."}]},
+     True),
+    ({"missing": []}, False),
+    (None, False),  # an older control plane, or a production registration
+])
+def test_serve_says_when_mission_controls_switch_is_off(
+    captured, monkeypatch, capsys, answer, says,
+):
+    """A training-mode serve() prints one line, in the control plane's words,
+    when Mission Control's "Allow practice runs" is off; nothing when it is
+    on or when the control plane does not answer. Mutation: drop the print,
+    or read the switch off anything but ``practice.missing``."""
+    real = _FakeTransport.register
+
+    def register(self, spec):
+        body = real(self, spec)
+        if answer is not None:
+            body["practice"] = answer
+        return body
+
+    monkeypatch.setattr(_FakeTransport, "register", register)
+    captured(["python", "agent.py"])
+    out = capsys.readouterr().out
+    assert ("Allow practice runs" in out) is says, out
+    if says:
+        assert "practice runs are not allowed for this agent." in out

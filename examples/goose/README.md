@@ -14,7 +14,7 @@ added to goose itself.
 >
 > If instead you *run goose yourself*, you do not need this file or any worker
 > process: `pip install agent-flywheel`, `agent-flywheel install-hooks`, and you
-> start goose exactly as before. In training mode (the default), with
+> start goose exactly as before. In training mode (`PERCEPTEYE_AGENT_MODE=training`, never the default), with
 > `PERCEPTEYE_CONTROL_PLANE_URL` and `PERCEPTEYE_API_KEY` set, each session
 > claims one practice task when a run has one for this agent
 > (`PERCEPTEYE_AGENT_ID`, default `goose`), finds it in its working directory

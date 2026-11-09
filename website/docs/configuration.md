@@ -7,9 +7,11 @@ Every knob is a keyword argument on `serve()` or one of seven environment variab
 `PERCEPTEYE_AGENT_MODE` decides whether this process does training work. It is the one knob that turns the flywheel off.
 
 ```bash
-PERCEPTEYE_AGENT_MODE=training      # claim rollouts and run them (the default when unset)
-PERCEPTEYE_AGENT_MODE=production    # serve() returns 0 immediately. No claim, no connection.
+PERCEPTEYE_AGENT_MODE=training      # claim rollouts and run them
+PERCEPTEYE_AGENT_MODE=production    # serve() returns 0 immediately. No claim, no connection. (the default when unset)
 ```
+
+**Both switches are needed for training.** This one says the process may run practice tasks. **Allow practice runs** on the agent in Mission Control (an org admin) says the platform may send them. A training process runs our tasks through your agent's real tools, so point it at a test or sandbox backend.
 
 **The same deployed image does either without a code edit.** "Stop contributing capacity" is an operational decision, and it should not require editing source to express it.
 
@@ -54,9 +56,9 @@ production, rollout, rollouts, serving, train, training.
 |:--|:--|:--|
 | 1 | `mode=` argument to `serve()` | an empty or whitespace-only string counts as **not passed** and falls through to rank 2 |
 | 2 | `PERCEPTEYE_AGENT_MODE` | what lets an operator flip a deployment without editing code |
-| 3 | `"training"` | the default when neither is set |
+| 3 | `"production"` | the default when neither is set: training is always an explicit choice |
 
-The empty-string rule is load-bearing. `mode=cfg.get("percepteye_mode", "")` is the ordinary way a config layer says "not set"; honoring it as a value pinned the process to `training` without ever reading the variable, so an operator who had flipped the switch kept contributing, on their own credentials, with nothing printed.
+The empty-string rule is load-bearing. `mode=cfg.get("percepteye_mode", "")` is the ordinary way a config layer says "not set"; honoring it as a value pinned the process to one mode without ever reading the variable, so an operator who had flipped the switch got the other mode, with nothing printed.
 
 **An override is announced in both directions.** When `mode=` in code disagrees with the environment, the line says which won:
 
@@ -327,7 +329,7 @@ Symlinks are **never** followed — one dropped in the agent's own directory wou
 
 | Variable | Meaning |
 |:--|:--|
-| `PERCEPTEYE_AGENT_MODE` | `training` (default) or `production`. In production `serve()` returns 0 without connecting. Gates capacity contribution only — not `attach()`. A value it cannot parse raises rather than being guessed. |
+| `PERCEPTEYE_AGENT_MODE` | `production` (default) or `training`. In production `serve()` returns 0 without connecting. Gates capacity contribution only — not `attach()`. A value it cannot parse raises rather than being guessed. |
 | `PERCEPTEYE_CONTROL_PLANE_URL` | Control-plane base URL, default `https://launch.percepteye.ai/api/flywheel/v1`. Overridable with `control_plane_url=`. |
 | `PERCEPTEYE_API_KEY` | Your flywheel key. Overridable with `api_key=`. When it is unset, the key `agent-flywheel login` stored for this agent on this control plane is used, and said once on stderr. |
 | `PERCEPTEYE_HOME` | Where this SDK keeps its files, default `~/.percepteye`: captured turns, and `credentials.json`, the keys `agent-flywheel login` stores (mode 0600, shared with the Node SDK). |

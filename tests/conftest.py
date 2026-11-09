@@ -25,8 +25,13 @@ def _no_ambient_agent_mode(monkeypatch):
 
     The name is unnamespaced, so this is likelier than it was: PERCEPTEYE_AGENT_MODE may
     already be exported for something that has nothing to do with us.
+
+    The suite runs in TRAINING, set explicitly: unset is production (training
+    is always a customer's explicit choice), and most of the suite exercises
+    serve()'s training path. A test about the default or about production
+    deletes or sets the variable itself (``test_mode_switch``).
     """
-    monkeypatch.delenv("PERCEPTEYE_AGENT_MODE", raising=False)
+    monkeypatch.setenv("PERCEPTEYE_AGENT_MODE", "training")
 
 
 def _isolate_home(patch: pytest.MonkeyPatch, home: pathlib.Path) -> None:

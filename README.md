@@ -45,14 +45,14 @@ Ship one line. Your agent keeps running in your process, behind your firewall, o
      requires every published copy to match it, here and on the docs site, so
      editing one copy alone turns the suite red. Re-derive by hand with:
        .venv/bin/python -m pytest tests/ --collect-only -q -p no:warnings \
-         | awk -F': ' '/^tests\/.*: [0-9]+$/{n+=$2} END{print n}'   # -> 1502 -->
+         | awk -F': ' '/^tests\/.*: [0-9]+$/{n+=$2} END{print n}'   # -> 1506 -->
 [![ci](https://img.shields.io/github/actions/workflow/status/percepteye-ai/agent-flywheel/ci.yml?branch=main&label=ci&style=for-the-badge&logo=githubactions&logoColor=white&color=22c55e)](https://github.com/percepteye-ai/agent-flywheel/actions)
 [![pypi](https://img.shields.io/pypi/v/agent-flywheel?style=for-the-badge&logo=pypi&logoColor=white&label=pypi&color=3b82f6)](https://pypi.org/project/agent-flywheel/)
 [![python](https://img.shields.io/badge/python-3.10%20→%203.13-3b82f6?style=for-the-badge&logo=python&logoColor=white)](https://github.com/percepteye-ai/agent-flywheel/blob/main/pyproject.toml)
 <br/>
 [![runtime dependencies](https://img.shields.io/badge/runtime_deps-1-f59e0b?style=for-the-badge)](https://github.com/percepteye-ai/agent-flywheel/blob/main/pyproject.toml)
 [![lines changed in your agent](https://img.shields.io/badge/lines_changed_in_your_agent-0-ec4899?style=for-the-badge)](#-zero-instrumentation-concretely)
-[![tests](https://img.shields.io/badge/tests-1502_·_0_skips-22c55e?style=for-the-badge)](#-development)
+[![tests](https://img.shields.io/badge/tests-1506_·_0_skips-22c55e?style=for-the-badge)](#-development)
 [![license](https://img.shields.io/badge/license-MIT-14b8a6?style=for-the-badge)](https://github.com/percepteye-ai/agent-flywheel/blob/main/LICENSE)
 
 <br/>
@@ -137,6 +137,7 @@ That is the whole product. Not a dashboard you read, not a benchmark you run —
 ```bash
 pip install agent-flywheel      # one runtime dependency: httpx
 export PERCEPTEYE_API_KEY=pefw_...
+export PERCEPTEYE_AGENT_MODE=training   # unset means production: serve() runs nothing
 ```
 
 **Or skip the browser tab.** Once the package is installed, the terminal can get the key for you:
@@ -156,6 +157,9 @@ import agent_flywheel as fw
 
 fw.serve("my_package.agent:build", agent_id="my-coding-agent", input_shape="text")
 ```
+
+> [!IMPORTANT]
+> **Training takes two switches, one on each side.** `PERCEPTEYE_AGENT_MODE=training` here says this process may run practice tasks. **Allow practice runs** on the agent in Mission Control (an org admin) says the platform may send them. With only one of the two, no practice task runs: unset or `production`, `serve()` returns at once and says so; without the Mission Control permission, a training run is refused before it starts and names the permission.
 
 **That is the integration.** You pass an importable `"module:attr"` factory so each rollout can rebuild your agent in a fresh child process. `serve()` claims rollouts, runs them, reports outcomes, and blocks until you stop it. Pass the `agent_id` you named in the dashboard: the key is bound to it.
 
@@ -258,9 +262,11 @@ Beat ⓪ is why you never write a task list. Tasks come from **the tool surface 
 One variable decides whether a deployment does training work. The same container does either, with no code edit.
 
 ```bash
-PERCEPTEYE_AGENT_MODE=training      # the default when unset
-PERCEPTEYE_AGENT_MODE=production
+PERCEPTEYE_AGENT_MODE=training
+PERCEPTEYE_AGENT_MODE=production    # the default when unset
 ```
+
+**Training is always an explicit choice.** A training process runs tasks we write through your agent's real tools, so point it at a test or sandbox backend, never the one your users depend on. Nothing about it happens by default: a deployment that never set the variable is a production deployment. Mission Control has the second switch, **Allow practice runs** on the agent, and both must be on.
 
 | | `training` | `production` |
 |:--|:--|:--|
@@ -525,7 +531,7 @@ A refused request raises `CustomerRefusal` with the body's `code`, `message`, `c
 |:--|:--|
 | `PERCEPTEYE_CONTROL_PLANE_URL` | control-plane base URL; unset, it defaults to `https://launch.percepteye.ai/api/flywheel/v1` |
 | `PERCEPTEYE_API_KEY` | your flywheel key, from [launch.percepteye.ai](https://launch.percepteye.ai/onboard/agent-sdk) |
-| `PERCEPTEYE_AGENT_MODE` | `training` (default) or `production` — [one switch, both ways](#-two-modes-one-image) |
+| `PERCEPTEYE_AGENT_MODE` | `production` (default) or `training` — [one switch, both ways](#-two-modes-one-image) |
 | `PERCEPTEYE_INTROSPECT` | `0` disables agent discovery |
 | `PERCEPTEYE_TRAJECTORY_DIR` | one explicit trajectory directory, for a single run |
 
@@ -562,7 +568,7 @@ python -m venv .venv
 
 The last one is **not** the Node package's own suite — that lives in the [Node repository](https://github.com/percepteye-ai/agent-flywheel-node) and runs there with `npm test`. This drives records through the Node writer and asserts the Python `Trajectory` reads them back with the same meaning, which is the half only this repo can check. **It needs a Node checkout**: point `PERCEPTEYE_NODE_SDK` at one, or keep it as a sibling directory. Without one it prints `SKIPPED` and exits 0, and the cross-language tests in the suite above skip with it.
 
-1502 tests, and CI permits **zero skips** — a skipped test and a passing test look identical in a green check mark. CI names `PERCEPTEYE_NODE_SDK` and `PRIME_AGENT_PACKAGE_ROOT` and installs both, so neither the cross-language half nor the tests that execute the real `prime-agent` binary can go green by skipping there. Other jobs assert that a bare install still works on Python 3.10→3.13, that the runtime dependency list never grows past `httpx`, and that the Node plugins never drift from the Python reader.
+1506 tests, and CI permits **zero skips** — a skipped test and a passing test look identical in a green check mark. CI names `PERCEPTEYE_NODE_SDK` and `PRIME_AGENT_PACKAGE_ROOT` and installs both, so neither the cross-language half nor the tests that execute the real `prime-agent` binary can go green by skipping there. Other jobs assert that a bare install still works on Python 3.10→3.13, that the runtime dependency list never grows past `httpx`, and that the Node plugins never drift from the Python reader.
 
 [`schema/flywheel-1.json`](https://github.com/percepteye-ai/agent-flywheel/blob/main/schema/flywheel-1.json) is the wire contract and this repository owns it. Absence is never collapsed into zero: `tool_calls=None` means "I did not report tool calls"; `[]` means "I observed zero", a positive claim. The animations above are generated, not drawn — [`docs/assets/render.sh`](https://github.com/percepteye-ai/agent-flywheel/blob/main/docs/assets/render.sh) rebuilds them.
 

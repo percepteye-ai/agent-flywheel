@@ -36,6 +36,9 @@ def host(tmp_path, monkeypatch):
     for var in ("OPENAI_HOST", "OPENAI_BASE_URL", "PERCEPTEYE_AGENT_MODE",
                 "PERCEPTEYE_LLM_BASE_URL"):
         monkeypatch.delenv(var, raising=False)
+    # Training is explicit (unset is production), and these tests are about
+    # flipping it, so they start from training.
+    monkeypatch.setenv("PERCEPTEYE_AGENT_MODE", "training")
     # Routing needs BOTH the training mode and a key. The keyless case has its
     # own test below; every other test here is about the switch, not consent.
     monkeypatch.setenv("PERCEPTEYE_API_KEY", "pefw_test")
