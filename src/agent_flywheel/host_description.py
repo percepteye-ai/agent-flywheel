@@ -819,6 +819,8 @@ def warm_up_command(
         api_key="percepteye-warmup-no-sampling",
         trajectory_dir=str(target),
         parent_env=parent_environment,
+        # Not a rollout: no auxiliary-model route is offered.
+        auxiliary_route=False,
         # Discovery assembles a catalogue; it does not execute a customer's
         # task and has no reason to receive Jira, AWS, database, or arbitrary
         # application credentials. Keep only locations the explicit execution

@@ -176,3 +176,27 @@ class ArtifactWriter:
 
 def build_artifact_writer() -> ArtifactWriter:
     return ArtifactWriter()
+
+
+class TaskProbe:
+    """Reports which task the SDK says this rollout was handed."""
+
+    def invoke(self, task: str) -> str:
+        from agent_flywheel import current_task_id
+
+        return f"task_id={current_task_id()}"
+
+
+def build_task_probe() -> TaskProbe:
+    return TaskProbe()
+
+
+class HostedProbe:
+    def invoke(self, task: str) -> str:
+        from agent_flywheel import hosted_model_url
+
+        return f"hosted={hosted_model_url('openai')}"
+
+
+def build_hosted_probe() -> HostedProbe:
+    return HostedProbe()

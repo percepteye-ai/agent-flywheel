@@ -102,8 +102,10 @@ def test_the_child_cannot_see_the_control_plane_credential(tmp_path, monkeypatch
 
     assert report["control_key"] == "<absent>"
     assert "pehk_live_must_not_leak" not in out.final_text
+    # Only what the SDK SETS for this rollout (no task was claimed here).
     assert set(report["percepteye_vars"].split(",")) == {
-        "PERCEPTEYE_ROLLOUT_ID", "PERCEPTEYE_TRAJECTORY_DIR"
+        "PERCEPTEYE_ROLLOUT_ID", "PERCEPTEYE_TRAJECTORY_DIR",
+        "PERCEPTEYE_HOSTED_URL",
     }
     # Their own credentials still reach their agent -- that is the premise.
     assert report["customer_key"] == "customer-token"

@@ -97,6 +97,8 @@ from .outcomes import (
     Trajectory,
     current_capture,
     current_rollout_id,
+    current_task_id,
+    hosted_model_url,
     record_tool_call,
 )
 from .policy import (
@@ -178,6 +180,8 @@ __all__ = [
     "current_policy",
     "current_prompt",
     "current_rollout_id",
+    "current_task_id",
+    "hosted_model_url",
     "endpoint_kwargs",
     "introspect_agent",
     "is_archive_ref",
