@@ -311,6 +311,41 @@ The model is not the only thing that improves. Mission Control also **evolves yo
 
 Is it ready for my agent? `training_eligibility(agent_id=...)["prompt_optimization"]` says which path a run takes (`mode`), whether it `can_run`, and if not, what it `needs`, in a sentence you can show a person. `list_runs(include_prompt_evolutions=True)` lists the prompt runs beside training runs ([Runs, eligibility and evaluation sets](#-runs-eligibility-and-evaluation-sets)).
 
+### How a new prompt reaches a running agent
+
+Nothing is pushed into your agent. Your process pulls, and **your code makes the swap**:
+
+1. Once per turn, `policy_source().current()` returns a cached snapshot. When `ttl_s` runs out, that same call re-reads `GET /policy/current` inside your call. There is no background thread.
+2. The policy carries `prompt_generation`, which names the approval being served. Only when it differs from what you hold does the SDK fetch the text from `GET /prompt/current`. Unchanged, the poll never carries your prompt.
+3. `snap.prompt` is `prompt_decision()`'s answer for that text. You apply `snap.prompt.text` at the start of a turn when `snap.prompt.apply` is true. A turn never changes prompt halfway, and the next turn runs the new approval.
+4. A refusal, an empty answer or a failed read leaves `text=None`, and you keep the prompt you are running.
+
+The delay is roughly one `ttl_s` plus one turn after the approval is confirmed, with no redeploy and no restart. Without `policy_source()`, `current_prompt()` + `prompt_decision()` is the same check, done whenever you call it.
+
+### Approving a new prompt
+
+Each winning prompt arrives as one **prompt-pair delivery**: the prompt, the checkpoint it was certified with, and its 2×2 evaluation (base or tuned model × your prompt or the new one). It waits for a person with write access to your organization, in two steps:
+
+1. **Decide.** Mission Control → **Decisions** shows the delivery's decision. Approve or reject it there. Only the explicit approve and reject controls can resolve it: a language model reading "sure, go ahead" is recorded as *answered*, which does not approve.
+2. **Confirm.** Mission Control → **Prompts** shows the delivery with a **Confirm** button. Confirm uses the approval up (it is single-use) and makes the bundle servable. From that moment `/prompt/current` serves it, and running agents pick it up as described above.
+
+The same two steps over the API, with a customer-automation key (`mck_`):
+
+```bash
+curl -X POST "$MC/api/v2/approvals/$APPROVAL_ID/approve" -H "Authorization: Bearer $MCK" -H "Content-Type: application/json" -d '{}'
+curl -X POST "$MC/api/v2/prompt-deliveries/$DELIVERY_ID/confirm" -H "Authorization: Bearer $MCK" -H "Content-Type: application/json" \
+     -d "{\"approval_id\": \"$APPROVAL_ID\"}"
+```
+
+`GET /api/v2/prompt-deliveries` lists deliveries with their `status`: `pending_approval`, `approved`, `delivered`, or `superseded` with `superseded_by` naming the newer one. Confirming a superseded delivery is refused with a 409 that names the newer delivery: approve that one instead.
+
+**What runs on its own, and what never does.** Starting optimization rounds, certifying the winner and assembling the delivery are automatic by default, and `GET /api/v2/autonomy/flags` shows each one's current setting. **Approval is never automatic.** No setting serves a prompt a person did not approve, so "auto" means the next candidate is always ready and waiting, not that it ships itself.
+
+**Reject, stop, or go back.**
+- **Reject** a waiting delivery in Decisions, and nothing changes for your agent.
+- **Stop applying** on your side at any time: don't apply `snap.prompt`, and the prompt in your code stands.
+- **There is no undo control for an approved prompt yet.** `/prompt/current` always serves the newest approved delivery. To go back, approve a newer delivery, or stop applying on your side.
+
 ## ✋ Nothing reaches your users until a person approves it
 
 **Both halves of an improvement — the model and the prompt — require a human decision.** Not a threshold, not a scheduler, not a language model reading a report and deciding it looks good.
