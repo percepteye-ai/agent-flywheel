@@ -80,7 +80,7 @@ That is the whole product. Not a dashboard you read, not a benchmark you run —
 |:--|:--|
 | 📈 **An agent that improves in place** | a policy trained on *this* agent's own trajectories — its prompt, its tools, its failure modes — not a generic model |
 | 🤖 **Post-training you never operate** | task generation, grading, reinforcement learning, promotion gates: run by the control plane, on our GPUs |
-| 🧠 **A prompt that improves too** | training co-optimizes the system prompt and ships the approved one back beside the model |
+| 🧠 **A prompt that improves too** | [prompt optimization](#-prompt-optimization-an-evolving-system-prompt) evolves the system prompt from your agent's own traces, keeps improving it as new traces arrive, and ships the approved one back beside the model |
 | 🔭 **Honest evidence** | every tool call is recorded as `ok`, `failed`, or `unknown` — the third is legal, expected, and never rounded up to `ok`, so a verifier abstains instead of learning from a lie |
 | 🔒 **Nothing moves** | no container, no cluster, no GPU, no inbound port; every connection is dialled out from your side |
 
@@ -298,6 +298,18 @@ system_prompt = snap.prompt.text if snap.prompt.apply else system_prompt
 **Nothing polls in the background.** The refresh runs inside your call — no timer, no poller — so a promotion *or a rollback* reaches production with no redeploy. After its first success `policy_source()` keeps serving the last good policy, so a network blip can never silently demote production back to the untrained model.
 
 `prompt_decision()` is the whole rule in one call, and the SDK never applies a prompt for you: it checks that a prompt is actually being served, that your own baseline prompt has not changed since the pair was certified, that the bundle's status is one a person approved, and that the prompt's identity matches the checkpoint it was certified against. `apply` is false unless all four hold, `reason` says which one failed, and `text` is `None` rather than `""` — so a refusal can never blank the instructions your agent is already running on. The Node SDK asks the identical question, and [`tests/test_prompt_decision_parity.py`](https://github.com/percepteye-ai/agent-flywheel/blob/main/tests/test_prompt_decision_parity.py) drives one table of cases through both implementations and asserts every field of the answer agrees.
+
+## 🧬 Prompt optimization: an evolving system prompt
+
+The model is not the only thing that improves. Mission Control also **evolves your agent's system prompt** from the traces it records, and you can use it without training a model at all.
+
+- **Evolutionary, not one-shot.** Each generation proposes candidate edits to your prompt as diffs against your own baseline (never a rewrite from nothing), grounded in where your agent actually failed. It scores every candidate on several separate axes, keeps the Pareto frontier rather than blending them into one number, and feeds what the frontier got wrong into the next generation's edits. A candidate whose diff does not apply cleanly is rejected, never run.
+- **Learned from your agent's own decisions.** For an agent connected through this SDK, a prompt run replays its recorded decisions, so it needs the model-content tier (see [Production observability](#-production-observability)): the traces must hold what the model saw. Nothing is re-run against your users.
+- **It keeps improving while you decide.** Your agent keeps producing traces after a round finishes, so optimization keeps running, including while a person has not yet decided the last improvement. Each new round starts with the candidate already waiting as the bar to beat. It is replaced only by a prompt that measures better, and the older waiting prompt is retired from your queue, so the one in front of the approver is always the best found so far. An approval already granted is never taken back.
+- **Certified, then approved.** The winning prompt is certified in a full-scale run, paired with the checkpoint it was measured on, and goes to your Decisions queue as one bundle. Nothing reaches your agent until a person approves it ([below](#-nothing-reaches-your-users-until-a-person-approves-it)).
+- **Applied by you, per turn.** `current_prompt()` / `prompt_decision()` or `policy_source()` ([above](#-two-modes-one-image)) pick up each new approval without a restart. The bytes served are pinned at approval: a later round can never change what an approval already covers.
+
+Is it ready for my agent? `training_eligibility(agent_id=...)["prompt_optimization"]` says which path a run takes (`mode`), whether it `can_run`, and if not, what it `needs`, in a sentence you can show a person. `list_runs(include_prompt_evolutions=True)` lists the prompt runs beside training runs ([Runs, eligibility and evaluation sets](#-runs-eligibility-and-evaluation-sets)).
 
 ## ✋ Nothing reaches your users until a person approves it
 
