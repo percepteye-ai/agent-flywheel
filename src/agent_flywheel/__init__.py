@@ -426,6 +426,11 @@ def current_prompt(
     "use no prompt", and an unreachable control plane must never blank a
     running agent's instructions.
 
+    ``{"withdrawn": true, "generation": "..."}`` means a person withdrew the
+    approved prompt and none is approved in its place: run the agent's own
+    prompt. :func:`prompt_decision` refuses it with that reason, and
+    ``policy_source()`` takes an applied prompt away when it arrives.
+
     **Deliberately not applied for you, and that is the difference from**
     :func:`apply_current_policy`. Swapping a model endpoint is invisible to an
     agent's behaviour; swapping its system prompt changes what it DOES. That is

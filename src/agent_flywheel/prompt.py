@@ -138,6 +138,14 @@ def prompt_decision(prompt: Mapping[str, Any] | None) -> PromptDecision:
     text = raw if isinstance(raw, str) else ""
     checksum = _str(p.get("model_prompt_checksum")) or None
 
+    # WITHDRAWN: a person took the approved prompt back out of service and
+    # nothing approved is left. Unlike `{}` below, this is an instruction to
+    # stop applying: the prompt the host assembles is what runs now.
+    if p.get("withdrawn") is True:
+        return PromptDecision(
+            apply=False, text=None, checksum=checksum, reason=WITHDRAWN_REASON,
+        )
+
     # `{}` IS AN ANSWER, and it is "keep what you have". Nothing is being
     # optimized for this agent yet, nothing has passed the approval gate, or
     # the control plane could not answer -- and every one of those means the
@@ -199,6 +207,14 @@ def prompt_decision(prompt: Mapping[str, Any] | None) -> PromptDecision:
     return PromptDecision(apply=True, text=text, checksum=checksum, reason="")
 
 
+#: Why nothing is applied once a person withdrew the approved prompt. Word for
+#: word the Node SDK's ``WITHDRAWN_REASON``.
+WITHDRAWN_REASON = (
+    "a person withdrew the approved prompt for this agent and none is "
+    "approved in its place; the prompt this host assembles stands"
+)
+
+
 #: Why nothing is applied before the control plane has been asked. Word for
 #: word the Node SDK's ``PENDING_ANSWER_REASON``.
 PENDING_ANSWER_REASON = "the control plane has not been asked yet"
@@ -250,6 +266,10 @@ def refreshed_prompt(
       and the host's own prompt stands, exactly as at start -- held at the
       answer's ``generation`` (or the served one, if it carries none), so the
       same answer is not re-read every poll.
+    * A WITHDRAWAL (``{"withdrawn": true}``): what a fresh start would do --
+      apply nothing, so the host's own prompt runs -- even after a prompt was
+      held. It is the one answer that takes an applied prompt away, because a
+      person decided it, and it is never what a failure answers.
     * THE EXCEPTION -- no answer, an empty one, or nothing served after a
       prompt was held: keep what is held. ``/prompt/current`` answers ``{}``
       for "could not answer" too, and an unreachable control plane must never
@@ -262,6 +282,9 @@ def refreshed_prompt(
             return held, held_gen
         return prompt_decision({}), ""
     if isinstance(answer, Mapping):
+        if answer.get("withdrawn") is True:
+            return (prompt_decision(answer),
+                    _str(answer.get("generation")) or served)
         raw = answer.get("text")
         if isinstance(raw, str) and raw.strip():
             return (prompt_decision(answer),

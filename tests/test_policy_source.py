@@ -568,3 +568,27 @@ def test_before_any_answer_the_prompt_is_not_applied_and_says_why():
     told = src.current().prompt
     assert not told.apply and "empty answer" in told.reason
     assert reads["n"] == 0
+
+
+def test_a_withdrawal_takes_an_applied_prompt_away_on_the_next_refresh():
+    """A person withdrew the approved prompt and none is approved in its
+    place. Unlike an empty or failed read, this is an answer, so the running
+    agent goes back to its own prompt without a restart -- and stays there,
+    without re-reading, while the withdrawal is what is served."""
+    from agent_flywheel.prompt import WITHDRAWN_REASON
+
+    clock = _Clock()
+    src, reads = _prompt_source(
+        [{"prompt_generation": "g1"}, {"prompt_generation": "w1"}],
+        [_prompt("FIRST", gen="g1", sha=_SHA1),
+         {"withdrawn": True, "generation": "w1"}],
+        clock=clock,
+    )
+    assert src.current().prompt.text == "FIRST"
+    clock.advance(301)
+    after = src.current().prompt
+    assert not after.apply and after.text is None
+    assert after.reason == WITHDRAWN_REASON
+    clock.advance(301)
+    src.current()
+    assert reads["n"] == 2

@@ -37,6 +37,16 @@ _OTHER = "b" * 64
 #: of the four refusals, the ORDER between them when two would fire, and the
 #: type edges where two languages most easily drift apart.
 CASES: dict[str, object] = {
+    # ── withdrawn: a person took the approved prompt back out of service ──
+    "withdrawn, none approved in its place": {
+        "withdrawn": True, "generation": "w1",
+    },
+    "withdrawn wins over any text beside it": {
+        "withdrawn": True, "text": "t", "status": "approved",
+    },
+    "withdrawn must be the boolean true": {
+        "withdrawn": "true", "text": "t", "status": "approved",
+    },
     # ── applies ──────────────────────────────────────────────────────────
     "approved and paired": {
         "name": "support-triage", "version": 3, "sha256": _SHA,
@@ -182,10 +192,11 @@ def test_both_sdks_reach_the_same_prompt_decision(name, node_answers):
     )
 
 
-#: How each refusal opens. Four causes, four openings -- a refusal that named
-#: one wrong cause for all four would tell an operator to go looking in the
-#: wrong place three times out of four.
+#: How each refusal opens. Five causes, five openings -- a refusal that named
+#: one wrong cause for all five would tell an operator to go looking in the
+#: wrong place four times out of five.
 CAUSE_OPENINGS = (
+    "a person withdrew the approved prompt",
     "the control plane is serving no approved prompt",
     "stale_baseline=true:",
     "the served bundle's status is",
@@ -196,7 +207,7 @@ CAUSE_OPENINGS = (
 def test_the_table_reaches_every_branch(node_answers):
     """A parity table that had drifted to one refusal would still be green.
 
-    Both implementations have five outcomes -- apply, and four causes. This
+    Both implementations have six outcomes -- apply, and five causes. This
     asserts the fixtures reach all five ON THE NODE SIDE, so the coverage claim
     is made against the implementation this file cannot otherwise see.
     """
@@ -216,6 +227,7 @@ def test_the_table_reaches_every_branch(node_answers):
 
 from agent_flywheel.prompt import (  # noqa: E402
     PENDING_PROMPT,
+    WITHDRAWN_REASON,
     prompt_needs_refresh,
     refreshed_prompt,
 )
@@ -254,6 +266,16 @@ REFRESH_CASES: dict[str, list] = {
         [_APPLIED, " g1 ", {"prompt_generation": "g1  "}, None],
     "a non-string generation is no generation":
         [_APPLIED, "g1", {"prompt_generation": 7}, None],
+    # A person decided it, so it is the one answer that takes an applied
+    # prompt away -- unlike an empty or failed read just above.
+    "withdrawn after a prompt was applied: the host's own prompt runs":
+        [_APPLIED, "g1", {"prompt_generation": "w1"},
+         {"withdrawn": True, "generation": "w1"}],
+    "withdrawn before anything was applied":
+        [_PENDING, "", {"prompt_generation": "w1"},
+         {"withdrawn": True, "generation": "w1"}],
+    "a withdrawal without a generation is held at the served one":
+        [_APPLIED, "g1", {"prompt_generation": "w1"}, {"withdrawn": True}],
 }
 
 
@@ -315,3 +337,7 @@ def test_the_refresh_table_reaches_every_outcome():
     assert any(not o["needs"] and o["decision"]["text"] == "OLD"
                for o in outs.values())
     assert any("empty answer" in o["decision"]["reason"] for o in outs.values())
+    assert any(o["decision"]["reason"] == WITHDRAWN_REASON
+               and not o["decision"]["apply"] and o["decision"]["text"] is None
+               and o["generation"] == "w1"
+               for o in outs.values())

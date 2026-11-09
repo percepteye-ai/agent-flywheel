@@ -45,14 +45,14 @@ Ship one line. Your agent keeps running in your process, behind your firewall, o
      requires every published copy to match it, here and on the docs site, so
      editing one copy alone turns the suite red. Re-derive by hand with:
        .venv/bin/python -m pytest tests/ --collect-only -q -p no:warnings \
-         | awk -F': ' '/^tests\/.*: [0-9]+$/{n+=$2} END{print n}'   # -> 1502 -->
+         | awk -F': ' '/^tests\/.*: [0-9]+$/{n+=$2} END{print n}'   # -> 1509 -->
 [![ci](https://img.shields.io/github/actions/workflow/status/percepteye-ai/agent-flywheel/ci.yml?branch=main&label=ci&style=for-the-badge&logo=githubactions&logoColor=white&color=22c55e)](https://github.com/percepteye-ai/agent-flywheel/actions)
 [![pypi](https://img.shields.io/pypi/v/agent-flywheel?style=for-the-badge&logo=pypi&logoColor=white&label=pypi&color=3b82f6)](https://pypi.org/project/agent-flywheel/)
 [![python](https://img.shields.io/badge/python-3.10%20→%203.13-3b82f6?style=for-the-badge&logo=python&logoColor=white)](https://github.com/percepteye-ai/agent-flywheel/blob/main/pyproject.toml)
 <br/>
 [![runtime dependencies](https://img.shields.io/badge/runtime_deps-1-f59e0b?style=for-the-badge)](https://github.com/percepteye-ai/agent-flywheel/blob/main/pyproject.toml)
 [![lines changed in your agent](https://img.shields.io/badge/lines_changed_in_your_agent-0-ec4899?style=for-the-badge)](#-zero-instrumentation-concretely)
-[![tests](https://img.shields.io/badge/tests-1502_·_0_skips-22c55e?style=for-the-badge)](#-development)
+[![tests](https://img.shields.io/badge/tests-1509_·_0_skips-22c55e?style=for-the-badge)](#-development)
 [![license](https://img.shields.io/badge/license-MIT-14b8a6?style=for-the-badge)](https://github.com/percepteye-ai/agent-flywheel/blob/main/LICENSE)
 
 <br/>
@@ -290,7 +290,9 @@ else:
 
 src = fw.policy_source(agent_id="my-agent", on_change=reconfigure)
 snap = src.current()                     # per turn; between refreshes it's a cache read
-system_prompt = snap.prompt.text if snap.prompt.apply else system_prompt
+# Fall back to your OWN prompt, not the last one applied: a withdrawn or
+# refused prompt must stop running.
+system_prompt = snap.prompt.text if snap.prompt.apply else MY_PROMPT
 ```
 
 **The prompt keeps improving after you approve it.** Mission Control goes on evolving the system prompt from the traces your agent keeps producing, including while a person has not yet decided the last improvement. Each round has to beat the candidate already waiting, so whatever is approved next is the best prompt found so far, and the older waiting one is retired from your queue. `snap.prompt` is `prompt_decision()`'s answer for the approved prompt served *now*. The SDK re-reads the text only when `/policy/current`'s `prompt_generation` names a different approval, so the poll never carries your prompt. Read it per turn, like the model: a turn never changes prompt halfway, and the next turn runs the newest approval. An empty or failed read never takes an applied prompt away.
@@ -317,34 +319,39 @@ Nothing is pushed into your agent. Your process pulls, and **your code makes the
 
 1. Once per turn, `policy_source().current()` returns a cached snapshot. When `ttl_s` runs out, that same call re-reads `GET /policy/current` inside your call. There is no background thread.
 2. The policy carries `prompt_generation`, which names the approval being served. Only when it differs from what you hold does the SDK fetch the text from `GET /prompt/current`. Unchanged, the poll never carries your prompt.
-3. `snap.prompt` is `prompt_decision()`'s answer for that text. You apply `snap.prompt.text` at the start of a turn when `snap.prompt.apply` is true. A turn never changes prompt halfway, and the next turn runs the new approval.
-4. A refusal, an empty answer or a failed read leaves `text=None`, and you keep the prompt you are running.
+3. `snap.prompt` is `prompt_decision()`'s answer for that text. You apply `snap.prompt.text` at the start of a turn when `snap.prompt.apply` is true, and your own prompt otherwise. A turn never changes prompt halfway, and the next turn runs the new approval.
+4. An empty answer or a failed read changes nothing: the snapshot keeps the prompt it held. A withdrawal is the one answer that takes it away (`apply` false, `reason` saying a person withdrew it), so the next turn runs your own prompt.
 
-The delay is roughly one `ttl_s` plus one turn after the approval is confirmed, with no redeploy and no restart. Without `policy_source()`, `current_prompt()` + `prompt_decision()` is the same check, done whenever you call it.
+The delay is roughly one `ttl_s` plus one turn after the approval, with no redeploy and no restart. Without `policy_source()`, `current_prompt()` + `prompt_decision()` is the same check, done whenever you call it.
 
 ### Approving a new prompt
 
-Each winning prompt arrives as one **prompt-pair delivery**: the prompt, the checkpoint it was certified with, and its 2×2 evaluation (base or tuned model × your prompt or the new one). It waits for a person with write access to your organization, in two steps:
+Each winning prompt arrives as one **prompt-pair delivery**: the prompt, the checkpoint it was certified with, and its 2×2 evaluation (base or tuned model × your prompt or the new one). It waits for a person with write access to your organization.
 
-1. **Decide.** Mission Control → **Decisions** shows the delivery's decision. Approve or reject it there. Only the explicit approve and reject controls can resolve it: a language model reading "sure, go ahead" is recorded as *answered*, which does not approve.
-2. **Confirm.** Mission Control → **Prompts** shows the delivery with a **Confirm** button. Confirm uses the approval up (it is single-use) and makes the bundle servable. From that moment `/prompt/current` serves it, and running agents pick it up as described above.
+**Approve it in Mission Control → Decisions.** That is the whole step: approving the decision makes the prompt servable, and from that moment `/prompt/current` serves it and running agents pick it up as described above. Only the explicit approve and reject controls can resolve it: a language model reading "sure, go ahead" is recorded as *answered*, which does not approve. If the prompt can no longer be served exactly as it was approved, the decision records why, and nothing is served.
 
-The same two steps over the API, with a customer-automation key (`mck_`):
+The same step over the API, with a customer-automation key (`mck_`):
 
 ```bash
 curl -X POST "$MC/api/v2/approvals/$APPROVAL_ID/approve" -H "Authorization: Bearer $MCK" -H "Content-Type: application/json" -d '{}'
-curl -X POST "$MC/api/v2/prompt-deliveries/$DELIVERY_ID/confirm" -H "Authorization: Bearer $MCK" -H "Content-Type: application/json" \
-     -d "{\"approval_id\": \"$APPROVAL_ID\"}"
 ```
 
-`GET /api/v2/prompt-deliveries` lists deliveries with their `status`: `pending_approval`, `approved`, `delivered`, or `superseded` with `superseded_by` naming the newer one. Confirming a superseded delivery is refused with a 409 that names the newer delivery: approve that one instead.
+The answer's `context.completion` says what happened: `confirmed`, or `refused` with the reason. `GET /api/v2/prompt-deliveries` lists deliveries with their `status`: `pending_approval`, `approved`, `delivered`, `superseded` (with `superseded_by` naming the newer one that replaced it before it was decided), or `withdrawn`.
 
 **What runs on its own, and what never does.** Starting optimization rounds, certifying the winner and assembling the delivery are automatic by default, and `GET /api/v2/autonomy/flags` shows each one's current setting. **Approval is never automatic.** No setting serves a prompt a person did not approve, so "auto" means the next candidate is always ready and waiting, not that it ships itself.
 
-**Reject, stop, or go back.**
+### Withdrawing a prompt, and other ways to stop
+
+- **Withdraw** an approved prompt in Mission Control → **Prompts** → the prompt → *Versions of this prompt* → **Withdraw**. It stops being served at once. The prompt approved before it serves again, or, if none is left, running agents are told it was withdrawn and go back to their own prompt within one refresh, with no restart. Over the API:
+
+  ```bash
+  curl -X POST "$MC/api/v2/prompt-deliveries/$DELIVERY_ID/withdraw" -H "Authorization: Bearer $MCK" \
+       -H "Content-Type: application/json" -d '{"reason": "answers got too long"}'
+  ```
+
+  A withdrawn prompt cannot be approved back into service; approve a newer delivery instead.
 - **Reject** a waiting delivery in Decisions, and nothing changes for your agent.
 - **Stop applying** on your side at any time: don't apply `snap.prompt`, and the prompt in your code stands.
-- **There is no undo control for an approved prompt yet.** `/prompt/current` always serves the newest approved delivery. To go back, approve a newer delivery, or stop applying on your side.
 
 ## ✋ Nothing reaches your users until a person approves it
 
@@ -562,7 +569,7 @@ python -m venv .venv
 
 The last one is **not** the Node package's own suite — that lives in the [Node repository](https://github.com/percepteye-ai/agent-flywheel-node) and runs there with `npm test`. This drives records through the Node writer and asserts the Python `Trajectory` reads them back with the same meaning, which is the half only this repo can check. **It needs a Node checkout**: point `PERCEPTEYE_NODE_SDK` at one, or keep it as a sibling directory. Without one it prints `SKIPPED` and exits 0, and the cross-language tests in the suite above skip with it.
 
-1502 tests, and CI permits **zero skips** — a skipped test and a passing test look identical in a green check mark. CI names `PERCEPTEYE_NODE_SDK` and `PRIME_AGENT_PACKAGE_ROOT` and installs both, so neither the cross-language half nor the tests that execute the real `prime-agent` binary can go green by skipping there. Other jobs assert that a bare install still works on Python 3.10→3.13, that the runtime dependency list never grows past `httpx`, and that the Node plugins never drift from the Python reader.
+1509 tests, and CI permits **zero skips** — a skipped test and a passing test look identical in a green check mark. CI names `PERCEPTEYE_NODE_SDK` and `PRIME_AGENT_PACKAGE_ROOT` and installs both, so neither the cross-language half nor the tests that execute the real `prime-agent` binary can go green by skipping there. Other jobs assert that a bare install still works on Python 3.10→3.13, that the runtime dependency list never grows past `httpx`, and that the Node plugins never drift from the Python reader.
 
 [`schema/flywheel-1.json`](https://github.com/percepteye-ai/agent-flywheel/blob/main/schema/flywheel-1.json) is the wire contract and this repository owns it. Absence is never collapsed into zero: `tool_calls=None` means "I did not report tool calls"; `[]` means "I observed zero", a positive claim. The animations above are generated, not drawn — [`docs/assets/render.sh`](https://github.com/percepteye-ai/agent-flywheel/blob/main/docs/assets/render.sh) rebuilds them.
 
