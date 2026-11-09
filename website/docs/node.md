@@ -18,7 +18,7 @@ No tool-result mutation seam is registered, in either mode, and the suite assert
 
 ## The mode decides which hooks are subscribed
 
-`PERCEPTEYE_AGENT_MODE` is the switch — `training` (the default) or `production`, resolved from the same closed set of spellings the Python SDK accepts, and `plugins.entries.agent-flywheel.config.mode` overrides the environment. A value neither can parse is not guessed: the plugin degrades to `production` and says so, because someone typing `prodction` is trying to *stop* contributing.
+`PERCEPTEYE_AGENT_MODE` is the switch — `production` (the default) or `training`, resolved from the same closed set of spellings the Python SDK accepts, and `plugins.entries.agent-flywheel.config.mode` overrides the environment. A value neither can parse is not guessed: the plugin degrades to `production` and says so, because someone typing `prodction` is trying to *stop* contributing.
 
 The split is structural. `registerRolloutDriver` is called from one place under one predicate, so in production mode the module that could claim a rollout or start a turn is never reached — "observe-only" is the absence of a subscription rather than a branch inside each handler that a later edit could invert.
 

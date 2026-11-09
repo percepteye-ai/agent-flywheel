@@ -51,7 +51,7 @@ Your agent's page, its **Agent** tab: **What it has sent us to learn from** coun
 
 ## Run practice tasks
 
-Your agent's page → **Advanced** → **Generate tasks and run them**, or **Generate, run and improve**. We write the tasks from your agent's own tools and system prompt; your agent works through them while it runs in training mode, `PERCEPTEYE_AGENT_MODE=training`, the default.
+Your agent's page → **Advanced** → **Generate tasks and run them**, or **Generate, run and improve**. We write the tasks from your agent's own tools and system prompt; your agent works through them while it runs in training mode, `PERCEPTEYE_AGENT_MODE=training`, which you set explicitly (unset means production). Practice runs also need **Allow practice runs** turned on for the agent here.
 
 ## Approve the winner in Decisions
 

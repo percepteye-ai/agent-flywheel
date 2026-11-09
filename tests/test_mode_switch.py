@@ -38,16 +38,26 @@ def _clean_env(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
-# ── the default is unchanged ────────────────────────────────────────────────
+# ── the default is production: training is an explicit choice ─────────────
 
 
-def test_unset_means_training_so_existing_calls_are_unaffected():
-    assert fw.current_mode() == "training"
+def test_unset_means_production_so_training_is_always_chosen():
+    """A training process runs our tasks through the agent's real tools, so
+    a deployment that never set the switch must not do that."""
+    assert fw.current_mode() == "production"
 
 
-def test_training_still_reaches_the_ordinary_preflight():
+def test_unset_serve_claims_nothing(monkeypatch, capsys):
+    """With nothing set, serve() returns 0 before any credential check, and
+    the line it prints names the switch that would turn training on."""
+    assert fw.serve("m:b", **CALL) == 0
+    assert "PERCEPTEYE_AGENT_MODE=training" in capsys.readouterr().out
+
+
+def test_training_still_reaches_the_ordinary_preflight(monkeypatch):
     """Proof the switch is not swallowing the run: with mode on, the missing
     credential is still what stops it, exactly as before the switch existed."""
+    monkeypatch.setenv("PERCEPTEYE_AGENT_MODE", "training")
     with pytest.raises(ConfigurationError, match="API key"):
         fw.serve("m:b", **CALL)
 
@@ -129,7 +139,7 @@ def test_the_legacy_value_still_means_what_it_meant(monkeypatch):
 
 def test_empty_is_treated_as_unset(monkeypatch):
     monkeypatch.setenv("PERCEPTEYE_AGENT_MODE", "   ")
-    assert fw.current_mode() == "training"
+    assert fw.current_mode() == "production"
 
 
 # ── a wrong value is never guessed ──────────────────────────────────────────
@@ -223,8 +233,8 @@ def test_an_empty_mode_argument_falls_through_to_the_environment(
     assert fw.serve("m:b", mode=empty, **CALL) == 0
 
 
-def test_an_empty_argument_with_no_environment_is_still_training(monkeypatch):
-    assert fw.resolve_mode("") == "training"
+def test_an_empty_argument_with_no_environment_is_the_default(monkeypatch):
+    assert fw.resolve_mode("") == "production"
 
 
 # ── an override is announced in BOTH directions ────────────────────────────
@@ -278,8 +288,8 @@ def test_the_switch_is_namespaced(monkeypatch):
 def test_the_old_percepteye_spelling_is_not_read(monkeypatch):
     """No dual-read fallback. One name, so there is one place to look when the
     switch is not doing what an operator expects."""
-    monkeypatch.setenv("PERCEPTEYE_MODE", "production")
-    assert fw.current_mode() == "training"
+    monkeypatch.setenv("PERCEPTEYE_MODE", "training")
+    assert fw.current_mode() == "production"
 
 
 def test_the_switch_does_not_reach_a_rollout_child(tmp_path, monkeypatch):

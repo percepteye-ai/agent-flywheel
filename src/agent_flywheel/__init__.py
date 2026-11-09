@@ -274,14 +274,16 @@ def _resolve_mode_source(explicit: str | None = None) -> tuple[str, str]:
     env = os.environ.get(ENV_MODE)
     if env is not None and str(env).strip() != "":
         return _mode_from(env, source=f"{ENV_MODE}="), "environment"
-    return "training", "default"
+    return "production", "default"
 
 
 def resolve_mode(explicit: str | None = None) -> str:
     """Which mode this process is in: ``"training"`` or ``"production"``.
 
     Precedence is explicit argument, then ``PERCEPTEYE_AGENT_MODE``, then
-    ``"training"``. The argument wins so that a caller who has hard-coded a
+    ``"production"``: training is an explicit choice, never a default, because
+    a training process claims practice tasks and runs them through the
+    agent's real tools. The argument wins so that a caller who has hard-coded a
     mode gets what they wrote; the environment provides the default in the
     ordinary case where nobody passed one, which is what lets an operator flip
     a deployment WITHOUT editing code. An empty or whitespace argument counts
@@ -891,6 +893,26 @@ def _rulebook_line(upload: RulebookUpload) -> str:
     )
 
 
+def _practice_line(registered: Any) -> str | None:
+    """The one line a training-mode ``serve()`` prints when Mission Control's
+    half of practice is off, or ``None``: read from the registration answer's
+    ``practice.missing`` (the control plane's ``practice_switches``), never
+    inferred here. The SDK's own half is on by construction, so only Mission
+    Control's switch is named."""
+    practice = registered.get("practice") if isinstance(registered, Mapping) else None
+    missing = practice.get("missing") if isinstance(practice, Mapping) else None
+    for item in missing if isinstance(missing, list) else []:
+        if isinstance(item, Mapping) and item.get("switch") == "practice_consent":
+            detail = str(item.get("detail") or "").strip()
+            return (
+                "[percepteye] training mode is on, but Mission Control's "
+                "\"Allow practice runs\" is off for this agent, so improvement "
+                "rounds (Start improving) will not send it tasks"
+                + (f": {detail}" if detail else ".")
+            )
+    return None
+
+
 def serve(
     entrypoint: Any,
     *,
@@ -952,8 +974,9 @@ def serve(
         mode: ``"training"`` to contribute capacity, ``"production"`` to do
             nothing. Omit it -- which is the point -- and ``PERCEPTEYE_AGENT_MODE``
             decides, so the same deployed image serves or does not without an
-            edit. Unset means ``"training"``, preserving the behaviour of every
-            existing call. ``"rollout"`` is the legacy spelling of
+            edit. Unset means ``"production"``: training is an explicit
+            choice, because it runs practice tasks through the agent's real
+            tools. ``"rollout"`` is the legacy spelling of
             ``"training"``. In production mode this returns 0 before opening
             any connection, and prints one line saying so; it does NOT raise,
             because a switch that crashes the service it was meant to quiet is
@@ -1335,7 +1358,14 @@ def serve(
     if runner.execution_sha256 is not None:
         payload["agent_execution_sha256"] = runner.execution_sha256
 
-    tr.register(payload)
+    registered = tr.register(payload)
+    # Practice takes two switches: this process's mode (training, or we would
+    # not be here) and Mission Control's "Allow practice runs". The control
+    # plane says which is off, in its own words; say it once, here, where the
+    # customer turned this one on. An older control plane says nothing.
+    practice_line = _practice_line(registered)
+    if practice_line:
+        print(practice_line, flush=True)
 
     # ── the Product's workflow rules, when the code declares them ───────────
     # Once, after the registration and never inside it: a registration is

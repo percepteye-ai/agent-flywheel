@@ -27,6 +27,7 @@ One runtime dependency, `httpx`.
 ```bash
 export PERCEPTEYE_CONTROL_PLANE_URL=https://launch.percepteye.ai/api/flywheel/v1
 export PERCEPTEYE_API_KEY=pefw_...
+export PERCEPTEYE_AGENT_MODE=training
 ```
 
 <!-- lang -->
@@ -54,7 +55,11 @@ One environment variable carries the credential, and it is the only one required
 
 ```bash
 export PERCEPTEYE_API_KEY=pefw_...        # from https://launch.percepteye.ai/onboard/agent-sdk
+export PERCEPTEYE_AGENT_MODE=training     # unset means production: serve() runs nothing
 ```
+
+!!! important "Training takes two switches"
+    `PERCEPTEYE_AGENT_MODE=training` here, and **Allow practice runs** on the agent in Mission Control (an org admin). With either one off, no practice task runs, and the side that is off says so. Point a training process at a test or sandbox backend: it runs our tasks through your agent's real tools.
 
 PerceptEye runs the control plane, and signing up is free and self-serve at [launch.percepteye.ai](https://launch.percepteye.ai/onboard/agent-sdk). Name your agent there and you get its key, shown once and scoped to that one agent. The control plane's address defaults to `https://launch.percepteye.ai/api/flywheel/v1`; `PERCEPTEYE_CONTROL_PLANE_URL` points it somewhere else. Without a key, `serve()` raises before the first rollout and names that page.
 
@@ -144,8 +149,8 @@ The first is informational only. A `serve()` rollout samples through the per-rol
 !!! note "One switch, both ways"
 
     ```bash
-    PERCEPTEYE_AGENT_MODE=production    # serve() returns 0 immediately
-    PERCEPTEYE_AGENT_MODE=training      # contribute capacity (the default when unset)
+    PERCEPTEYE_AGENT_MODE=production    # serve() returns 0 immediately (the default when unset)
+    PERCEPTEYE_AGENT_MODE=training      # contribute capacity
     ```
 
     In `production`, `serve()` returns **before opening any connection**, so that deployment needs no control-plane URL and no key — turning training off never requires being configured for it. It returns rather than raising, because a switch that crashes the service it was meant to quiet is not a switch, and it prints the line above, because a silent no-op is the failure mode this package refuses everywhere else. An unrecognized value raises instead of guessing. Full table of accepted spellings and precedence in [configuration](configuration.md).

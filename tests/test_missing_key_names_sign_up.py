@@ -75,9 +75,10 @@ def test_attach_names_it_in_the_upload_refusal(keyless, tmp_path):
 def test_the_cli_names_it(keyless, monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("GOOSE_PATH_ROOT", str(tmp_path))
     monkeypatch.setenv("PERCEPTEYE_HOME", str(tmp_path / ".percepteye"))
-    for name in ("PERCEPTEYE_AGENT_MODE", "PERCEPTEYE_LLM_BASE_URL",
-                 "PERCEPTEYE_CAPTURE"):
+    for name in ("PERCEPTEYE_LLM_BASE_URL", "PERCEPTEYE_CAPTURE"):
         monkeypatch.delenv(name, raising=False)
+    # Training, explicitly (unset is production): the key is what it lacks.
+    monkeypatch.setenv("PERCEPTEYE_AGENT_MODE", "training")
     assert main(["install-hooks"]) == 0
     assert SIGN_UP_URL in capsys.readouterr().out
     main(["status"])

@@ -32,7 +32,8 @@ KEY = "PERCEPTEYE_API_KEY"
 def goose_home(monkeypatch, tmp_path):
     monkeypatch.setenv("GOOSE_PATH_ROOT", str(tmp_path))
     monkeypatch.setenv("PERCEPTEYE_HOME", str(tmp_path / ".percepteye"))
-    monkeypatch.delenv("PERCEPTEYE_AGENT_MODE", raising=False)
+    # Training, explicitly: unset is production, which claims nothing.
+    monkeypatch.setenv("PERCEPTEYE_AGENT_MODE", "training")
     monkeypatch.delenv("PERCEPTEYE_LLM_BASE_URL", raising=False)
     monkeypatch.delenv("PERCEPTEYE_CAPTURE", raising=False)
     return tmp_path

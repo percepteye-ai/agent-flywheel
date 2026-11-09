@@ -39,8 +39,8 @@ Practice tasks are an optional extra beside the main loop, which learns from you
 **Mode is resolved first, before any credential check and before any socket.** A production deployment therefore needs no control-plane URL and no key: turning training off must not require being configured for it. In `production`, `serve()` prints one line and returns `0`.
 
 ```bash
-PERCEPTEYE_AGENT_MODE=production   # serve() returns 0 immediately. No claim, no connection.
-PERCEPTEYE_AGENT_MODE=training     # contribute capacity (the default when unset)
+PERCEPTEYE_AGENT_MODE=production   # serve() returns 0 immediately. No claim, no connection. (the default when unset)
+PERCEPTEYE_AGENT_MODE=training     # contribute capacity
 ```
 
 Step 8 is why a bad entrypoint stops startup rather than surfacing an hour later as a missing member of a comparison group. Resolution is probed once, in order: `invoke`, `run`, `execute`, `chat`, `__call__`.
