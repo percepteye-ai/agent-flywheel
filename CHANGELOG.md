@@ -5,6 +5,41 @@ What changed in `agent-flywheel`, by release. The Node SDK,
 ships the same version number in the same release. Commit hashes are this
 repository's.
 
+## 0.5.0
+
+### Added
+
+- **A customer can report how a turn or a conversation actually turned out.**
+  Python: `Attachment.report_outcome(outcome, turn_id=, conversation_id=,
+  value=, note=, occurred_at=, outcome_id=)`. Node: `reportOutcome(outcome,
+  {turnId, conversationId, value, note, occurredAt, outcomeId})` on the capture
+  handle `register()` returns. Both SDKs, same behaviour:
+  - **Vocabulary.** `outcome` is one of `resolved`, `escalated`, `reopened`,
+    `abandoned`, `thumbs_up`, `thumbs_down` (`PRODUCTION_OUTCOMES`), naming a
+    turn, a conversation, or both. Anything outside it, or a value the wire
+    cannot carry, raises `InvalidOutcome` at the call, capture on or off.
+    `note` is at most 1,000 characters. Each report is recorded; none replaces
+    another.
+  - **Idempotency.** `outcome_id` / `outcomeId` is the report's idempotency
+    key: omitted, one is minted; pass your own stable id to collapse your own
+    retries of the same report.
+  - **Offline queue.** Each outcome waits as one file in the capture directory
+    (`.outcome.<digest>.json`), is uploaded off the caller's thread with the
+    turns' flush, and is retried across restarts until Mission Control
+    acknowledges it, for at most a week.
+  - **Consent.** It is sent on exactly the terms a turn is: a no-op (returns
+    `None` / `null`, keeps nothing) until Mission Control enables production
+    capture for the agent, and a 403 from the intake stops outcomes as it stops
+    turns.
+
+### Requires
+
+- **Mission Control must serve `POST /api/flywheel/v1/outcomes`.** Against an
+  older server the upload answers 404, which both SDKs treat as retryable: the
+  outcomes stay queued and are retried for up to a week, then dropped with a
+  warning (`N reported outcome(s) could not be delivered for a week and were
+  dropped.`).
+
 ## 0.4.0
 
 ### Changed
