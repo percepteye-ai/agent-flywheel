@@ -5,6 +5,30 @@ What changed in `agent-flywheel`, by release. The Node SDK,
 ships the same version number in the same release. Commit hashes are this
 repository's.
 
+## 0.4.0
+
+### Changed
+
+- **An unset `PERCEPTEYE_AGENT_MODE` now means `production`; training is an
+  explicit choice.** `serve()` with no mode set prints its production line and
+  returns without opening a connection. Set `PERCEPTEYE_AGENT_MODE=training`
+  on the process meant to run practice tasks. Both SDKs, same default.
+- **Practice takes two switches, and the SDK names the one that is off.** At
+  training-mode registration, when the agent's **Allow practice runs** switch in
+  Mission Control is off, `serve()` (Python) and the rollout runner (Node) say so
+  in one line. Mission Control in turn refuses a practice round with
+  `practice_needs_a_training_process` when no training process has checked in.
+
+### Added
+
+- **An environment-backed agent knows the task it was handed:**
+  `current_task_id()` / `PERCEPTEYE_TASK_ID`, and a rollout's tool spans carry
+  that task id in both SDKs.
+- **A rollout can reach non-policy models:** `hosted_model_url(provider)` /
+  `PERCEPTEYE_HOSTED_URL`.
+- **A command agent reports its own grade** by writing
+  `$PERCEPTEYE_TRAJECTORY_DIR/outcome.json`.
+
 ## 0.3.0
 
 ### Added
