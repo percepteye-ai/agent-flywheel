@@ -212,8 +212,14 @@ def hosted_model_url(provider: str) -> str | None:
     another model points THAT client here, with the rollout's own key (the
     ``OPENAI_API_KEY`` it was given) and the provider's own request shape::
 
-        sim = OpenAI(base_url=fw.hosted_model_url("openai") + "/v1",
+        sim = OpenAI(base_url=fw.hosted_model_url("openrouter"),
                      api_key=os.environ["OPENAI_API_KEY"])
+
+    For an OpenAI-compatible provider (``openai``, ``vertex``,
+    ``openrouter``, ...) the URL is an OpenAI client's base as it is: the
+    gateway sends ``chat/completions`` (with or without ``/v1``) to that
+    provider's own chat path. Gemini and Anthropic take their own API's
+    paths below it.
 
     Those calls are the org's own (paid as its hosted calls are) and are never
     recorded as training rows. ``provider`` is one Mission Control serves
