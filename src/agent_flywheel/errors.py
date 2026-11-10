@@ -17,6 +17,7 @@ __all__ = [
     "ContractViolation",
     "EntrypointError",
     "FlywheelError",
+    "InvalidOutcome",
     "LeaseLost",
     "ModeNotAvailable",
     "RoutingNotInstallable",
@@ -72,6 +73,17 @@ class ContractViolation(FlywheelError):
 
     Raised by the contract types themselves, at construction, so the dangerous
     shape is unconstructible rather than merely discouraged.
+    """
+
+
+class InvalidOutcome(ContractViolation):
+    """``report_outcome`` was handed something the outcome wire cannot carry:
+    a word outside the closed vocabulary, no turn or conversation to attach
+    it to, an id, number, note or time the published schema refuses.
+
+    Raised by ``Attachment.report_outcome`` BEFORE anything is stored or
+    sent, whether or not production capture is enabled, so the mistake shows
+    up where it was written instead of as a silently missing label.
     """
 
 

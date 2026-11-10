@@ -30,6 +30,7 @@ from urllib.parse import quote
 if TYPE_CHECKING:
     from ._http import ControlPlaneClient
 from .contract import (
+    _PRODUCTION_OUTCOME_BATCH_MAX_ITEMS,
     _PRODUCTION_TURN_BATCH_MAX_ITEMS,
     RolloutOutput,
     RolloutRequest,
@@ -38,6 +39,7 @@ from .contract import (
     _production_agent_identifier,
     _production_identifier,
     _production_turn_identifier,
+    production_outcome,
 )
 from .errors import ConfigurationError, ContractViolation, TransportError
 from .execution_identity import is_lower_sha256
@@ -519,6 +521,44 @@ class AttachTransport:
             json_body={"agent_id": agent_id, "turns": turns},
             idempotency_key=(
                 f"turns-{quote(agent_id, safe='-._~')}-{digest}"
+            ),
+        )
+
+    def report_outcomes(
+        self, agent_id: str, outcomes: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Upload a batch of reported outcomes: ``POST /outcomes``.
+
+        How production turns or conversations actually turned out, each in
+        the shape :func:`~agent_flywheel.contract.production_outcome`
+        validates -- which every outcome is passed through again here, so a
+        batch that leaves is one the published schema accepts.
+
+        RETRYING IS SAFE, as it is for :meth:`report_turns`: the control
+        plane keys each outcome on its ``outcome_id`` and answers a replay as
+        a duplicate. The idempotency key is the turn batch's derivation over
+        the outcomes, so both SDKs send the same key for the same batch.
+        """
+        if _production_agent_identifier(agent_id) is None:
+            raise ContractViolation(
+                "production outcome agent_id does not match the published "
+                "production agent identifier grammar"
+            )
+        if (
+            not isinstance(outcomes, list)
+            or not 1 <= len(outcomes) <= _PRODUCTION_OUTCOME_BATCH_MAX_ITEMS
+        ):
+            raise ContractViolation(
+                "production outcome batches must contain between 1 and "
+                f"{_PRODUCTION_OUTCOME_BATCH_MAX_ITEMS} outcomes"
+            )
+        body = [production_outcome(outcome) for outcome in outcomes]
+        return self._c.request(
+            "POST",
+            "/outcomes",
+            json_body={"agent_id": agent_id, "outcomes": body},
+            idempotency_key=(
+                f"outcomes-{quote(agent_id, safe='-._~')}-{_body_digest(body)}"
             ),
         )
 

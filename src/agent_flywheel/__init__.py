@@ -54,6 +54,7 @@ from . import declaration as _declaration
 from ._version import __version__
 from .contract import (
     CONTRACT_VERSION,
+    PRODUCTION_OUTCOMES,
     ExclusionReason,
     Outcome,
     RolloutOutput,
@@ -75,6 +76,7 @@ from .errors import (
     ContractViolation,
     EntrypointError,
     FlywheelError,
+    InvalidOutcome,
     LeaseLost,
     ModeNotAvailable,
     RoutingNotInstallable,
@@ -139,6 +141,7 @@ _log = logging.getLogger(__name__)
 __all__ = [
     "ARCHIVE_REF_PREFIXES",
     "CONTRACT_VERSION",
+    "PRODUCTION_OUTCOMES",
     "SERVABLE_PROMPT_STATUSES",
     "TASK",
     "AttachTransport",
@@ -156,6 +159,7 @@ __all__ = [
     "FlywheelError",
     "FlywheelTransport",
     "InputShape",
+    "InvalidOutcome",
     "LeaseLost",
     "ModeNotAvailable",
     "Outcome",

@@ -20,7 +20,7 @@ from typing import Any, Literal
 #: ``describe=`` and with the Node SDK's ``jsonType`` -- ``got null``, never
 #: ``got NoneType``: an operator configuring rules in JSON wrote no Python.
 from .declaration import _json_type, _json_whole_number
-from .errors import ContractViolation
+from .errors import ContractViolation, InvalidOutcome
 
 #: Imported rather than restated so the contract validates against exactly
 #: the field set the extractor produces -- one definition, never a twin
@@ -32,6 +32,7 @@ __all__ = [
     "CONTRACT_VERSION",
     "ExclusionReason",
     "Outcome",
+    "PRODUCTION_OUTCOMES",
     "RolloutOutput",
     "RolloutRequest",
     "RulebookReceipt",
@@ -93,6 +94,102 @@ def _production_turn_identifier(value: Any) -> str | None:
 def _production_agent_identifier(value: Any) -> str | None:
     """Return an exact wire id safe as the agent URL path segment."""
     return _production_turn_identifier(value)
+
+
+#: THE closed vocabulary of ``Attachment.report_outcome``: how a production
+#: turn or conversation actually turned out. Asserted verbatim against
+#: ``schema/flywheel-1.json`` (``ProductionOutcome.outcome``), which the
+#: control plane's intake and the Node SDK carry too.
+PRODUCTION_OUTCOMES: tuple[str, ...] = (
+    "resolved", "escalated", "reopened", "abandoned",
+    "thumbs_up", "thumbs_down",
+)
+#: A note is a short remark, not a transcript (the schema's ``maxLength``,
+#: counted in code points).
+_PRODUCTION_OUTCOME_NOTE_MAX_CHARS = 1000
+_PRODUCTION_OUTCOME_BATCH_MAX_ITEMS = 64
+#: An RFC 3339 instant WITH its offset. A time with no offset is not an
+#: instant, and guessing the zone would move the outcome.
+_RFC3339_PATTERN = (
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$"
+)
+_RFC3339_RE = re.compile(_RFC3339_PATTERN)
+_OUTCOME_WIRE_KEYS = (
+    "outcome_id", "outcome", "turn_id", "conversation_id", "value", "note",
+    "occurred_at",
+)
+
+
+def production_outcome(wire: Any) -> dict[str, Any]:
+    """One reported outcome exactly as the wire carries it, or
+    :class:`InvalidOutcome` naming what is wrong.
+
+    THE one validator: ``Attachment.report_outcome`` builds its record
+    through it, and ``AttachTransport.report_outcomes`` passes every outcome
+    through it again before a batch leaves, so what is refused at the call
+    and what is refused at the wire cannot differ. The Node SDK's
+    ``productionOutcome`` applies the same rules with the same messages.
+
+    Absent optional fields are OMITTED, never null. Nothing is rewritten: an
+    id, a note or a time that does not fit is refused, not cleaned into a
+    different one.
+    """
+    if not isinstance(wire, dict):
+        raise InvalidOutcome(
+            f"an outcome must be an object, got {_json_type(wire)}")
+    unknown = sorted(set(wire) - set(_OUTCOME_WIRE_KEYS))
+    if unknown:
+        raise InvalidOutcome(
+            "an outcome has no field "
+            + json.dumps(unknown[0], ensure_ascii=False))
+    outcome = wire.get("outcome")
+    if not isinstance(outcome, str) or outcome not in PRODUCTION_OUTCOMES:
+        # The value as JSON spells it, so both SDKs print the same refusal.
+        got = (json.dumps(outcome, ensure_ascii=False)
+               if isinstance(outcome, str) else _json_type(outcome))
+        raise InvalidOutcome(
+            f"outcome must be one of {', '.join(PRODUCTION_OUTCOMES)}; "
+            f"got {got}")
+    if _production_turn_identifier(wire.get("outcome_id")) is None:
+        raise InvalidOutcome("outcome_id is not a valid identifier")
+    out: dict[str, Any] = {
+        "outcome_id": wire["outcome_id"], "outcome": outcome,
+    }
+    if wire.get("turn_id") is not None:
+        if _production_turn_identifier(wire["turn_id"]) is None:
+            raise InvalidOutcome("turn_id is not a valid turn identifier")
+        out["turn_id"] = wire["turn_id"]
+    if wire.get("conversation_id") is not None:
+        if _production_identifier(wire["conversation_id"]) is None:
+            raise InvalidOutcome(
+                "conversation_id is not a valid identifier")
+        out["conversation_id"] = wire["conversation_id"]
+    if "turn_id" not in out and "conversation_id" not in out:
+        raise InvalidOutcome(
+            "an outcome names the turn_id or the conversation_id it is the "
+            "outcome of")
+    value = wire.get("value")
+    if value is not None:
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or value != value or value in (float("inf"), float("-inf"))):
+            raise InvalidOutcome("value must be a finite number")
+        out["value"] = value
+    note = wire.get("note")
+    if note is not None:
+        if (not isinstance(note, str) or not note
+                or len(note) > _PRODUCTION_OUTCOME_NOTE_MAX_CHARS):
+            raise InvalidOutcome(
+                "note must be a non-empty string of at most "
+                f"{_PRODUCTION_OUTCOME_NOTE_MAX_CHARS} characters")
+        out["note"] = note
+    occurred_at = wire.get("occurred_at")
+    if (not isinstance(occurred_at, str)
+            or _RFC3339_RE.fullmatch(occurred_at) is None):
+        raise InvalidOutcome(
+            "occurred_at must be an RFC 3339 time with its offset, such as "
+            "2026-11-10T09:00:00Z")
+    out["occurred_at"] = occurred_at
+    return out
 
 Outcome = Literal["ok", "failed", "unknown"]
 

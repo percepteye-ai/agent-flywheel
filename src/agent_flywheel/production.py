@@ -45,6 +45,8 @@ disk for the next flush.
 from __future__ import annotations
 
 import atexit
+import hashlib
+import json
 import os
 import shutil
 import threading
@@ -55,6 +57,7 @@ import weakref
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -70,15 +73,17 @@ if TYPE_CHECKING:
 from . import declaration as _declaration
 from .contract import (
     _PRODUCTION_IDENTIFIER_MAX_CHARS,
+    _PRODUCTION_OUTCOME_BATCH_MAX_ITEMS,
     _PRODUCTION_TURN_BATCH_MAX_ITEMS,
     _production_agent_identifier,
     _production_identifier,
     _production_turn_identifier,
+    production_outcome,
 )
 from .control_plane import resolve_control_plane_url
 from .declaration import Describe
 from .entrypoint import InputShape
-from .errors import ConfigurationError, TransportError
+from .errors import ConfigurationError, InvalidOutcome, TransportError
 from .execution_identity import normalize_attested_components
 from .outcomes import (
     AGENT_FINGERPRINT_FILENAME,
@@ -328,6 +333,47 @@ def _started_at(d: Path) -> float:
         return 0.0
 
 
+#: A reported outcome waiting to be uploaded is ONE FILE in the trajectory
+#: root, ``.outcome.<digest of its id>.json``. A file and not a directory for
+#: the reason ``Attachment._UPLOADED_INDEX`` is: every directory under the
+#: root is read as a turn. One file per outcome, written whole and renamed
+#: into place, so two processes sharing a root never rewrite each other's
+#: pending outcomes; the Node SDK writes the same names.
+_OUTCOME_FILE_PREFIX = ".outcome."
+_OUTCOME_FILE_SUFFIX = ".json"
+#: How long an outcome that could not be delivered is kept. Bounded, because
+#: an outbox nothing can drain (a control plane that has no ``/outcomes``
+#: route yet) must not grow for the life of a deployment; a week, the Node
+#: SDK's rollout outbox bound.
+_OUTCOME_MAX_AGE_S = 7 * 24 * 3600.0
+
+
+def _outcome_file(root: str | os.PathLike[str], outcome_id: str) -> Path:
+    """Where the outcome with this id waits. A digest of the id, never the id:
+    a caller's id may be 255 characters, and a file name may not."""
+    digest = hashlib.sha256(outcome_id.encode("utf-8")).hexdigest()[:32]
+    return Path(root) / (
+        f"{_OUTCOME_FILE_PREFIX}{digest}{_OUTCOME_FILE_SUFFIX}")
+
+
+def _rfc3339(value: Any) -> Any:
+    """``occurred_at`` as the wire spells it. ``None`` is now; an aware
+    ``datetime`` becomes UTC with milliseconds and ``Z`` (what the Node SDK's
+    ``Date.toISOString()`` writes); a string goes through untouched for the
+    validator to judge. A naive ``datetime`` is refused: it names no instant.
+    """
+    if value is None:
+        value = datetime.now(timezone.utc)
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise InvalidOutcome(
+                "occurred_at must carry a timezone: a naive datetime does "
+                "not say when")
+        return value.astimezone(timezone.utc).isoformat(
+            timespec="milliseconds").replace("+00:00", "Z")
+    return value
+
+
 #: How ``_http.ControlPlaneClient.request`` spells a terminal 403. It formats
 #: every 4xx that is not 408/429 as ``"{method} {path} -> HTTP {code}: {detail}"``
 #: and raises ``TransportError``; the status is not carried structurally, so
@@ -546,7 +592,8 @@ class Attachment:
 
         Yields the turn id, which the caller should keep: it is the join key
         for any outcome that arrives later than the turn does -- the draft was
-        kept an hour afterwards, the pull request merged the next morning.
+        kept an hour afterwards, the pull request merged the next morning --
+        and :meth:`report_outcome` is how that outcome is reported.
 
         A turn boundary is DECLARED rather than inferred. Guessing where one
         request ends and the next begins is the same class of guess this SDK
@@ -683,6 +730,193 @@ class Attachment:
             task_id=read_task_id(path) or "",
             execution_sha256=execution_sha256 or "",
         )
+
+    def report_outcome(
+        self,
+        outcome: str,
+        *,
+        turn_id: str | None = None,
+        conversation_id: str | None = None,
+        value: float | None = None,
+        note: str | None = None,
+        occurred_at: datetime | str | None = None,
+        outcome_id: str | None = None,
+    ) -> str | None:
+        """Tell the control plane how a turn or a conversation turned out.
+
+        The outcome that arrives later than the turn does: the case was
+        ``"resolved"``, ``"escalated"`` to a person, ``"reopened"`` or
+        ``"abandoned"``, or the end user gave a ``"thumbs_up"`` or
+        ``"thumbs_down"``. Name what it is the outcome of with the ``turn_id``
+        :meth:`turn` yielded, the ``conversation_id`` you passed it, or both.
+        Report as many as happen -- resolved today, reopened next week -- each
+        is recorded and none replaces another.
+
+        ``value`` is an optional number of your own (an order value, a
+        satisfaction score); ``note`` an optional short remark, at most 1,000
+        characters, masked for personal data by the control plane before it
+        is stored; ``occurred_at`` when it happened (an aware ``datetime`` or
+        an RFC 3339 string), now when omitted. ``outcome_id`` is this
+        report's idempotency key: leave it out and one is minted; pass your
+        own stable id to make your own retries of the same report collapse.
+
+        A WEAK LABEL, not a grade. It is your report of what happened next;
+        it does not score the turn and nothing is trained on it directly.
+
+        Returns the outcome's id once it is queued for upload, or ``None``
+        when nothing was queued. IT IS A NO-OP UNTIL PRODUCTION CAPTURE IS
+        ENABLED for this agent (:attr:`may_upload`): an outcome is a fact
+        about your end users' traffic, so it is sent on exactly the terms a
+        turn is, and nothing is kept locally for an agent that may not send
+        it.
+
+        Queued, then uploaded off the calling thread with the turns' own
+        retry behaviour: the outcome waits on disk under ``trajectory_root``
+        until the control plane acknowledges it, survives a restart, and is
+        given up on (with a warning) only after a week undelivered.
+
+        Raises :class:`~agent_flywheel.errors.InvalidOutcome` -- before
+        anything is stored, capture enabled or not -- for a word outside the
+        vocabulary, no turn or conversation, or an id, number, note or time
+        the wire cannot carry. Nothing else here raises.
+        """
+        wire: dict[str, Any] = {
+            "outcome_id": (
+                f"o_{uuid.uuid4().hex}" if outcome_id is None else outcome_id
+            ),
+            "outcome": outcome,
+            "occurred_at": _rfc3339(occurred_at),
+        }
+        for name, given in (
+            ("turn_id", turn_id), ("conversation_id", conversation_id),
+            ("value", value), ("note", note),
+        ):
+            if given is not None:
+                wire[name] = given
+        wire = production_outcome(wire)
+        if not self.may_upload:
+            # Also the answer with no key or control plane: nothing has said
+            # yes (``may_upload`` is only ever the control plane's word).
+            return None
+        path = _outcome_file(self.trajectory_root, wire["outcome_id"])
+        partial = path.with_name(path.name + ".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            partial.write_text(
+                json.dumps(wire, sort_keys=True), encoding="utf-8")
+            os.replace(partial, path)
+        except OSError:
+            # Capture costs the observation, never the caller.
+            return None
+        self._flush_soon()
+        return str(wire["outcome_id"])
+
+    def _flush_outcomes(self) -> dict[str, int]:
+        """Upload the outcomes waiting on disk. Caller holds ``_flush_lock``
+        and has established :attr:`may_upload`. Never raises.
+
+        THE TURNS' RULES: a batch the control plane acknowledged is deleted;
+        a 403 is its decision, so sending stops (:meth:`_refuse_upload`) and
+        the outcomes stay on disk; any other failure leaves the batch for the
+        next flush. An outcome the control plane refused BY NAME inside an
+        acknowledged batch (a conflicting replay) would be refused again, so
+        it is dropped and said out loud.
+        """
+        root = Path(self.trajectory_root)
+        try:
+            files = sorted(
+                p for p in root.iterdir()
+                if p.name.startswith(_OUTCOME_FILE_PREFIX)
+                and p.name.endswith(_OUTCOME_FILE_SUFFIX) and p.is_file()
+            )
+        except OSError:
+            return {}
+        pending: list[tuple[Path, dict[str, Any]]] = []
+        expired = 0
+        now = time.time()
+        for path in files:
+            try:
+                if now - path.stat().st_mtime > _OUTCOME_MAX_AGE_S:
+                    path.unlink()
+                    expired += 1
+                    continue
+                pending.append((path, production_outcome(
+                    json.loads(path.read_text(encoding="utf-8")))))
+            except (OSError, ValueError, InvalidOutcome):
+                # Unreadable or not ours to send; one file costs that file.
+                continue
+        if expired:
+            self._warn(
+                f"agent-flywheel: {expired} reported outcome(s) could not be "
+                f"delivered for a week and were dropped.")
+        if not pending:
+            return {}
+        sent = failed = 0
+        client = None
+        try:
+            from ._http import ControlPlaneClient
+            from .transport import AttachTransport
+
+            client = ControlPlaneClient(self._cp_url, self._api_key)
+            tr = AttachTransport(client, self.agent_id)
+            size = _PRODUCTION_OUTCOME_BATCH_MAX_ITEMS
+            for i in range(0, len(pending), size):
+                chunk = pending[i:i + size]
+                try:
+                    reply = tr.report_outcomes(
+                        self.agent_id, [wire for _, wire in chunk])
+                except Exception as exc:
+                    refusal = _capture_refusal(exc)
+                    if refusal is not None:
+                        self._refuse_upload(refusal)
+                        failed += len(pending) - sent
+                        break
+                    failed += len(chunk)
+                    continue
+                for path, _wire in chunk:
+                    try:
+                        path.unlink()
+                    except OSError:
+                        # Resent next flush; the intake answers a duplicate.
+                        pass
+                sent += len(chunk)
+                self._note_refused_outcomes(reply)
+        except Exception:
+            failed += len(pending) - sent
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+        return {"outcomes_sent": sent, "outcomes_failed": failed}
+
+    def _note_refused_outcomes(self, reply: Any) -> None:
+        """Say which outcomes of an acknowledged batch the control plane did
+        not record, in its own words. Never raises."""
+        try:
+            results = (
+                reply.get("outcomes") if isinstance(reply, Mapping) else None)
+            refused = sorted({
+                str(result.get("error") or "refused")
+                for result in results or ()
+                if isinstance(result, Mapping)
+                and result.get("accepted") is False
+            })
+            if refused:
+                self._warn(
+                    "agent-flywheel: the control plane did not record some "
+                    f"reported outcomes ({', '.join(refused)}); they will not "
+                    "be sent again.")
+        except Exception:
+            return
+
+    @staticmethod
+    def _warn(message: str) -> None:
+        try:
+            warnings.warn(message, RuntimeWarning, stacklevel=3)
+        except Exception:  # -W error turns the line above into a raise
+            pass
 
     def read_turn(self, turn_id: str) -> dict[str, str] | None:
         """The task and answer recorded for one turn, or ``None``.
@@ -1245,7 +1479,10 @@ class Attachment:
 
     def flush(self, *, include_unanswered: bool = False,
               batch_size: int = 64) -> dict[str, int]:
-        """Upload captured turns to the control plane. Returns counts.
+        """Upload captured turns, and any reported outcomes still waiting, to
+        the control plane. Returns counts: the turns' ``sent`` / ``skipped`` /
+        ``failed``, plus ``outcomes_sent`` / ``outcomes_failed`` when outcomes
+        were waiting.
 
         Serialized against the automatic background flush, so a manual call
         cannot race it into sending the same turn twice.
@@ -1261,7 +1498,23 @@ class Attachment:
 
     def _flush_locked(self, *, include_unanswered: bool = False,
                       batch_size: int = 64) -> dict[str, int]:
-        """The upload itself. Caller holds ``_flush_lock``.
+        """Everything a flush sends: the captured turns, then the reported
+        outcomes. Caller holds ``_flush_lock``. Never raises.
+
+        ONE SEAM FOR BOTH, because the consent question is one question: the
+        turn half asks (and re-asks) it, and outcomes go only when its answer
+        is yes. The counts are the turns'; ``outcomes_sent`` and
+        ``outcomes_failed`` are added only when outcomes were waiting.
+        """
+        counts = self._flush_turns_locked(
+            include_unanswered=include_unanswered, batch_size=batch_size)
+        if self.may_upload:
+            counts.update(self._flush_outcomes())
+        return counts
+
+    def _flush_turns_locked(self, *, include_unanswered: bool = False,
+                            batch_size: int = 64) -> dict[str, int]:
+        """The turn upload itself. Caller holds ``_flush_lock``.
 
         WHY NOT AT TURN-SCOPE EXIT, which is where an earlier design put it:
         ``record_answer`` is callable AFTER the scope closes, and the package's

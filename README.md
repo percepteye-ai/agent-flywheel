@@ -52,7 +52,7 @@ Ship one line. Your agent keeps running in your process, behind your firewall, o
 <br/>
 [![runtime dependencies](https://img.shields.io/badge/runtime_deps-1-f59e0b?style=for-the-badge)](https://github.com/percepteye-ai/agent-flywheel/blob/main/pyproject.toml)
 [![lines changed in your agent](https://img.shields.io/badge/lines_changed_in_your_agent-0-ec4899?style=for-the-badge)](#-zero-instrumentation-concretely)
-[![tests](https://img.shields.io/badge/tests-1525_·_0_skips-22c55e?style=for-the-badge)](#-development)
+[![tests](https://img.shields.io/badge/tests-1589_·_0_skips-22c55e?style=for-the-badge)](#-development)
 [![license](https://img.shields.io/badge/license-MIT-14b8a6?style=for-the-badge)](https://github.com/percepteye-ai/agent-flywheel/blob/main/LICENSE)
 
 <br/>
@@ -411,6 +411,16 @@ dataset services validate any later trace-to-task binding.
 
 `input_text=` and `record_answer()` are the two lines that carry the turn's text, and both are yours to pass — they are your end user's message and the answer your code returned, which no adapter can tell apart from the rest of a model call. Once capture is on, uploading is automatic: answered turns go every 32 turns on a short-lived daemon thread, and an `atexit` hook sends the rest. Uploads never raise into your process and never block a turn on the network.
 
+**Then tell it how the turn turned out.** The turn id `turn()` yields is the join key for what happens afterwards — the case was resolved, a person had to take over, the customer came back:
+
+```python
+px.report_outcome("resolved", turn_id=turn_id)                 # this turn settled it
+px.report_outcome("reopened", conversation_id=conv_id,         # ...or the whole conversation,
+                  value=129.50, note="refund re-requested")    # with a number and a short note of your own
+```
+
+The outcome is one of `resolved`, `escalated`, `reopened`, `abandoned`, `thumbs_up`, `thumbs_down`; anything else raises `agent_flywheel.InvalidOutcome` where you wrote it. Name the `turn_id`, the `conversation_id`, or both, and report as many as happen — resolved today and reopened next week are two outcomes, and neither replaces the other. `value=` is an optional number, `note=` an optional remark of at most 1,000 characters (the control plane masks personal data in it before storing it), `occurred_at=` defaults to now, and `outcome_id=` is the idempotency key if you want your own. It follows the turn in every way that matters: **it is a no-op until capture is enabled for the agent** (it returns `None` and keeps nothing), and once enabled it is queued on disk under `trajectory_root`, sent off your thread, retried until the control plane acknowledges it (for up to a week, across restarts), and never raises for anything but a value the vocabulary does not have. An outcome is your report of what happened next — a weak label the platform keeps beside the turn, not a grade, and nothing is trained on it directly.
+
 > [!IMPORTANT]
 > **What your model saw is a second, separate opt-in, also off by default.** With the model-content tier granted for the agent, the LangChain and Google ADK adapters also *observe* each model call inside a turn — the system prompt, the whole conversation history, the tool definitions and every tool result — and the turn uploads it as one [OpenTelemetry GenAI](https://opentelemetry.io/docs/specs/semconv/gen-ai/) trace (`genai_trace`). Observation only: no call, response or tool result is changed, nothing is truncated, and a turn whose model boundary was not observed carries no trace rather than one rebuilt from its text. Without the grant none of it is recorded, not even locally. The control plane grants the tier only while exactly one active Product declares the agent, because a trace is kept only for a turn it can attribute to a Product; if the agent becomes shared, recording stops when the control plane refuses a trace for that reason, and resumes once the grant is back. `px.may_capture_model_content` is the live answer; `px.model_content_refusal` is the sentence explaining a `False`. Prime Agent is served as a `serve()` command, and its JSON stream carries neither its system prompt nor its tool definitions, so no model content is captured for it.
 
@@ -575,7 +585,7 @@ python -m venv .venv
 
 The last one is **not** the Node package's own suite — that lives in the [Node repository](https://github.com/percepteye-ai/agent-flywheel-node) and runs there with `npm test`. This drives records through the Node writer and asserts the Python `Trajectory` reads them back with the same meaning, which is the half only this repo can check. **It needs a Node checkout**: point `PERCEPTEYE_NODE_SDK` at one, or keep it as a sibling directory. Without one it prints `SKIPPED` and exits 0, and the cross-language tests in the suite above skip with it.
 
-1525 tests, and CI permits **zero skips** — a skipped test and a passing test look identical in a green check mark. CI names `PERCEPTEYE_NODE_SDK` and `PRIME_AGENT_PACKAGE_ROOT` and installs both, so neither the cross-language half nor the tests that execute the real `prime-agent` binary can go green by skipping there. Other jobs assert that a bare install still works on Python 3.10→3.13, that the runtime dependency list never grows past `httpx`, and that the Node plugins never drift from the Python reader.
+1589 tests, and CI permits **zero skips** — a skipped test and a passing test look identical in a green check mark. CI names `PERCEPTEYE_NODE_SDK` and `PRIME_AGENT_PACKAGE_ROOT` and installs both, so neither the cross-language half nor the tests that execute the real `prime-agent` binary can go green by skipping there. Other jobs assert that a bare install still works on Python 3.10→3.13, that the runtime dependency list never grows past `httpx`, and that the Node plugins never drift from the Python reader.
 
 [`schema/flywheel-1.json`](https://github.com/percepteye-ai/agent-flywheel/blob/main/schema/flywheel-1.json) is the wire contract and this repository owns it. Absence is never collapsed into zero: `tool_calls=None` means "I did not report tool calls"; `[]` means "I observed zero", a positive claim. The animations above are generated, not drawn — [`docs/assets/render.sh`](https://github.com/percepteye-ai/agent-flywheel/blob/main/docs/assets/render.sh) rebuilds them.
 
