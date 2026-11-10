@@ -100,6 +100,21 @@ TURN_KINDS = ("task", "answer")
 
 ROLLOUT_ID_ENV = "PERCEPTEYE_ROLLOUT_ID"
 TRAJECTORY_DIR_ENV = "PERCEPTEYE_TRAJECTORY_DIR"
+#: The id of the task the open rollout was handed (``current_task_id``).
+TASK_ID_ENV = "PERCEPTEYE_TASK_ID"
+#: The base URL of the open rollout's AUXILIARY models (``hosted_model_url``).
+HOSTED_URL_ENV = "PERCEPTEYE_HOSTED_URL"
+
+
+def hosted_base_for(llm_url: str | None) -> str | None:
+    """THE rule for a rollout's auxiliary-model base: its gateway URL plus
+    ``/hosted``. Mission Control serves ``<llm_url>/hosted/<provider>/<path>``
+    on the rollout's own key, for models that are not the policy under
+    training. One function, so the child's environment and the in-process
+    scope cannot disagree."""
+    if not isinstance(llm_url, str) or not llm_url.strip():
+        return None
+    return llm_url.rstrip("/") + "/hosted"
 
 _current_rollout: ContextVar[str | None] = ContextVar(
     "percepteye_current_rollout", default=None
@@ -131,6 +146,9 @@ _current_conversation: ContextVar[str | None] = ContextVar(
 )
 _current_task: ContextVar[str | None] = ContextVar(
     "percepteye_current_task", default=None
+)
+_current_hosted_url: ContextVar[str | None] = ContextVar(
+    "percepteye_current_hosted_url", default=None
 )
 _current_execution_sha256: ContextVar[str | None] = ContextVar(
     "percepteye_current_execution_sha256", default=None
@@ -181,6 +199,52 @@ def current_capture() -> tuple[CaptureScope, str] | None:
         # apart, and the "no feature flags" posture survives.
         return ("rollout", env)
     return None
+
+
+def hosted_model_url(provider: str) -> str | None:
+    """Where this rollout reaches a model that is NOT the policy being
+    trained -- a user simulator, a judge, an embedding model -- through
+    Mission Control's gateway, or ``None`` outside a rollout.
+
+    Inside a rollout every OpenAI/Anthropic call is the policy's: the gateway
+    serves the policy under training whatever ``model`` you name, and keys for
+    other providers are removed from the child. A harness that also needs
+    another model points THAT client here, with the rollout's own key (the
+    ``OPENAI_API_KEY`` it was given) and the provider's own request shape::
+
+        sim = OpenAI(base_url=fw.hosted_model_url("openai") + "/v1",
+                     api_key=os.environ["OPENAI_API_KEY"])
+
+    Those calls are the org's own (paid as its hosted calls are) and are never
+    recorded as training rows. ``provider`` is one Mission Control serves
+    (``openai``, ``anthropic``, ``gemini``, ``vertex``, ``openrouter``, ...).
+    """
+    base = _current_hosted_url.get() if _current_rollout.get() else (
+        os.environ.get(HOSTED_URL_ENV) if os.environ.get(ROLLOUT_ID_ENV) else None)
+    if not base:
+        return None
+    return f"{base.rstrip('/')}/{str(provider).strip('/')}"
+
+
+def current_task_id() -> str | None:
+    """The id of the task this rollout was handed, or ``None``.
+
+    For a task the customer registered with the control plane (an environment
+    task), this is the customer's OWN id, so an agent backed by its own
+    environment -- a benchmark harness, a simulator, a test suite -- can start
+    exactly that task and grade it. For a task the platform generated, it is
+    that task's opaque id.
+
+    Resolution order is context variable, then environment, as for
+    :func:`current_rollout_id`: an in-process rollout reads the scope, a
+    rollout child (Python or command) reads ``PERCEPTEYE_TASK_ID``. Inside
+    ``attach().turn()`` it is the turn's own ``task_id``, when one was passed.
+    ``None`` outside any scope, and when the claim named no task.
+    """
+    if _current_rollout.get():
+        return _current_task.get()
+    return _normalize_task_id(os.environ.get(TASK_ID_ENV)) if os.environ.get(
+        ROLLOUT_ID_ENV) else None
 
 
 def current_rollout_id() -> str | None:
@@ -895,6 +959,7 @@ class _RolloutScope:
     def __init__(self, rollout_id: str, trajectory_dir: str, *,
                  conversation_id: str | None = None,
                  task_id: str | None = None,
+                 hosted_url: str | None = None,
                  execution_sha256: str | None = None,
                  kind: CaptureScope = "rollout",
                  model_content: bool = False) -> None:
@@ -903,6 +968,7 @@ class _RolloutScope:
         self._kind = kind
         self._conversation_id = conversation_id or None
         self._task_id = _normalize_task_id(task_id)
+        self._hosted_url = hosted_url or None
         self._execution_sha256 = (
             execution_sha256 if is_lower_sha256(execution_sha256) else None
         )
@@ -926,6 +992,7 @@ class _RolloutScope:
             _current_task.set(self._task_id),
             _current_execution_sha256.set(self._execution_sha256),
             _current_model_capture.set(started),
+            _current_hosted_url.set(self._hosted_url),
         ]
         return self._rid
 
@@ -938,6 +1005,7 @@ class _RolloutScope:
             _current_task.reset(self._tokens[4])
             _current_execution_sha256.reset(self._tokens[5])
             _current_model_capture.reset(self._tokens[6])
+            _current_hosted_url.reset(self._tokens[7])
             self._tokens = []
         if self._model_content:
             _record_model_boundary_end(self._trajectory_dir)

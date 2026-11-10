@@ -159,6 +159,8 @@ def build_child_env(
     *,
     rollout_id: str,
     llm_url: str,
+    task_id: str | None = None,
+    auxiliary_route: bool = True,
     api_key: str,
     trajectory_dir: str,
     parent_env: Mapping[str, str] | None = None,
@@ -186,8 +188,9 @@ def build_child_env(
        cannot override rollout identity or routing. A ``None`` value removes
        that name from the child, inherited or baseline alike -- an interpreter
        variable an adapter's runtime must not see, say.
-    3. Two Percepteye variables are then SET, scoped to this rollout: the
-       rollout id and the trajectory directory.
+    3. Percepteye variables are then SET, scoped to this rollout: the
+       rollout id, the trajectory directory and, when the claim named one,
+       the task id.
     4. The per-rollout LLM endpoint and its single-use key are set last, so
        they win over anything inherited or adapter-supplied.
     """
@@ -221,6 +224,26 @@ def build_child_env(
     # (3) Rollout-scoped, and nothing else from our side.
     env["PERCEPTEYE_ROLLOUT_ID"] = rollout_id
     env["PERCEPTEYE_TRAJECTORY_DIR"] = trajectory_dir
+    # The task this rollout was handed, by the id the control plane claimed it
+    # under -- for a task the customer registered, THEIR id. An agent backed by
+    # its own environment (a benchmark, a simulator, a test suite) needs it to
+    # start that task; the free-text turn input cannot carry it reliably. Only
+    # a value that is a safe opaque id crosses (the same predicate the
+    # in-process scope uses); anything else leaves the variable unset.
+    from .outcomes import (
+        HOSTED_URL_ENV, TASK_ID_ENV, _normalize_task_id, hosted_base_for,
+    )
+
+    safe_task = _normalize_task_id(task_id)
+    if safe_task:
+        env[TASK_ID_ENV] = safe_task
+    # Where the rollout reaches models that are NOT the policy (a user
+    # simulator, a judge), on its own key: ``hosted_model_url``.
+    # ``auxiliary_route`` False for a child that is not a claimed rollout (the
+    # description warm-up): there is no rollout key the route would accept.
+    hosted = hosted_base_for(llm_url) if auxiliary_route else None
+    if hosted:
+        env[HOSTED_URL_ENV] = hosted
 
     # (4) Routing last so it beats anything inherited. Note this only wins over
     # ENVIRONMENT: a client constructed with an explicit base_url argument in

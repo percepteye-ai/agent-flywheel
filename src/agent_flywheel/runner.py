@@ -20,6 +20,7 @@ import concurrent.futures as _cf
 import contextvars
 import hashlib
 import json
+import math
 import os
 import shutil
 import signal
@@ -49,6 +50,7 @@ from .execution_identity import (
 )
 from .introspection import _MAX_PROMPT_CHARS, DiscoveredAgent
 from .isolation import build_child_env, is_environment_overlay
+from .outcomes import hosted_base_for
 from .outcomes import TOOL_CALLS_FILENAME, Trajectory, _RolloutScope
 from .transport import AttachTransport, sleep_ms
 
@@ -140,7 +142,9 @@ def run_rollout_in_process(
             adapters, llm_url=rollout.llm_url, api_key=rollout.api_key
         )
         _ = report
-    with _RolloutScope(rollout.rollout_id, trajectory_dir):
+    with _RolloutScope(rollout.rollout_id, trajectory_dir,
+                       task_id=(rollout.metadata or {}).get("task_id"),
+                       hosted_url=hosted_base_for(rollout.llm_url)):
         arg = resolved.build_arg(rollout.turn_input)
         try:
             if resolved.is_async:
@@ -228,6 +232,36 @@ def _coerce_output(raw: Any) -> RolloutOutput:
                 return RolloutOutput(final_text=v)
         return RolloutOutput(final_text=json.dumps(raw, default=str))
     return RolloutOutput(final_text="" if raw is None else str(raw))
+
+
+#: The file a COMMAND agent writes its own grade to, in its trajectory
+#: directory: ``{"reward": <number>, "success": <bool>}``, either optional.
+OUTCOME_FILENAME = "outcome.json"
+
+
+def _attach_reported_outcome(out: RolloutOutput, trajectory_dir: str) -> None:
+    """A command agent's own grade, from ``$PERCEPTEYE_TRAJECTORY_DIR/
+    outcome.json``. A Python entrypoint returns a ``RolloutOutput`` carrying
+    ``reward``/``success``; a process has no such object, and before this it
+    had no way to report a grade at all -- so an environment-backed CLI
+    harness could never be scored by its own environment. Only a finite
+    number is a reward and only a bool a success; anything else is ignored,
+    never coerced. A value the output already carries is not replaced."""
+    path = os.path.join(trajectory_dir, OUTCOME_FILENAME)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    reward = data.get("reward")
+    if (out.reward is None and isinstance(reward, (int, float))
+            and not isinstance(reward, bool) and math.isfinite(float(reward))):
+        out.reward = float(reward)
+    success = data.get("success")
+    if out.success is None and isinstance(success, bool):
+        out.success = success
 
 
 def _attach_trajectory(out: RolloutOutput, trajectory_dir: str) -> None:
@@ -552,6 +586,7 @@ def run_rollout_as_command(
         out.timing.setdefault("elapsed_s", time.time() - started)
         _attach_trajectory(out, trajectory_dir)
         _attach_command_projection(out, stdout_text or "", output_adapter)
+        _attach_reported_outcome(out, trajectory_dir)
         return out
 
     try:
@@ -1371,6 +1406,7 @@ class RolloutRunner:
                 env=build_child_env(
                     rollout_id=rollout.rollout_id, llm_url=rollout.llm_url,
                     api_key=rollout.api_key, trajectory_dir=trajectory_dir,
+                    task_id=(rollout.metadata or {}).get("task_id"),
                     endpoint_env=self.endpoint_env, extra=extra,
                 ),
                 # The per-rollout directory is the child's working directory,
@@ -1510,6 +1546,7 @@ class RolloutRunner:
         }
         env = build_child_env(
             rollout_id=rollout.rollout_id,
+            task_id=(rollout.metadata or {}).get("task_id"),
             llm_url=rollout.llm_url,
             api_key=rollout.api_key,
             trajectory_dir=trajectory_dir,

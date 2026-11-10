@@ -30,7 +30,7 @@ on your credentials — unchanged.
 <div class="fw-stat"><div class="fw-stat__n">0</div><div class="fw-stat__l">lines changed inside your agent</div></div>
 <div class="fw-stat"><div class="fw-stat__n">1</div><div class="fw-stat__l">runtime dependency (<code>httpx</code>)</div></div>
 <div class="fw-stat"><div class="fw-stat__n">0</div><div class="fw-stat__l">inbound ports, containers, GPUs</div></div>
-<div class="fw-stat"><div class="fw-stat__n">1513</div><div class="fw-stat__l">tests, zero skips permitted</div></div>
+<div class="fw-stat"><div class="fw-stat__n">1525</div><div class="fw-stat__l">tests, zero skips permitted</div></div>
 </div>
 
 ## Start here

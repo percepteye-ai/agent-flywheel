@@ -39,7 +39,9 @@ def test_control_plane_key_never_reaches_the_child():
 def test_no_unapproved_percepteye_variable_is_inherited():
     env = _env()
     inherited = {k for k in env if k.startswith("PERCEPTEYE_")}
-    assert inherited == {"PERCEPTEYE_ROLLOUT_ID", "PERCEPTEYE_TRAJECTORY_DIR"}
+    # The SDK SETS these for the rollout; none is inherited from the parent.
+    assert inherited == {"PERCEPTEYE_ROLLOUT_ID", "PERCEPTEYE_TRAJECTORY_DIR",
+                         "PERCEPTEYE_HOSTED_URL"}
 
 
 def test_customer_specific_model_identity_never_crosses_the_namespace_scrub():
