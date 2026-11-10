@@ -231,7 +231,10 @@ def build_child_env(
     # a value that is a safe opaque id crosses (the same predicate the
     # in-process scope uses); anything else leaves the variable unset.
     from .outcomes import (
-        HOSTED_URL_ENV, TASK_ID_ENV, _normalize_task_id, hosted_base_for,
+        HOSTED_URL_ENV,
+        TASK_ID_ENV,
+        _normalize_task_id,
+        hosted_base_for,
     )
 
     safe_task = _normalize_task_id(task_id)

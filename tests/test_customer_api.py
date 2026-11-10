@@ -8,8 +8,13 @@ import httpx
 import pytest
 
 from agent_flywheel.customer_api import (
-    ATTACK_REFUSAL_CODES, CUSTOMER_CONTRACT_VERSION, PROMPT_RUN_REFUSAL_CODES, RUN_LIST_REFUSAL_CODES,
-    CustomerApiClient, CustomerRefusal, customer_api_base,
+    ATTACK_REFUSAL_CODES,
+    CUSTOMER_CONTRACT_VERSION,
+    PROMPT_RUN_REFUSAL_CODES,
+    RUN_LIST_REFUSAL_CODES,
+    CustomerApiClient,
+    CustomerRefusal,
+    customer_api_base,
 )
 from agent_flywheel.errors import ConfigurationError
 

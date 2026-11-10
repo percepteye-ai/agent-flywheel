@@ -480,7 +480,7 @@ def _prompt(text, *, gen, sha, status="approved", stale=False):
 def _prompt_source(policies, prompts, *, clock):
     """A handle whose /policy/current and /prompt/current reads are both
     scripted, counting the prompt reads."""
-    src, calls = _source(policies, clock=clock)
+    src, _calls = _source(policies, clock=clock)
     reads = {"n": 0}
 
     def _fetch_prompt():
@@ -533,7 +533,7 @@ def test_a_failed_or_empty_read_never_takes_an_applied_prompt_away():
     """``{}`` from /prompt/current also means "could not answer"; and a
     /policy/current that stops naming a prompt is absence, not withdrawal."""
     clock = _Clock()
-    src, reads = _prompt_source(
+    src, _reads = _prompt_source(
         [{"prompt_generation": "g1"}, {"prompt_generation": "g2"}, {}],
         [_prompt("FIRST", gen="g1", sha=_SHA1), {}], clock=clock,
     )

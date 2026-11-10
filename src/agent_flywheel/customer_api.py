@@ -33,9 +33,9 @@ from .control_plane import resolve_control_plane_url
 from .errors import ConfigurationError
 
 __all__ = [
+    "ATTACK_REFUSAL_CODES",
     "CUSTOMER_CONTRACT_VERSION",
     "ENV_CUSTOMER_API_KEY",
-    "ATTACK_REFUSAL_CODES",
     "PROMPT_RUN_REFUSAL_CODES",
     "RUN_LIST_REFUSAL_CODES",
     "CustomerApiClient",

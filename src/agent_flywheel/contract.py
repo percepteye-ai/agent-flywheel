@@ -30,9 +30,9 @@ from .execution_identity import is_lower_sha256
 
 __all__ = [
     "CONTRACT_VERSION",
+    "PRODUCTION_OUTCOMES",
     "ExclusionReason",
     "Outcome",
-    "PRODUCTION_OUTCOMES",
     "RolloutOutput",
     "RolloutRequest",
     "RulebookReceipt",

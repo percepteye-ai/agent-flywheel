@@ -50,8 +50,7 @@ from .execution_identity import (
 )
 from .introspection import _MAX_PROMPT_CHARS, DiscoveredAgent
 from .isolation import build_child_env, is_environment_overlay
-from .outcomes import hosted_base_for
-from .outcomes import TOOL_CALLS_FILENAME, Trajectory, _RolloutScope
+from .outcomes import TOOL_CALLS_FILENAME, Trajectory, _RolloutScope, hosted_base_for
 from .transport import AttachTransport, sleep_ms
 
 __all__ = ["RolloutRunner", "run_rollout_in_process"]
