@@ -2,7 +2,7 @@
 
 Mission Control holds a rollout out of training unless two independent counts
 of its policy calls agree: the one its gateway observed, and the one the agent
-side REPORTS (``mission_control/flywheel/grading.py``). An agent that returns a
+side REPORTS. An agent that returns a
 ``RolloutOutput`` without ``llm_call_count`` -- almost every agent, since
 nothing in its own code knows the number -- was therefore excluded on every
 rollout as ``llm_calls_unobserved``, however clean its traffic (τ³ banking,
