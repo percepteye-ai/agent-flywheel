@@ -1,4 +1,4 @@
-"""Reads of the customer-automation API (customer contract 1.50.0).
+"""Reads of the customer-automation API (customer contract 1.51.0).
 
 The rest of this package speaks the agent contract (``flywheel/1``) under
 ``/api/flywheel/v1`` with an agent's ``pefw_`` key. The runs list, training
@@ -10,7 +10,7 @@ so this client refuses it before sending anything and says which key it needs.
 The Node SDK's ``src/customer-api.js`` is the same surface, name for name
 (camelCase there): :data:`CUSTOMER_CONTRACT_VERSION`,
 :data:`ENV_CUSTOMER_API_KEY`, :func:`customer_api_base`,
-:class:`CustomerRefusal`, :class:`CustomerContractTooOld`, the five
+:class:`CustomerRefusal`, :class:`CustomerContractTooOld`, the six
 ``*_REFUSAL_CODES`` groups, :class:`CustomerApiClient` with ``list_runs``,
 ``training_eligibility``, ``list_eval_sets`` and ``supports_contract``
 (``tests/test_customer_api_parity.py`` runs both and requires one answer).
@@ -41,6 +41,7 @@ from .control_plane import resolve_control_plane_url
 from .errors import ConfigurationError
 
 __all__ = [
+    "AGENT_REFUSAL_CODES",
     "ATTACK_REFUSAL_CODES",
     "CUSTOMER_CONTRACT_VERSION",
     "CYBER_REFUSAL_CODES",
@@ -55,7 +56,7 @@ __all__ = [
 ]
 
 #: The customer contract this client was written against.
-CUSTOMER_CONTRACT_VERSION = "1.50.0"
+CUSTOMER_CONTRACT_VERSION = "1.51.0"
 _MAJOR = CUSTOMER_CONTRACT_VERSION.split(".", 1)[0]
 
 #: Where the customer-automation key is read from when none is passed.
@@ -121,6 +122,18 @@ TRAINING_REFUSAL_CODES = (
     "training_pool_cannot_train_objective",
     "opsd_chosen_model_not_trainable",
     "hillclimb_base_model_invalid",
+)
+#: Why a round with your agent is refused before anything is spent (1.51.0;
+#: Mission Control raised each before it published them): its "Allow practice
+#: runs" switch is off, no ``serve()`` process runs it with
+#: ``PERCEPTEYE_AGENT_MODE=training``, its model-content capture is off for a
+#: round read from its capture, or it gives practice nothing to write tasks
+#: from.
+AGENT_REFUSAL_CODES = (
+    "practice_rollouts_not_enabled",
+    "practice_needs_a_training_process",
+    "model_content_capture_not_enabled",
+    "flywheel_no_task_source",
 )
 
 _FLYWHEEL_SUFFIX = "/api/flywheel/v1"

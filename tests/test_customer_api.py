@@ -1,4 +1,4 @@
-"""The customer API reads (contract 1.50.0), case for case with the Node
+"""The customer API reads (contract 1.51.0), case for case with the Node
 SDK's test/customer-api.test.js."""
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from agent_flywheel.customer_api import (
+    AGENT_REFUSAL_CODES,
     ATTACK_REFUSAL_CODES,
     CUSTOMER_CONTRACT_VERSION,
     CYBER_REFUSAL_CODES,
@@ -35,7 +36,7 @@ def _client(status, body, calls):
 
 
 def test_pins_contract_and_new_codes():
-    assert CUSTOMER_CONTRACT_VERSION == "1.50.0"
+    assert CUSTOMER_CONTRACT_VERSION == "1.51.0"
     assert ATTACK_REFUSAL_CODES == (
         "attack_set_is_sealed",
         "attack_resistance_measuring",
@@ -65,6 +66,9 @@ def test_pins_contract_and_new_codes():
         "recorded_decisions_too_few", "recorded_prompt_mismatch",
         "prompt_objective_unprepared", "prompt_evolution_refused",
         "prompt_model_unreachable")
+    assert AGENT_REFUSAL_CODES == (
+        "practice_rollouts_not_enabled", "practice_needs_a_training_process",
+        "model_content_capture_not_enabled", "flywheel_no_task_source")
 
 
 def test_base_beside_flywheel_api(monkeypatch):
@@ -269,9 +273,16 @@ def test_refusal_codes_are_the_control_planes():
                 "cyber_attack_reward_not_comparable": 422,
                 "opsd_chosen_model_not_trainable": 422,
                 "hillclimb_base_model_invalid": 422,
+                # 1.51.0: the hillclimb door's refusals of an agent's switch,
+                # raised before 1.51.0 published them.
+                "practice_rollouts_not_enabled": 422,
+                "practice_needs_a_training_process": 422,
+                "model_content_capture_not_enabled": 422,
+                "flywheel_no_task_source": 422,
                 }
     known = (RUN_LIST_REFUSAL_CODES + PROMPT_RUN_REFUSAL_CODES
-             + ATTACK_REFUSAL_CODES + CYBER_REFUSAL_CODES + TRAINING_REFUSAL_CODES)
+             + ATTACK_REFUSAL_CODES + CYBER_REFUSAL_CODES + TRAINING_REFUSAL_CODES
+             + AGENT_REFUSAL_CODES)
     assert len(known) == len(set(known)), "a code is in two groups"
     assert set(known) == set(expected)
     for code, status in expected.items():

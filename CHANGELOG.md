@@ -32,7 +32,7 @@ repository's.
     capture for the agent, and a 403 from the intake stops outcomes as it stops
     turns.
 
-- **The customer-API client speaks customer contract 1.50.0** (it declared
+- **The customer-API client speaks customer contract 1.51.0** (it declared
   1.31.0 while Mission Control published 1.50.0). Both SDKs, same surface:
   - `training_eligibility(training_location=)` / `trainingEligibility({
     trainingLocation })` asks what a run could train on `platform_pool` or
@@ -50,6 +50,13 @@ repository's.
     its code);
     new `CYBER_REFUSAL_CODES` (why a cyber choice cannot apply) and
     `TRAINING_REFUSAL_CODES` (why a train is refused or stopped).
+  - New `AGENT_REFUSAL_CODES` (1.51.0): why a round with your agent is refused
+    before anything is spent -- `practice_rollouts_not_enabled` (its **Allow
+    practice runs** switch is off), `practice_needs_a_training_process` (no
+    `serve()` process runs it with `PERCEPTEYE_AGENT_MODE=training`),
+    `model_content_capture_not_enabled` and `flywheel_no_task_source`. Mission
+    Control refused with each before its contract listed them; 1.51.0
+    publishes them, all the customer's to fix (422).
   - Documented response fields: a run's `objective`, `security_mode`,
     `base_model`, `benchmark_eval_set_id`, `algorithm` and `owner_run_id`;
     eligibility's `flash_reinforce`, `opsd.trainable_models` and

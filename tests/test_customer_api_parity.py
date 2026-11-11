@@ -8,6 +8,8 @@ same refusal-code catalogue group by group, the same reading of a refusal's own
 evidence (``detail``), and the same verdict on an eligibility answer for a
 training location (1.50.0): returned when it is for the location asked,
 refused ``CustomerContractTooOld`` when it is not, as an older server's is.
+Both leave out the same published codes, for the reason
+:data:`NOT_CARRIED_PREFIXES` gives.
 
 The skip rule is ``tests/node_sdk.py``'s.
 """
@@ -30,7 +32,16 @@ GROUPS = {
     "ATTACK_REFUSAL_CODES": "ATTACK_REFUSAL_CODES",
     "CYBER_REFUSAL_CODES": "CYBER_REFUSAL_CODES",
     "TRAINING_REFUSAL_CODES": "TRAINING_REFUSAL_CODES",
+    "AGENT_REFUSAL_CODES": "AGENT_REFUSAL_CODES",
 }
+
+#: Codes the control plane publishes that NEITHER SDK carries, by prefix, and
+#: why: 1.40.0's three ``prompt_box_*`` codes are the platform's own
+#: prompt-optimization host, the platform's fault (a refusal by one still
+#: raises ``CustomerRefusal`` with its code), and one names that host's
+#: serving stack, a word this public package's guard keeps out of every
+#: published file -- so the codes are named here by prefix, never spelled.
+NOT_CARRIED_PREFIXES = ("prompt_box_",)
 
 #: ``name -> (asked location, the server's 200 body)``.
 ELIGIBILITY_CASES: dict[str, tuple[str | None, object]] = {
@@ -107,7 +118,7 @@ def test_both_sdks_know_the_same_refusal_codes(node_answers, python_name):
 
 
 def test_every_exported_group_is_compared():
-    """A sixth group added to one SDK must be added here, or this fails."""
+    """A seventh group added to one SDK must be added here, or this fails."""
     exported = {n for n in customer_api.__all__ if n.endswith("_REFUSAL_CODES")}
     assert exported == set(GROUPS)
 
@@ -130,3 +141,14 @@ def test_the_verdicts_are_not_all_one_answer(node_answers):
 @pytest.mark.parametrize("name", sorted(REFUSAL_CASES))
 def test_both_sdks_read_a_refusals_evidence_alike(node_answers, name):
     assert node_answers["detail"][name] == CustomerRefusal(422, REFUSAL_CASES[name]).detail
+
+
+def test_neither_sdk_carries_the_platform_hosts_codes(node_answers):
+    """The exclusion :data:`NOT_CARRIED_PREFIXES` documents holds in both
+    SDKs: no group of either carries a ``prompt_box_*`` code. Carrying one
+    would publish a platform-fault code, and spelling all three would put the
+    host's serving stack in this package."""
+    for name in GROUPS:
+        for code in (*getattr(customer_api, name),
+                     *node_answers["groups"][GROUPS[name]]):
+            assert not code.startswith(NOT_CARRIED_PREFIXES), (name, code)
