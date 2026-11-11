@@ -68,6 +68,15 @@ repository's.
     `destination_algorithm_unsupported` and `provider_checkpoint_not_owned`
     (403). Mission Control refused with each before its contract listed them;
     1.51.0 publishes them, all the customer's to fix (422 unless stated).
+    `RUN_LIST_REFUSAL_CODES` adds `launch_input_requires_platform_operator`
+    (403, new in 1.51.0): a hill climb request naming an input only a
+    platform operator may set (the experiment-only `environment_task_grader`,
+    which left the `POST /hillclimbs` request's schema; neither SDK ever
+    sent it). The other fourteen codes 1.51.0 added or published are not
+    carried: the operations that answer them (a Decision's answer, eval-set
+    comparisons and saves, observability sources, serving an artifact, a
+    champion's rollback) are ones neither SDK calls or documents, and a
+    refusal by one still raises `CustomerRefusal` with its code.
   - Documented response fields: a run's `objective`, `security_mode`,
     `base_model`, `benchmark_eval_set_id`, `algorithm` and `owner_run_id`;
     eligibility's `flash_reinforce`, `opsd.trainable_models` and
