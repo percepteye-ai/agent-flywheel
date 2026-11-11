@@ -541,10 +541,12 @@ class _Refusing(_Outcomes):
         super().__init__(**kw)
         self.answer = answer
         self.tried: list[list[str]] = []
+        self.records: dict[str, dict] = {}
 
     def report_outcomes(self, agent_id, outcomes):
         ids = [o["outcome_id"] for o in outcomes]
         self.tried.append(ids)
+        self.records.update((o["outcome_id"], dict(o)) for o in outcomes)
         refused = self.answer(ids)
         if refused is not None:
             status, detail = refused
@@ -593,7 +595,7 @@ def test_a_refusal_of_the_whole_batch_keeps_every_outcome(
 ):
     """Every part of the batch refused alike -- the same status, the same
     words -- is a refusal of THE BATCH: a 422 from a control plane on another
-    contract minor, a proxy's 400 or 413. It used to be bisected to singles
+    contract minor, a proxy's 400. It used to be bisected to singles
     and every outcome dropped, 64 outcomes costing 127 requests, each charged
     against the control plane's rate limit. Now the two halves agreeing ends
     it: three requests, every outcome kept for a later flush (the week still
@@ -621,6 +623,57 @@ def test_a_refusal_of_the_whole_batch_keeps_every_outcome(
         assert len(said) == 1 and "HTTP 422" in said[0], said
         assert not any("were dropped" in str(w.message) for w in caught)
     assert tr.outcomes == []
+
+
+def test_a_413_is_about_size_so_the_split_goes_on_until_it_fits(
+    monkeypatch, tmp_path, quiet,
+):
+    """A 413 is about the BODY'S SIZE, so both halves of a batch too large
+    for a proxy answer the same words -- and halves too large still is not a
+    refusal of the batch: quarters may fit. It used to stop the flush there,
+    and the outcomes waited a week and expired. A 413 always splits on."""
+    ids = [f"o{n:02}" for n in range(_PRODUCTION_OUTCOME_BATCH_MAX_ITEMS)]
+    quarter = len(ids) // 4
+    tr = _Refusing(lambda batch: (
+        (413, "Request Entity Too Large") if len(batch) > quarter else None))
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _report(px, *ids)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            counts = px.flush()
+        assert (counts["outcomes_sent"], counts["outcomes_failed"],
+                counts["outcomes_dropped"]) == (len(ids), 0, 0)
+        assert _pending(tmp_path) == []
+        assert len(tr.tried) == 1 + 2 + 4, "halves, then quarters"
+        assert not any("whole batches" in str(w.message) for w in caught)
+    assert sorted(o["outcome_id"] for o in tr.outcomes) == ids
+
+
+def test_one_outcome_too_large_alone_is_dropped_naming_413_and_its_size(
+    monkeypatch, tmp_path, quiet,
+):
+    """A record that still draws a 413 standing alone is too large on its
+    own: it is the record's fault, so it is dropped -- said with the status
+    and the record's size -- and the rest of its batch is sent."""
+    ids = [f"o{n}" for n in range(8)]
+    tr = _Refusing(lambda batch: (
+        (413, "Request Entity Too Large") if "o5" in batch else None))
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _report(px, *ids)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            counts = px.flush()
+        assert (counts["outcomes_sent"], counts["outcomes_failed"],
+                counts["outcomes_dropped"]) == (7, 0, 1)
+        # The size as the wire spells the record: compact JSON, UTF-8 -- the
+        # figure the Node SDK's ``Buffer.byteLength(JSON.stringify(wire))``
+        # gives for the same record.
+        size = len(json.dumps(tr.records["o5"], separators=(",", ":"),
+                              ensure_ascii=False).encode("utf-8"))
+        said = [str(w.message) for w in caught
+                if "were dropped" in str(w.message)]
+        assert len(said) == 1, said
+        assert "HTTP 413" in said[0] and f"{size} bytes" in said[0], said
 
 
 def test_two_records_refused_for_different_causes_are_still_isolated(
@@ -1119,7 +1172,8 @@ def test_an_outcome_the_node_sdk_queued_is_one_this_sdk_uploads(
 
 #: The parity table: what the control plane answers each batch with. A dict of
 #: refused ids -> (status, detail), the first of them in a batch deciding its
-#: answer; ``"*"`` refuses every batch.
+#: answer; ``"*"`` refuses every batch; ``">N"`` refuses every batch of more
+#: than N records (a proxy's size limit).
 REFUSAL_TABLE = {
     "one record, 422": {"o5": (422, "refused")},
     "one record, 400": {"o0": (400, "refused")},
@@ -1127,7 +1181,10 @@ REFUSAL_TABLE = {
     "two records, two causes": {"o1": (422, "o1: value must be finite"),
                                 "o6": (409, "o6: replayed")},
     "the whole batch, 422": {"*": (422, "contract minor mismatch")},
-    "the whole batch, 413": {"*": (413, "Request Entity Too Large")},
+    "a proxy's size limit, 413, cleared by quarters": {
+        ">3": (413, "Request Entity Too Large")},
+    "every request, 413, so each record alone": {
+        "*": (413, "Request Entity Too Large")},
     "the route, 404": {"*": (404, "Not Found")},
     "the route, 401": {"*": (401, "invalid key")},
     "the route, 410": {"*": (410, "gone")},
@@ -1137,6 +1194,9 @@ REFUSAL_TABLE = {
 def _table_answer(table, ids):
     if "*" in table:
         return table["*"]
+    for key, answer in table.items():
+        if key.startswith(">"):
+            return answer if len(ids) > int(key[1:]) else None
     for refused_id, answer in table.items():
         if refused_id in ids:
             return answer
@@ -1208,6 +1268,8 @@ def test_both_sdks_isolate_a_refused_outcome_alike(
         f"const root={json.dumps(str(tmp_path / 'node'))};\n"
         "const tried=[], sent=[];\n"
         "const answer=(ids)=>{if(table['*'])return table['*'];"
+        "for(const [k,a] of Object.entries(table))"
+        "if(k.startsWith('>'))return ids.length>Number(k.slice(1))?a:null;"
         "for(const [id,a] of Object.entries(table))"
         "if(ids.includes(id))return a;return null;};\n"
         "const reply=(status,body)=>new Response(JSON.stringify(body),"
@@ -1232,6 +1294,8 @@ def test_both_sdks_isolate_a_refused_outcome_alike(
     theirs = json.loads(run_node(sdk, node, script))
     assert theirs == ours
     assert ours["tried"], "the table is not vacuous"
+    if row.startswith("a proxy's size limit"):
+        assert ours["sent"] == sorted(ids) and ours["left"] == 0, ours
 
 
 def test_the_table_reaches_every_way_a_flush_ends():

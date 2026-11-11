@@ -36,8 +36,10 @@ repository's.
     holds back the good ones beside it. When both halves of a split are
     refused alike (same status, same words) the refusal was of the batch --
     a control plane on another contract minor, a proxy -- so the outcomes
-    stay for a later flush and the cause is said once; splitting is bounded
-    at 32 requests a flush.
+    stay for a later flush and the cause is said once. A 413 is about the
+    body's size, never the batch, so it is split on until the parts fit; a
+    record too large even alone is dropped with a warning naming the 413 and
+    its size. Splitting is bounded at 32 requests a flush.
   - **Consent.** It is sent on exactly the terms a turn is: a no-op (returns
     `None` / `null`, keeps nothing) once Mission Control has said production
     capture is not enabled for the agent, and a 403 from the intake stops

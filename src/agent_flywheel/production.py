@@ -410,11 +410,33 @@ def _outcome_route_refused(status: Any) -> bool:
     return status in _OUTCOME_ROUTE_REFUSALS
 
 
+#: The 4xx about the BODY'S SIZE (a proxy's limit, or the control plane's):
+#: never a refusal of what the batch says, so a smaller part may pass.
+_OUTCOME_TOO_LARGE = 413
+
+
+def _outcome_refused_for_size(status: Any) -> bool:
+    """Whether an ``/outcomes`` refusal was about how LARGE the body was.
+    Both halves of a batch too large for a proxy answer it in the same
+    words, so it is never read as a refusal of the batch: the split goes on,
+    and a record that draws it alone is too large on its own. The Node SDK's
+    ``outcomeRefusedForSize``."""
+    return status == _OUTCOME_TOO_LARGE
+
+
+def _outcome_wire_bytes(wire: Mapping[str, Any]) -> int:
+    """A record's size as the wire spells it: compact JSON, UTF-8 -- the
+    Node SDK's ``Buffer.byteLength(JSON.stringify(wire))``."""
+    return len(json.dumps(wire, separators=(",", ":"),
+                          ensure_ascii=False).encode("utf-8"))
+
+
 def _outcome_batch_refused(status: Any) -> bool:
     """Whether an ``/outcomes`` answer refused THIS BATCH: any other 4xx
     (400, 409, 413, 422 ...). The batch is split to find the records it
-    refused, or -- both halves refused alike -- kept as a refusal of the
-    batch itself (``Attachment._flush_outcomes``). The Node SDK's
+    refused, or -- both halves refused alike for what they say, never for
+    their size (:func:`_outcome_refused_for_size`) -- kept as a refusal of
+    the batch itself (``Attachment._flush_outcomes``). The Node SDK's
     ``outcomeBatchRefused``."""
     return (isinstance(status, int) and not isinstance(status, bool)
             and 400 <= status < 500
@@ -960,12 +982,19 @@ class Attachment:
 
         Unless both halves are refused with the same status and the same
         words: then the refusal was about THE BATCH, not a record in it -- a
-        422 from a control plane on another contract minor, a proxy's 400 or
-        413 -- and splitting further would drop every outcome at two requests
-        each. Sending stops for this flush, they stay on disk (the week's
-        expiry still applies), and the cause is said once. Splitting is also
-        bounded per flush (:data:`_OUTCOME_SPLIT_MAX_REQUESTS`); what the
-        bound leaves unsent stays for the next flush.
+        422 from a control plane on another contract minor, a proxy's 400 --
+        and splitting further would drop every outcome at two requests each.
+        Sending stops for this flush, they stay on disk (the week's expiry
+        still applies), and the cause is said once.
+
+        Except a 413 (:func:`_outcome_refused_for_size`): it is about the
+        body's SIZE, so both halves of a batch too large for a proxy answer
+        it alike, and smaller parts may still pass. The split goes on; a
+        record that draws a 413 standing alone is too large on its own, and
+        is dropped with a warning naming the 413 and its size.
+
+        Splitting is bounded per flush (:data:`_OUTCOME_SPLIT_MAX_REQUESTS`);
+        what the bound leaves unsent stays for the next flush.
 
         A 4xx about the ROUTE or the KEY (401, 404, 405, 410) is not the
         records' fault either: sending stops for this flush and they stay on
@@ -1073,15 +1102,21 @@ class Attachment:
                 if stop:
                     break
                 if (halves and len(refused) == 2
-                        and refused[0][1] == refused[1][1]):
+                        and refused[0][1] == refused[1][1]
+                        and not _outcome_refused_for_size(refused[0][1][0])):
                     failed += sum(len(b) for b, _ in refused) + _left()
                     queue.clear()
                     self._warn_whole_batch_refusal(refused[0][1][1])
                     break
                 split: list[list[Batch]] = []
-                for batch, (_status, cause) in refused:
+                for batch, (status, cause) in refused:
                     if len(batch) == 1:
                         _forget(batch)
+                        if _outcome_refused_for_size(status):
+                            cause = (
+                                f"{cause} (an outcome of "
+                                f"{_outcome_wire_bytes(batch[0][1])} bytes, "
+                                "too large to send even alone)")
                         dropped.append(cause)
                     else:
                         half = len(batch) // 2
