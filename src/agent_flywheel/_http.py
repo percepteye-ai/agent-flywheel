@@ -286,7 +286,13 @@ class ControlPlaneClient:
                 continue
 
             if resp.status_code == 410:
+                # The STATUS travels on it like on every other 4xx: a caller
+                # that reads ``status_code`` (the outcome flush's
+                # ``_outcome_route_refused``) otherwise saw ``None`` -- a
+                # blip -- for the one status it names. The Node SDK's
+                # ``LeaseLost`` has always carried ``statusCode: 410``.
                 raise LeaseLost(_detail(resp) or "lease lost",
+                                status_code=resp.status_code,
                                 ambiguous=ambiguous)
             ambiguous = ambiguous or _may_have_performed(resp.status_code)
 

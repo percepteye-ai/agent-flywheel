@@ -97,6 +97,10 @@ repository's.
   `default` is `off` (cyber is a choice) and `measurement_funding` is
   `run_quote`. The client's docs said `platform`; the client never rewrote the
   value.
+- **`LeaseLost.status_code` is 410** (it was `None`), as the Node SDK's
+  `statusCode` has always been, so a caller reading the status of a 410 sees
+  it -- the outcome upload reads a 410 as a refusal of the route, keeping the
+  outcomes, not as a blip that tries every batch.
 
 ### Requires
 

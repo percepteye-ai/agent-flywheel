@@ -737,14 +737,18 @@ def _over_http(monkeypatch, root, routes):
 GRANTED = {"POST /agents": (200, {"capture": {"turns": True}})}
 
 
-@pytest.mark.parametrize("status", [401, 404, 405])
+@pytest.mark.parametrize("status", [401, 404, 405, 410])
 def test_a_refusal_of_the_route_drops_nothing(
     monkeypatch, tmp_path, quiet, status,
 ):
     """A control plane with no ``/outcomes`` route yet, or a key it does not
     take, refuses every batch for a reason that is not the records': bisecting
     would drop every good outcome. They stay, the cause is said, and the
-    batches after it are not tried. Through the real HTTP client."""
+    batches after it are not tried.
+
+    THROUGH THE REAL HTTP CLIENT: a stub raising ``TransportError(status_code=
+    410)`` passed while the client raised ``LeaseLost`` with no status for a
+    410, so in production a 410 was a blip and every batch was tried."""
     total = _PRODUCTION_OUTCOME_BATCH_MAX_ITEMS + 3
     with warnings.catch_warnings(record=True) as caught, _over_http(
         monkeypatch, tmp_path,
@@ -1126,6 +1130,7 @@ REFUSAL_TABLE = {
     "the whole batch, 413": {"*": (413, "Request Entity Too Large")},
     "the route, 404": {"*": (404, "Not Found")},
     "the route, 401": {"*": (401, "invalid key")},
+    "the route, 410": {"*": (410, "gone")},
 }
 
 
@@ -1144,8 +1149,11 @@ def test_both_sdks_isolate_a_refused_outcome_alike(
 ):
     """The same queue on disk, the same answers from the control plane: both
     packages try the same batches in the same order, send the same outcomes,
-    drop the same ones, keep the same ones and count alike. Both through
-    their real HTTP clients, answered in-process."""
+    drop the same ones, keep the same ones and count alike.
+
+    BOTH THROUGH THEIR REAL HTTP CLIENTS, answered in-process: a stub that
+    raises a ready-made error skips the one place the two packages differed
+    (the Python client raised a 410 with no status)."""
     from .node_sdk import require_node_sdk, run_node
 
     sdk, node = require_node_sdk()
@@ -1231,7 +1239,7 @@ def test_the_table_reaches_every_way_a_flush_ends():
     kinds = {next(iter(t)) == "*" for t in REFUSAL_TABLE.values()}
     statuses = {a[0] for t in REFUSAL_TABLE.values() for a in t.values()}
     assert kinds == {True, False}
-    assert {404, 401, 422, 413, 409, 400} <= statuses
+    assert {410, 404, 401, 422, 413, 409, 400} <= statuses
 
 
 def test_both_sdks_bound_the_outcome_queue_alike():

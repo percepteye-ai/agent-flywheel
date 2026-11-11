@@ -1053,9 +1053,14 @@ class Attachment:
                         if _outcome_route_refused(status):
                             failed += len(batch) + untried + _left()
                             queue.clear()
+                            # A 410 is a ``LeaseLost``, whose words are the
+                            # detail alone: the status is named either way.
+                            said = str(exc)
+                            if f"HTTP {status}" not in said:
+                                said = f"HTTP {status}: {said}"
                             self._warn(
                                 "agent-flywheel: the control plane did not "
-                                f"take reported outcomes ({exc}); they stay "
+                                f"take reported outcomes ({said}); they stay "
                                 "on disk and are sent again on a later "
                                 "flush.")
                             stop = True

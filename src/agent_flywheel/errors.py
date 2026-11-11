@@ -125,7 +125,16 @@ class LeaseLost(TransportError):
     the reaper has cleared the lease, so "discard" named the one case where the
     local copy was the last one. The ROW is lost; the result is kept, named,
     and reported out loud (see ``RolloutRunner._settle``).
+
+    ``status_code`` is 410 unless said otherwise: a lease is lost by exactly
+    one status, and a caller that reads the code (the outcome flush's
+    ``_outcome_route_refused``) must see it here, not only in the class name.
+    It used to be ``None``, read as a blip. The Node SDK's ``LeaseLost``.
     """
+
+    def __init__(self, message: str, *, status_code: int | None = 410,
+                 ambiguous: bool = False) -> None:
+        super().__init__(message, status_code=status_code, ambiguous=ambiguous)
 
 
 class ModeNotAvailable(ConfigurationError):
