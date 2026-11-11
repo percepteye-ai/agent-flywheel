@@ -32,8 +32,44 @@ repository's.
     capture for the agent, and a 403 from the intake stops outcomes as it stops
     turns.
 
+- **The customer-API client speaks customer contract 1.50.0** (it declared
+  1.31.0 while Mission Control published 1.50.0). Both SDKs, same surface:
+  - `training_eligibility(training_location=)` / `trainingEligibility({
+    trainingLocation })` asks what a run could train on `platform_pool` or
+    `platform_gpu` (1.50.0); the answer's `training_locations` names the place
+    it is for and, on our GPUs, how many hosts are free.
+  - `CustomerRefusal.detail` is the refusal's own evidence (`waiting_on`,
+    `host_prompt_fit`, a diverged train's `learning_rate`, `cause`,
+    `chosen_model`), `None` / `null` when it carries none.
+  - The refusal codes 1.32.0 through 1.49.0 published, exported by group:
+    `ATTACK_REFUSAL_CODES` adds `attack_unmeasured_undisclosed`;
+    `PROMPT_RUN_REFUSAL_CODES` adds `prompt_objective_unprepared`,
+    `prompt_evolution_refused` and `prompt_model_unreachable` (1.40.0's three
+    codes for the platform's own prompt-optimization host are not carried: the
+    platform's fault, and a refusal by one still raises `CustomerRefusal` with
+    its code);
+    new `CYBER_REFUSAL_CODES` (why a cyber choice cannot apply) and
+    `TRAINING_REFUSAL_CODES` (why a train is refused or stopped).
+  - Documented response fields: a run's `objective`, `security_mode`,
+    `base_model`, `benchmark_eval_set_id`, `algorithm` and `owner_run_id`;
+    eligibility's `flash_reinforce`, `opsd.trainable_models` and
+    `training_locations`; a hill climb's security `base`, `checkpoints`,
+    `external_benchmarks`, `benchmark_coverage` and `capability`.
+
+### Changed
+
+- **Eligibility's `security` is documented as it is served since 1.44.0:**
+  `default` is `off` (cyber is a choice) and `measurement_funding` is
+  `run_quote`. The client's docs said `platform`; the client never rewrote the
+  value.
+
 ### Requires
 
+- **Every customer-API read works against Mission Control 1.30.0 or newer**,
+  as before. `training_location` / `trainingLocation` needs 1.50.0: an older
+  server ignores the query and answers for the organization's own setting, so
+  the client raises `CustomerContractTooOld` (a `ConfigurationError`) rather
+  than return an answer for a place you did not ask about.
 - **Mission Control must serve `POST /api/flywheel/v1/outcomes`.** Against an
   older server the upload answers 404, which both SDKs treat as retryable: the
   outcomes stay queued and are retried for up to a week, then dropped with a

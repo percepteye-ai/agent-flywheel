@@ -1,4 +1,4 @@
-"""The customer API reads (contract 1.31.0), case for case with the Node
+"""The customer API reads (contract 1.50.0), case for case with the Node
 SDK's test/customer-api.test.js."""
 from __future__ import annotations
 
@@ -10,9 +10,12 @@ import pytest
 from agent_flywheel.customer_api import (
     ATTACK_REFUSAL_CODES,
     CUSTOMER_CONTRACT_VERSION,
+    CYBER_REFUSAL_CODES,
     PROMPT_RUN_REFUSAL_CODES,
     RUN_LIST_REFUSAL_CODES,
+    TRAINING_REFUSAL_CODES,
     CustomerApiClient,
+    CustomerContractTooOld,
     CustomerRefusal,
     customer_api_base,
 )
@@ -32,7 +35,7 @@ def _client(status, body, calls):
 
 
 def test_pins_contract_and_new_codes():
-    assert CUSTOMER_CONTRACT_VERSION == "1.31.0"
+    assert CUSTOMER_CONTRACT_VERSION == "1.50.0"
     assert ATTACK_REFUSAL_CODES == (
         "attack_set_is_sealed",
         "attack_resistance_measuring",
@@ -44,11 +47,24 @@ def test_pins_contract_and_new_codes():
         "hillclimb_not_found",
         "round_not_found",
         "event_kind_is_the_platforms",
+        "attack_unmeasured_undisclosed",
     )
+    assert CYBER_REFUSAL_CODES == (
+        "cyber_disabled", "cyber_training_disabled", "cyber_needs_training",
+        "cyber_no_training_entry", "cyber_lane_has_no_attack_reward",
+        "hillclimb_security_unknown", "cyber_attack_reward_not_comparable")
+    assert TRAINING_REFUSAL_CODES == (
+        "opsd_prompts_exceed_host", "opsd_recipe_tokenizer_hub_unavailable",
+        "opsd_recipe_tokenizer_refused", "opsd_recipe_tokenizer_platform_fault",
+        "opsd_teacher_preflight_no_evidence_decisions", "training_diverged_at_lr",
+        "training_unhealthy", "training_pool_cannot_train_objective",
+        "opsd_chosen_model_not_trainable", "hillclimb_base_model_invalid")
     assert RUN_LIST_REFUSAL_CODES == ("launch_uri_outside_org", "run_page_too_deep")
     assert PROMPT_RUN_REFUSAL_CODES == (
         "prompt_run_balance_too_small", "recorded_prompt_absent",
-        "recorded_decisions_too_few", "recorded_prompt_mismatch")
+        "recorded_decisions_too_few", "recorded_prompt_mismatch",
+        "prompt_objective_unprepared", "prompt_evolution_refused",
+        "prompt_model_unreachable")
 
 
 def test_base_beside_flywheel_api(monkeypatch):
@@ -99,6 +115,41 @@ def test_eligibility_and_eval_sets():
     assert calls[1].url.query == b"product_id=p1&limit=5&offset=10"
 
 
+def test_eligibility_for_a_training_location():
+    """1.50.0: the answer is for the location asked, and says so."""
+    calls: list = []
+    c = _client(200, {"training_locations": {
+        "answered_for": "platform_gpu", "default": "platform_pool", "options": [
+            {"location": "platform_gpu", "available": True, "refusal": None,
+             "gpu_hosts": 2, "gpu_hosts_free": 1}]}}, calls)
+    e = c.training_eligibility(agent_id="a1", training_location="platform_gpu")
+    assert e["training_locations"]["options"][0]["gpu_hosts_free"] == 1
+    assert calls[0].url.query == b"agent_id=a1&training_location=platform_gpu"
+
+
+@pytest.mark.parametrize("body", [
+    {"prompt_optimization": {}},                                   # before 1.50.0
+    {"training_locations": None},
+    {"training_locations": {"answered_for": "platform_pool"}},     # the org's own
+    ["not", "an", "object"],
+])
+def test_an_answer_not_for_the_asked_location_is_refused(body):
+    """A server before 1.50.0 ignores ``training_location`` and answers for
+    the organization's own setting; that is never returned as the answer
+    asked for."""
+    c = _client(200, body, [])
+    with pytest.raises(CustomerContractTooOld, match=r"customer contract 1\.50\.0"):
+        c.training_eligibility(training_location="platform_gpu")
+
+
+def test_without_a_location_an_older_answer_is_returned_unchanged():
+    """No location asked, nothing to check: a 1.30.0 server's answer stands."""
+    calls: list = []
+    c = _client(200, {"prompt_optimization": {"enabled": False}}, calls)
+    assert c.training_eligibility(product_id="p") == {"prompt_optimization": {"enabled": False}}
+    assert calls[0].url.query == b"product_id=p"
+
+
 def test_hillclimb_security_reads_the_runs_record():
     calls: list = []
     c = _client(200, {"measurement": {"state": "not_measured"}}, calls)
@@ -127,6 +178,11 @@ def test_refusal_code_and_plain_words():
     assert err.plain_words == "These traces hold no system message."
     assert err.fault_owner == "customer"
     assert err.retryable is False
+    assert err.detail is None
+    diverged = CustomerRefusal(422, {"detail": {
+        "code": "training_diverged_at_lr", "message": "m",
+        "detail": {"learning_rate": 2e-5, "retry_learning_rate": 1e-5}}})
+    assert diverged.detail == {"learning_rate": 2e-5, "retry_learning_rate": 1e-5}
     no_msg = CustomerRefusal(422, {"detail": {
         "code": "run_page_too_deep", "message": "m", "customer_words": "Use an earlier date."}})
     assert no_msg.plain_words == "Use an earlier date."
@@ -190,9 +246,34 @@ def test_refusal_codes_are_the_control_planes():
                 "hillclimb_not_found": 404,
                 "round_not_found": 404,
                 "event_kind_is_the_platforms": 403,
+                # 1.32.0 through 1.49.0: every code those bumps published but
+                # 1.40.0's three prompt_box_* codes (see PROMPT_RUN_REFUSAL_CODES).
+                "opsd_prompts_exceed_host": 422,
+                "opsd_recipe_tokenizer_hub_unavailable": 503,
+                "opsd_recipe_tokenizer_refused": 422,
+                "opsd_recipe_tokenizer_platform_fault": 503,
+                "opsd_teacher_preflight_no_evidence_decisions": 409,
+                "attack_unmeasured_undisclosed": 409,
+                "training_diverged_at_lr": 422,
+                "training_unhealthy": 422,
+                "prompt_objective_unprepared": 500,
+                "prompt_evolution_refused": 409,
+                "prompt_model_unreachable": 422,
+                "cyber_disabled": 503,
+                "cyber_training_disabled": 503,
+                "cyber_needs_training": 422,
+                "cyber_no_training_entry": 422,
+                "cyber_lane_has_no_attack_reward": 422,
+                "hillclimb_security_unknown": 422,
+                "training_pool_cannot_train_objective": 503,
+                "cyber_attack_reward_not_comparable": 422,
+                "opsd_chosen_model_not_trainable": 422,
+                "hillclimb_base_model_invalid": 422,
                 }
-    assert set(RUN_LIST_REFUSAL_CODES + PROMPT_RUN_REFUSAL_CODES
-               + ATTACK_REFUSAL_CODES) == set(expected)
+    known = (RUN_LIST_REFUSAL_CODES + PROMPT_RUN_REFUSAL_CODES
+             + ATTACK_REFUSAL_CODES + CYBER_REFUSAL_CODES + TRAINING_REFUSAL_CODES)
+    assert len(known) == len(set(known)), "a code is in two groups"
+    assert set(known) == set(expected)
     for code, status in expected.items():
         assert published.get(code) == status, code
     assert doc["x-customer-contract-version"] == CUSTOMER_CONTRACT_VERSION
