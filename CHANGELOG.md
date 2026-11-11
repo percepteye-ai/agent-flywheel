@@ -34,9 +34,11 @@ repository's.
     with a warning naming the control plane's cause, so one bad record never
     holds back the good ones beside it.
   - **Consent.** It is sent on exactly the terms a turn is: a no-op (returns
-    `None` / `null`, keeps nothing) until Mission Control enables production
-    capture for the agent, and a 403 from the intake stops outcomes as it stops
-    turns.
+    `None` / `null`, keeps nothing) once Mission Control has said production
+    capture is not enabled for the agent, and a 403 from the intake stops
+    outcomes as it stops turns. Reported while that answer is still unknown
+    (the registration that asks failed on a blip), the outcome is kept, and
+    reporting it starts the flush that asks again.
 
 - **The customer-API client speaks customer contract 1.51.0** (it declared
   1.31.0 while Mission Control published 1.50.0). Both SDKs, same surface:

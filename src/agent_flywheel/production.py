@@ -477,6 +477,7 @@ class Attachment:
         api_key: str | None = None,
         may_upload: bool = False,
         upload_refusal: str | None = None,
+        consent_refused: bool = False,
         agent_fingerprint: Mapping[str, str] | None = None,
         may_capture_model_content: bool = False,
         model_content_refusal: str | None = None,
@@ -522,6 +523,13 @@ class Attachment:
         self.may_upload = may_upload
         #: Why not, in a sentence, when it is False and the control plane said.
         self.upload_refusal = upload_refusal
+        #: Whether the control plane SAID NO -- an answered verdict, or the
+        #: intake's 403 -- as opposed to not having answered yet (a
+        #: registration that failed on a blip). ``may_upload`` is False in
+        #: both, and they are different facts: an outcome reported while the
+        #: answer is UNKNOWN is kept for the flush that re-asks, and only an
+        #: explicit no makes :meth:`report_outcome` a no-op.
+        self._consent_refused = bool(consent_refused and not may_upload)
         #: THE SECOND CONSENT TIER, as the control plane last said it: may a
         #: turn also carry what its model calls saw and said -- the system
         #: prompt, the whole conversation history, the tool definitions and
@@ -791,11 +799,14 @@ class Attachment:
         it does not score the turn and nothing is trained on it directly.
 
         Returns the outcome's id once it is queued for upload, or ``None``
-        when nothing was queued. IT IS A NO-OP UNTIL PRODUCTION CAPTURE IS
-        ENABLED for this agent (:attr:`may_upload`): an outcome is a fact
-        about your end users' traffic, so it is sent on exactly the terms a
-        turn is, and nothing is kept locally for an agent that may not send
-        it.
+        when nothing was queued. IT IS A NO-OP ONCE THE CONTROL PLANE HAS SAID
+        PRODUCTION CAPTURE IS NOT ENABLED for this agent, or with no control
+        plane to ask: an outcome is a fact about your end users' traffic, so
+        it is sent on exactly the terms a turn is, and nothing is kept locally
+        for an agent that may not send it. While the answer is still UNKNOWN
+        (the registration that asks failed on a blip) the outcome is kept, and
+        reporting it starts the flush that asks again; it is sent once the
+        answer is yes.
 
         Queued, then uploaded off the calling thread with the turns' own
         retry behaviour: the outcome waits on disk under ``trajectory_root``
@@ -823,9 +834,12 @@ class Attachment:
             if given is not None:
                 wire[name] = given
         wire = production_outcome(wire)
-        if not self.may_upload:
-            # Also the answer with no key or control plane: nothing has said
-            # yes (``may_upload`` is only ever the control plane's word).
+        if not self.may_upload and (
+            self._consent_refused or not (self._cp_url and self._api_key)
+        ):
+            # An explicit no, or nothing to ask: nothing will ever say yes to
+            # this outcome, so nothing is kept. While the answer is merely
+            # UNKNOWN it is kept, and ``_flush_soon`` below re-asks.
             return None
         path = _outcome_file(self.trajectory_root, wire["outcome_id"])
         partial = path.with_name(path.name + ".tmp")
@@ -1424,6 +1438,7 @@ class Attachment:
         """
         self.may_upload = True
         self.upload_refusal = None
+        self._consent_refused = False
         if not self._exit_flush_registered:
             self._exit_flush_registered = True
             _flush_at_exit(self)
@@ -1440,6 +1455,7 @@ class Attachment:
         """
         self.may_upload = False
         self.upload_refusal = reason
+        self._consent_refused = True
         # A trace rides on a turn: a refused turn refuses its model content
         # too, for the same reason.
         self.may_capture_model_content = False
@@ -1506,6 +1522,7 @@ class Attachment:
                 # the same argument that stops an empty answer revoking
                 # consent two lines up.
                 self.upload_refusal = verdict.reason
+                self._consent_refused = True
         except Exception:
             # A capture bug costs the observation, never the turn.
             pass
@@ -2098,6 +2115,8 @@ def attach(
     )
     key = _resolved_key.value if _resolved_key else None
     may_upload = False
+    #: Only an ANSWERED no (see ``Attachment._consent_refused``).
+    consent_refused = False
     may_capture_model_content = False
     model_content_refusal: str | None = None
     # NAMED, not None. `upload_refusal` is documented as "the sentence
@@ -2206,6 +2225,7 @@ def attach(
                 verdict = capture_verdict(reg)
                 may_upload = verdict.may_upload
                 upload_refusal = verdict.reason
+                consent_refused = verdict.answered and not verdict.may_upload
                 may_capture_model_content = verdict.may_capture_model_content
                 model_content_refusal = verdict.model_content_reason
             except Exception as exc:
@@ -2276,6 +2296,7 @@ def attach(
         api_key=key,
         may_upload=may_upload,
         upload_refusal=upload_refusal,
+        consent_refused=consent_refused,
         agent_fingerprint=agent_fingerprint,
         may_capture_model_content=may_capture_model_content,
         model_content_refusal=model_content_refusal,

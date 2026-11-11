@@ -275,6 +275,66 @@ def test_it_is_a_no_op_with_no_control_plane_key(monkeypatch, tmp_path, quiet):
         px.close()
 
 
+class _Unanswered(_Outcomes):
+    """A registration that failed on a blip, so consent is UNKNOWN; the
+    capture read answers ``later`` (``None``: still nothing) when re-asked."""
+
+    def __init__(self, later=None, **kw):
+        super().__init__(**kw)
+        self.later = later
+        self.asked = 0
+
+    def register(self, spec):
+        raise TransportError("connection reset")
+
+    def capture_current(self, agent_id):
+        self.asked += 1
+        return {} if self.later is None else {"capture": self.later}
+
+
+def test_an_outcome_reported_before_consent_is_known_is_kept_and_asks_again(
+    monkeypatch, tmp_path, quiet,
+):
+    """``may_upload`` is False both after an explicit no and after a
+    registration that never got its answer. Read as a no, the second dropped
+    every outcome reported until a turn's flush happened to re-ask -- and
+    nothing re-asked for an outcome. It is kept, and reporting it starts the
+    flush that asks."""
+    tr = _Unanswered()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        assert px.may_upload is False
+        outcome_id = px.report_outcome("resolved", turn_id="t1")
+        assert outcome_id is not None
+        assert len(_pending(tmp_path)) == 1
+        assert quiet == [1], "reporting it starts the flush that re-asks"
+        # Still no answer: kept, not sent.
+        px.flush()
+        assert tr.asked >= 1 and tr.outcomes == []
+        assert len(_pending(tmp_path)) == 1
+        # The operator's yes arrives: the next flush asks, learns it, sends.
+        tr.later = {"turns": True}
+        counts = px.flush()
+        assert px.may_upload is True
+        assert counts["outcomes_sent"] == 1
+    assert [o["outcome_id"] for o in tr.outcomes] == [outcome_id]
+    assert _pending(tmp_path) == []
+
+
+def test_an_explicit_no_learned_later_makes_reporting_a_no_op_again(
+    monkeypatch, tmp_path, quiet,
+):
+    """Only the control plane's answered no ends the waiting: what was kept
+    stays on disk like a refused turn, and nothing new is kept."""
+    tr = _Unanswered(later={"turns": False, "reason": "opt-in per agent"})
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        assert px.report_outcome("resolved", turn_id="t1") is not None
+        px.flush()
+        assert px.may_upload is False and px.upload_refusal == "opt-in per agent"
+        assert px.report_outcome("reopened", turn_id="t1") is None
+        assert len(_pending(tmp_path)) == 1
+    assert tr.outcomes == []
+
+
 def test_nothing_waiting_is_sent_once_consent_is_withdrawn(
     monkeypatch, tmp_path, quiet,
 ):
