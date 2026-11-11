@@ -110,7 +110,9 @@ CYBER_REFUSAL_CODES = (
 #: recipe tokenizer and the teacher gate's evidence (1.32.0); a diverged or
 #: unhealthy train (1.36.0, 1.37.0; ``CustomerRefusal.detail`` carries the
 #: evidence); a pool that cannot train the objective (1.46.0); a chosen model
-#: that cannot be trained (1.49.0).
+#: that cannot be trained (1.49.0); a base model named by no usable id, a
+#: destination that cannot train the algorithm, a checkpoint another
+#: organization's runs produced (1.51.0, raised before it published them).
 TRAINING_REFUSAL_CODES = (
     "opsd_prompts_exceed_host",
     "opsd_recipe_tokenizer_hub_unavailable",
@@ -122,18 +124,24 @@ TRAINING_REFUSAL_CODES = (
     "training_pool_cannot_train_objective",
     "opsd_chosen_model_not_trainable",
     "hillclimb_base_model_invalid",
+    "base_model_unresolvable",
+    "destination_algorithm_unsupported",
+    "provider_checkpoint_not_owned",
 )
 #: Why a round with your agent is refused before anything is spent (1.51.0;
 #: Mission Control raised each before it published them): its "Allow practice
 #: runs" switch is off, no ``serve()`` process runs it with
 #: ``PERCEPTEYE_AGENT_MODE=training``, its model-content capture is off for a
-#: round read from its capture, or it gives practice nothing to write tasks
-#: from.
+#: round read from its capture, it gives practice nothing to write tasks
+#: from, or the product does not declare the agent the organization
+#: registered (or declares one that cannot serve).
 AGENT_REFUSAL_CODES = (
     "practice_rollouts_not_enabled",
     "practice_needs_a_training_process",
     "model_content_capture_not_enabled",
     "flywheel_no_task_source",
+    "flywheel_product_undeclared",
+    "invalid_flywheel_spec",
 )
 
 _FLYWHEEL_SUFFIX = "/api/flywheel/v1"

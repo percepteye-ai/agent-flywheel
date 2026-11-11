@@ -59,7 +59,9 @@ def test_pins_contract_and_new_codes():
         "opsd_recipe_tokenizer_refused", "opsd_recipe_tokenizer_platform_fault",
         "opsd_teacher_preflight_no_evidence_decisions", "training_diverged_at_lr",
         "training_unhealthy", "training_pool_cannot_train_objective",
-        "opsd_chosen_model_not_trainable", "hillclimb_base_model_invalid")
+        "opsd_chosen_model_not_trainable", "hillclimb_base_model_invalid",
+        "base_model_unresolvable", "destination_algorithm_unsupported",
+        "provider_checkpoint_not_owned")
     assert RUN_LIST_REFUSAL_CODES == ("launch_uri_outside_org", "run_page_too_deep")
     assert PROMPT_RUN_REFUSAL_CODES == (
         "prompt_run_balance_too_small", "recorded_prompt_absent",
@@ -68,7 +70,8 @@ def test_pins_contract_and_new_codes():
         "prompt_model_unreachable")
     assert AGENT_REFUSAL_CODES == (
         "practice_rollouts_not_enabled", "practice_needs_a_training_process",
-        "model_content_capture_not_enabled", "flywheel_no_task_source")
+        "model_content_capture_not_enabled", "flywheel_no_task_source",
+        "flywheel_product_undeclared", "invalid_flywheel_spec")
 
 
 def test_base_beside_flywheel_api(monkeypatch):
@@ -279,6 +282,11 @@ def test_refusal_codes_are_the_control_planes():
                 "practice_needs_a_training_process": 422,
                 "model_content_capture_not_enabled": 422,
                 "flywheel_no_task_source": 422,
+                "flywheel_product_undeclared": 422,
+                "invalid_flywheel_spec": 422,
+                "base_model_unresolvable": 422,
+                "destination_algorithm_unsupported": 422,
+                "provider_checkpoint_not_owned": 403,
                 }
     known = (RUN_LIST_REFUSAL_CODES + PROMPT_RUN_REFUSAL_CODES
              + ATTACK_REFUSAL_CODES + CYBER_REFUSAL_CODES + TRAINING_REFUSAL_CODES

@@ -54,9 +54,12 @@ repository's.
     before anything is spent -- `practice_rollouts_not_enabled` (its **Allow
     practice runs** switch is off), `practice_needs_a_training_process` (no
     `serve()` process runs it with `PERCEPTEYE_AGENT_MODE=training`),
-    `model_content_capture_not_enabled` and `flywheel_no_task_source`. Mission
-    Control refused with each before its contract listed them; 1.51.0
-    publishes them, all the customer's to fix (422).
+    `model_content_capture_not_enabled`, `flywheel_no_task_source`,
+    `flywheel_product_undeclared` and `invalid_flywheel_spec`; and
+    `TRAINING_REFUSAL_CODES` adds `base_model_unresolvable`,
+    `destination_algorithm_unsupported` and `provider_checkpoint_not_owned`
+    (403). Mission Control refused with each before its contract listed them;
+    1.51.0 publishes them, all the customer's to fix (422 unless stated).
   - Documented response fields: a run's `objective`, `security_mode`,
     `base_model`, `benchmark_eval_set_id`, `algorithm` and `owner_run_id`;
     eligibility's `flash_reinforce`, `opsd.trainable_models` and
