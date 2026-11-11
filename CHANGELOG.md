@@ -28,7 +28,8 @@ repository's.
   - **Offline queue.** Each outcome waits as one file in the capture directory
     (`.outcome.<digest>.json`), is uploaded off the caller's thread with the
     turns' flush, and is retried across restarts until Mission Control
-    acknowledges it, for at most a week. A 4xx about the batch (400, 409, 413,
+    acknowledges it, for at most a week (the week runs out on every flush,
+    whatever consent says). A 4xx about the batch (400, 409, 413,
     422 ...) is final for it: the batch is split until the refused records
     stand alone, the rest are sent at once, and each refused record is dropped
     with a warning naming the control plane's cause, so one bad record never
@@ -38,7 +39,10 @@ repository's.
     capture is not enabled for the agent, and a 403 from the intake stops
     outcomes as it stops turns. Reported while that answer is still unknown
     (the registration that asks failed on a blip), the outcome is kept, and
-    reporting it starts the flush that asks again.
+    reporting it starts the flush that asks again; at most 1,000 are kept
+    while it is unknown, oldest dropped first with a warning. A 401, 403 or
+    404 on the verdict read, or an answer with no verdict in it, is an
+    answer: no.
 
 - **The customer-API client speaks customer contract 1.51.0** (it declared
   1.31.0 while Mission Control published 1.50.0). Both SDKs, same surface:

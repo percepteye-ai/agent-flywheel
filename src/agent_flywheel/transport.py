@@ -209,6 +209,24 @@ class FlywheelTransport(Protocol):
         ...
 
 
+#: Statuses on ``GET /agents/{id}/capture`` that are the control plane's
+#: answer, not a blip: a key it does not accept (401), a key or agent it will
+#: not answer for (403), no such agent or no such route (404 -- a control
+#: plane older than the read). The Node SDK's ``CAPTURE_READ_REFUSALS``.
+CAPTURE_READ_REFUSALS = frozenset({401, 403, 404})
+
+
+def capture_read_refusal(what: str) -> dict[str, Any]:
+    """The verdict-read body for an answer that grants nothing: an answered
+    refusal (``capture.turns`` false) whose reason names what the control
+    plane said, so :func:`~agent_flywheel.production.capture_verdict` reads
+    it as an answer. The Node SDK's ``captureReadRefusal``, word for word."""
+    return {"capture": {"turns": False, "reason": (
+        "the control plane did not grant this agent production capture when "
+        f"asked ({what}), so nothing is uploaded. Turns are still captured "
+        "locally.")}}
+
+
 class AttachTransport:
     """Outbound-only pull transport.
 
@@ -455,14 +473,32 @@ class AttachTransport:
         OPEN because keeping the current policy is the safe answer there -- and
         the two must not be made to look alike, because their safe directions
         are opposite.
+
+        A DEFINITIVE ANSWER IS AN ANSWER, though. A 401, 403 or 404 on this
+        read, or a 2xx body with no ``capture`` block in it, is the control
+        plane deciding, not a blip: it will say the same thing to the next
+        read. Returned as ``{}`` it read as "consent unknown", so an outcome
+        reported meanwhile was kept on disk for good and every report re-asked.
+        Each is returned as an answered refusal naming what was said
+        (:func:`capture_read_refusal`); only an exception with no answer, or
+        a status outside :data:`CAPTURE_READ_REFUSALS`, is ``{}``.
         """
         if _production_agent_identifier(agent_id) is None:
             return {}
         try:
-            return self._c.request(
-                "GET", f"/agents/{quote(agent_id, safe='')}/capture") or {}
+            body = self._c.request(
+                "GET", f"/agents/{quote(agent_id, safe='')}/capture")
+        except TransportError as exc:
+            status = exc.status_code
+            if status in CAPTURE_READ_REFUSALS:
+                return capture_read_refusal(str(exc))
+            return {}
         except Exception:  # see docstring
             return {}
+        if isinstance(body, dict) and isinstance(body.get("capture"), dict):
+            return body
+        return capture_read_refusal(
+            "it answered with no capture verdict in the body")
 
     def report_turns(
         self, agent_id: str, turns: list[dict[str, Any]]

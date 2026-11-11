@@ -346,6 +346,11 @@ _OUTCOME_FILE_SUFFIX = ".json"
 #: route yet) must not grow for the life of a deployment; a week, the Node
 #: SDK's rollout outbox bound.
 _OUTCOME_MAX_AGE_S = 7 * 24 * 3600.0
+#: How many outcomes are kept while consent is still UNKNOWN (the verdict read
+#: has not been answered yet). Bounded by count as well as age, because a week
+#: of a busy agent's reports is not a small outbox; past it the oldest go, out
+#: loud. The Node SDK's ``OUTCOME_MAX_KEPT_UNANSWERED``.
+_OUTCOME_MAX_KEPT_UNANSWERED = 1000
 
 
 def _outcome_file(root: str | os.PathLike[str], outcome_id: str) -> Path:
@@ -806,7 +811,8 @@ class Attachment:
         for an agent that may not send it. While the answer is still UNKNOWN
         (the registration that asks failed on a blip) the outcome is kept, and
         reporting it starts the flush that asks again; it is sent once the
-        answer is yes.
+        answer is yes. At most 1,000 are kept while it is unknown; past that
+        the oldest are dropped, with a warning.
 
         Queued, then uploaded off the calling thread with the turns' own
         retry behaviour: the outcome waits on disk under ``trajectory_root``
@@ -851,12 +857,80 @@ class Attachment:
         except OSError:
             # Capture costs the observation, never the caller.
             return None
+        if not self.may_upload:
+            self._cap_unanswered_outcomes()
         self._flush_soon()
         return str(wire["outcome_id"])
 
-    def _flush_outcomes(self) -> dict[str, int]:
-        """Upload the outcomes waiting on disk. Caller holds ``_flush_lock``
-        and has established :attr:`may_upload`. Never raises.
+    def _outcome_files(self) -> list[Path]:
+        """The outcome files waiting in the trajectory root, in name order.
+        Never raises: an unreadable root is an empty queue."""
+        try:
+            return sorted(
+                p for p in Path(self.trajectory_root).iterdir()
+                if p.name.startswith(_OUTCOME_FILE_PREFIX)
+                and p.name.endswith(_OUTCOME_FILE_SUFFIX) and p.is_file()
+            )
+        except OSError:
+            return []
+
+    def _cap_unanswered_outcomes(self) -> None:
+        """While consent is UNKNOWN, keep at most
+        :data:`_OUTCOME_MAX_KEPT_UNANSWERED` outcomes: the oldest (by when
+        they were written, then by name) go, with a warning. Never raises."""
+        files = self._outcome_files()
+        excess = len(files) - _OUTCOME_MAX_KEPT_UNANSWERED
+        if excess <= 0:
+            return
+
+        def _age(path: Path) -> tuple[float, str]:
+            try:
+                return (path.stat().st_mtime, path.name)
+            except OSError:
+                return (0.0, path.name)
+
+        dropped = 0
+        for path in sorted(files, key=_age)[:excess]:
+            try:
+                path.unlink()
+                dropped += 1
+            except OSError:
+                continue
+        if dropped:
+            self._warn(
+                f"agent-flywheel: {dropped} reported outcome(s) were dropped, "
+                "oldest first: the control plane has not yet said whether "
+                "this agent may upload them, and at most "
+                f"{_OUTCOME_MAX_KEPT_UNANSWERED} are kept while it has not.")
+
+    def _expire_outcomes(self) -> list[Path]:
+        """Drop the outcomes undelivered for a week, out loud; the rest, in
+        name order. Runs on EVERY flush, whatever consent says: the bound used
+        to live inside the upload, which runs only once consent is yes, so an
+        outcome kept while the answer was unknown -- or after a refusal --
+        never expired. Never raises."""
+        kept: list[Path] = []
+        expired = 0
+        now = time.time()
+        for path in self._outcome_files():
+            try:
+                if now - path.stat().st_mtime > _OUTCOME_MAX_AGE_S:
+                    path.unlink()
+                    expired += 1
+                    continue
+            except OSError:
+                continue
+            kept.append(path)
+        if expired:
+            self._warn(
+                f"agent-flywheel: {expired} reported outcome(s) could not be "
+                f"delivered for a week and were dropped.")
+        return kept
+
+    def _flush_outcomes(self, files: list[Path]) -> dict[str, int]:
+        """Upload the outcomes waiting on disk (``files``, already past
+        :meth:`_expire_outcomes`). Caller holds ``_flush_lock`` and has
+        established :attr:`may_upload`. Never raises.
 
         THE TURNS' RULES: a batch the control plane acknowledged is deleted;
         a 403 is its decision, so sending stops (:meth:`_refuse_upload`) and
@@ -880,33 +954,14 @@ class Attachment:
         disk for a later flush, each counted once; ``outcomes_dropped``, the
         records the control plane refused.
         """
-        root = Path(self.trajectory_root)
-        try:
-            files = sorted(
-                p for p in root.iterdir()
-                if p.name.startswith(_OUTCOME_FILE_PREFIX)
-                and p.name.endswith(_OUTCOME_FILE_SUFFIX) and p.is_file()
-            )
-        except OSError:
-            return {}
         pending: list[tuple[Path, dict[str, Any]]] = []
-        expired = 0
-        now = time.time()
         for path in files:
             try:
-                if now - path.stat().st_mtime > _OUTCOME_MAX_AGE_S:
-                    path.unlink()
-                    expired += 1
-                    continue
                 pending.append((path, production_outcome(
                     json.loads(path.read_text(encoding="utf-8")))))
             except (OSError, ValueError, InvalidOutcome):
                 # Unreadable or not ours to send; one file costs that file.
                 continue
-        if expired:
-            self._warn(
-                f"agent-flywheel: {expired} reported outcome(s) could not be "
-                f"delivered for a week and were dropped.")
         if not pending:
             return {}
         size = _PRODUCTION_OUTCOME_BATCH_MAX_ITEMS
@@ -1599,11 +1654,16 @@ class Attachment:
         turn half asks (and re-asks) it, and outcomes go only when its answer
         is yes. The counts are the turns'; ``outcomes_sent`` and
         ``outcomes_failed`` are added only when outcomes were waiting.
+
+        THE WEEK'S EXPIRY RUNS ON EVERY FLUSH, consent or not
+        (:meth:`_expire_outcomes`): an outcome kept while the answer is
+        unknown, or after a refusal, is bounded like any other.
         """
         counts = self._flush_turns_locked(
             include_unanswered=include_unanswered, batch_size=batch_size)
-        if self.may_upload:
-            counts.update(self._flush_outcomes())
+        waiting = self._expire_outcomes()
+        if self.may_upload and waiting:
+            counts.update(self._flush_outcomes(waiting))
         return counts
 
     def _flush_turns_locked(self, *, include_unanswered: bool = False,

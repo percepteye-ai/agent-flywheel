@@ -20,6 +20,7 @@ import json
 import os
 import time
 import warnings
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -333,6 +334,116 @@ def test_an_explicit_no_learned_later_makes_reporting_a_no_op_again(
         assert px.report_outcome("reopened", turn_id="t1") is None
         assert len(_pending(tmp_path)) == 1
     assert tr.outcomes == []
+
+
+@contextmanager
+def _over_http(monkeypatch, root, routes):
+    """An attachment whose every request goes through the REAL
+    ``ControlPlaneClient`` and ``AttachTransport``, answered in-process:
+    ``routes`` maps ``"METHOD /path"`` to ``(status, json body)`` or to a
+    callable taking the request and returning one. Anything else is 200
+    ``{}``. Every request is recorded as ``"METHOD /path"``."""
+    import httpx
+
+    from agent_flywheel import _http
+
+    seen: list[str] = []
+
+    def handler(request):
+        key = f"{request.method} {request.url.path}"
+        seen.append(key)
+        answer = routes.get(key, (200, {}))
+        if callable(answer):
+            answer = answer(request)
+        status, body = answer
+        return httpx.Response(status, json=body)
+
+    real = _http.ControlPlaneClient
+    monkeypatch.setattr(_http, "ControlPlaneClient", lambda url, key, **kw: real(
+        url, key, client=httpx.Client(transport=httpx.MockTransport(handler))))
+    monkeypatch.setenv("PERCEPTEYE_CONTROL_PLANE_URL", "https://cp.invalid")
+    monkeypatch.setenv("PERCEPTEYE_API_KEY", "pek_x")
+    px = fw.attach(agent_id="support", trajectory_root=str(root))
+    try:
+        yield px, seen
+    finally:
+        px.close()
+
+
+@pytest.mark.parametrize("answer", [
+    (401, {"detail": "invalid key"}),
+    (403, {"detail": "this key may not read capture"}),
+    (404, {"detail": "Not Found"}),
+    (200, {"agent_id": "support"}),
+], ids=["401", "403", "404", "no-capture-block"])
+def test_a_definitive_answer_on_the_verdict_read_ends_the_waiting(
+    monkeypatch, tmp_path, quiet, answer,
+):
+    """A 401, 403 or 404 on ``GET /agents/{id}/capture``, or an answer with no
+    verdict in it, will be said again to every read: it is an answer, and it
+    is no. Read as "unknown", every outcome reported was kept on disk for
+    good and every report cost another read. Through the REAL client."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with _over_http(monkeypatch, tmp_path, {
+            # A registration that did not answer: consent starts UNKNOWN.
+            "POST /agents": (200, {"agent_id": "support"}),
+            "GET /agents/support/capture": answer,
+        }) as (px, seen):
+            assert px.may_upload is False
+            assert px.report_outcome("resolved", turn_id="t1") is not None
+            px.flush()
+            reads = seen.count("GET /agents/support/capture")
+            assert reads >= 1
+            assert px.report_outcome("reopened", turn_id="t1") is None, (
+                "a definitive answer is no longer 'unknown'")
+            assert "did not grant" in px.upload_refusal
+            if answer[0] != 200:
+                assert f"HTTP {answer[0]}" in px.upload_refusal
+            assert len(_pending(tmp_path)) == 1, "kept like a refused turn"
+
+
+def test_an_outcome_kept_while_consent_is_unknown_still_expires(
+    monkeypatch, tmp_path, quiet,
+):
+    """The week's expiry ran inside the upload, which runs only once consent
+    is yes: an outcome kept while the answer never came stayed forever."""
+    tr = _Unanswered()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        px.report_outcome("resolved", turn_id="t1")
+        (stale,) = _pending(tmp_path)
+        long_ago = time.time() - production._OUTCOME_MAX_AGE_S - 60
+        os.utime(stale, (long_ago, long_ago))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            px.flush()
+        assert px.may_upload is False
+        assert _pending(tmp_path) == []
+        assert any("for a week" in str(w.message) for w in caught)
+    assert tr.outcomes == []
+
+
+def test_at_most_so_many_outcomes_are_kept_while_consent_is_unknown(
+    monkeypatch, tmp_path, quiet,
+):
+    """Bounded by count as well as by age: the oldest go, out loud."""
+    monkeypatch.setattr(production, "_OUTCOME_MAX_KEPT_UNANSWERED", 3)
+    tr = _Unanswered()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            for n in range(5):
+                px.report_outcome("resolved", turn_id="t1", outcome_id=f"o{n}")
+                written = production._outcome_file(tmp_path, f"o{n}")
+                when = time.time() - 1000 + n
+                os.utime(written, (when, when))
+        assert _pending(tmp_path) == sorted(
+            production._outcome_file(tmp_path, f"o{n}") for n in (2, 3, 4))
+        assert any("oldest first" in str(w.message) for w in caught)
+        # Once consent is yes there is no cap: it is the upload's queue.
+        tr.later = {"turns": True}
+        px.flush()
+    assert sorted(o["outcome_id"] for o in tr.outcomes) == ["o2", "o3", "o4"]
 
 
 def test_nothing_waiting_is_sent_once_consent_is_withdrawn(
