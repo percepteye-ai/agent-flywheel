@@ -383,6 +383,33 @@ def _rfc3339(value: Any) -> Any:
 _REFUSED_MARKER = "-> HTTP 403"
 
 
+#: A 4xx that is about the ROUTE or the KEY, never the records in an
+#: ``/outcomes`` batch: an absent route (404, 405 -- a control plane older
+#: than ``POST /outcomes``), a key it does not accept (401), a gone resource
+#: (410). The Node SDK's ``outcomeRouteRefused``.
+_OUTCOME_ROUTE_REFUSALS = frozenset({401, 404, 405, 410})
+#: 4xx that are neither: 403 is the consent refusal
+#: (:func:`_capture_refusal`); 408 and 429 are blips the client retried.
+_OUTCOME_NOT_A_BATCH_REFUSAL = frozenset({403, 408, 429})
+
+
+def _outcome_route_refused(status: Any) -> bool:
+    """Whether an ``/outcomes`` answer refused the route or the key, not the
+    records: sending stops for this flush and the outcomes stay."""
+    return status in _OUTCOME_ROUTE_REFUSALS
+
+
+def _outcome_batch_refused(status: Any) -> bool:
+    """Whether an ``/outcomes`` answer refused THIS BATCH: any other 4xx
+    (400, 409, 413, 422 ...). It is final for the batch, which is split to
+    find the records it refused (``Attachment._flush_outcomes``). The Node
+    SDK's ``outcomeBatchRefused``."""
+    return (isinstance(status, int) and not isinstance(status, bool)
+            and 400 <= status < 500
+            and status not in _OUTCOME_ROUTE_REFUSALS
+            and status not in _OUTCOME_NOT_A_BATCH_REFUSAL)
+
+
 def _capture_refusal(exc: BaseException) -> str | None:
     """The intake's sentence when it REFUSED these turns, else ``None``.
 
@@ -773,7 +800,9 @@ class Attachment:
         Queued, then uploaded off the calling thread with the turns' own
         retry behaviour: the outcome waits on disk under ``trajectory_root``
         until the control plane acknowledges it, survives a restart, and is
-        given up on (with a warning) only after a week undelivered.
+        given up on (with a warning) only after a week undelivered, or at
+        once, with a warning naming the cause, when the control plane refuses
+        that record (a 4xx about the batch; the rest of the batch is sent).
 
         Raises :class:`~agent_flywheel.errors.InvalidOutcome` -- before
         anything is stored, capture enabled or not -- for a word outside the
@@ -817,10 +846,25 @@ class Attachment:
 
         THE TURNS' RULES: a batch the control plane acknowledged is deleted;
         a 403 is its decision, so sending stops (:meth:`_refuse_upload`) and
-        the outcomes stay on disk; any other failure leaves the batch for the
-        next flush. An outcome the control plane refused BY NAME inside an
-        acknowledged batch (a conflicting replay) would be refused again, so
-        it is dropped and said out loud.
+        the outcomes stay on disk; a blip (no answer, a 5xx, a 408 or 429
+        that outlasted the retries) leaves the batch for the next flush. An
+        outcome the control plane refused BY NAME inside an acknowledged batch
+        (a conflicting replay) would be refused again, so it is dropped and
+        said out loud.
+
+        A 4xx ABOUT THE BATCH IS FINAL FOR THAT BATCH
+        (:func:`_outcome_batch_refused`). It used to be retried every flush
+        for a week and then deleted, so one bad record cost up to 63 good
+        ones beside it. The batch is split in halves until the refused
+        records stand alone: the good ones are sent, each bad one is dropped
+        with a warning naming the control plane's own cause. A 4xx about the
+        ROUTE or the KEY (401, 404, 405, 410) is not the records' fault:
+        bisecting it would drop every good outcome, so sending stops for this
+        flush and they stay on disk, said out loud.
+
+        Counts: ``outcomes_sent``; ``outcomes_failed``, the outcomes still on
+        disk for a later flush, each counted once; ``outcomes_dropped``, the
+        records the control plane refused.
         """
         root = Path(self.trajectory_root)
         try:
@@ -851,45 +895,78 @@ class Attachment:
                 f"delivered for a week and were dropped.")
         if not pending:
             return {}
+        size = _PRODUCTION_OUTCOME_BATCH_MAX_ITEMS
+        # Every batch still to send, in order; a refused batch's halves go
+        # back to the front.
+        queue: list[list[tuple[Path, dict[str, Any]]]] = [
+            pending[i:i + size] for i in range(0, len(pending), size)]
         sent = failed = 0
+        dropped: list[str] = []
         client = None
+
+        def _forget(batch: list[tuple[Path, dict[str, Any]]]) -> None:
+            for path, _wire in batch:
+                try:
+                    path.unlink()
+                except OSError:
+                    # Resent next flush; the intake answers a duplicate.
+                    pass
+
         try:
             from ._http import ControlPlaneClient
             from .transport import AttachTransport
 
             client = ControlPlaneClient(self._cp_url, self._api_key)
             tr = AttachTransport(client, self.agent_id)
-            size = _PRODUCTION_OUTCOME_BATCH_MAX_ITEMS
-            for i in range(0, len(pending), size):
-                chunk = pending[i:i + size]
+            while queue:
+                batch = queue.pop(0)
                 try:
                     reply = tr.report_outcomes(
-                        self.agent_id, [wire for _, wire in chunk])
+                        self.agent_id, [wire for _, wire in batch])
                 except Exception as exc:
                     refusal = _capture_refusal(exc)
                     if refusal is not None:
                         self._refuse_upload(refusal)
-                        failed += len(pending) - sent
+                        failed += len(batch) + sum(len(b) for b in queue)
+                        queue.clear()
                         break
-                    failed += len(chunk)
+                    status = getattr(exc, "status_code", None)
+                    if _outcome_batch_refused(status):
+                        if len(batch) == 1:
+                            _forget(batch)
+                            dropped.append(str(exc))
+                        else:
+                            half = len(batch) // 2
+                            queue[:0] = [batch[:half], batch[half:]]
+                        continue
+                    if _outcome_route_refused(status):
+                        failed += len(batch) + sum(len(b) for b in queue)
+                        queue.clear()
+                        self._warn(
+                            "agent-flywheel: the control plane did not take "
+                            f"reported outcomes ({exc}); they stay on disk "
+                            "and are sent again on a later flush.")
+                        break
+                    failed += len(batch)
                     continue
-                for path, _wire in chunk:
-                    try:
-                        path.unlink()
-                    except OSError:
-                        # Resent next flush; the intake answers a duplicate.
-                        pass
-                sent += len(chunk)
+                _forget(batch)
+                sent += len(batch)
                 self._note_refused_outcomes(reply)
         except Exception:
-            failed += len(pending) - sent
+            failed += sum(len(b) for b in queue)
         finally:
             if client is not None:
                 try:
                     client.close()
                 except Exception:
                     pass
-        return {"outcomes_sent": sent, "outcomes_failed": failed}
+        if dropped:
+            self._warn(
+                f"agent-flywheel: the control plane refused {len(dropped)} "
+                "reported outcome(s), so they were dropped and the rest of "
+                f"their batch was sent: {'; '.join(sorted(set(dropped)))}")
+        return {"outcomes_sent": sent, "outcomes_failed": failed,
+                "outcomes_dropped": len(dropped)}
 
     def _note_refused_outcomes(self, reply: Any) -> None:
         """Say which outcomes of an acknowledged batch the control plane did

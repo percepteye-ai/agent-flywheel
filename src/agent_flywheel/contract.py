@@ -11,6 +11,7 @@ below exists because its absence produced fabricated training data.
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field, fields
@@ -109,11 +110,52 @@ PRODUCTION_OUTCOMES: tuple[str, ...] = (
 _PRODUCTION_OUTCOME_NOTE_MAX_CHARS = 1000
 _PRODUCTION_OUTCOME_BATCH_MAX_ITEMS = 64
 #: An RFC 3339 instant WITH its offset. A time with no offset is not an
-#: instant, and guessing the zone would move the outcome.
+#: instant, and guessing the zone would move the outcome. ASCII digits only:
+#: Python's ``\d`` also matches other scripts' digits, which no server parses.
 _RFC3339_PATTERN = (
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$"
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?"
+    r"(Z|[+-][0-9]{2}:[0-9]{2})$"
 )
 _RFC3339_RE = re.compile(_RFC3339_PATTERN)
+_OCCURRED_AT_REFUSAL = (
+    "occurred_at must be an RFC 3339 time with its offset, such as "
+    "2026-11-10T09:00:00Z")
+
+
+def _is_rfc3339_instant(text: Any) -> bool:
+    """Whether ``text`` is an RFC 3339 instant that EXISTS: the pattern, and
+    then every field in its range -- a real calendar day (``2026-02-30`` is
+    not one), an hour of 0-23 (``T24:00`` is not one), no leap second, an
+    offset under a day. A shape alone let an impossible time reach the
+    control plane, which refused the whole batch around it. The Node SDK's
+    ``isRfc3339Instant`` applies the same arithmetic."""
+    if not isinstance(text, str) or _RFC3339_RE.fullmatch(text) is None:
+        return False
+    year, month, day = int(text[0:4]), int(text[5:7]), int(text[8:10])
+    hour, minute, second = int(text[11:13]), int(text[14:16]), int(text[17:19])
+    if not (1 <= year and 1 <= month <= 12):
+        return False
+    leap = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+    days = (31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+    if not (1 <= day <= days[month - 1] and hour <= 23 and minute <= 59
+            and second <= 59):
+        return False
+    if not text.endswith("Z"):
+        if int(text[-5:-3]) > 23 or int(text[-2:]) > 59:
+            return False
+    return True
+
+
+def _is_finite_wire_number(value: Any) -> bool:
+    """Whether ``value`` is a number the wire carries as a finite float: not a
+    bool, not NaN or an infinity, and not an int too large for a float (the
+    control plane reads ``value`` as one, and refused the batch around it)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False
 _OUTCOME_WIRE_KEYS = (
     "outcome_id", "outcome", "turn_id", "conversation_id", "value", "note",
     "occurred_at",
@@ -170,8 +212,7 @@ def production_outcome(wire: Any) -> dict[str, Any]:
             "outcome of")
     value = wire.get("value")
     if value is not None:
-        if (isinstance(value, bool) or not isinstance(value, (int, float))
-                or value != value or value in (float("inf"), float("-inf"))):
+        if not _is_finite_wire_number(value):
             raise InvalidOutcome("value must be a finite number")
         out["value"] = value
     note = wire.get("note")
@@ -183,11 +224,8 @@ def production_outcome(wire: Any) -> dict[str, Any]:
                 f"{_PRODUCTION_OUTCOME_NOTE_MAX_CHARS} characters")
         out["note"] = note
     occurred_at = wire.get("occurred_at")
-    if (not isinstance(occurred_at, str)
-            or _RFC3339_RE.fullmatch(occurred_at) is None):
-        raise InvalidOutcome(
-            "occurred_at must be an RFC 3339 time with its offset, such as "
-            "2026-11-10T09:00:00Z")
+    if not _is_rfc3339_instant(occurred_at):
+        raise InvalidOutcome(_OCCURRED_AT_REFUSAL)
     out["occurred_at"] = occurred_at
     return out
 

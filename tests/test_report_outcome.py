@@ -204,6 +204,20 @@ def test_it_is_validated_even_while_capture_is_off(
     ({"turn_id": "t1", "occurred_at": datetime(2026, 11, 10, 9)}, "timezone"),
     ({"turn_id": "t1", "occurred_at": "yesterday"}, "RFC 3339"),
     ({"turn_id": "t1", "occurred_at": "2026-11-10T09:00:00"}, "RFC 3339"),
+    # The shape of a time is not a time: each of these used to pass.
+    ({"turn_id": "t1", "occurred_at": "2026-02-30T09:00:00Z"}, "RFC 3339"),
+    ({"turn_id": "t1", "occurred_at": "2025-02-29T09:00:00Z"}, "RFC 3339"),
+    ({"turn_id": "t1", "occurred_at": "2026-11-10T24:00:00Z"}, "RFC 3339"),
+    ({"turn_id": "t1", "occurred_at": "2026-11-10T09:60:00Z"}, "RFC 3339"),
+    ({"turn_id": "t1", "occurred_at": "2026-11-10T23:59:60Z"}, "RFC 3339"),
+    ({"turn_id": "t1", "occurred_at": "2026-13-10T09:00:00Z"}, "RFC 3339"),
+    ({"turn_id": "t1", "occurred_at": "0000-11-10T09:00:00Z"}, "RFC 3339"),
+    ({"turn_id": "t1", "occurred_at": "2026-11-10T09:00:00+24:00"}, "RFC 3339"),
+    # Digits of another script: Python's ``\d`` matched them.
+    ({"turn_id": "t1", "occurred_at": "\u0662026-11-10T09:00:00Z"}, "RFC 3339"),
+    ({"turn_id": "t1", "occurred_at": "\uff12\uff10\uff12\uff16-11-10T09:00:00Z"}, "RFC 3339"),
+    # An int the wire's float cannot hold.
+    ({"turn_id": "t1", "value": 10 ** 400}, "finite number"),
     ({"turn_id": "t1", "outcome_id": "a/b"}, "outcome_id"),
     ({"turn_id": "t1", "outcome_id": ""}, "outcome_id"),
 ])
@@ -381,6 +395,125 @@ def test_more_than_a_batch_goes_in_batches(monkeypatch, tmp_path, quiet):
         _PRODUCTION_OUTCOME_BATCH_MAX_ITEMS, 3]
 
 
+class _Refusing(_Outcomes):
+    """The outcome route answering by status: ``answer(ids)`` is ``None``
+    (acknowledged) or the ``(status, detail)`` the control plane answers
+    that batch with. Every batch it was sent is kept, refused or not."""
+
+    def __init__(self, answer, **kw):
+        super().__init__(**kw)
+        self.answer = answer
+        self.tried: list[list[str]] = []
+
+    def report_outcomes(self, agent_id, outcomes):
+        ids = [o["outcome_id"] for o in outcomes]
+        self.tried.append(ids)
+        refused = self.answer(ids)
+        if refused is not None:
+            status, detail = refused
+            raise TransportError(
+                f"POST /outcomes -> HTTP {status}: {detail}",
+                status_code=status)
+        return super().report_outcomes(agent_id, outcomes)
+
+
+def _report(px, *ids):
+    for outcome_id in ids:
+        px.report_outcome("resolved", turn_id="t1", outcome_id=outcome_id)
+
+
+def test_one_refused_outcome_never_holds_back_the_good_ones(
+    monkeypatch, tmp_path, quiet,
+):
+    """A 4xx about the batch is final for it. It used to be retried every
+    flush for a week, then the whole batch deleted: one bad record cost up to
+    63 good ones. The batch is split until the refused record stands alone;
+    the rest are sent at once and the refused one is dropped, by name."""
+    ids = [f"o{n}" for n in range(9)]
+    tr = _Refusing(lambda batch: (
+        (422, "value: Input should be a finite number")
+        if "o5" in batch else None))
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _report(px, *ids)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            counts = px.flush()
+        assert (counts["outcomes_sent"], counts["outcomes_failed"],
+                counts["outcomes_dropped"]) == (8, 0, 1)
+        assert _pending(tmp_path) == [], "nothing is left to retry forever"
+        assert any("HTTP 422" in str(w.message)
+                   and "finite number" in str(w.message) for w in caught)
+        tried = len(tr.tried)
+        px.flush()
+        assert len(tr.tried) == tried, "a refused record is not sent again"
+    assert sorted(o["outcome_id"] for o in tr.outcomes) == sorted(
+        set(ids) - {"o5"})
+    assert ["o5"] in tr.tried, "the refused record was isolated, not guessed"
+
+
+def test_a_refusal_of_every_record_drops_each_and_sends_nothing(
+    monkeypatch, tmp_path, quiet,
+):
+    tr = _Refusing(lambda batch: (400, "bad body"))
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _report(px, "a", "b", "c")
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            counts = px.flush()
+        assert (counts["outcomes_sent"], counts["outcomes_failed"],
+                counts["outcomes_dropped"]) == (0, 0, 3)
+        assert _pending(tmp_path) == []
+    assert tr.outcomes == []
+
+
+@pytest.mark.parametrize("status", [401, 404, 405, 410])
+def test_a_refusal_of_the_route_drops_nothing(
+    monkeypatch, tmp_path, quiet, status,
+):
+    """A control plane with no ``/outcomes`` route yet, or a key it does not
+    take, refuses every batch for a reason that is not the records': bisecting
+    would drop every good outcome. They stay, and the cause is said."""
+    tr = _Refusing(lambda batch: (status, "Not Found"))
+    with warnings.catch_warnings(record=True) as caught, \
+            _attached(monkeypatch, tmp_path, tr) as px:
+        warnings.simplefilter("always")
+        _report(px, "a", "b", "c")
+        counts = px.flush()
+        assert (counts["outcomes_sent"], counts["outcomes_failed"],
+                counts["outcomes_dropped"]) == (0, 3, 0)
+        assert len(_pending(tmp_path)) == 3
+        assert len(tr.tried) == 1, "one try, not a bisection"
+        assert any(f"HTTP {status}" in str(w.message) for w in caught)
+        assert px.may_upload is True, "not a consent refusal"
+
+
+def test_a_later_403_counts_each_unsent_outcome_once(
+    monkeypatch, tmp_path, quiet,
+):
+    """A blip on the first batch and a 403 on the second: every outcome is
+    still on disk, and is counted once. ``failed += len(pending) - sent`` on
+    top of the first batch's own count made it 131 of 67."""
+    total = _PRODUCTION_OUTCOME_BATCH_MAX_ITEMS + 3
+    calls = []
+
+    class _BlipThenRefuse(_Outcomes):
+        def report_outcomes(self, agent_id, outcomes):
+            calls.append(len(outcomes))
+            if len(calls) == 1:
+                raise TransportError("connection reset")
+            raise TransportError(
+                "POST /outcomes -> HTTP 403: capture is off", status_code=403)
+
+    with _attached(monkeypatch, tmp_path, _BlipThenRefuse()) as px:
+        _report(px, *(f"o{n}" for n in range(total)))
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            counts = px.flush()
+        assert calls == [_PRODUCTION_OUTCOME_BATCH_MAX_ITEMS, 3]
+        assert (counts["outcomes_sent"], counts["outcomes_failed"]) == (0, total)
+        assert len(_pending(tmp_path)) == total
+
+
 def test_a_waiting_outcome_is_never_read_as_a_turn(
     monkeypatch, tmp_path, quiet,
 ):
@@ -489,6 +622,7 @@ GOOD = {"outcome_id": "o1", "outcome": "resolved", "turn_id": "t1",
     {**GOOD, "note": ""},
     {**GOOD, "note": "x" * 1001},
     {**GOOD, "occurred_at": "2026-11-10T09:00:00"},
+    {**GOOD, "occurred_at": "\u0662026-11-10T09:00:00Z"},
     {**GOOD, "outcome_id": "a/b"},
     {**GOOD, "extra": 1},
     {k: v for k, v in GOOD.items() if k != "occurred_at"},
@@ -616,6 +750,17 @@ _VERDICT_CASES = [
     {**GOOD, "note": "\U0001f4e6" * 1000},
     {**GOOD, "note": "x" * 1001},
     {**GOOD, "occurred_at": "2026-11-10T09:00:00"},
+    {**GOOD, "occurred_at": "2026-02-30T09:00:00Z"},
+    {**GOOD, "occurred_at": "2024-02-29T09:00:00Z"},
+    {**GOOD, "occurred_at": "1900-02-29T09:00:00Z"},
+    {**GOOD, "occurred_at": "2000-02-29T23:59:59.999-23:59"},
+    {**GOOD, "occurred_at": "2026-11-10T24:00:00Z"},
+    {**GOOD, "occurred_at": "2026-11-10T23:59:60Z"},
+    {**GOOD, "occurred_at": "2026-11-10T09:00:00+24:00"},
+    {**GOOD, "occurred_at": "0000-01-01T00:00:00Z"},
+    {**GOOD, "occurred_at": "\u0662026-11-10T09:00:00Z"},
+    {**GOOD, "value": 10 ** 400},
+    {**GOOD, "value": 1e308},
     {k: v for k, v in GOOD.items() if k != "occurred_at"},
     {**GOOD, "outcome_id": "a/b"},
     {**GOOD, "zeta": 1, "extra": 1},
@@ -651,7 +796,7 @@ def test_both_sdks_validate_an_outcome_alike_word_for_word():
     assert tuple(theirs["vocabulary"]) == PRODUCTION_OUTCOMES
     assert theirs["out"] == [_verdict(wire) for wire in _VERDICT_CASES]
     refused = [v for v in theirs["out"] if "refused" in v]
-    assert len(refused) == len(_VERDICT_CASES) - 3, "the table is not vacuous"
+    assert len(refused) == len(_VERDICT_CASES) - 6, "the table is not vacuous"
 
 
 def test_an_outcome_the_node_sdk_queued_is_one_this_sdk_uploads(
@@ -691,3 +836,74 @@ def test_an_outcome_the_node_sdk_queued_is_one_this_sdk_uploads(
         "note": "mañana", "value": 2,
         "occurred_at": "2026-11-10T09:00:00.000Z",
     }]
+
+
+@pytest.mark.parametrize(("refused_id", "status"), [
+    ("o5", 422), ("o0", 400), (None, 404), (None, 401), ("o3", 409),
+])
+def test_both_sdks_isolate_a_refused_outcome_alike(
+    monkeypatch, tmp_path, quiet, refused_id, status,
+):
+    """The same queue on disk, the same answers from the control plane: both
+    packages try the same batches in the same order, send the same outcomes,
+    drop the same ones and count alike."""
+    from .node_sdk import require_node_sdk, run_node
+
+    sdk, node = require_node_sdk()
+    ids = [f"o{n}" for n in range(11)]
+
+    def answer(batch):
+        if refused_id is None:
+            return (status, "refused")
+        return (status, "refused") if refused_id in batch else None
+
+    def seed(root):
+        root.mkdir(parents=True, exist_ok=True)
+        for outcome_id in ids:
+            production._outcome_file(root, outcome_id).write_text(json.dumps(
+                {"outcome_id": outcome_id, "outcome": "resolved",
+                 "turn_id": "t1", "occurred_at": "2026-11-10T09:00:00Z"}),
+                encoding="utf-8")
+
+    seed(tmp_path / "py")
+    tr = _Refusing(answer)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with _attached(monkeypatch, tmp_path / "py", tr) as px:
+            counts = px.flush()
+            # Copied now: closing the attachment flushes again.
+            ours = {
+                "tried": [list(batch) for batch in tr.tried],
+                "sent": sorted(o["outcome_id"] for o in tr.outcomes),
+                "left": len(_pending(tmp_path / "py")),
+                "counts": [counts["outcomes_sent"], counts["outcomes_failed"],
+                           counts["outcomes_dropped"]],
+            }
+
+    seed(tmp_path / "node")
+    script = (
+        "import {createTurnUploader} from './src/capture.js';\n"
+        "import {TransportError} from './src/errors.js';\n"
+        "import {readdirSync} from 'node:fs';\n"
+        f"const refusedId={json.dumps(refused_id)}, status={status};\n"
+        f"const root={json.dumps(str(tmp_path / 'node'))};\n"
+        "const tried=[], sent=[];\n"
+        "const transport={captureCurrent:async()=>({}),"
+        "reportTurns:async()=>({}),"
+        "reportOutcomes:async(_a,outcomes)=>{"
+        "const ids=outcomes.map((o)=>o.outcome_id);tried.push(ids);"
+        "if(refusedId===null||ids.includes(refusedId))"
+        "throw new TransportError(`POST /outcomes -> HTTP ${status}: refused`,"
+        "{statusCode:status});"
+        "sent.push(...ids);return {outcomes:ids.map((id)=>({outcome_id:id,"
+        "accepted:true}))};}};\n"
+        "const u=createTurnUploader({transport,agentId:'a1',root});\n"
+        "u.setVerdict({mayUpload:true});\n"
+        "const c=await u.flush();\n"
+        "const left=readdirSync(root).filter((n)=>n.startsWith('.outcome.')).length;\n"
+        "console.log(JSON.stringify({tried,sent:sent.sort(),left,"
+        "counts:[c.outcomesSent,c.outcomesFailed,c.outcomesDropped]}));\n"
+    )
+    theirs = json.loads(run_node(sdk, node, script))
+    assert theirs == ours
+    assert ours["tried"], "the table is not vacuous"

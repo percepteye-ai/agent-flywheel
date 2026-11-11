@@ -17,7 +17,9 @@ repository's.
   - **Vocabulary.** `outcome` is one of `resolved`, `escalated`, `reopened`,
     `abandoned`, `thumbs_up`, `thumbs_down` (`PRODUCTION_OUTCOMES`), naming a
     turn, a conversation, or both. Anything outside it, or a value the wire
-    cannot carry, raises `InvalidOutcome` at the call, capture on or off.
+    cannot carry, raises `InvalidOutcome` at the call, capture on or off:
+    `occurred_at` must be a time that exists (not `2026-02-30`, not `T24:00`,
+    ASCII digits) and `value` a finite number the wire's float holds.
     `note` is at most 1,000 characters. Each report is recorded; none replaces
     another.
   - **Idempotency.** `outcome_id` / `outcomeId` is the report's idempotency
@@ -26,7 +28,11 @@ repository's.
   - **Offline queue.** Each outcome waits as one file in the capture directory
     (`.outcome.<digest>.json`), is uploaded off the caller's thread with the
     turns' flush, and is retried across restarts until Mission Control
-    acknowledges it, for at most a week.
+    acknowledges it, for at most a week. A 4xx about the batch (400, 409, 413,
+    422 ...) is final for it: the batch is split until the refused records
+    stand alone, the rest are sent at once, and each refused record is dropped
+    with a warning naming the control plane's cause, so one bad record never
+    holds back the good ones beside it.
   - **Consent.** It is sent on exactly the terms a turn is: a no-op (returns
     `None` / `null`, keeps nothing) until Mission Control enables production
     capture for the agent, and a 403 from the intake stops outcomes as it stops
@@ -81,10 +87,10 @@ repository's.
   the client raises `CustomerContractTooOld` (a `ConfigurationError`) rather
   than return an answer for a place you did not ask about.
 - **Mission Control must serve `POST /api/flywheel/v1/outcomes`.** Against an
-  older server the upload answers 404, which both SDKs treat as retryable: the
-  outcomes stay queued and are retried for up to a week, then dropped with a
-  warning (`N reported outcome(s) could not be delivered for a week and were
-  dropped.`).
+  older server the upload answers 404, a refusal of the route and not of the
+  records: the outcomes stay queued, the flush says so, and they are retried
+  for up to a week, then dropped with a warning (`N reported outcome(s) could
+  not be delivered for a week and were dropped.`).
 
 ## 0.4.0
 
