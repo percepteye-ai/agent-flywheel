@@ -29,11 +29,15 @@ repository's.
     (`.outcome.<digest>.json`), is uploaded off the caller's thread with the
     turns' flush, and is retried across restarts until Mission Control
     acknowledges it, for at most a week (the week runs out on every flush,
-    whatever consent says). A 4xx about the batch (400, 409, 413,
-    422 ...) is final for it: the batch is split until the refused records
-    stand alone, the rest are sent at once, and each refused record is dropped
+    whatever consent says). A 4xx about the records (400, 409, 413, 422 ...)
+    is final for them: the batch is split until the refused records stand
+    alone, the rest are sent at once, and each refused record is dropped
     with a warning naming the control plane's cause, so one bad record never
-    holds back the good ones beside it.
+    holds back the good ones beside it. When both halves of a split are
+    refused alike (same status, same words) the refusal was of the batch --
+    a control plane on another contract minor, a proxy -- so the outcomes
+    stay for a later flush and the cause is said once; splitting is bounded
+    at 32 requests a flush.
   - **Consent.** It is sent on exactly the terms a turn is: a no-op (returns
     `None` / `null`, keeps nothing) once Mission Control has said production
     capture is not enabled for the agent, and a 403 from the intake stops

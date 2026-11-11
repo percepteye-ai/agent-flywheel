@@ -336,40 +336,6 @@ def test_an_explicit_no_learned_later_makes_reporting_a_no_op_again(
     assert tr.outcomes == []
 
 
-@contextmanager
-def _over_http(monkeypatch, root, routes):
-    """An attachment whose every request goes through the REAL
-    ``ControlPlaneClient`` and ``AttachTransport``, answered in-process:
-    ``routes`` maps ``"METHOD /path"`` to ``(status, json body)`` or to a
-    callable taking the request and returning one. Anything else is 200
-    ``{}``. Every request is recorded as ``"METHOD /path"``."""
-    import httpx
-
-    from agent_flywheel import _http
-
-    seen: list[str] = []
-
-    def handler(request):
-        key = f"{request.method} {request.url.path}"
-        seen.append(key)
-        answer = routes.get(key, (200, {}))
-        if callable(answer):
-            answer = answer(request)
-        status, body = answer
-        return httpx.Response(status, json=body)
-
-    real = _http.ControlPlaneClient
-    monkeypatch.setattr(_http, "ControlPlaneClient", lambda url, key, **kw: real(
-        url, key, client=httpx.Client(transport=httpx.MockTransport(handler))))
-    monkeypatch.setenv("PERCEPTEYE_CONTROL_PLANE_URL", "https://cp.invalid")
-    monkeypatch.setenv("PERCEPTEYE_API_KEY", "pek_x")
-    px = fw.attach(agent_id="support", trajectory_root=str(root))
-    try:
-        yield px, seen
-    finally:
-        px.close()
-
-
 @pytest.mark.parametrize("answer", [
     (401, {"detail": "invalid key"}),
     (403, {"detail": "this key may not read capture"}),
@@ -622,39 +588,177 @@ def test_one_refused_outcome_never_holds_back_the_good_ones(
     assert ["o5"] in tr.tried, "the refused record was isolated, not guessed"
 
 
-def test_a_refusal_of_every_record_drops_each_and_sends_nothing(
+def test_a_refusal_of_the_whole_batch_keeps_every_outcome(
     monkeypatch, tmp_path, quiet,
 ):
-    tr = _Refusing(lambda batch: (400, "bad body"))
+    """Every part of the batch refused alike -- the same status, the same
+    words -- is a refusal of THE BATCH: a 422 from a control plane on another
+    contract minor, a proxy's 400 or 413. It used to be bisected to singles
+    and every outcome dropped, 64 outcomes costing 127 requests, each charged
+    against the control plane's rate limit. Now the two halves agreeing ends
+    it: three requests, every outcome kept for a later flush (the week still
+    applies), and the cause said once, not once per flush."""
+    ids = [f"o{n:02}" for n in range(_PRODUCTION_OUTCOME_BATCH_MAX_ITEMS)]
+    tr = _Refusing(lambda batch: (422, "outcomes.0.note: Extra inputs are "
+                                       "not permitted"))
     with _attached(monkeypatch, tmp_path, tr) as px:
-        _report(px, "a", "b", "c")
+        _report(px, *ids)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            counts = px.flush()
+            again = px.flush()
+        assert (counts["outcomes_sent"], counts["outcomes_failed"],
+                counts["outcomes_dropped"]) == (0, len(ids), 0)
+        assert again["outcomes_failed"] == len(ids)
+        assert len(_pending(tmp_path)) == len(ids), "nothing is dropped"
+        batch = tr.tried[0]
+        assert sorted(batch) == ids
+        half = len(ids) // 2
+        assert tr.tried == [batch, batch[:half], batch[half:]] * 2, (
+            "the batch and its two halves, per flush -- not a bisection")
+        said = [str(w.message) for w in caught
+                if "whole batches" in str(w.message)]
+        assert len(said) == 1 and "HTTP 422" in said[0], said
+        assert not any("were dropped" in str(w.message) for w in caught)
+    assert tr.outcomes == []
+
+
+def test_two_records_refused_for_different_causes_are_still_isolated(
+    monkeypatch, tmp_path, quiet,
+):
+    """The whole-batch rule asks for the SAME status and the SAME words: a
+    record refused in each half, each for its own cause, is two bad records,
+    and the good ones beside them still go."""
+    ids = [f"o{n}" for n in range(8)]
+
+    def answer(batch):
+        if "o1" in batch and "o6" in batch:
+            return (422, "outcomes: two records are invalid")
+        if "o1" in batch:
+            return (422, "o1: value must be finite")
+        if "o6" in batch:
+            return (409, "o6: replayed with different content")
+        return None
+
+    tr = _Refusing(answer)
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _report(px, *ids)
         with warnings.catch_warnings(record=True):
             warnings.simplefilter("always")
             counts = px.flush()
         assert (counts["outcomes_sent"], counts["outcomes_failed"],
-                counts["outcomes_dropped"]) == (0, 0, 3)
+                counts["outcomes_dropped"]) == (6, 0, 2)
         assert _pending(tmp_path) == []
-    assert tr.outcomes == []
+    assert sorted(o["outcome_id"] for o in tr.outcomes) == sorted(
+        set(ids) - {"o1", "o6"})
 
 
-@pytest.mark.parametrize("status", [401, 404, 405, 410])
+def test_a_stop_counts_the_half_refused_beside_it(
+    monkeypatch, tmp_path, quiet,
+):
+    """One half refused for a record, the other answered with a 403: sending
+    stops, every outcome is still on disk, and each is counted once --
+    including the refused half, which was neither sent nor dropped."""
+    ids = [f"o{n}" for n in range(8)]
+
+    def answer(batch):
+        if "o1" in batch:
+            return (422, "o1: value must be finite")
+        return (403, "production capture is opt-in per agent")
+
+    tr = _Refusing(answer)
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _report(px, *ids)
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            counts = px.flush()
+        assert px.may_upload is False
+        assert len(_pending(tmp_path)) == len(ids)
+        assert (counts["outcomes_sent"], counts["outcomes_failed"],
+                counts["outcomes_dropped"]) == (0, len(ids), 0)
+
+
+def test_splitting_is_bounded_per_flush(monkeypatch, tmp_path, quiet):
+    """A refusal that names each batch differently is never recognised as a
+    whole-batch one, and splitting it to singles would cost two requests per
+    outcome. Each flush spends at most ``_OUTCOME_SPLIT_MAX_REQUESTS`` on
+    splitting; what that leaves unsent stays for the next flush."""
+    ids = [f"o{n:02}" for n in range(_PRODUCTION_OUTCOME_BATCH_MAX_ITEMS)]
+    tr = _Refusing(lambda batch: (422, f"{batch[0]}: refused"))
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _report(px, *ids)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            counts = px.flush()
+        assert len(tr.tried) <= 1 + production._OUTCOME_SPLIT_MAX_REQUESTS
+        assert counts["outcomes_sent"] == 0
+        assert (counts["outcomes_failed"] + counts["outcomes_dropped"]
+                == len(ids))
+        assert counts["outcomes_failed"] > 0
+        assert len(_pending(tmp_path)) == counts["outcomes_failed"]
+        assert any(f"{production._OUTCOME_SPLIT_MAX_REQUESTS} requests"
+                   in str(w.message) for w in caught)
+
+
+@contextmanager
+def _over_http(monkeypatch, root, routes):
+    """An attachment whose every request goes through the REAL
+    ``ControlPlaneClient`` and ``AttachTransport``, answered in-process:
+    ``routes`` maps ``"METHOD /path"`` to ``(status, json body)`` or to a
+    callable taking the request and returning one. Anything else is 200
+    ``{}``. Every request is recorded as ``"METHOD /path"``."""
+    import httpx
+
+    from agent_flywheel import _http
+
+    seen: list[str] = []
+
+    def handler(request):
+        key = f"{request.method} {request.url.path}"
+        seen.append(key)
+        answer = routes.get(key, (200, {}))
+        if callable(answer):
+            answer = answer(request)
+        status, body = answer
+        return httpx.Response(status, json=body)
+
+    real = _http.ControlPlaneClient
+    monkeypatch.setattr(_http, "ControlPlaneClient", lambda url, key, **kw: real(
+        url, key, client=httpx.Client(transport=httpx.MockTransport(handler))))
+    monkeypatch.setenv("PERCEPTEYE_CONTROL_PLANE_URL", "https://cp.invalid")
+    monkeypatch.setenv("PERCEPTEYE_API_KEY", "pek_x")
+    px = fw.attach(agent_id="support", trajectory_root=str(root))
+    try:
+        yield px, seen
+    finally:
+        px.close()
+
+
+GRANTED = {"POST /agents": (200, {"capture": {"turns": True}})}
+
+
+@pytest.mark.parametrize("status", [401, 404, 405])
 def test_a_refusal_of_the_route_drops_nothing(
     monkeypatch, tmp_path, quiet, status,
 ):
     """A control plane with no ``/outcomes`` route yet, or a key it does not
     take, refuses every batch for a reason that is not the records': bisecting
-    would drop every good outcome. They stay, and the cause is said."""
-    tr = _Refusing(lambda batch: (status, "Not Found"))
-    with warnings.catch_warnings(record=True) as caught, \
-            _attached(monkeypatch, tmp_path, tr) as px:
+    would drop every good outcome. They stay, the cause is said, and the
+    batches after it are not tried. Through the real HTTP client."""
+    total = _PRODUCTION_OUTCOME_BATCH_MAX_ITEMS + 3
+    with warnings.catch_warnings(record=True) as caught, _over_http(
+        monkeypatch, tmp_path,
+        {**GRANTED, "POST /outcomes": (status, {"detail": "Not Found"})},
+    ) as (px, seen):
         warnings.simplefilter("always")
-        _report(px, "a", "b", "c")
+        _report(px, *(f"o{n}" for n in range(total)))
         counts = px.flush()
         assert (counts["outcomes_sent"], counts["outcomes_failed"],
-                counts["outcomes_dropped"]) == (0, 3, 0)
-        assert len(_pending(tmp_path)) == 3
-        assert len(tr.tried) == 1, "one try, not a bisection"
-        assert any(f"HTTP {status}" in str(w.message) for w in caught)
+                counts["outcomes_dropped"]) == (0, total, 0)
+        assert len(_pending(tmp_path)) == total
+        assert seen.count("POST /outcomes") == 1, "one try, not a bisection"
+        assert any(f"HTTP {status}" in str(w.message)
+                   and "did not take" in str(w.message) for w in caught)
         assert px.may_upload is True, "not a consent refusal"
 
 
@@ -1009,24 +1113,44 @@ def test_an_outcome_the_node_sdk_queued_is_one_this_sdk_uploads(
     }]
 
 
-@pytest.mark.parametrize(("refused_id", "status"), [
-    ("o5", 422), ("o0", 400), (None, 404), (None, 401), ("o3", 409),
-])
+#: The parity table: what the control plane answers each batch with. A dict of
+#: refused ids -> (status, detail), the first of them in a batch deciding its
+#: answer; ``"*"`` refuses every batch.
+REFUSAL_TABLE = {
+    "one record, 422": {"o5": (422, "refused")},
+    "one record, 400": {"o0": (400, "refused")},
+    "one record, 409": {"o3": (409, "refused")},
+    "two records, two causes": {"o1": (422, "o1: value must be finite"),
+                                "o6": (409, "o6: replayed")},
+    "the whole batch, 422": {"*": (422, "contract minor mismatch")},
+    "the whole batch, 413": {"*": (413, "Request Entity Too Large")},
+    "the route, 404": {"*": (404, "Not Found")},
+    "the route, 401": {"*": (401, "invalid key")},
+}
+
+
+def _table_answer(table, ids):
+    if "*" in table:
+        return table["*"]
+    for refused_id, answer in table.items():
+        if refused_id in ids:
+            return answer
+    return None
+
+
+@pytest.mark.parametrize("row", list(REFUSAL_TABLE))
 def test_both_sdks_isolate_a_refused_outcome_alike(
-    monkeypatch, tmp_path, quiet, refused_id, status,
+    monkeypatch, tmp_path, quiet, row,
 ):
     """The same queue on disk, the same answers from the control plane: both
     packages try the same batches in the same order, send the same outcomes,
-    drop the same ones and count alike."""
+    drop the same ones, keep the same ones and count alike. Both through
+    their real HTTP clients, answered in-process."""
     from .node_sdk import require_node_sdk, run_node
 
     sdk, node = require_node_sdk()
+    table = REFUSAL_TABLE[row]
     ids = [f"o{n}" for n in range(11)]
-
-    def answer(batch):
-        if refused_id is None:
-            return (status, "refused")
-        return (status, "refused") if refused_id in batch else None
 
     def seed(root):
         root.mkdir(parents=True, exist_ok=True)
@@ -1036,16 +1160,31 @@ def test_both_sdks_isolate_a_refused_outcome_alike(
                  "turn_id": "t1", "occurred_at": "2026-11-10T09:00:00Z"}),
                 encoding="utf-8")
 
+    tried: list[list[str]] = []
+    sent: list[str] = []
+
+    def outcomes_route(request):
+        batch = [o["outcome_id"]
+                 for o in json.loads(request.content)["outcomes"]]
+        tried.append(batch)
+        refused = _table_answer(table, batch)
+        if refused is not None:
+            return refused[0], {"detail": refused[1]}
+        sent.extend(batch)
+        return 200, {"outcomes": [
+            {"outcome_id": i, "accepted": True} for i in batch]}
+
     seed(tmp_path / "py")
-    tr = _Refusing(answer)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        with _attached(monkeypatch, tmp_path / "py", tr) as px:
+        with _over_http(monkeypatch, tmp_path / "py", {
+            **GRANTED, "POST /outcomes": outcomes_route,
+        }) as (px, _seen):
             counts = px.flush()
             # Copied now: closing the attachment flushes again.
             ours = {
-                "tried": [list(batch) for batch in tr.tried],
-                "sent": sorted(o["outcome_id"] for o in tr.outcomes),
+                "tried": [list(batch) for batch in tried],
+                "sent": sorted(sent),
                 "left": len(_pending(tmp_path / "py")),
                 "counts": [counts["outcomes_sent"], counts["outcomes_failed"],
                            counts["outcomes_dropped"]],
@@ -1054,20 +1193,27 @@ def test_both_sdks_isolate_a_refused_outcome_alike(
     seed(tmp_path / "node")
     script = (
         "import {createTurnUploader} from './src/capture.js';\n"
-        "import {TransportError} from './src/errors.js';\n"
+        "import {ControlPlaneClient} from './src/http.js';\n"
+        "import {AttachTransport} from './src/transport.js';\n"
         "import {readdirSync} from 'node:fs';\n"
-        f"const refusedId={json.dumps(refused_id)}, status={status};\n"
+        f"const table={json.dumps(table)};\n"
         f"const root={json.dumps(str(tmp_path / 'node'))};\n"
         "const tried=[], sent=[];\n"
-        "const transport={captureCurrent:async()=>({}),"
-        "reportTurns:async()=>({}),"
-        "reportOutcomes:async(_a,outcomes)=>{"
-        "const ids=outcomes.map((o)=>o.outcome_id);tried.push(ids);"
-        "if(refusedId===null||ids.includes(refusedId))"
-        "throw new TransportError(`POST /outcomes -> HTTP ${status}: refused`,"
-        "{statusCode:status});"
-        "sent.push(...ids);return {outcomes:ids.map((id)=>({outcome_id:id,"
-        "accepted:true}))};}};\n"
+        "const answer=(ids)=>{if(table['*'])return table['*'];"
+        "for(const [id,a] of Object.entries(table))"
+        "if(ids.includes(id))return a;return null;};\n"
+        "const reply=(status,body)=>new Response(JSON.stringify(body),"
+        "{status,headers:{'content-type':'application/json'}});\n"
+        "const fetchImpl=async(url,init)=>{"
+        "if(!String(url).endsWith('/outcomes'))return reply(200,{});"
+        "const ids=JSON.parse(init.body).outcomes.map((o)=>o.outcome_id);"
+        "tried.push(ids);const a=answer(ids);"
+        "if(a)return reply(a[0],{detail:a[1]});"
+        "sent.push(...ids);return reply(200,{outcomes:ids.map((id)=>("
+        "{outcome_id:id,accepted:true}))});};\n"
+        "const client=new ControlPlaneClient('https://cp.invalid','pek_x',"
+        "{fetchImpl});\n"
+        "const transport=new AttachTransport(client,{agentId:'a1'});\n"
         "const u=createTurnUploader({transport,agentId:'a1',root});\n"
         "u.setVerdict({mayUpload:true});\n"
         "const c=await u.flush();\n"
@@ -1078,3 +1224,36 @@ def test_both_sdks_isolate_a_refused_outcome_alike(
     theirs = json.loads(run_node(sdk, node, script))
     assert theirs == ours
     assert ours["tried"], "the table is not vacuous"
+
+
+def test_the_table_reaches_every_way_a_flush_ends():
+    """A table that drifted to one shape would still be green."""
+    kinds = {next(iter(t)) == "*" for t in REFUSAL_TABLE.values()}
+    statuses = {a[0] for t in REFUSAL_TABLE.values() for a in t.values()}
+    assert kinds == {True, False}
+    assert {404, 401, 422, 413, 409, 400} <= statuses
+
+
+def test_both_sdks_bound_the_outcome_queue_alike():
+    """The two bounds the flush applies are one figure in both packages."""
+    from .node_sdk import require_node_sdk, run_node
+
+    sdk, node = require_node_sdk()
+    script = (
+        "import {OUTCOME_MAX_KEPT_UNANSWERED, OUTCOME_SPLIT_MAX_REQUESTS,"
+        "OUTCOME_MAX_AGE_MS} from './src/capture.js';\n"
+        "import {CAPTURE_READ_REFUSALS, captureReadRefusal}"
+        " from './src/transport.js';\n"
+        "console.log(JSON.stringify([OUTCOME_MAX_KEPT_UNANSWERED,"
+        "OUTCOME_SPLIT_MAX_REQUESTS, OUTCOME_MAX_AGE_MS,"
+        "[...CAPTURE_READ_REFUSALS].sort(), captureReadRefusal('x')]));\n"
+    )
+    from agent_flywheel import transport
+
+    assert json.loads(run_node(sdk, node, script)) == [
+        production._OUTCOME_MAX_KEPT_UNANSWERED,
+        production._OUTCOME_SPLIT_MAX_REQUESTS,
+        production._OUTCOME_MAX_AGE_S * 1000,
+        sorted(transport.CAPTURE_READ_REFUSALS),
+        transport.capture_read_refusal("x"),
+    ]

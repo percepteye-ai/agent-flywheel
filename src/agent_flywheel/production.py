@@ -351,6 +351,12 @@ _OUTCOME_MAX_AGE_S = 7 * 24 * 3600.0
 #: of a busy agent's reports is not a small outbox; past it the oldest go, out
 #: loud. The Node SDK's ``OUTCOME_MAX_KEPT_UNANSWERED``.
 _OUTCOME_MAX_KEPT_UNANSWERED = 1000
+#: How many requests one flush may spend splitting refused ``/outcomes``
+#: batches. Isolating one bad record of 64 costs 12; the bound stops a refusal
+#: the split did not recognise as whole-batch from costing two requests per
+#: outcome, each charged against the control plane's rate limit. The Node
+#: SDK's ``OUTCOME_SPLIT_MAX_REQUESTS``.
+_OUTCOME_SPLIT_MAX_REQUESTS = 32
 
 
 def _outcome_file(root: str | os.PathLike[str], outcome_id: str) -> Path:
@@ -406,9 +412,10 @@ def _outcome_route_refused(status: Any) -> bool:
 
 def _outcome_batch_refused(status: Any) -> bool:
     """Whether an ``/outcomes`` answer refused THIS BATCH: any other 4xx
-    (400, 409, 413, 422 ...). It is final for the batch, which is split to
-    find the records it refused (``Attachment._flush_outcomes``). The Node
-    SDK's ``outcomeBatchRefused``."""
+    (400, 409, 413, 422 ...). The batch is split to find the records it
+    refused, or -- both halves refused alike -- kept as a refusal of the
+    batch itself (``Attachment._flush_outcomes``). The Node SDK's
+    ``outcomeBatchRefused``."""
     return (isinstance(status, int) and not isinstance(status, bool)
             and 400 <= status < 500
             and status not in _OUTCOME_ROUTE_REFUSALS
@@ -535,6 +542,9 @@ class Attachment:
         #: answer is UNKNOWN is kept for the flush that re-asks, and only an
         #: explicit no makes :meth:`report_outcome` a no-op.
         self._consent_refused = bool(consent_refused and not may_upload)
+        #: The cause of the last whole-batch outcome refusal said out loud
+        #: (:meth:`_warn_whole_batch_refusal`), so it is said once.
+        self._outcome_batch_refusal_said: str | None = None
         #: THE SECOND CONSENT TIER, as the control plane last said it: may a
         #: turn also carry what its model calls saw and said -- the system
         #: prompt, the whole conversation history, the tool definitions and
@@ -819,7 +829,9 @@ class Attachment:
         until the control plane acknowledges it, survives a restart, and is
         given up on (with a warning) only after a week undelivered, or at
         once, with a warning naming the cause, when the control plane refuses
-        that record (a 4xx about the batch; the rest of the batch is sent).
+        that record (a 4xx about the record; the rest of the batch is sent).
+        A refusal of the whole batch -- every part of it refused alike --
+        keeps the outcomes for a later flush instead.
 
         Raises :class:`~agent_flywheel.errors.InvalidOutcome` -- before
         anything is stored, capture enabled or not -- for a word outside the
@@ -940,15 +952,24 @@ class Attachment:
         (a conflicting replay) would be refused again, so it is dropped and
         said out loud.
 
-        A 4xx ABOUT THE BATCH IS FINAL FOR THAT BATCH
-        (:func:`_outcome_batch_refused`). It used to be retried every flush
-        for a week and then deleted, so one bad record cost up to 63 good
-        ones beside it. The batch is split in halves until the refused
-        records stand alone: the good ones are sent, each bad one is dropped
-        with a warning naming the control plane's own cause. A 4xx about the
-        ROUTE or the KEY (401, 404, 405, 410) is not the records' fault:
-        bisecting it would drop every good outcome, so sending stops for this
-        flush and they stay on disk, said out loud.
+        A 4xx ABOUT THE RECORDS IS FINAL FOR THEM
+        (:func:`_outcome_batch_refused`). A refused batch is split in halves,
+        and BOTH halves are tried before either is split again: the good ones
+        are sent, and each bad one, once it stands alone, is dropped with a
+        warning naming the control plane's own cause.
+
+        Unless both halves are refused with the same status and the same
+        words: then the refusal was about THE BATCH, not a record in it -- a
+        422 from a control plane on another contract minor, a proxy's 400 or
+        413 -- and splitting further would drop every outcome at two requests
+        each. Sending stops for this flush, they stay on disk (the week's
+        expiry still applies), and the cause is said once. Splitting is also
+        bounded per flush (:data:`_OUTCOME_SPLIT_MAX_REQUESTS`); what the
+        bound leaves unsent stays for the next flush.
+
+        A 4xx about the ROUTE or the KEY (401, 404, 405, 410) is not the
+        records' fault either: sending stops for this flush and they stay on
+        disk, said out loud.
 
         Counts: ``outcomes_sent``; ``outcomes_failed``, the outcomes still on
         disk for a later flush, each counted once; ``outcomes_dropped``, the
@@ -965,15 +986,20 @@ class Attachment:
         if not pending:
             return {}
         size = _PRODUCTION_OUTCOME_BATCH_MAX_ITEMS
-        # Every batch still to send, in order; a refused batch's halves go
-        # back to the front.
-        queue: list[list[tuple[Path, dict[str, Any]]]] = [
-            pending[i:i + size] for i in range(0, len(pending), size)]
-        sent = failed = 0
+        Batch = list[tuple[Path, dict[str, Any]]]
+        # Every GROUP still to send, in order: a batch on its own, or the two
+        # halves of one refused batch, which are tried together. A refused
+        # half's own halves go back to the front.
+        queue: list[list[Batch]] = [
+            [pending[i:i + size]] for i in range(0, len(pending), size)]
+        sent = failed = split_requests = 0
         dropped: list[str] = []
         client = None
 
-        def _forget(batch: list[tuple[Path, dict[str, Any]]]) -> None:
+        def _left() -> int:
+            return sum(len(b) for group in queue for b in group)
+
+        def _forget(batch: Batch) -> None:
             for path, _wire in batch:
                 try:
                     path.unlink()
@@ -988,41 +1014,76 @@ class Attachment:
             client = ControlPlaneClient(self._cp_url, self._api_key)
             tr = AttachTransport(client, self.agent_id)
             while queue:
-                batch = queue.pop(0)
-                try:
-                    reply = tr.report_outcomes(
-                        self.agent_id, [wire for _, wire in batch])
-                except Exception as exc:
-                    refusal = _capture_refusal(exc)
-                    if refusal is not None:
-                        self._refuse_upload(refusal)
-                        failed += len(batch) + sum(len(b) for b in queue)
-                        queue.clear()
-                        break
-                    status = getattr(exc, "status_code", None)
-                    if _outcome_batch_refused(status):
-                        if len(batch) == 1:
-                            _forget(batch)
-                            dropped.append(str(exc))
-                        else:
-                            half = len(batch) // 2
-                            queue[:0] = [batch[:half], batch[half:]]
+                group = queue.pop(0)
+                halves = len(group) == 2
+                if halves and (split_requests + 2
+                               > _OUTCOME_SPLIT_MAX_REQUESTS):
+                    failed += sum(len(b) for b in group) + _left()
+                    queue.clear()
+                    self._warn(
+                        "agent-flywheel: the control plane refused reported "
+                        "outcomes, and finding which ones reached "
+                        f"{_OUTCOME_SPLIT_MAX_REQUESTS} requests in this "
+                        "flush; the rest stay on disk for a later flush.")
+                    break
+                refused: list[tuple[Batch, tuple[int, str]]] = []
+                stop = False
+                for index, batch in enumerate(group):
+                    if halves:
+                        split_requests += 1
+                    try:
+                        reply = tr.report_outcomes(
+                            self.agent_id, [wire for _, wire in batch])
+                    except Exception as exc:
+                        # Kept by a stop: this half, the half not tried
+                        # yet, a half already refused beside it, the queue.
+                        untried = (sum(len(b) for b in group[index + 1:])
+                                   + sum(len(b) for b, _ in refused))
+                        refusal = _capture_refusal(exc)
+                        if refusal is not None:
+                            self._refuse_upload(refusal)
+                            failed += len(batch) + untried + _left()
+                            queue.clear()
+                            stop = True
+                            break
+                        status = getattr(exc, "status_code", None)
+                        if _outcome_batch_refused(status):
+                            refused.append((batch, (status, str(exc))))
+                            continue
+                        if _outcome_route_refused(status):
+                            failed += len(batch) + untried + _left()
+                            queue.clear()
+                            self._warn(
+                                "agent-flywheel: the control plane did not "
+                                f"take reported outcomes ({exc}); they stay "
+                                "on disk and are sent again on a later "
+                                "flush.")
+                            stop = True
+                            break
+                        failed += len(batch)
                         continue
-                    if _outcome_route_refused(status):
-                        failed += len(batch) + sum(len(b) for b in queue)
-                        queue.clear()
-                        self._warn(
-                            "agent-flywheel: the control plane did not take "
-                            f"reported outcomes ({exc}); they stay on disk "
-                            "and are sent again on a later flush.")
-                        break
-                    failed += len(batch)
-                    continue
-                _forget(batch)
-                sent += len(batch)
-                self._note_refused_outcomes(reply)
+                    _forget(batch)
+                    sent += len(batch)
+                    self._note_refused_outcomes(reply)
+                if stop:
+                    break
+                if (halves and len(refused) == 2
+                        and refused[0][1] == refused[1][1]):
+                    failed += sum(len(b) for b, _ in refused) + _left()
+                    queue.clear()
+                    self._warn_whole_batch_refusal(refused[0][1][1])
+                    break
+                split: list[list[Batch]] = []
+                for batch, (_status, cause) in refused:
+                    if len(batch) == 1:
+                        _forget(batch)
+                        dropped.append(cause)
+                    else:
+                        half = len(batch) // 2
+                        split.append([batch[:half], batch[half:]])
+                queue[:0] = split
         except Exception:
-            failed += sum(len(b) for b in queue)
+            failed += _left()
         finally:
             if client is not None:
                 try:
@@ -1036,6 +1097,19 @@ class Attachment:
                 f"their batch was sent: {'; '.join(sorted(set(dropped)))}")
         return {"outcomes_sent": sent, "outcomes_failed": failed,
                 "outcomes_dropped": len(dropped)}
+
+    def _warn_whole_batch_refusal(self, cause: str) -> None:
+        """Say ONCE per cause that the control plane refuses whole outcome
+        batches: it holds for every flush until one side is upgraded, and a
+        warning per flush would be a week of the same line."""
+        if cause == self._outcome_batch_refusal_said:
+            return
+        self._outcome_batch_refusal_said = cause
+        self._warn(
+            "agent-flywheel: the control plane refused whole batches of "
+            f"reported outcomes ({cause}), which is about the batch, not a "
+            "record in it; they stay on disk, are sent again on a later "
+            "flush, and are dropped only after a week undelivered.")
 
     def _note_refused_outcomes(self, reply: Any) -> None:
         """Say which outcomes of an acknowledged batch the control plane did
