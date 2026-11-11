@@ -1329,3 +1329,40 @@ def test_both_sdks_bound_the_outcome_queue_alike():
         sorted(transport.CAPTURE_READ_REFUSALS),
         transport.capture_read_refusal("x"),
     ]
+
+
+class _BareRefusing(_Refusing):
+    """Refuses with the control plane's words alone: the status rides only
+    on the error, as a client that does not spell it into the message."""
+
+    def report_outcomes(self, agent_id, outcomes):
+        ids = [o["outcome_id"] for o in outcomes]
+        refused = self.answer(ids)
+        if refused is not None:
+            self.tried.append(ids)
+            status, detail = refused
+            raise TransportError(detail, status_code=status)
+        return super().report_outcomes(agent_id, outcomes)
+
+
+def test_the_same_words_at_two_statuses_are_no_refusal_of_the_batch(
+    monkeypatch, tmp_path, quiet,
+):
+    """Whole-batch means the same STATUS and the same words, in unison with
+    the Node SDK: halves refused in the same words at 400 and 422 are two
+    answers, so the split goes on. Mutation: compare the words alone ->
+    stopped as a whole-batch refusal."""
+    ids = [f"o{n}" for n in range(8)]
+    # The two halves of a split are tried one after the other, so
+    # alternating answers refuse every pair of halves at two statuses.
+    calls = iter(range(10_000))
+    tr = _BareRefusing(lambda batch: (
+        (400 if next(calls) % 2 else 422, "refused")))
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _report(px, *ids)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            counts = px.flush()
+    assert not any("whole batches" in str(w.message) for w in caught)
+    assert counts["outcomes_dropped"] == len(ids)
+    assert len(tr.tried) > 3, "split on, not stopped at the halves"
