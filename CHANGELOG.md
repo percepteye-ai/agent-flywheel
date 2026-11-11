@@ -82,7 +82,12 @@ repository's.
     (403, new in 1.51.0): a hill climb request naming an input only a
     platform operator may set (the experiment-only `environment_task_grader`,
     which left the `POST /hillclimbs` request's schema; neither SDK ever
-    sent it). The other fourteen codes 1.51.0 added or published are not
+    sent it), and `code_sandbox_not_configured` (503, not retryable) and
+    `code_sandbox_unreachable` (503, retryable), both the platform's (new in
+    1.51.0): a launch of a coding agent whose own code runs on the platform,
+    refused before any run exists when the deployment has no isolated
+    sandbox for that code or its sandbox is not answering. The other
+    fourteen codes 1.51.0 added or published are not
     carried: the operations that answer them (a Decision's answer, eval-set
     comparisons and saves, observability sources, serving an artifact, a
     champion's rollback) are ones neither SDK calls or documents, and a

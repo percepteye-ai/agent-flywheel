@@ -64,11 +64,18 @@ ENV_CUSTOMER_API_KEY = "PERCEPTEYE_MC_API_KEY"
 
 #: 1.29.0: what a launch may read and how far the runs list reaches. 1.51.0:
 #: a launch input only a platform operator may set (the experiment-only
-#: ``environment_task_grader``, which left the hill climb request's schema).
+#: ``environment_task_grader``, which left the hill climb request's schema);
+#: and a launch of a coding agent whose own code runs on the platform, refused
+#: before any run exists because the deployment has no isolated sandbox for
+#: that code (``code_sandbox_not_configured``, 503, the platform's: retrying
+#: does not help) or its sandbox is not answering
+#: (``code_sandbox_unreachable``, 503, the platform's: retry shortly).
 RUN_LIST_REFUSAL_CODES = (
     "launch_uri_outside_org",
     "run_page_too_deep",
     "launch_input_requires_platform_operator",
+    "code_sandbox_not_configured",
+    "code_sandbox_unreachable",
 )
 #: 1.29.0: why a prompt run cannot start (``prompt_optimization`` says ahead).
 #: 1.38.0: a prompt-objective hill climb's evolution could not start; 1.39.0:
