@@ -28,7 +28,13 @@ Follow this in order; each step links to the detail. When something fails,
 
 1. **Settle what the release depends on.** If it relies on a control-plane
    change, that change must be deployed first: an SDK that talks to an older
-   Mission Control misbehaves. If the dashboard's install line pins the new
+   Mission Control misbehaves. **Run the Mission Control gate
+   ([§1a](#1a-the-mission-control-gate)) against the Mission Control the
+   release targets, in both repositories, and do not tag until both print
+   `ok`.** 0.5.0 is why: both SDKs declare customer contract 1.51.0 and upload
+   to `POST /api/flywheel/v1/outcomes`; tagged before that route was
+   deployed, every reported outcome would have been refused for a week and
+   then dropped. If the dashboard's install line pins the new
    version (`pip install "agent-flywheel>=X.Y.Z"`), the release is urgent the
    moment that deploy lands: until then the page's first command fails.
 2. **Bump both versions, one number for both.** Python: `_version.py`,
@@ -104,6 +110,77 @@ SVG was edited by hand instead of through its renderer.
 
 **Merge order.** When figures or the schema changed, merge the Node PR first:
 this repository's `test-full` job checks out the Node repository's `main`.
+
+## 1a. The Mission Control gate
+
+Before tagging, confirm the Mission Control the release targets serves what
+this release calls. Name its origin in `CP`: the SDK's default is
+`https://launch.percepteye.ai` (`DEFAULT_CONTROL_PLANE_URL` in
+`src/agent_flywheel/control_plane.py`, without its `/api/flywheel/v1`); a
+release that targets another deployment names that one. The gate checks two
+facts and exits non-zero naming the one that failed:
+
+- `GET $CP/api/v2/contract` (anonymous) publishes `info.version` at least the
+  `CUSTOMER_CONTRACT_VERSION` the SDK declares, in the same major;
+- `POST $CP/api/flywheel/v1/outcomes`, sent with no key and an empty body, is
+  answered BY THE ROUTE (401, 403 or 422). A 404 or 405 means the route is not
+  deployed, and any other answer (a page served for an unknown path) is no
+  evidence it is. That route is on the Flywheel API, whose OpenAPI is not
+  served, which is why it is probed.
+
+**Python** (from this repository's root):
+
+```bash
+CP=https://launch.percepteye.ai .venv/bin/python - <<'EOF'
+import json, os, urllib.error, urllib.request
+
+from agent_flywheel.customer_api import CUSTOMER_CONTRACT_VERSION as declared
+
+cp = os.environ["CP"].rstrip("/")
+served = json.load(urllib.request.urlopen(f"{cp}/api/v2/contract"))["info"]["version"]
+v = lambda s: tuple(int(x) for x in s.split("."))  # noqa: E731
+assert v(served)[0] == v(declared)[0] and v(served) >= v(declared), (
+    f"{cp} serves customer contract {served}; this SDK declares {declared}")
+req = urllib.request.Request(
+    f"{cp}/api/flywheel/v1/outcomes", data=b"{}", method="POST",
+    headers={"content-type": "application/json"})
+try:
+    status = urllib.request.urlopen(req).status
+except urllib.error.HTTPError as exc:
+    status = exc.code
+# An unauthenticated empty POST is refused BY THE ROUTE (401/403/422); a
+# 404/405 -- or anything else, such as a page answered for an unknown path --
+# is no evidence the route exists.
+assert status in (401, 403, 422), (
+    f"{cp} did not answer POST /api/flywheel/v1/outcomes as a route "
+    f"(HTTP {status})")
+print(f"ok: {cp} serves customer contract {served} and POST /outcomes")
+EOF
+```
+
+**Node** (from the Node repository's root):
+
+```bash
+CP=https://launch.percepteye.ai node --input-type=module -e '
+import { CUSTOMER_CONTRACT_VERSION as declared } from "./src/customer-api.js";
+const cp = process.env.CP.replace(/\/+$/, "");
+const v = (s) => s.split(".").map(Number);
+const served = (await (await fetch(`${cp}/api/v2/contract`)).json()).info.version;
+const [s, d] = [v(served), v(declared)];
+const atLeast = s[0] === d[0] && (s[1] > d[1] || (s[1] === d[1] && s[2] >= d[2]));
+if (!atLeast) throw new Error(`${cp} serves customer contract ${served}; this SDK declares ${declared}`);
+const { status } = await fetch(`${cp}/api/flywheel/v1/outcomes`, {
+  method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+if (![401, 403, 422].includes(status)) {
+  throw new Error(`${cp} did not answer POST /api/flywheel/v1/outcomes as a route (HTTP ${status})`);
+}
+console.log(`ok: ${cp} serves customer contract ${served} and POST /outcomes`);
+'
+```
+
+A release that calls a new Flywheel route adds that route to both probes in
+the same change. There is no pre-tag script to hang this on: the release
+workflows run after the tag is pushed, which is too late for it.
 
 ## 2. Python release (PyPI)
 
