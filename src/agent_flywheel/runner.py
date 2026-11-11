@@ -142,9 +142,12 @@ def run_rollout_in_process(
             adapters, llm_url=rollout.llm_url, api_key=rollout.api_key
         )
         _ = report
+    from .policy_calls import count_policy_calls
+
     with _RolloutScope(rollout.rollout_id, trajectory_dir,
                        task_id=(rollout.metadata or {}).get("task_id"),
-                       hosted_url=hosted_base_for(rollout.llm_url)):
+                       hosted_url=hosted_base_for(rollout.llm_url)), \
+            count_policy_calls(rollout.llm_url) as policy_calls:
         arg = resolved.build_arg(rollout.turn_input)
         try:
             if resolved.is_async:
@@ -205,6 +208,11 @@ def run_rollout_in_process(
     out = _coerce_output(raw)
     out.timing["elapsed_s"] = time.time() - started
     _attach_trajectory(out, trajectory_dir)
+    # The agent's own count wins; otherwise the SDK's, counted at the client
+    # (``policy_calls``). Without one Mission Control cannot reconcile what
+    # its gateway observed and holds every rollout out of training.
+    if out.llm_call_count is None:
+        out.llm_call_count = policy_calls.value
     return out
 
 
