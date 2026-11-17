@@ -1,6 +1,6 @@
 """ONE reading of what an agent's environment states, in two languages.
 
-Three tables, each driven through this SDK and through the Node SDK, and the
+Four tables, each driven through this SDK and through the Node SDK, and the
 two answers compared:
 
 * ``OUTCOME_FILES`` -- raw ``outcome.json`` texts, through
@@ -13,6 +13,9 @@ two answers compared:
   Both SDKs REQUIRE the time (the contract they author says so) while the
   control plane's intake accepts a report without one; what is pinned here is
   that the two SDKs refuse the same reports in the same words.
+* ``EPISODE_IDS`` -- through ``current_rollout_id`` and the Node plugin's
+  ``currentRolloutId``: the episode id an outcome is reported against. Node
+  once had no producer of it for application code.
 
 The skip rule is ``tests/node_sdk.py``'s.
 """
@@ -310,3 +313,70 @@ def test_a_report_without_its_time_is_refused_and_one_with_it_is_not(node, kind)
     assert node[kind]["UTC"]["ok"]["occurred_at"] == "2026-11-10T09:00:00Z"
     assert node[kind]["an offset"]["ok"]["occurred_at"] == (
         "2026-11-10T09:00:00+05:30")
+
+
+#: name -> (the rollout a session is running or None, the session asking,
+#: whether that rollout has ended). Python reads its context; Node is asked
+#: with the host context the rollout's session is keyed by.
+EPISODE_IDS: dict[str, tuple[str | None, str, bool]] = {
+    "outside any rollout": (None, "s1", False),
+    "inside a rollout": ("rl_mc_41", "s1", False),
+    "after the rollout ended": ("rl_mc_41", "s1", True),
+    "another session's rollout": ("rl_mc_41", "s2", False),
+}
+
+_NODE_EPISODE = r"""
+import { register } from "./src/index.js";
+const cases = JSON.parse(await new Promise((ok) => {
+  let s = ""; process.stdin.on("data", (d) => { s += d; });
+  process.stdin.on("end", () => ok(s));
+}));
+const api = {
+  on() {}, logger: { info() {}, warn() {} },
+  config: { plugins: { entries: { "agent-flywheel": {
+    hooks: { allowConversationAccess: true } } } } },
+  session: { workflow: { enqueueNextTurnInjection: async () => ({ enqueued: true }) } },
+};
+const out = {};
+for (const [name, c] of Object.entries(cases.cases)) {
+  const plugin = register(api, {
+    mode: "training", apiKey: "pefw_test",
+    controlPlaneUrl: "http://127.0.0.1:9/api/flywheel/v1",
+  }, { PERCEPTEYE_HOME: cases.home, PERCEPTEYE_TRAJECTORY_DIR: "" });
+  const [rollout, asking, ended] = c;
+  if (rollout) plugin.rollouts.track("s1", { rolloutId: rollout });
+  if (ended) plugin.rollouts.inFlight.delete("s1");
+  out[name] = plugin.currentRolloutId({ sessionKey: asking });
+  plugin.rollouts.inFlight.clear();
+}
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def _python_episode(rollout, asking, ended, trajectory_dir) -> str | None:
+    import contextvars
+
+    from agent_flywheel.outcomes import _RolloutScope, current_rollout_id
+
+    # A session is a context of its own: Python's rollout lives in the one it
+    # was entered in, as Node's lives in the host session it was claimed for.
+    sessions = {"s1": contextvars.copy_context(), "s2": contextvars.copy_context()}
+    scope = _RolloutScope(rollout, trajectory_dir) if rollout else None
+    if scope is not None:
+        sessions["s1"].run(scope.__enter__)
+        if ended:
+            sessions["s1"].run(scope.__exit__, None, None, None)
+    return sessions[asking].run(current_rollout_id)
+
+
+def test_both_sdks_name_the_same_episode(tmp_path, monkeypatch):
+    monkeypatch.delenv("PERCEPTEYE_ROLLOUT_ID", raising=False)
+    sdk, binary = require_node_sdk()
+    theirs = json.loads(run_node(sdk, binary, _NODE_EPISODE, stdin=json.dumps({
+        "home": str(tmp_path / "home"), "cases": EPISODE_IDS})))
+    for name, (rollout, asking, ended) in EPISODE_IDS.items():
+        python = _python_episode(rollout, asking, ended, str(tmp_path))
+        assert theirs[name] == python, (
+            f"{name}: Node {theirs[name]!r}, Python {python!r}")
+    # Not agreement on nothing: inside a rollout both name it.
+    assert theirs["inside a rollout"] == "rl_mc_41"
