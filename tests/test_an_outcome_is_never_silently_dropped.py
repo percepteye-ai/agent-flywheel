@@ -744,3 +744,34 @@ def test_a_second_refusal_never_overwrites_the_first_retired_record(tmp_path):
     assert survived == ["first", "second", "third"], (
         f"a later refusal destroyed an earlier retired record: {survived}"
     )
+
+
+def test_one_malformed_evidence_part_does_not_cost_the_episode_its_outcome():
+    """The checks, the termination and the seeds are statements ABOUT an
+    outcome. A check row the wire refuses (a NaN value here) used to send the
+    whole result down the salvage: reward, tool calls and artifacts dropped
+    and the episode excluded as a crash. The part that cannot be carried is
+    dropped and named; everything else, including the evidence parts that ARE
+    well formed, is sent."""
+    import pytest
+
+    from agent_flywheel.runner import _wire_payload
+
+    out = RolloutOutput(
+        final_text="done", reward=0.75, success=True,
+        tool_calls=[ToolCallOutcome(
+            name="grep", arguments={"q": "x"}, status_code=None, outcome="ok")],
+        checks=[{"id": "balance_restored", "status": "measured",
+                 "value": float("nan")}],
+        termination={"class": "completed"},
+        seeds={"environment": 7},
+    )
+    with pytest.warns(RuntimeWarning, match="checks"):
+        wire = _wire_payload(out)
+    assert "exclusion" not in wire, wire
+    assert wire["reward"] == 0.75 and wire["success"] is True
+    assert wire["tool_calls"] and wire["tool_calls"][0]["name"] == "grep"
+    assert "checks" not in wire
+    assert wire["termination"] == {"class": "completed"}
+    assert wire["seeds"] == {"environment": 7}
+    assert out.checks, "the caller's object was mutated"

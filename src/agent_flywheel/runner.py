@@ -30,7 +30,7 @@ import threading
 import time
 import warnings
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -2638,6 +2638,35 @@ def _fs_slug(value: str) -> str:
     return (safe.strip("._") or "unnamed")[:120]
 
 
+_EVIDENCE_PARTS = (
+    ("checks", checks_to_wire),
+    ("termination", termination_to_wire),
+    ("seeds", seeds_to_wire),
+)
+
+
+def _without_unsendable_evidence(
+    out: RolloutOutput,
+) -> tuple[RolloutOutput, list[str]]:
+    """``out`` less each evidence part its own serialiser refuses, and the
+    names of the parts removed. Never raises."""
+    unsendable: list[str] = []
+    for name, to_wire in _EVIDENCE_PARTS:
+        value = getattr(out, name, None)
+        if value is None:
+            continue
+        try:
+            to_wire(value)
+        except Exception:
+            unsendable.append(name)
+    if not unsendable:
+        return out, []
+    try:
+        return replace(out, **{name: None for name in unsendable}), unsendable
+    except Exception:
+        return out, []
+
+
 def _wire_payload(out: RolloutOutput) -> dict[str, Any]:
     """The contract payload for this outcome, ALWAYS.
 
@@ -2659,6 +2688,24 @@ def _wire_payload(out: RolloutOutput) -> dict[str, Any]:
     try:
         return out.to_wire()
     except Exception as exc:
+        # The evidence parts are statements ABOUT the outcome, not the outcome.
+        # One malformed check row (a NaN value, an unknown key) must not cost
+        # the episode its reward, tool calls and artifacts: drop the part that
+        # cannot be carried, say so, and send the rest whole.
+        kept, unsendable = _without_unsendable_evidence(out)
+        if unsendable:
+            try:
+                wire = kept.to_wire()
+            except Exception:
+                pass  # something else is wrong too: the full salvage below
+            else:
+                warnings.warn(
+                    f"[agent-flywheel] this rollout's {', '.join(unsendable)} "
+                    f"could not be represented on the flywheel/1 wire "
+                    f"({type(exc).__name__}: {exc}) and was not sent; the "
+                    f"rest of the result was.",
+                    RuntimeWarning, stacklevel=2)
+                return wire
         # ``getattr``, because this function's whole contract is that it does
         # not raise: the object that just failed to serialise is the last one
         # to assume anything about.
