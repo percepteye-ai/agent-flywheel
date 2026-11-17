@@ -376,3 +376,39 @@ def test_a_whole_float_seed_is_the_integer_it_spells():
     assert type(wire["environment"]) is int
     assert seeds_to_wire({"environment": 2**53 - 1}) == {
         "environment": 2**53 - 1}
+
+
+# ── text the control plane's parser takes ─────────────────────────────────
+
+_LONE = "case-\ud800"
+_EMOJI = "case-\U0001F600"
+_AT = "2026-11-10T09:00:00Z"
+
+
+@pytest.mark.parametrize("field", [
+    "outcome_id", "turn_id", "conversation_id", "episode_id"])
+def test_an_outcome_id_with_a_lone_surrogate_is_refused(field):
+    """A lone surrogate is escaped on the wire and refused by the control
+    plane's parser: a 422 for the batch, then a record dropped by the split."""
+    from agent_flywheel.contract import production_outcome
+
+    base = {"outcome_id": "o-1", "outcome": "resolved", "episode_id": "e-1",
+            "occurred_at": _AT}
+    with pytest.raises(ContractViolation, match=field):
+        production_outcome({**base, field: _LONE})
+    assert production_outcome({**base, field: _EMOJI})[field] == _EMOJI
+
+
+def test_feedback_and_a_note_with_a_lone_surrogate_are_refused():
+    from agent_flywheel.contract import production_outcome, turn_feedback
+
+    feedback = {"feedback_id": "f-1", "signal": "accepted",
+                "episode_id": "e-1", "turn_index": 0, "occurred_at": _AT}
+    for field in ("feedback_id", "episode_id"):
+        with pytest.raises(ContractViolation, match=field):
+            turn_feedback({**feedback, field: _LONE})
+    outcome = {"outcome_id": "o-1", "outcome": "resolved",
+               "episode_id": "e-1", "occurred_at": _AT}
+    with pytest.raises(ContractViolation, match="well-formed Unicode"):
+        production_outcome({**outcome, "note": f"x{_LONE}"})
+    assert production_outcome({**outcome, "note": _EMOJI})["note"] == _EMOJI
