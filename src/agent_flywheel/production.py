@@ -470,6 +470,19 @@ def _outcome_batch_refused(status: Any) -> bool:
 _ROUTE_ABSENT = frozenset({404, 405})
 
 
+def _unanswered_outcomes_dropped(dropped: int) -> str:
+    """The one sentence for outcomes dropped by the count bound while the
+    consent question is unanswered -- its cause, which is not a refusal: the
+    control plane has not answered (it could not be reached, or did not say).
+    The Node SDK's ``unansweredOutcomesDropped``."""
+    return (
+        f"agent-flywheel: {dropped} reported outcome(s) were dropped, oldest "
+        "first: the control plane has not answered whether this agent may "
+        "upload production traffic (it could not be reached, or did not say), "
+        f"and at most {_OUTCOME_MAX_KEPT_UNANSWERED} outcomes that wait on "
+        "that answer are kept until it does.")
+
+
 def _route_absent(status: Any) -> bool:
     """Whether an answer says the route does not exist on this control
     plane. Every other 4xx is about the key or the records, and must never
@@ -1017,7 +1030,9 @@ class Attachment:
         except OSError:
             # Capture costs the observation, never the caller.
             return None
-        if not self.may_upload:
+        if not self.may_upload and not names_only_an_episode(wire):
+            # Only an outcome consent is the question for waits on its
+            # answer; one naming only an episode is sent regardless.
             self._cap_unanswered_outcomes()
         self._flush_soon()
         return str(wire["outcome_id"])
@@ -1194,10 +1209,23 @@ class Attachment:
 
     def _cap_unanswered_outcomes(self) -> None:
         """While consent is UNKNOWN, keep at most
-        :data:`_OUTCOME_MAX_KEPT_UNANSWERED` outcomes: the oldest (by when
-        they were written, then by name) go, with a warning. Never raises."""
+        :data:`_OUTCOME_MAX_KEPT_UNANSWERED` of the outcomes that wait on it:
+        the oldest (by when they were written, then by name) go, with a
+        warning naming that cause. An outcome that names only an episode
+        (``contract.names_only_an_episode``) does not wait on consent, so it
+        is neither counted nor dropped here. Never raises."""
         files = self._outcome_files()
-        excess = len(files) - _OUTCOME_MAX_KEPT_UNANSWERED
+        if len(files) <= _OUTCOME_MAX_KEPT_UNANSWERED:
+            return
+        waiting: list[Path] = []
+        for path in files:
+            try:
+                wire = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not (isinstance(wire, Mapping) and names_only_an_episode(wire)):
+                waiting.append(path)
+        excess = len(waiting) - _OUTCOME_MAX_KEPT_UNANSWERED
         if excess <= 0:
             return
 
@@ -1208,18 +1236,14 @@ class Attachment:
                 return (0.0, path.name)
 
         dropped = 0
-        for path in sorted(files, key=_age)[:excess]:
+        for path in sorted(waiting, key=_age)[:excess]:
             try:
                 path.unlink()
                 dropped += 1
             except OSError:
                 continue
         if dropped:
-            self._warn(
-                f"agent-flywheel: {dropped} reported outcome(s) were dropped, "
-                "oldest first: the control plane has not yet said whether "
-                "this agent may upload them, and at most "
-                f"{_OUTCOME_MAX_KEPT_UNANSWERED} are kept while it has not.")
+            self._warn(_unanswered_outcomes_dropped(dropped))
 
     def _expire_outcomes(self) -> list[Path]:
         """Drop the outcomes undelivered for a week, out loud; the rest, in

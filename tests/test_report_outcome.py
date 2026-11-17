@@ -412,6 +412,47 @@ def test_at_most_so_many_outcomes_are_kept_while_consent_is_unknown(
     assert sorted(o["outcome_id"] for o in tr.outcomes) == ["o2", "o3", "o4"]
 
 
+def test_the_bound_while_consent_is_unknown_holds_no_episode_outcome(
+    monkeypatch, tmp_path, quiet,
+):
+    """An outcome that names only an episode does not wait on consent, so the
+    count bound neither counts nor drops it -- it once did both, and said
+    consent was the cause. The warning names the actual one: no answer."""
+    monkeypatch.setattr(production, "_OUTCOME_MAX_KEPT_UNANSWERED", 3)
+    tr = _Unanswered()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            for n in range(5):
+                px.report_outcome("resolved", episode_id=f"rl_{n}",
+                                  outcome_id=f"e{n}")
+            assert len(_pending(tmp_path)) == 5, "episodes are not bounded"
+            assert not caught, "nothing was dropped"
+            for n in range(5):
+                px.report_outcome("resolved", turn_id="t1", outcome_id=f"o{n}")
+                written = production._outcome_file(tmp_path, f"o{n}")
+                when = time.time() - 1000 + n
+                os.utime(written, (when, when))
+        kept = sorted(json.loads(p.read_text())["outcome_id"]
+                      for p in _pending(tmp_path))
+        assert kept == ["e0", "e1", "e2", "e3", "e4", "o2", "o3", "o4"]
+        said = [str(w.message) for w in caught if "oldest first" in str(w.message)]
+        assert said and "has not answered" in said[-1]
+        assert "has not yet said" not in said[-1]
+
+
+def test_the_unanswered_drop_is_said_in_one_sentence_by_both_sdks():
+    from .node_sdk import require_node_sdk, run_node
+
+    sdk, node = require_node_sdk()
+    theirs = run_node(sdk, node, (
+        "import {unansweredOutcomesDropped} from './src/capture.js';\n"
+        "process.stdout.write(unansweredOutcomesDropped(7));\n"))
+    ours = production._unanswered_outcomes_dropped(7)
+    assert theirs.removeprefix("[agent-flywheel] ") == ours.removeprefix(
+        "agent-flywheel: ")
+
+
 def test_nothing_waiting_is_sent_once_consent_is_withdrawn(
     monkeypatch, tmp_path, quiet,
 ):
