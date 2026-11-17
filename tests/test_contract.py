@@ -219,3 +219,89 @@ def test_a_granted_lease_survives_the_wire():
         "lease_expires_ts": 1234.5,
     })
     assert r.lease_expires_ts == 1234.5
+
+
+# ── checks, termination, seeds: what the agent's environment saw ────────────
+
+def _schema():
+    import pathlib
+
+    return json.loads(
+        (pathlib.Path(__file__).resolve().parents[1] / "schema"
+         / "flywheel-1.json").read_text())
+
+
+def test_the_evidence_parts_reach_the_wire_in_the_schemas_words():
+    from agent_flywheel.contract import (
+        CHECK_ESTABLISHES,
+        CHECK_STATUSES,
+        MAX_REPORTED_CHECKS,
+        TERMINATION_CLASSES,
+    )
+
+    wire = RolloutOutput(
+        final_text="x",
+        checks=[
+            {"id": "db_state", "status": "measured", "value": 1,
+             "required": True, "establishes": "state_reached"},
+            {"id": "judge", "status": "unavailable"},
+        ],
+        termination={"class": "turn_limit", "detail": "40 turns"},
+        seeds={"environment": 7, "sampling": "s-3"},
+    ).to_wire()
+    assert wire["checks"] == [
+        {"id": "db_state", "status": "measured", "value": 1.0,
+         "required": True, "establishes": "state_reached"},
+        {"id": "judge", "status": "unavailable"},
+    ]
+    assert wire["termination"] == {"class": "turn_limit", "detail": "40 turns"}
+    assert wire["seeds"] == {"environment": 7, "sampling": "s-3"}
+
+    defs = _schema()["$defs"]
+    assert set(wire) <= set(defs["RolloutOutput"]["properties"])
+    assert tuple(defs["ReportedCheck"]["properties"]["status"]["enum"]) \
+        == CHECK_STATUSES
+    assert tuple(e for e in defs["ReportedCheck"]["properties"]["establishes"]
+                 ["enum"] if e is not None) == CHECK_ESTABLISHES
+    assert tuple(defs["ReportedTermination"]["properties"]["class"]["enum"]) \
+        == TERMINATION_CLASSES
+    assert defs["RolloutOutput"]["properties"]["checks"]["maxItems"] \
+        == MAX_REPORTED_CHECKS
+    for row in wire["checks"]:
+        assert set(row) <= set(defs["ReportedCheck"]["properties"])
+
+
+def test_an_agent_that_states_none_of_them_sends_none_of_them():
+    wire = RolloutOutput(final_text="x", checks=[], seeds={}).to_wire()
+    assert not {"checks", "termination", "seeds"} & set(wire)
+
+
+@pytest.mark.parametrize("kwargs, named", [
+    ({"checks": [{"id": "a", "status": "passed"}]}, r"checks\[0\]\.status"),
+    ({"checks": [{"id": "", "status": "measured"}]}, r"checks\[0\]\.id"),
+    ({"checks": [{"id": "a", "status": "error", "value": 0}]},
+     "only a measured check has a value"),
+    ({"checks": [{"id": "a", "status": "measured", "value": True}]},
+     r"checks\[0\]\.value"),
+    ({"checks": [{"id": "a", "status": "measured", "value": float("nan")}]},
+     r"checks\[0\]\.value"),
+    ({"checks": [{"id": "a", "status": "measured", "establishes": "won"}]},
+     r"checks\[0\]\.establishes"),
+    ({"checks": [{"id": "a", "status": "measured", "source": "human_label"}]},
+     "unknown key"),
+    ({"checks": [{"id": str(i), "status": "measured"} for i in range(201)]},
+     "at most 200"),
+    ({"termination": {"class": "gave_up"}}, r"termination\.class"),
+    ({"termination": {"class": "time_limit",
+                      "corroborated_by": "mission_control_gateway"}},
+     "unknown key"),
+    ({"termination": {"class": "time_limit", "attributed_to": "platform"}},
+     "unknown key"),
+    ({"seeds": {"environment": 1.5}}, r"seeds\.environment"),
+    ({"seeds": {"sampling": True}}, r"seeds\.sampling"),
+])
+def test_a_malformed_evidence_part_is_refused_by_name(kwargs, named):
+    """A check that could not run is never a zero, and an agent can neither
+    corroborate nor attribute its own ending."""
+    with pytest.raises(ContractViolation, match=named):
+        RolloutOutput(final_text="x", **kwargs).to_wire()

@@ -34,9 +34,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .contract import RolloutOutput, RolloutRequest, ToolCallOutcome
+from .contract import (
+    RolloutOutput,
+    RolloutRequest,
+    ToolCallOutcome,
+    checks_to_wire,
+    seeds_to_wire,
+    termination_to_wire,
+)
 from .entrypoint import TASK, InputShape, ResolvedEntrypoint, resolve_entrypoint
-from .errors import ConfigurationError, LeaseLost, TransportError
+from .errors import (
+    ConfigurationError,
+    ContractViolation,
+    LeaseLost,
+    TransportError,
+)
 from .event_stream import CommandOutputAdapter, CommandOutputProjection
 from .execution_identity import (
     ExecutionChild,
@@ -242,7 +254,8 @@ def _coerce_output(raw: Any) -> RolloutOutput:
 
 
 #: The file a COMMAND agent writes its own grade to, in its trajectory
-#: directory: ``{"reward": <number>, "success": <bool>}``, either optional.
+#: directory: ``{"reward": <number>, "success": <bool>, "checks": [...],
+#: "termination": {...}, "seeds": {...}}``, each optional.
 OUTCOME_FILENAME = "outcome.json"
 
 
@@ -253,7 +266,9 @@ def _attach_reported_outcome(out: RolloutOutput, trajectory_dir: str) -> None:
     had no way to report a grade at all -- so an environment-backed CLI
     harness could never be scored by its own environment. Only a finite
     number is a reward and only a bool a success; anything else is ignored,
-    never coerced. A value the output already carries is not replaced."""
+    never coerced. ``checks``, ``termination`` and ``seeds`` are read the same
+    way (:func:`contract.checks_to_wire` and its siblings say what is
+    well-formed). A value the output already carries is not replaced."""
     path = os.path.join(trajectory_dir, OUTCOME_FILENAME)
     try:
         with open(path, encoding="utf-8") as fh:
@@ -269,6 +284,20 @@ def _attach_reported_outcome(out: RolloutOutput, trajectory_dir: str) -> None:
     success = data.get("success")
     if out.success is None and isinstance(success, bool):
         out.success = success
+    # The same rule for the three evidence parts: a well-formed one is kept,
+    # a malformed one is ignored whole -- it must not cost the episode its
+    # report, which is what raising here (or at ``to_wire``) would do.
+    for name, to_wire in (("checks", checks_to_wire),
+                          ("termination", termination_to_wire),
+                          ("seeds", seeds_to_wire)):
+        if getattr(out, name) is not None or data.get(name) is None:
+            continue
+        try:
+            stated = to_wire(data[name])
+        except ContractViolation:
+            continue
+        if stated:
+            setattr(out, name, stated)
 
 
 def _attach_trajectory(out: RolloutOutput, trajectory_dir: str) -> None:
@@ -2637,6 +2666,7 @@ def _wire_payload(out: RolloutOutput) -> dict[str, Any]:
             name for name in (
                 "tool_calls", "artifacts", "reward", "success",
                 "llm_call_count", "events", "timing", "agent_fingerprint",
+                "checks", "termination", "seeds",
             ) if getattr(out, name, None)
         ]
         detail = "; ".join(filter(None, (
@@ -2776,6 +2806,9 @@ def _output_from_wire(d: dict[str, Any]) -> RolloutOutput:
         events=list(d.get("events") or []),
         timing=dict(d.get("timing") or {}),
         agent_fingerprint=d.get("agent_fingerprint"),
+        checks=d.get("checks"),
+        termination=d.get("termination"),
+        seeds=d.get("seeds"),
     )
 
 

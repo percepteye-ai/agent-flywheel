@@ -515,6 +515,39 @@
             "object",
             "null"
           ]
+        },
+        "checks": {
+          "description": "What the flywheel's own environment checked on this episode, beyond the one reward/success. A STATEMENT by the flywheel: recorded as the flywheel's report and never an authority on the outcome. Only a measured check carries a value -- a check that could not run is never a zero.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "maxItems": 200,
+          "items": {
+            "$ref": "#/$defs/ReportedCheck"
+          }
+        },
+        "termination": {
+          "description": "How the episode ended, as the flywheel saw it. The class is a statement; whether the ending was the policy's doing or the platform's is decided server-side from the gateway's own records, and nothing here can assert it.",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ReportedTermination"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seeds": {
+          "description": "The seeds the episode ran under, so a replica can be told from a repeat.",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ReportedSeeds"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
@@ -611,6 +644,107 @@
         "rule_count": {
           "type": "integer",
           "minimum": 0
+        }
+      }
+    },
+    "ReportedCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "status": {
+          "enum": [
+            "measured",
+            "unavailable",
+            "error",
+            "abstained",
+            "not_applicable"
+          ]
+        },
+        "value": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "basis": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 200
+        },
+        "required": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "establishes": {
+          "enum": [
+            "action_taken",
+            "state_reached",
+            "output_matched",
+            "message_communicated",
+            "call_returned_without_error",
+            null
+          ]
+        }
+      }
+    },
+    "ReportedTermination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "class"
+      ],
+      "properties": {
+        "class": {
+          "enum": [
+            "completed",
+            "turn_limit",
+            "token_limit",
+            "time_limit",
+            "error",
+            "cancelled"
+          ]
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 500
+        }
+      }
+    },
+    "ReportedSeeds": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "environment": {
+          "type": [
+            "integer",
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "sampling": {
+          "type": [
+            "integer",
+            "string",
+            "null"
+          ],
+          "maxLength": 128
         }
       }
     }

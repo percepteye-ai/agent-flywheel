@@ -146,3 +146,27 @@ def test_a_malformed_grade_is_ignored_not_coerced(tmp_path):
         artifacts_dir=str(tmp_path), rollout_timeout_s=30.0,
     ).run_one(_req(tmp_path, None))
     assert (out.reward, out.success) == (None, None)
+
+
+def test_a_command_agent_reports_what_its_environment_checked(tmp_path):
+    """The outcome file carries checks, termination and seeds to the report.
+    A malformed part is ignored whole and costs the episode nothing else."""
+    script = tmp_path / "agent.sh"
+    script.write_text(
+        '#!/bin/sh\nprintf \'{"reward": 0.0, '
+        '"checks": [{"id": "db_state", "status": "measured", "value": 0}], '
+        '"termination": {"class": "nonsense"}, '
+        '"seeds": {"environment": 11}}\' '
+        '> "$PERCEPTEYE_TRAJECTORY_DIR/outcome.json"\necho done\n')
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    out = RolloutRunner(
+        ["sh", str(script)], transport=_T(), input_shape="text",
+        artifacts_dir=str(tmp_path), rollout_timeout_s=30.0,
+    ).run_one(_req(tmp_path, "task_017"))
+    assert out.reward == 0.0
+    assert out.checks == [
+        {"id": "db_state", "status": "measured", "value": 0.0}]
+    assert out.termination is None
+    assert out.seeds == {"environment": 11}
+    wire = out.to_wire()
+    assert wire["checks"] == out.checks and wire["seeds"] == out.seeds

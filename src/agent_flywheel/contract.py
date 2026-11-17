@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from typing import Any, Literal
 
@@ -32,13 +32,17 @@ from .execution_identity import is_lower_sha256
 __all__ = [
     "CONTRACT_VERSION",
     "PRODUCTION_OUTCOMES",
+    "CHECK_ESTABLISHES",
+    "CHECK_STATUSES",
     "ExclusionReason",
+    "MAX_REPORTED_CHECKS",
     "Outcome",
     "RolloutOutput",
     "RolloutRequest",
     "RulebookReceipt",
     "RulebookRequest",
     "RulebookStatus",
+    "TERMINATION_CLASSES",
     "ToolCallOutcome",
 ]
 
@@ -480,6 +484,130 @@ class RolloutRequest:
         return max(0.0, self.deadline_ts - now)
 
 
+#: The state a reported check is in. Only ``measured`` carries a ``value``: a
+#: check that could not run is never a zero.
+CHECK_STATUSES = (
+    "measured", "unavailable", "error", "abstained", "not_applicable",
+)
+#: What a reported check proves.
+CHECK_ESTABLISHES = (
+    "action_taken", "state_reached", "output_matched",
+    "message_communicated", "call_returned_without_error",
+)
+#: How an episode ended. The agent states the class; who is answerable for it
+#: is decided by the platform, from its own records.
+TERMINATION_CLASSES = (
+    "completed", "turn_limit", "token_limit", "time_limit", "error",
+    "cancelled",
+)
+#: Most checks one report may carry.
+MAX_REPORTED_CHECKS = 200
+_CHECK_KEYS = frozenset({"id", "status", "value", "basis", "required",
+                         "establishes"})
+
+
+def _short_text(value: Any, limit: int, what: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > limit:
+        raise ContractViolation(
+            f"{what} must be a non-empty string of at most {limit} characters")
+    return value
+
+
+def checks_to_wire(checks: Any) -> list[dict[str, Any]]:
+    """The wire form of the checks an agent's own environment ran on an
+    episode: ``[{"id", "status", "value", "basis", "required",
+    "establishes"}]``, only ``id`` and ``status`` required. Raises
+    :class:`ContractViolation` naming the row and the field at fault."""
+    if not isinstance(checks, (list, tuple)):
+        raise ContractViolation("checks must be a list")
+    if len(checks) > MAX_REPORTED_CHECKS:
+        raise ContractViolation(
+            f"checks carries {len(checks)} rows; at most "
+            f"{MAX_REPORTED_CHECKS} are accepted")
+    rows: list[dict[str, Any]] = []
+    for i, row in enumerate(checks):
+        where = f"checks[{i}]"
+        if not isinstance(row, Mapping):
+            raise ContractViolation(f"{where} must be an object")
+        extra = set(row) - _CHECK_KEYS
+        if extra:
+            raise ContractViolation(
+                f"{where} carries unknown key(s) {sorted(map(str, extra))}")
+        out: dict[str, Any] = {
+            "id": _short_text(row.get("id"), 200, f"{where}.id")}
+        status = row.get("status")
+        if status not in CHECK_STATUSES:
+            raise ContractViolation(
+                f"{where}.status must be one of {list(CHECK_STATUSES)}")
+        out["status"] = status
+        value = row.get("value")
+        if value is not None:
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))):
+                raise ContractViolation(
+                    f"{where}.value must be a finite number or None")
+            if status != "measured":
+                raise ContractViolation(
+                    f"{where}.value is stated but its status is {status!r}; "
+                    f"only a measured check has a value")
+            out["value"] = float(value)
+        if row.get("basis") is not None:
+            out["basis"] = _short_text(row["basis"], 200, f"{where}.basis")
+        if row.get("required") is not None:
+            if not isinstance(row["required"], bool):
+                raise ContractViolation(f"{where}.required must be a bool")
+            out["required"] = row["required"]
+        if row.get("establishes") is not None:
+            if row["establishes"] not in CHECK_ESTABLISHES:
+                raise ContractViolation(
+                    f"{where}.establishes must be one of "
+                    f"{list(CHECK_ESTABLISHES)}")
+            out["establishes"] = row["establishes"]
+        rows.append(out)
+    return rows
+
+
+def termination_to_wire(termination: Any) -> dict[str, Any]:
+    """The wire form of how the episode ended: ``{"class", "detail"}``."""
+    if not isinstance(termination, Mapping):
+        raise ContractViolation("termination must be an object")
+    extra = set(termination) - {"class", "detail"}
+    if extra:
+        raise ContractViolation(
+            f"termination carries unknown key(s) {sorted(map(str, extra))}")
+    if termination.get("class") not in TERMINATION_CLASSES:
+        raise ContractViolation(
+            f"termination.class must be one of {list(TERMINATION_CLASSES)}")
+    out: dict[str, Any] = {"class": termination["class"]}
+    if termination.get("detail") is not None:
+        out["detail"] = _short_text(
+            termination["detail"], 500, "termination.detail")
+    return out
+
+
+def seeds_to_wire(seeds: Any) -> dict[str, Any]:
+    """The wire form of the seeds the episode ran under:
+    ``{"environment", "sampling"}``, each an integer or a short string."""
+    if not isinstance(seeds, Mapping):
+        raise ContractViolation("seeds must be an object")
+    extra = set(seeds) - {"environment", "sampling"}
+    if extra:
+        raise ContractViolation(
+            f"seeds carries unknown key(s) {sorted(map(str, extra))}")
+    out: dict[str, Any] = {}
+    for key in ("environment", "sampling"):
+        value = seeds.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            raise ContractViolation(
+                f"seeds.{key} must be an integer or a string")
+        if isinstance(value, str):
+            _short_text(value, 128, f"seeds.{key}")
+        out[key] = value
+    return out
+
+
 #: Every key ``RolloutOutput.to_wire()`` may emit. Anything derived from the
 #: inference wire or from the rollout record is absent by construction: this is
 #: a closed dataclass, so an agent cannot assert a field it has no way to
@@ -488,7 +616,7 @@ class RolloutRequest:
 WIRE_KEYS = frozenset({
     "final_text", "tool_calls", "tool_calls_omitted_count", "artifacts",
     "events", "timing", "llm_call_count", "reward", "success",
-    "agent_fingerprint", "exclusion",
+    "agent_fingerprint", "exclusion", "checks", "termination", "seeds",
 })
 
 
@@ -519,6 +647,17 @@ class RolloutOutput:
     events: list[dict[str, Any]] = field(default_factory=list)
     timing: dict[str, Any] = field(default_factory=dict)
     agent_fingerprint: dict[str, Any] | None = None
+    #: What the agent's own environment checked on this episode, beyond the
+    #: one ``reward``/``success``: see :func:`checks_to_wire`. ``None`` is
+    #: "not reported"; ``[]`` is not sent either (it states nothing).
+    checks: list[dict[str, Any]] | None = None
+    #: How the episode ended, ``{"class", "detail"}``, the class one of
+    #: :data:`TERMINATION_CLASSES`. A statement, not a verdict: the platform
+    #: decides from its own records whether the ending was the policy's.
+    termination: dict[str, Any] | None = None
+    #: The seeds the episode ran under, ``{"environment", "sampling"}``, so a
+    #: replica can be told from a repeat.
+    seeds: dict[str, Any] | None = None
 
     def to_wire(self) -> dict[str, Any]:
         if self.llm_call_count is not None and (
@@ -547,6 +686,14 @@ class RolloutOutput:
                 "reason": self.exclusion_reason,
                 "detail": self.exclusion_detail,
             }
+        if self.checks:
+            d["checks"] = checks_to_wire(self.checks)
+        if self.termination is not None:
+            d["termination"] = termination_to_wire(self.termination)
+        if self.seeds is not None:
+            seeds = seeds_to_wire(self.seeds)
+            if seeds:
+                d["seeds"] = seeds
         extra = set(d) - WIRE_KEYS
         if extra:
             raise ContractViolation(

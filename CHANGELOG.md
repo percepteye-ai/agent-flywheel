@@ -98,6 +98,28 @@ repository's.
     `training_locations`; a hill climb's security `base`, `checkpoints`,
     `external_benchmarks`, `benchmark_coverage` and `capability`.
 
+- **A rollout's report can say what the agent's own environment checked, how
+  the episode ended and which seeds it ran under.** Three optional parts on
+  the report, both SDKs, same words (`schema/flywheel-1.json`:
+  `ReportedCheck`, `ReportedTermination`, `ReportedSeeds`):
+  - `checks`: up to 200 rows `{id, status, value, basis, required,
+    establishes}`. `status` is one of `measured`, `unavailable`, `error`,
+    `abstained`, `not_applicable` (`CHECK_STATUSES`); only a measured check
+    carries a `value`, so a check that could not run is never a zero.
+    `establishes` is one of `CHECK_ESTABLISHES`.
+  - `termination`: `{class, detail}`, the class one of `completed`,
+    `turn_limit`, `token_limit`, `time_limit`, `error`, `cancelled`
+    (`TERMINATION_CLASSES`). It is a statement: whether the ending was the
+    model's doing is decided by Mission Control from its own records.
+  - `seeds`: `{environment, sampling}`, each an integer or a short string.
+
+  Python: `RolloutOutput(checks=, termination=, seeds=)`, or the same three
+  keys in a command agent's `outcome.json`. Node: `checks`, `termination` and
+  `seeds` on the report object. A malformed part raises `ContractViolation` /
+  `ContractError` naming the row and field; in `outcome.json` it is ignored
+  whole, like a malformed `reward`. A Mission Control that predates them
+  ignores all three.
+
 ### Changed
 
 - **Eligibility's `security` is documented as it is served since 1.44.0:**
