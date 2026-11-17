@@ -78,12 +78,20 @@ from .contract import (
     _production_agent_identifier,
     _production_identifier,
     _production_turn_identifier,
+    _TURN_FEEDBACK_BATCH_MAX_ITEMS,
+    names_only_an_episode,
     production_outcome,
+    turn_feedback,
 )
 from .control_plane import resolve_control_plane_url
 from .declaration import Describe
 from .entrypoint import InputShape
-from .errors import ConfigurationError, InvalidOutcome, TransportError
+from .errors import (
+    ConfigurationError,
+    InvalidFeedback,
+    InvalidOutcome,
+    TransportError,
+)
 from .execution_identity import normalize_attested_components
 from .outcomes import (
     AGENT_FINGERPRINT_FILENAME,
@@ -341,6 +349,10 @@ def _started_at(d: Path) -> float:
 #: pending outcomes; the Node SDK writes the same names.
 _OUTCOME_FILE_PREFIX = ".outcome."
 _OUTCOME_FILE_SUFFIX = ".json"
+#: Per-turn feedback waits the same way, under its own name:
+#: ``.feedback.<digest of its id>.json``. The outcomes' week and count bounds
+#: apply to it.
+_FEEDBACK_FILE_PREFIX = ".feedback."
 #: How long an outcome that could not be delivered is kept. Bounded, because
 #: an outbox nothing can drain (a control plane that has no ``/outcomes``
 #: route yet) must not grow for the life of a deployment; a week, the Node
@@ -367,17 +379,32 @@ def _outcome_file(root: str | os.PathLike[str], outcome_id: str) -> Path:
         f"{_OUTCOME_FILE_PREFIX}{digest}{_OUTCOME_FILE_SUFFIX}")
 
 
-def _rfc3339(value: Any) -> Any:
+def _feedback_file(root: str | os.PathLike[str], feedback_id: str) -> Path:
+    """Where the feedback with this id waits (:func:`_outcome_file`)."""
+    digest = hashlib.sha256(feedback_id.encode("utf-8")).hexdigest()[:32]
+    return Path(root) / (
+        f"{_FEEDBACK_FILE_PREFIX}{digest}{_OUTCOME_FILE_SUFFIX}")
+
+
+def _final_refusal(status: Any) -> bool:
+    """Whether an answer is a 4xx that sending again cannot change: not a
+    timeout (408) or a rate limit (429), which are blips."""
+    return (isinstance(status, int) and not isinstance(status, bool)
+            and 400 <= status < 500 and status not in (408, 429))
+
+
+def _rfc3339(value: Any, refusal: type[Exception] = InvalidOutcome) -> Any:
     """``occurred_at`` as the wire spells it. ``None`` is now; an aware
     ``datetime`` becomes UTC with milliseconds and ``Z`` (what the Node SDK's
     ``Date.toISOString()`` writes); a string goes through untouched for the
-    validator to judge. A naive ``datetime`` is refused: it names no instant.
+    validator to judge. A naive ``datetime`` is refused, as ``refusal``: it
+    names no instant.
     """
     if value is None:
         value = datetime.now(timezone.utc)
     if isinstance(value, datetime):
         if value.tzinfo is None or value.utcoffset() is None:
-            raise InvalidOutcome(
+            raise refusal(
                 "occurred_at must carry a timezone: a naive datetime does "
                 "not say when")
         return value.astimezone(timezone.utc).isoformat(
@@ -567,6 +594,15 @@ class Attachment:
         #: The cause of the last whole-batch outcome refusal said out loud
         #: (:meth:`_warn_whole_batch_refusal`), so it is said once.
         self._outcome_batch_refusal_said: str | None = None
+        #: The control plane refused an outcome that names only an episode
+        #: while production capture is not enabled -- one that predates the
+        #: episode join. Said once; no more are sent on those terms by this
+        #: process (:meth:`_refuse_episode_outcomes`).
+        self._episode_outcomes_refused = False
+        #: The control plane will not take per-turn feedback (one that
+        #: predates the route answers 404). Said once; after it
+        #: :meth:`report_turn_feedback` is a no-op.
+        self._turn_feedback_refused = False
         #: THE SECOND CONSENT TIER, as the control plane last said it: may a
         #: turn also carry what its model calls saw and said -- the system
         #: prompt, the whole conversation history, the tool definitions and
@@ -813,8 +849,10 @@ class Attachment:
         note: str | None = None,
         occurred_at: datetime | str | None = None,
         outcome_id: str | None = None,
+        episode_id: str | None = None,
     ) -> str | None:
-        """Tell the control plane how a turn or a conversation turned out.
+        """Tell the control plane how a turn, a conversation or an episode
+        turned out.
 
         The outcome that arrives later than the turn does: the case was
         ``"resolved"``, ``"escalated"`` to a person, ``"reopened"`` or
@@ -823,6 +861,16 @@ class Attachment:
         :meth:`turn` yielded, the ``conversation_id`` you passed it, or both.
         Report as many as happen -- resolved today, reopened next week -- each
         is recorded and none replaces another.
+
+        FOR AN EPISODE THE PLATFORM RAN (an environment or simulation
+        rollout), pass ``episode_id``: the ``rollout_id`` your entrypoint was
+        handed with it (``current_rollout_id()`` inside the rollout). The
+        report joins that episode's reward evidence as a weak reading. An
+        outcome that names ONLY an episode carries nothing about your end
+        users' traffic, so it is queued and sent whether or not production
+        capture is enabled; it needs only a control plane to send to. A
+        control plane that predates the join refuses it, which is said once,
+        and no more are sent on those terms by this process.
 
         ``value`` is an optional number of your own (an order value, a
         satisfaction score); ``note`` an optional short remark, at most 1,000
@@ -857,8 +905,8 @@ class Attachment:
 
         Raises :class:`~agent_flywheel.errors.InvalidOutcome` -- before
         anything is stored, capture enabled or not -- for a word outside the
-        vocabulary, no turn or conversation, or an id, number, note or time
-        the wire cannot carry. Nothing else here raises.
+        vocabulary, no turn, conversation or episode, or an id, number, note
+        or time the wire cannot carry. Nothing else here raises.
         """
         wire: dict[str, Any] = {
             "outcome_id": (
@@ -869,18 +917,24 @@ class Attachment:
         }
         for name, given in (
             ("turn_id", turn_id), ("conversation_id", conversation_id),
-            ("value", value), ("note", note),
+            ("episode_id", episode_id), ("value", value), ("note", note),
         ):
             if given is not None:
                 wire[name] = given
         wire = production_outcome(wire)
-        if not self.may_upload and (
-            self._consent_refused or not (self._cp_url and self._api_key)
-        ):
-            # An explicit no, or nothing to ask: nothing will ever say yes to
-            # this outcome, so nothing is kept. While the answer is merely
-            # UNKNOWN it is kept, and ``_flush_soon`` below re-asks.
-            return None
+        if not self.may_upload:
+            if not (self._cp_url and self._api_key):
+                # Nothing to ask and nothing to send to.
+                return None
+            if names_only_an_episode(wire):
+                # Not about end users' traffic: consent is not its question.
+                if self._episode_outcomes_refused:
+                    return None
+            elif self._consent_refused:
+                # An explicit no: nothing will ever say yes to this outcome,
+                # so nothing is kept. While the answer is merely UNKNOWN it
+                # is kept, and ``_flush_soon`` below re-asks.
+                return None
         path = _outcome_file(self.trajectory_root, wire["outcome_id"])
         partial = path.with_name(path.name + ".tmp")
         try:
@@ -896,17 +950,184 @@ class Attachment:
         self._flush_soon()
         return str(wire["outcome_id"])
 
-    def _outcome_files(self) -> list[Path]:
-        """The outcome files waiting in the trajectory root, in name order.
-        Never raises: an unreadable root is an empty queue."""
+    def report_turn_feedback(
+        self,
+        signal: str,
+        *,
+        episode_id: str,
+        turn_index: int,
+        occurred_at: datetime | str | None = None,
+        feedback_id: str | None = None,
+    ) -> str | None:
+        """Tell the control plane what the user did with one turn of an
+        episode.
+
+        ``signal`` is what your application already knows: the user
+        ``"accepted"`` the answer, ``"corrected"`` it, ``"repeated"`` the
+        request, ``"escalated"`` to a person or ``"abandoned"`` the task.
+        ``episode_id`` is the ``rollout_id`` your entrypoint was handed with
+        the episode (``current_rollout_id()`` inside it) and ``turn_index``
+        the zero-based position of the turn in it. ``occurred_at`` is when it
+        happened (an aware ``datetime`` or an RFC 3339 string), now when
+        omitted. ``feedback_id`` is this report's idempotency key: leave it
+        out and one is minted. Report as many as happen -- corrected, then
+        accepted -- each is its own record.
+
+        A WEAK LABEL, and not an outcome: it does not score the turn, it is
+        stored apart from reported outcomes, and nothing is trained on it
+        directly.
+
+        Returns the feedback's id once it is queued for upload, or ``None``
+        when nothing was queued: with no control plane to send to, or once
+        the control plane has refused feedback (one that predates it answers
+        404; said once, and nothing more is kept or sent by this process).
+        It needs no production-capture consent: it carries ids, one word and
+        a time. Queued as one file under ``trajectory_root`` and uploaded off
+        the calling thread; kept across a blip for at most a week.
+
+        Raises :class:`~agent_flywheel.errors.InvalidFeedback` -- before
+        anything is stored -- for a word outside the vocabulary (the message
+        names the allowed ones), or an episode id, turn index or time the
+        wire cannot carry. Nothing else here raises, and no answer of the
+        control plane ever reaches the caller.
+        """
+        wire = turn_feedback({
+            "feedback_id": (
+                f"f_{uuid.uuid4().hex}" if feedback_id is None
+                else feedback_id
+            ),
+            "episode_id": episode_id,
+            "turn_index": turn_index,
+            "signal": signal,
+            "occurred_at": _rfc3339(occurred_at, InvalidFeedback),
+        })
+        if self._turn_feedback_refused or not (
+                self._cp_url and self._api_key):
+            return None
+        path = _feedback_file(self.trajectory_root, wire["feedback_id"])
+        partial = path.with_name(path.name + ".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            partial.write_text(
+                json.dumps(wire, sort_keys=True), encoding="utf-8")
+            os.replace(partial, path)
+        except OSError:
+            # Capture costs the observation, never the caller.
+            return None
+        self._flush_soon()
+        return str(wire["feedback_id"])
+
+    def _flush_feedback(self) -> dict[str, int]:
+        """Upload the per-turn feedback waiting on disk. Caller holds
+        ``_flush_lock``. Never raises.
+
+        Simpler than :meth:`_flush_outcomes` on purpose, because feedback is
+        the weakest label there is: an acknowledged batch is deleted; a blip
+        (no answer, a 5xx, a 408 or 429) leaves what is waiting for the next
+        flush, bounded by the outcomes' week and count; ANY OTHER 4xx IS
+        FINAL -- a control plane that predates the route (404), a key it does
+        not take -- so what is waiting is dropped, it is said once, and
+        :meth:`report_turn_feedback` is a no-op for the rest of the process.
+
+        Counts, only when feedback was waiting: ``feedback_sent``,
+        ``feedback_failed`` (still on disk), ``feedback_dropped``.
+        """
+        files = self._queued_files(_FEEDBACK_FILE_PREFIX)
+        now = time.time()
+
+        def _age(path: Path) -> float:
+            try:
+                return path.stat().st_mtime
+            except OSError:
+                return 0.0
+
+        files.sort(key=lambda p: (_age(p), p.name))
+        stale = [p for p in files if now - _age(p) > _OUTCOME_MAX_AGE_S]
+        excess = len(files) - len(stale) - _OUTCOME_MAX_KEPT_UNANSWERED
+        fresh = [p for p in files if p not in stale]
+        dropped = 0
+        for path in stale + fresh[:max(excess, 0)]:
+            try:
+                path.unlink()
+                dropped += 1
+            except OSError:
+                pass
+        pending: list[tuple[Path, dict[str, Any]]] = []
+        for path in fresh[max(excess, 0):]:
+            try:
+                pending.append((path, turn_feedback(
+                    json.loads(path.read_text(encoding="utf-8")))))
+            except (OSError, ValueError, InvalidFeedback):
+                # Unreadable or not ours to send; one file costs that file.
+                continue
+        if not pending or self._turn_feedback_refused:
+            return {"feedback_dropped": dropped} if dropped else {}
+        sent = 0
+        left = len(pending)
+        client = None
+        try:
+            from ._http import ControlPlaneClient
+            from .transport import AttachTransport
+
+            client = ControlPlaneClient(self._cp_url, self._api_key)
+            tr = AttachTransport(client, self.agent_id)
+            size = _TURN_FEEDBACK_BATCH_MAX_ITEMS
+            for start in range(0, len(pending), size):
+                batch = pending[start:start + size]
+                try:
+                    tr.report_turn_feedback(
+                        self.agent_id, [wire for _, wire in batch])
+                except Exception as exc:
+                    if _final_refusal(getattr(exc, "status_code", None)):
+                        self._turn_feedback_refused = True
+                        for path, _wire in pending[start:]:
+                            try:
+                                path.unlink()
+                            except OSError:
+                                pass
+                        dropped += left
+                        left = 0
+                        self._warn(
+                            "agent-flywheel: the control plane did not take "
+                            f"per-turn feedback ({exc}); it may predate it. "
+                            "What was waiting is dropped and no more is "
+                            "sent by this process.")
+                    break
+                for path, _wire in batch:
+                    try:
+                        path.unlink()
+                    except OSError:
+                        # Resent next flush; the intake answers a duplicate.
+                        pass
+                sent += len(batch)
+                left -= len(batch)
+        except Exception:
+            pass
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+        return {"feedback_sent": sent, "feedback_failed": left,
+                "feedback_dropped": dropped}
+
+    def _queued_files(self, prefix: str) -> list[Path]:
+        """The files with this prefix waiting in the trajectory root, in name
+        order. Never raises: an unreadable root is an empty queue."""
         try:
             return sorted(
                 p for p in Path(self.trajectory_root).iterdir()
-                if p.name.startswith(_OUTCOME_FILE_PREFIX)
+                if p.name.startswith(prefix)
                 and p.name.endswith(_OUTCOME_FILE_SUFFIX) and p.is_file()
             )
         except OSError:
             return []
+
+    def _outcome_files(self) -> list[Path]:
+        """The outcome files waiting in the trajectory root, in name order.
+        Never raises: an unreadable root is an empty queue."""
+        return self._queued_files(_OUTCOME_FILE_PREFIX)
 
     def _cap_unanswered_outcomes(self) -> None:
         """While consent is UNKNOWN, keep at most
@@ -961,10 +1182,31 @@ class Attachment:
                 f"delivered for a week and were dropped.")
         return kept
 
-    def _flush_outcomes(self, files: list[Path]) -> dict[str, int]:
+    def _refuse_episode_outcomes(self, reason: str) -> None:
+        """The control plane refused outcomes that name only an episode, for
+        want of production capture: it predates the episode join (or has it
+        switched off). Said ONCE; they stay on disk, go with the rest if
+        capture is enabled, and no more are queued or sent on those terms by
+        this process. Never raises."""
+        if self._episode_outcomes_refused:
+            return
+        self._episode_outcomes_refused = True
+        self._warn(
+            "agent-flywheel: the control plane did not take outcomes "
+            f"reported for an episode ({reason}); it may predate them. They "
+            "stay on disk and no more are sent by this process unless "
+            "production capture is enabled.")
+
+    def _flush_outcomes(
+        self, files: list[Path], *, episodes_only: bool = False,
+    ) -> dict[str, int]:
         """Upload the outcomes waiting on disk (``files``, already past
         :meth:`_expire_outcomes`). Caller holds ``_flush_lock`` and has
-        established :attr:`may_upload`. Never raises.
+        established :attr:`may_upload` -- or passes ``episodes_only``, which
+        sends just the outcomes that name an episode and nothing else
+        (``contract.names_only_an_episode``), the ones consent is not the
+        question for; a 403 then stops those alone
+        (:meth:`_refuse_episode_outcomes`). Never raises.
 
         THE TURNS' RULES: a batch the control plane acknowledged is deleted;
         a 403 is its decision, so sending stops (:meth:`_refuse_upload`) and
@@ -1012,6 +1254,8 @@ class Attachment:
             except (OSError, ValueError, InvalidOutcome):
                 # Unreadable or not ours to send; one file costs that file.
                 continue
+        if episodes_only:
+            pending = [p for p in pending if names_only_an_episode(p[1])]
         if not pending:
             return {}
         size = _PRODUCTION_OUTCOME_BATCH_MAX_ITEMS
@@ -1070,7 +1314,10 @@ class Attachment:
                                    + sum(len(b) for b, _ in refused))
                         refusal = _capture_refusal(exc)
                         if refusal is not None:
-                            self._refuse_upload(refusal)
+                            if episodes_only:
+                                self._refuse_episode_outcomes(refusal)
+                            else:
+                                self._refuse_upload(refusal)
                             failed += len(batch) + untried + _left()
                             queue.clear()
                             stop = True
@@ -1769,6 +2016,11 @@ class Attachment:
         is yes. The counts are the turns'; ``outcomes_sent`` and
         ``outcomes_failed`` are added only when outcomes were waiting.
 
+        EXCEPT WHAT IS NOT ABOUT END USERS' TRAFFIC, which consent is not the
+        question for: an outcome that names only an episode the platform ran,
+        and per-turn feedback (:meth:`_flush_feedback`). Those go whenever
+        there is a control plane to send to.
+
         THE WEEK'S EXPIRY RUNS ON EVERY FLUSH, consent or not
         (:meth:`_expire_outcomes`): an outcome kept while the answer is
         unknown, or after a refusal, is bounded like any other.
@@ -1778,6 +2030,11 @@ class Attachment:
         waiting = self._expire_outcomes()
         if self.may_upload and waiting:
             counts.update(self._flush_outcomes(waiting))
+        elif (waiting and not self._episode_outcomes_refused
+                and self._cp_url and self._api_key):
+            counts.update(self._flush_outcomes(waiting, episodes_only=True))
+        if self._cp_url and self._api_key:
+            counts.update(self._flush_feedback())
         return counts
 
     def _flush_turns_locked(self, *, include_unanswered: bool = False,

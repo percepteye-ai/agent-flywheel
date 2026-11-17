@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 from .contract import (
     _PRODUCTION_OUTCOME_BATCH_MAX_ITEMS,
     _PRODUCTION_TURN_BATCH_MAX_ITEMS,
+    _TURN_FEEDBACK_BATCH_MAX_ITEMS,
     RolloutOutput,
     RolloutRequest,
     RulebookReceipt,
@@ -40,6 +41,7 @@ from .contract import (
     _production_identifier,
     _production_turn_identifier,
     production_outcome,
+    turn_feedback,
 )
 from .errors import ConfigurationError, ContractViolation, TransportError
 from .execution_identity import is_lower_sha256
@@ -595,6 +597,44 @@ class AttachTransport:
             json_body={"agent_id": agent_id, "outcomes": body},
             idempotency_key=(
                 f"outcomes-{quote(agent_id, safe='-._~')}-{_body_digest(body)}"
+            ),
+        )
+
+    def report_turn_feedback(
+        self, agent_id: str, feedback: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Upload a batch of per-turn feedback: ``POST /turn-feedback``.
+
+        What the user did with one turn of one episode, each in the shape
+        :func:`~agent_flywheel.contract.turn_feedback` validates -- which
+        every report is passed through again here.
+
+        RETRYING IS SAFE, as it is for :meth:`report_outcomes`: the control
+        plane keys each report on its ``feedback_id`` and answers a replay as
+        a duplicate. The idempotency key is the outcome batch's derivation
+        over the feedback, so both SDKs send the same key for the same batch.
+        """
+        if _production_agent_identifier(agent_id) is None:
+            raise ContractViolation(
+                "turn feedback agent_id does not match the published "
+                "production agent identifier grammar"
+            )
+        if (
+            not isinstance(feedback, list)
+            or not 1 <= len(feedback) <= _TURN_FEEDBACK_BATCH_MAX_ITEMS
+        ):
+            raise ContractViolation(
+                "turn feedback batches must contain between 1 and "
+                f"{_TURN_FEEDBACK_BATCH_MAX_ITEMS} reports"
+            )
+        body = [turn_feedback(report) for report in feedback]
+        return self._c.request(
+            "POST",
+            "/turn-feedback",
+            json_body={"agent_id": agent_id, "feedback": body},
+            idempotency_key=(
+                "turn-feedback-"
+                f"{quote(agent_id, safe='-._~')}-{_body_digest(body)}"
             ),
         )
 

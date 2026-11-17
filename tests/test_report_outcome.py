@@ -189,7 +189,7 @@ def test_it_is_validated_even_while_capture_is_off(
 
 
 @pytest.mark.parametrize(("kwargs", "problem"), [
-    ({}, "turn_id or the conversation_id"),
+    ({}, "conversation_id or the episode_id it is the outcome of"),
     ({"turn_id": "../escape"}, "turn_id"),
     ({"turn_id": 7}, "turn_id"),
     ({"conversation_id": " padded"}, "conversation_id"),

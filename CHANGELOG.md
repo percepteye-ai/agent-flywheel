@@ -50,6 +50,38 @@ repository's.
     404 on the verdict read, or an answer with no verdict in it, is an
     answer: no.
 
+- **An outcome can name the episode it is the outcome of, and one turn of an
+  episode can be given feedback.** Both SDKs, same wire, same refusal text.
+  - **Episode join.** `report_outcome(..., episode_id=)` /
+    `reportOutcome(outcome, {episodeId})`. The episode id is the one the
+    platform gives the agent with each served episode
+    (`current_rollout_id()` / the request's `rolloutId`). An outcome names a
+    turn, a conversation, an episode, or any of them together; published as
+    `episode_id` on `ProductionOutcome`. Mission Control keeps it beside that
+    episode's evidence as a weak reading.
+  - **Per-turn feedback.** Python: `Attachment.report_turn_feedback(signal,
+    *, episode_id, turn_index, occurred_at=, feedback_id=)`. Node:
+    `reportTurnFeedback(signal, {episodeId, turnIndex, occurredAt,
+    feedbackId})` on the capture handle. `signal` is one of `accepted`,
+    `corrected`, `repeated`, `escalated`, `abandoned`
+    (`TURN_FEEDBACK_SIGNALS`); anything else raises `InvalidFeedback` naming
+    the five. `turn_index` is a whole number from 0 to 100000. Sent to
+    `POST /turn-feedback` in batches of at most 64 (`TurnFeedback`,
+    `TurnFeedbackBatch` in the published schema); `feedback_id` is the
+    idempotency key. Queued one file each (`.feedback.<digest>.json`), sent
+    off the caller's thread, retried across restarts for at most a week, at
+    most 1,000 waiting.
+  - **Consent.** Neither is end users' production traffic: an outcome naming
+    only an episode, and all feedback, are sent without production capture
+    being enabled. An outcome that also names a turn or a conversation is
+    sent on the turn's terms, as before.
+  - **Older control planes.** One that predates `episode_id` ignores the
+    field. One that refuses an episode-only outcome for want of capture
+    consent (403) is said once; those outcomes stay on disk and no more are
+    queued by that process. One without `/turn-feedback` (any final 4xx) is
+    said once; waiting feedback is dropped and `report_turn_feedback` returns
+    `None` for the rest of the process. Nothing raises into the agent's loop.
+
 - **The customer-API client speaks customer contract 1.51.0** (it declared
   1.31.0 while Mission Control published 1.50.0). Both SDKs, same surface:
   - `training_eligibility(training_location=)` / `trainingEligibility({

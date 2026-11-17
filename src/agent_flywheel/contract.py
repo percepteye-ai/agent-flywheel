@@ -21,7 +21,7 @@ from typing import Any, Literal
 #: ``describe=`` and with the Node SDK's ``jsonType`` -- ``got null``, never
 #: ``got NoneType``: an operator configuring rules in JSON wrote no Python.
 from .declaration import _json_type, _json_whole_number
-from .errors import ContractViolation, InvalidOutcome
+from .errors import ContractViolation, InvalidFeedback, InvalidOutcome
 
 #: Imported rather than restated so the contract validates against exactly
 #: the field set the extractor produces -- one definition, never a twin
@@ -32,6 +32,7 @@ from .execution_identity import is_lower_sha256
 __all__ = [
     "CONTRACT_VERSION",
     "PRODUCTION_OUTCOMES",
+    "TURN_FEEDBACK_SIGNALS",
     "CHECK_ESTABLISHES",
     "CHECK_STATUSES",
     "ExclusionReason",
@@ -161,8 +162,8 @@ def _is_finite_wire_number(value: Any) -> bool:
     except OverflowError:
         return False
 _OUTCOME_WIRE_KEYS = (
-    "outcome_id", "outcome", "turn_id", "conversation_id", "value", "note",
-    "occurred_at",
+    "outcome_id", "outcome", "turn_id", "conversation_id", "episode_id",
+    "value", "note", "occurred_at",
 )
 
 
@@ -210,10 +211,15 @@ def production_outcome(wire: Any) -> dict[str, Any]:
             raise InvalidOutcome(
                 "conversation_id is not a valid identifier")
         out["conversation_id"] = wire["conversation_id"]
-    if "turn_id" not in out and "conversation_id" not in out:
+    if wire.get("episode_id") is not None:
+        # The ``rollout_id`` the platform handed the agent with the episode.
+        if _production_identifier(wire["episode_id"]) is None:
+            raise InvalidOutcome("episode_id is not a valid identifier")
+        out["episode_id"] = wire["episode_id"]
+    if not {"turn_id", "conversation_id", "episode_id"} & set(out):
         raise InvalidOutcome(
-            "an outcome names the turn_id or the conversation_id it is the "
-            "outcome of")
+            "an outcome names the turn_id, the conversation_id or the "
+            "episode_id it is the outcome of")
     value = wire.get("value")
     if value is not None:
         if not _is_finite_wire_number(value):
@@ -232,6 +238,75 @@ def production_outcome(wire: Any) -> dict[str, Any]:
         raise InvalidOutcome(_OCCURRED_AT_REFUSAL)
     out["occurred_at"] = occurred_at
     return out
+
+
+def names_only_an_episode(outcome: Mapping[str, Any]) -> bool:
+    """Whether a reported outcome names an episode and nothing else. Such an
+    outcome is about a platform-run episode, not the agent's end users'
+    traffic, so it is sent without the production-capture consent a turn's
+    or a conversation's outcome needs."""
+    return ("episode_id" in outcome and "turn_id" not in outcome
+            and "conversation_id" not in outcome)
+
+
+#: THE closed vocabulary of ``Attachment.report_turn_feedback``: what the
+#: user did with one turn. Asserted verbatim against
+#: ``schema/flywheel-1.json`` (``TurnFeedback.signal``), which the control
+#: plane's intake and the Node SDK carry too.
+TURN_FEEDBACK_SIGNALS: tuple[str, ...] = (
+    "accepted", "corrected", "repeated", "escalated", "abandoned",
+)
+#: A turn index is a position inside one episode (the schema's ``maximum``).
+_TURN_FEEDBACK_TURN_INDEX_MAX = 100000
+_TURN_FEEDBACK_BATCH_MAX_ITEMS = 64
+_FEEDBACK_WIRE_KEYS = (
+    "feedback_id", "episode_id", "turn_index", "signal", "occurred_at",
+)
+
+
+def turn_feedback(wire: Any) -> dict[str, Any]:
+    """One per-turn feedback report exactly as the wire carries it, or
+    :class:`InvalidFeedback` naming what is wrong.
+
+    THE one validator, as :func:`production_outcome` is for outcomes:
+    ``Attachment.report_turn_feedback`` builds its record through it and
+    ``AttachTransport.report_turn_feedback`` passes every report through it
+    again before a batch leaves. The Node SDK's ``turnFeedback`` applies the
+    same rules with the same messages.
+    """
+    if not isinstance(wire, dict):
+        raise InvalidFeedback(
+            f"feedback must be an object, got {_json_type(wire)}")
+    unknown = sorted(set(wire) - set(_FEEDBACK_WIRE_KEYS))
+    if unknown:
+        raise InvalidFeedback(
+            "feedback has no field "
+            + json.dumps(unknown[0], ensure_ascii=False))
+    signal = wire.get("signal")
+    if not isinstance(signal, str) or signal not in TURN_FEEDBACK_SIGNALS:
+        got = (json.dumps(signal, ensure_ascii=False)
+               if isinstance(signal, str) else _json_type(signal))
+        raise InvalidFeedback(
+            f"signal must be one of {', '.join(TURN_FEEDBACK_SIGNALS)}; "
+            f"got {got}")
+    if _production_turn_identifier(wire.get("feedback_id")) is None:
+        raise InvalidFeedback("feedback_id is not a valid identifier")
+    if _production_identifier(wire.get("episode_id")) is None:
+        raise InvalidFeedback("episode_id is not a valid identifier")
+    turn_index = _json_whole_number(wire.get("turn_index"))
+    if turn_index is None or not (
+            0 <= turn_index <= _TURN_FEEDBACK_TURN_INDEX_MAX):
+        raise InvalidFeedback(
+            "turn_index must be a whole number from 0 to "
+            f"{_TURN_FEEDBACK_TURN_INDEX_MAX}")
+    if not _is_rfc3339_instant(wire.get("occurred_at")):
+        raise InvalidFeedback(_OCCURRED_AT_REFUSAL)
+    return {
+        "feedback_id": wire["feedback_id"], "episode_id": wire["episode_id"],
+        "turn_index": turn_index, "signal": signal,
+        "occurred_at": wire["occurred_at"],
+    }
+
 
 Outcome = Literal["ok", "failed", "unknown"]
 

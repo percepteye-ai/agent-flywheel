@@ -17,6 +17,7 @@ __all__ = [
     "ContractViolation",
     "EntrypointError",
     "FlywheelError",
+    "InvalidFeedback",
     "InvalidOutcome",
     "LeaseLost",
     "ModeNotAvailable",
@@ -84,6 +85,17 @@ class InvalidOutcome(ContractViolation):
     Raised by ``Attachment.report_outcome`` BEFORE anything is stored or
     sent, whether or not production capture is enabled, so the mistake shows
     up where it was written instead of as a silently missing label.
+    """
+
+
+class InvalidFeedback(ContractViolation):
+    """``report_turn_feedback`` was handed something the feedback wire cannot
+    carry: a word outside the closed vocabulary (the message names the
+    allowed ones), an episode id or turn index that is none, or a time the
+    published schema refuses.
+
+    Raised by ``Attachment.report_turn_feedback`` BEFORE anything is stored
+    or sent, so the mistake shows up where it was written.
     """
 
 

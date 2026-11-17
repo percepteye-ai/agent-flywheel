@@ -47,7 +47,8 @@ With `register=True` the call makes exactly two outbound requests, once, at star
 |:--|:--|
 | `.turn(turn_id=None, conversation_id=None, task_id=None, input_text=None)` | context manager; yields the turn id |
 | `.record_answer(turn_id, text)` | what the agent finally answered; callable **after** the scope closes |
-| `.report_outcome(outcome, turn_id=None, conversation_id=None, value=None, note=None, occurred_at=None, outcome_id=None)` | how the turn or conversation turned out: `resolved`, `escalated`, `reopened`, `abandoned`, `thumbs_up` or `thumbs_down`. Returns the outcome's id, or `None` (a no-op) once the control plane says capture is not enabled (kept, and asked again, while that answer is unknown); raises `InvalidOutcome` for anything else |
+| `.report_outcome(outcome, turn_id=None, conversation_id=None, value=None, note=None, occurred_at=None, outcome_id=None, episode_id=None)` | how the turn, the conversation or the episode (`episode_id=`, the id a served episode's request carries; alone it needs no capture consent) turned out: `resolved`, `escalated`, `reopened`, `abandoned`, `thumbs_up` or `thumbs_down`. Returns the outcome's id, or `None` (a no-op) once the control plane says capture is not enabled (kept, and asked again, while that answer is unknown); raises `InvalidOutcome` for anything else |
+| `.report_turn_feedback(signal, *, episode_id, turn_index, occurred_at=None, feedback_id=None)` | what the user did with one turn of an episode the platform ran: `accepted`, `corrected`, `repeated`, `escalated` or `abandoned`. `turn_index` counts from 0. Needs no capture consent. Returns the feedback's id, or `None` with no control plane or once the control plane has refused the route (said once; nothing raises); raises `InvalidFeedback` for anything else |
 | `.read(turn_id)` | that turn's `list[ToolCallOutcome]`, or `None` if nothing was recorded |
 | `.read_turn(turn_id)` | the `task` / `answer` text recorded for that turn, or `None` |
 | `.flush(include_unanswered=False, batch_size=64)` | uploads now, asking for the permissions again first; larger requested batches are split at the contract's 64-turn limit |
@@ -434,7 +435,7 @@ On a practice task whose text is `"count to three"`, the reported trajectory is:
 
 **`unknown`, not `ok`.** The tool returned a string and nothing observed whether the call succeeded. `Tool.invoke({"q": ...})` with a plain dict has no tool-call id to attach, so LangChain returns raw content rather than a `ToolMessage` — and raw content from a tool that worked is byte-identical to raw content from a tool that caught its own exception and returned prose. Calling that `ok` is the single most consequential lie a capture can tell, so the adapter does not.
 
-That is the honest floor zero instrumentation buys you, and it is enforced by [`tests/test_zero_instrumentation.py`](https://github.com/percepteye-ai/agent-flywheel/blob/main/tests/test_zero_instrumentation.py) inside the 1692-test suite. Drive the same tool through a model-issued tool call and the same adapter reports `"outcome": "ok"` with the model's `tool_call_id` attached, because then there is a `ToolMessage` with a real `status`.
+That is the honest floor zero instrumentation buys you, and it is enforced by [`tests/test_zero_instrumentation.py`](https://github.com/percepteye-ai/agent-flywheel/blob/main/tests/test_zero_instrumentation.py) inside the 1771-test suite. Drive the same tool through a model-issued tool call and the same adapter reports `"outcome": "ok"` with the model's `tool_call_id` attached, because then there is a `ToolMessage` with a real `status`.
 
 One call where you *do* know the answer gets you the rest:
 
