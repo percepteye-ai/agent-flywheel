@@ -1,0 +1,126 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": []
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "agent-flywheel"
+          },
+          "spans": [
+            {
+              "traceId": "00000000000000000000000000000001",
+              "spanId": "0000000000000001",
+              "name": "chat",
+              "kind": 1,
+              "startTimeUnixNano": "1794301100000000000",
+              "endTimeUnixNano": "1794301100000000001",
+              "attributes": [
+                {
+                  "key": "gen_ai.input.messages",
+                  "value": {
+                    "stringValue": "where is my order?"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "percepteye.conversation.id",
+                  "value": {
+                    "stringValue": "c1"
+                  }
+                },
+                {
+                  "key": "percepteye.turn.id",
+                  "value": {
+                    "stringValue": "turn-7"
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "00000000000000000000000000000002",
+              "spanId": "0000000000000002",
+              "name": "chat",
+              "kind": 1,
+              "startTimeUnixNano": "1794301100000000002",
+              "endTimeUnixNano": "1794301100000000003",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.output.messages",
+                  "value": {
+                    "stringValue": "It ships tomorrow."
+                  }
+                },
+                {
+                  "key": "percepteye.turn.id",
+                  "value": {
+                    "stringValue": "turn-7"
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "00000000000000000000000000000003",
+              "spanId": "0000000000000003",
+              "name": "percepteye.turn.feedback",
+              "kind": 1,
+              "startTimeUnixNano": "1794301100000000004",
+              "endTimeUnixNano": "1794301100000000005",
+              "attributes": [
+                {
+                  "key": "percepteye.turn.id",
+                  "value": {
+                    "stringValue": "turn-7"
+                  }
+                }
+              ],
+              "events": [
+                {
+                  "name": "percepteye.turn.feedback",
+                  "timeUnixNano": "1794301200250000000",
+                  "attributes": [
+                    {
+                      "key": "percepteye.turn.feedback.id",
+                      "value": {
+                        "stringValue": "fb-1"
+                      }
+                    },
+                    {
+                      "key": "percepteye.turn.feedback.signal",
+                      "value": {
+                        "stringValue": "corrected"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "links": [
+                {
+                  "traceId": "00000000000000000000000000000001",
+                  "spanId": "0000000000000001"
+                },
+                {
+                  "traceId": "00000000000000000000000000000002",
+                  "spanId": "0000000000000002"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

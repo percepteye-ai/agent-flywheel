@@ -81,7 +81,9 @@ from .contract import (
     _TURN_FEEDBACK_BATCH_MAX_ITEMS,
     names_only_an_episode,
     production_outcome,
+    rfc3339_unix_nanos,
     turn_feedback,
+    turn_feedback_on_a_span,
 )
 from .control_plane import resolve_control_plane_url
 from .declaration import Describe
@@ -1041,13 +1043,14 @@ class Attachment:
         self,
         signal: str,
         *,
-        episode_id: str,
-        turn_index: int,
+        episode_id: str | None = None,
+        turn_index: int | None = None,
         occurred_at: datetime | str | None = None,
         feedback_id: str | None = None,
+        turn_id: str | None = None,
     ) -> str | None:
         """Tell the control plane what the user did with one turn of an
-        episode.
+        episode -- or with one production turn, named by ``turn_id``.
 
         ``signal`` is what your application already knows: the user
         ``"accepted"`` the answer, ``"corrected"`` it, ``"repeated"`` the
@@ -1075,12 +1078,28 @@ class Attachment:
         a time. Queued as one file under ``trajectory_root`` and uploaded off
         the calling thread; kept across a blip for at most a week.
 
+        A PRODUCTION TURN (``turn_id=``, the id :meth:`turn` yielded, in
+        place of ``episode_id`` and ``turn_index``) has no episode for that
+        route to join. Its feedback goes where its turn went: an event on the
+        turn's trace, through your TracerProvider
+        (``tracing.record_turn_feedback_span``: a span linked to the turn's,
+        carrying ``percepteye.turn.feedback`` at ``occurred_at``), which an
+        OTLP export to the control plane delivers with the turn. It returns
+        the feedback's id once that span is recorded, and ``None`` when
+        nothing records it (no OpenTelemetry, no provider): nothing is queued
+        for it, because no route takes it.
+
         Raises :class:`~agent_flywheel.errors.InvalidFeedback` -- before
         anything is stored -- for a word outside the vocabulary (the message
-        names the allowed ones), or an episode id, turn index or time the
-        wire cannot carry. Nothing else here raises, and no answer of the
-        control plane ever reaches the caller.
+        names the allowed ones), an episode id, turn index, turn id or time
+        the wire cannot carry, or a turn named both ways. Nothing else here
+        raises, and no answer of the control plane ever reaches the caller.
         """
+        if turn_id is not None:
+            return self._report_turn_feedback_on_its_span(
+                signal, turn_id=turn_id, named_an_episode=(
+                    episode_id is not None or turn_index is not None),
+                occurred_at=occurred_at, feedback_id=feedback_id)
         wire = turn_feedback({
             "feedback_id": (
                 f"f_{uuid.uuid4().hex}" if feedback_id is None
@@ -1106,6 +1125,35 @@ class Attachment:
             return None
         self._flush_soon()
         return str(wire["feedback_id"])
+
+    def _report_turn_feedback_on_its_span(
+        self, signal: str, *, turn_id: str, named_an_episode: bool,
+        occurred_at: datetime | str | None, feedback_id: str | None,
+    ) -> str | None:
+        """:meth:`report_turn_feedback` for a production turn: validated by
+        ``contract.turn_feedback_on_a_span``, emitted by
+        ``tracing.record_turn_feedback_span``. The id once recorded, else
+        ``None``."""
+        if named_an_episode:
+            raise InvalidFeedback(
+                "feedback names one turn: a production turn's turn_id, or an "
+                "episode's episode_id and turn_index, not both")
+        wire = turn_feedback_on_a_span({
+            "feedback_id": (
+                f"f_{uuid.uuid4().hex}" if feedback_id is None
+                else feedback_id
+            ),
+            "turn_id": turn_id,
+            "signal": signal,
+            "occurred_at": _rfc3339(occurred_at, InvalidFeedback),
+        })
+        from .tracing import record_turn_feedback_span
+
+        recorded = record_turn_feedback_span(
+            turn_id=wire["turn_id"], signal=wire["signal"],
+            occurred_at_unix_nano=rfc3339_unix_nanos(wire["occurred_at"]),
+            feedback_id=wire["feedback_id"])
+        return str(wire["feedback_id"]) if recorded else None
 
     def _flush_feedback(self) -> dict[str, int]:
         """Upload the per-turn feedback waiting on disk. Caller holds

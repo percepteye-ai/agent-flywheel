@@ -282,20 +282,15 @@ _FEEDBACK_WIRE_KEYS = (
 )
 
 
-def turn_feedback(wire: Any) -> dict[str, Any]:
-    """One per-turn feedback report exactly as the wire carries it, or
-    :class:`InvalidFeedback` naming what is wrong.
-
-    THE one validator, as :func:`production_outcome` is for outcomes:
-    ``Attachment.report_turn_feedback`` builds its record through it and
-    ``AttachTransport.report_turn_feedback`` passes every report through it
-    again before a batch leaves. The Node SDK's ``turnFeedback`` applies the
-    same rules with the same messages.
-    """
+def _feedback_head(wire: Any, keys: tuple[str, ...]) -> str:
+    """The checks every per-turn feedback report shares, in their order --
+    an object, no field outside ``keys``, a ``signal`` from the vocabulary, a
+    ``feedback_id`` -- and the signal. :func:`turn_feedback` and
+    :func:`turn_feedback_on_a_span` add what names the turn."""
     if not isinstance(wire, dict):
         raise InvalidFeedback(
             f"feedback must be an object, got {_json_type(wire)}")
-    unknown = sorted(set(wire) - set(_FEEDBACK_WIRE_KEYS))
+    unknown = sorted(set(wire) - set(keys))
     if unknown:
         raise InvalidFeedback(
             "feedback has no field "
@@ -309,6 +304,20 @@ def turn_feedback(wire: Any) -> dict[str, Any]:
             f"got {got}")
     if _production_turn_identifier(wire.get("feedback_id")) is None:
         raise InvalidFeedback("feedback_id is not a valid identifier")
+    return signal
+
+
+def turn_feedback(wire: Any) -> dict[str, Any]:
+    """One per-turn feedback report exactly as the wire carries it, or
+    :class:`InvalidFeedback` naming what is wrong.
+
+    THE one validator, as :func:`production_outcome` is for outcomes:
+    ``Attachment.report_turn_feedback`` builds its record through it and
+    ``AttachTransport.report_turn_feedback`` passes every report through it
+    again before a batch leaves. The Node SDK's ``turnFeedback`` applies the
+    same rules with the same messages.
+    """
+    signal = _feedback_head(wire, _FEEDBACK_WIRE_KEYS)
     if _production_identifier(wire.get("episode_id")) is None:
         raise InvalidFeedback("episode_id is not a valid identifier")
     turn_index = _json_whole_number(wire.get("turn_index"))
@@ -324,6 +333,51 @@ def turn_feedback(wire: Any) -> dict[str, Any]:
         "turn_index": turn_index, "signal": signal,
         "occurred_at": wire["occurred_at"],
     }
+
+
+#: What feedback on a PRODUCTION TURN carries: the turn's own id in place of
+#: an episode and a position. It is not sent to ``POST /turn-feedback``
+#: (whose turns are an episode's); it is an event on that turn's trace.
+_SPAN_FEEDBACK_KEYS = ("feedback_id", "turn_id", "signal", "occurred_at")
+
+
+def turn_feedback_on_a_span(wire: Any) -> dict[str, Any]:
+    """Per-turn feedback on a production turn, ``{feedback_id, turn_id,
+    signal, occurred_at}``, or :class:`InvalidFeedback` naming what is wrong:
+    :func:`turn_feedback`'s vocabulary, ids and time, with the turn named by
+    the ``turn_id`` its span carries (``percepteye.turn.id``). What
+    ``tracing.record_turn_feedback_span`` emits. The Node SDK's
+    ``turnFeedbackOnASpan`` applies the same rules with the same messages."""
+    signal = _feedback_head(wire, _SPAN_FEEDBACK_KEYS)
+    if _production_turn_identifier(wire.get("turn_id")) is None:
+        raise InvalidFeedback("turn_id is not a valid turn identifier")
+    if not _is_rfc3339_instant(wire.get("occurred_at")):
+        raise InvalidFeedback(_OCCURRED_AT_REFUSAL)
+    return {
+        "feedback_id": wire["feedback_id"], "turn_id": wire["turn_id"],
+        "signal": signal, "occurred_at": wire["occurred_at"],
+    }
+
+
+def rfc3339_unix_nanos(value: str) -> int:
+    """An RFC 3339 instant (one :func:`_is_rfc3339_instant` takes) as Unix
+    nanoseconds, exactly: the fraction's first nine digits, the offset
+    applied. What an OTel event's ``timeUnixNano`` carries. The Node SDK's
+    ``rfc3339UnixNanos``."""
+    import calendar
+
+    m = re.fullmatch(
+        r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})"
+        r"(?:\.([0-9]+))?(Z|([+-])([0-9]{2}):([0-9]{2}))", value)
+    if m is None:
+        raise InvalidFeedback(_OCCURRED_AT_REFUSAL)
+    year, month, day, hour, minute, second = (int(g) for g in m.groups()[:6])
+    seconds = calendar.timegm((year, month, day, hour, minute, second))
+    if m.group(8) != "Z":
+        offset = int(m.group(10)) * 3600 + int(m.group(11)) * 60
+        seconds -= offset if m.group(9) == "+" else -offset
+    fraction = int(((m.group(7) or "") + "000000000")[:9])
+    return seconds * 1_000_000_000 + fraction
 
 
 Outcome = Literal["ok", "failed", "unknown"]
