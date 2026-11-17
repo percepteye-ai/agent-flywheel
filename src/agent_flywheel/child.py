@@ -43,6 +43,7 @@ def main(argv: list[str] | None = None) -> int:
     # earlier SDK's configuration channel useless.
     from .runner import (
         DEFAULT_ROLLOUT_TIMEOUT_S,
+        _wire_payload,
         build_agent,
         run_rollout_in_process,
     )
@@ -64,7 +65,10 @@ def main(argv: list[str] | None = None) -> int:
         # in. A callback registered in the parent sees nothing a child does.
         adapters=payload.get("adapters", "auto"),
     )
-    sys.stdout.write(json.dumps(out.to_wire(), default=str) + "\n")
+    # ``_wire_payload``, the one place a result the wire cannot carry is made
+    # carriable: a bare ``to_wire`` here raised, and the child died holding a
+    # result whose only fault was one malformed evidence row.
+    sys.stdout.write(json.dumps(_wire_payload(out), default=str) + "\n")
     sys.stdout.flush()
     return 0
 

@@ -775,3 +775,29 @@ def test_one_malformed_evidence_part_does_not_cost_the_episode_its_outcome():
     assert wire["termination"] == {"class": "completed"}
     assert wire["seeds"] == {"environment": 7}
     assert out.checks, "the caller's object was mutated"
+
+
+def test_the_child_process_reports_through_the_same_seam(
+        tmp_path, monkeypatch, capsys):
+    """The isolated child wrote ``out.to_wire()`` bare, so the same malformed
+    evidence row killed the child and the parent recorded a crash."""
+    import io
+
+    from agent_flywheel import child, runner
+
+    out = RolloutOutput(
+        final_text="done", reward=0.5,
+        checks=[{"id": "c", "status": "measured", "value": float("inf")}])
+    monkeypatch.setattr(runner, "build_agent", lambda spec: object())
+    monkeypatch.setattr(child, "resolve_entrypoint", lambda *a, **k: object())
+    monkeypatch.setattr(runner, "run_rollout_in_process", lambda *a, **k: out)
+    monkeypatch.setattr(child.RolloutRequest, "from_wire",
+                        classmethod(lambda cls, d: _req(tmp_path)))
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({
+        "spec": "m:a", "rollout": {}, "trajectory_dir": str(tmp_path)})))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert child.main() == 0
+    wire = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert wire["reward"] == 0.5 and "exclusion" not in wire
+    assert "checks" not in wire
