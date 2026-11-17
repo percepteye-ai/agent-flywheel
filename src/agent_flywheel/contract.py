@@ -808,7 +808,11 @@ class RolloutOutput:
         dropped = self.checks_dropped
         if type(dropped) is not int or dropped < 0:
             dropped = 0
-        if self.checks:
+        # An empty list states nothing; anything else that is not a list is
+        # refused by ``checks_to_wire``, never read as nothing -- ``{}`` and
+        # ``""`` were, while the Node SDK refused them.
+        if self.checks is not None and not (
+                isinstance(self.checks, (list, tuple)) and not self.checks):
             d["checks"] = checks_to_wire(self.checks)
             dropped += checks_over_limit(self.checks)
         if dropped:

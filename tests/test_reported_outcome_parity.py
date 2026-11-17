@@ -1,6 +1,6 @@
 """ONE reading of what an agent's environment states, in two languages.
 
-Four tables, each driven through this SDK and through the Node SDK, and the
+Five tables, each driven through this SDK and through the Node SDK, and the
 two answers compared:
 
 * ``OUTCOME_FILES`` -- raw ``outcome.json`` texts, through
@@ -13,6 +13,8 @@ two answers compared:
   Both SDKs REQUIRE the time (the contract they author says so) while the
   control plane's intake accepts a report without one; what is pinned here is
   that the two SDKs refuse the same reports in the same words.
+* ``CHECKS`` -- what a report's ``checks`` may be, through
+  ``RolloutOutput.to_wire`` and ``rolloutOutputToWire``.
 * ``EPISODE_IDS`` -- through ``current_rollout_id`` and the Node plugin's
   ``currentRolloutId``: the episode id an outcome is reported against. Node
   once had no producer of it for application code.
@@ -178,19 +180,36 @@ OCCURRED_AT: dict[str, object] = {
     "an empty string": "",
 }
 
+#: name -> what an agent passes as a report's checks. An empty list states
+#: nothing; anything else that is not a list is refused by both -- Python once
+#: read ``{}`` and ``""`` as nothing while Node refused them.
+CHECKS: dict[str, object] = {
+    "absent": None,
+    "an empty list": [],
+    "an empty object": {},
+    "an empty string": "",
+    "zero": 0,
+    "false": False,
+    "one row": [_CHECK],
+    "an object holding a row": {"0": _CHECK},
+}
+
+
 _NODE = r"""
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { takeReportedOutcome } from './src/trajectory.js';
-import { seedsToWire, productionOutcome, turnFeedback } from './src/wire.js';
+import {
+  seedsToWire, productionOutcome, turnFeedback, rolloutOutputToWire,
+} from './src/wire.js';
 let raw = '';
 for await (const chunk of process.stdin) raw += chunk;
-const { files, seeds, outcomes, feedback } = JSON.parse(raw);
+const { files, seeds, outcomes, feedback, checks } = JSON.parse(raw);
 const answer = (fn) => {
   try { return { ok: fn() }; } catch (err) { return { refused: err.message }; }
 };
-const out = { files: {}, seeds: {}, outcomes: {}, feedback: {} };
+const out = { files: {}, seeds: {}, outcomes: {}, feedback: {}, checks: {} };
 const dir = mkdtempSync(join(tmpdir(), 'outcome-parity-'));
 try {
   for (const [name, text] of Object.entries(files)) {
@@ -208,6 +227,12 @@ for (const [name, wire] of Object.entries(outcomes)) {
 }
 for (const [name, wire] of Object.entries(feedback)) {
   out.feedback[name] = answer(() => turnFeedback(wire));
+}
+for (const [name, value] of Object.entries(checks)) {
+  out.checks[name] = answer(() => {
+    const wire = rolloutOutputToWire({ finalText: 'x', checks: value });
+    return { checks: wire.checks ?? null, checks_dropped: wire.checks_dropped ?? null };
+  });
 }
 process.stdout.write(JSON.stringify(out));
 """
@@ -229,7 +254,7 @@ def node() -> dict[str, dict]:
     sdk, binary = require_node_sdk()
     return json.loads(run_node(sdk, binary, _NODE, stdin=json.dumps({
         "files": OUTCOME_FILES, "seeds": SEEDS, "outcomes": OUTCOMES,
-        "feedback": FEEDBACK})))
+        "feedback": FEEDBACK, "checks": CHECKS})))
 
 
 def _python_reads(text: str, tmp_path) -> dict:
@@ -380,3 +405,27 @@ def test_both_sdks_name_the_same_episode(tmp_path, monkeypatch):
             f"{name}: Node {theirs[name]!r}, Python {python!r}")
     # Not agreement on nothing: inside a rollout both name it.
     assert theirs["inside a rollout"] == "rl_mc_41"
+
+
+def _python_checks(value: object) -> dict:
+    try:
+        wire = RolloutOutput(final_text="x", checks=value).to_wire()
+    except ContractViolation as exc:
+        return {"refused": str(exc)}
+    return {"ok": {"checks": wire.get("checks"),
+                   "checks_dropped": wire.get("checks_dropped")}}
+
+
+@pytest.mark.parametrize("name", sorted(CHECKS))
+def test_both_sdks_read_the_same_checks(node, name):
+    python = _python_checks(CHECKS[name])
+    assert node["checks"][name] == python, (
+        f"{name}: Node {node['checks'][name]!r}, Python {python!r}")
+
+
+def test_the_checks_table_refuses_and_accepts(node):
+    assert node["checks"]["an empty list"] == {
+        "ok": {"checks": None, "checks_dropped": None}}
+    assert "refused" in node["checks"]["an empty object"]
+    assert node["checks"]["one row"]["ok"]["checks"] == [
+        {"id": "row", "status": "abstained"}]
