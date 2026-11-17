@@ -93,6 +93,19 @@ repository's.
     plane whose episode intake is switched off answers 503 with a
     Retry-After: the request is retried as the header says, and what is
     waiting stays for a later flush. Nothing raises into the agent's loop.
+  - **Feedback on a production turn.** `report_turn_feedback(signal,
+    turn_id=)` / `reportTurnFeedback(signal, {turnId})` names a production
+    turn in place of an episode's. It is an event on that turn's trace,
+    through the customer's TracerProvider: a span `percepteye.turn.feedback`
+    of its own trace, linked to the turn's spans (an ended span takes no
+    event) and carrying `percepteye.turn.id`, with the event
+    `percepteye.turn.feedback` at `occurred_at` (to the nanosecond), its
+    `percepteye.turn.feedback.signal` and `percepteye.turn.feedback.id`.
+    Nothing is queued for `POST /turn-feedback`, which takes an episode's
+    turns only; the id is returned once the span is recorded, `None` /
+    `null` when nothing records it. Same vocabulary and refusals; naming a
+    turn both ways is refused. `tests/fixtures/turn_feedback_span.json` is
+    the export, byte-equal in both SDKs.
   - **Text the wire can carry.** An id (outcome, turn, conversation, episode,
     feedback) or a note holding a lone surrogate is refused at the call
     (`InvalidOutcome` / `InvalidFeedback`; a turn id is not used), as the
