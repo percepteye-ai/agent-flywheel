@@ -798,7 +798,8 @@ def test_splitting_is_bounded_per_flush(monkeypatch, tmp_path, quiet):
 def _over_http(monkeypatch, root, routes):
     """An attachment whose every request goes through the REAL
     ``ControlPlaneClient`` and ``AttachTransport``, answered in-process:
-    ``routes`` maps ``"METHOD /path"`` to ``(status, json body)`` or to a
+    ``routes`` maps ``"METHOD /path"`` to ``(status, json body)`` (or
+    ``(status, json body, headers)``) or to a
     callable taking the request and returning one. Anything else is 200
     ``{}``. Every request is recorded as ``"METHOD /path"``."""
     import httpx
@@ -813,8 +814,9 @@ def _over_http(monkeypatch, root, routes):
         answer = routes.get(key, (200, {}))
         if callable(answer):
             answer = answer(request)
-        status, body = answer
-        return httpx.Response(status, json=body)
+        status, body, *headers = answer
+        return httpx.Response(status, json=body,
+                              headers=headers[0] if headers else None)
 
     real = _http.ControlPlaneClient
     monkeypatch.setattr(_http, "ControlPlaneClient", lambda url, key, **kw: real(

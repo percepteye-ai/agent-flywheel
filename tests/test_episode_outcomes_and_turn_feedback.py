@@ -385,6 +385,40 @@ def test_a_control_plane_with_no_feedback_route_never_reaches_the_caller(
         assert px.may_upload is True, "not a consent refusal"
 
 
+def test_a_switched_off_intake_keeps_every_report_for_later(
+    monkeypatch, tmp_path, quiet,
+):
+    """A control plane whose episode intake is switched off answers 503 with
+    a Retry-After: not a missing route (which would drop what is waiting),
+    not a refusal of the key (which would stop sending). THROUGH THE REAL
+    HTTP CLIENT: the request is retried as the header says, both kinds of
+    report stay on disk, nothing is said as a no, and they go once it is on."""
+    off = (503, {"detail": "episode reports are switched off"},
+           {"Retry-After": "0"})
+    routes = {**GRANTED, "POST /turn-feedback": off, "POST /outcomes": off}
+    with warnings.catch_warnings(record=True) as caught, _over_http(
+        monkeypatch, tmp_path, routes,
+    ) as (px, seen):
+        warnings.simplefilter("always")
+        px.report_turn_feedback("accepted", episode_id=EPISODE, turn_index=0)
+        px.report_outcome("resolved", episode_id=EPISODE)
+        px.flush()
+        assert len(_waiting(tmp_path)) == 1, "the feedback is kept"
+        assert len(px._outcome_files()) == 1, "the outcome is kept"
+        assert seen.count("POST /turn-feedback") > 1, "retried as told"
+        assert seen.count("POST /outcomes") > 1, "retried as told"
+        assert not _said(caught, "predate"), "not a missing route"
+        assert not _said(caught, "refused"), "not a refusal"
+        assert px.report_turn_feedback(
+            "accepted", episode_id=EPISODE, turn_index=1) is not None
+        routes["POST /turn-feedback"] = (200, {})
+        routes["POST /outcomes"] = (200, {})
+        counts = px.flush()
+        assert counts["feedback_sent"] == 2
+        assert counts["outcomes_sent"] == 1
+        assert _waiting(tmp_path) == [] and px._outcome_files() == []
+
+
 def test_a_403_keeps_the_feedback_and_stops_sending(
     monkeypatch, tmp_path, quiet,
 ):
