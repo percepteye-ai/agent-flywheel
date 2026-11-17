@@ -168,6 +168,18 @@ def test_a_turn_this_process_never_recorded_is_still_named(spans):
     assert "percepteye.turn.feedback.id" not in span.events[0].attributes
 
 
+def test_a_rollouts_turn_is_not_linked(spans):
+    """An episode's feedback goes to POST /turn-feedback; its turn's span is
+    not remembered for a production report."""
+    import agent_flywheel.tracing as mod
+
+    mod.record_turn_span(output_text="x", turn_id=TURN, rollout_id="rl_1")
+    assert mod.record_turn_feedback_span(
+        turn_id=TURN, signal="accepted",
+        occurred_at_unix_nano=rfc3339_unix_nanos(AT))
+    assert not spans.get_finished_spans()[-1].links
+
+
 def test_nothing_records_it_without_a_tracer(monkeypatch, tmp_path):
     import agent_flywheel.tracing as mod
 
