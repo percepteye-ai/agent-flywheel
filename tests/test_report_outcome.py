@@ -509,16 +509,57 @@ def test_an_outcome_undelivered_for_a_week_is_dropped_out_loud(
 def test_an_outcome_the_control_plane_refuses_by_name_is_not_resent(
     monkeypatch, tmp_path, quiet,
 ):
+    """And it is said BY ITS ID, with the control plane's word, and counted
+    as dropped: the warning used to name the word alone, and the count said
+    the outcome was sent."""
     tr = _Outcomes(refuse={"dup"})
     with _attached(monkeypatch, tmp_path, tr) as px:
         px.report_outcome("resolved", turn_id="t1", outcome_id="dup")
+        px.report_outcome("resolved", turn_id="t1", outcome_id="fine")
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            px.flush()
-        assert any("outcome_conflict" in str(w.message) for w in caught)
+            counts = px.flush()
+        said = [str(w.message) for w in caught
+                if "did not record" in str(w.message)]
+        assert len(said) == 1, "said once"
+        assert "dup (outcome_conflict)" in said[0]
+        assert "fine" not in said[0]
+        assert (counts["outcomes_sent"], counts["outcomes_failed"],
+                counts["outcomes_dropped"]) == (1, 0, 1)
         assert _pending(tmp_path) == []
         px.flush()
     assert len(tr.outcome_batches) == 1
+
+
+def test_an_outcome_recorded_without_its_note_is_said_by_its_id(
+    monkeypatch, tmp_path, quiet,
+):
+    """The control plane records an outcome whose note it could not mask and
+    says so in the reply (``note.stored: false``). Nothing read it."""
+    class _Noteless(_Outcomes):
+        def report_outcomes(self, agent_id, outcomes):
+            reply = super().report_outcomes(agent_id, outcomes)
+            for result in reply["outcomes"]:
+                result["note"] = (
+                    {"stored": False, "error": "note_unmaskable"}
+                    if result["outcome_id"] == "o-bare" else {"stored": True})
+            return reply
+
+    tr = _Noteless()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        px.report_outcome(
+            "resolved", turn_id="t1", outcome_id="o-bare", note="a note")
+        px.report_outcome(
+            "resolved", turn_id="t1", outcome_id="o-whole", note="a note")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            counts = px.flush()
+        said = [str(w.message) for w in caught
+                if "without the note" in str(w.message)]
+        assert len(said) == 1
+        assert "o-bare (note_unmaskable)" in said[0]
+        assert "o-whole" not in said[0]
+        assert counts["outcomes_sent"] == 2, "it was recorded"
 
 
 def test_more_than_a_batch_goes_in_batches(monkeypatch, tmp_path, quiet):

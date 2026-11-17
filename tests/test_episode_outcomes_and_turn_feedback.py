@@ -351,13 +351,14 @@ def test_a_blip_with_a_status_keeps_the_feedback(
         tr.feedback_raise = None
 
 
-@pytest.mark.parametrize("status", [401, 403, 404, 405, 410, 422])
-def test_a_control_plane_that_does_not_take_feedback_never_reaches_the_caller(
+@pytest.mark.parametrize("status", [404, 405])
+def test_a_control_plane_with_no_feedback_route_never_reaches_the_caller(
     monkeypatch, tmp_path, quiet, status,
 ):
     """THROUGH THE REAL HTTP CLIENT. A control plane that predates the route
-    answers 404; nothing raises into the customer's loop, it is said once,
-    what was waiting is dropped, and the process stops asking."""
+    answers 404 (405 where another method has the path); nothing raises into
+    the customer's loop, it is said once, what was waiting is dropped, and
+    the process stops asking."""
     total = _TURN_FEEDBACK_BATCH_MAX_ITEMS + 3
     with warnings.catch_warnings(record=True) as caught, _over_http(
         monkeypatch, tmp_path,
@@ -382,6 +383,144 @@ def test_a_control_plane_that_does_not_take_feedback_never_reaches_the_caller(
         with pytest.raises(InvalidFeedback):
             px.report_turn_feedback("liked", episode_id=EPISODE, turn_index=0)
         assert px.may_upload is True, "not a consent refusal"
+
+
+def test_a_403_keeps_the_feedback_and_stops_sending(
+    monkeypatch, tmp_path, quiet,
+):
+    """A 403 is the control plane's decision about THIS KEY (it lacks the
+    scope, it is bound elsewhere), not a missing route. It was read as "the
+    route is not there" and the whole queue was deleted for it. The outcomes'
+    rule: sending stops for the process, said once, and what is waiting stays
+    on disk for the process that holds a key the route takes."""
+    total = _TURN_FEEDBACK_BATCH_MAX_ITEMS + 3
+    with warnings.catch_warnings(record=True) as caught, _over_http(
+        monkeypatch, tmp_path,
+        {**GRANTED, "POST /turn-feedback": (
+            403, {"detail": "this key lacks the turn.report scope"})},
+    ) as (px, seen):
+        warnings.simplefilter("always")
+        for index in range(total):
+            assert px.report_turn_feedback(
+                "accepted", episode_id=EPISODE, turn_index=index)
+        counts = px.flush()
+        assert (counts["feedback_sent"], counts["feedback_failed"],
+                counts["feedback_dropped"]) == (0, total, 0)
+        assert len(_waiting(tmp_path)) == total, "a 403 deletes nothing"
+        assert seen.count("POST /turn-feedback") == 1, "one try, then it stops"
+        assert px.report_turn_feedback(
+            "accepted", episode_id=EPISODE, turn_index=0) is None
+        px.flush()
+        assert seen.count("POST /turn-feedback") == 1
+        assert len(_waiting(tmp_path)) == total
+        said = _said(caught, "refused per-turn feedback")
+        assert len(said) == 1 and "turn.report scope" in said[0]
+        assert not _said(caught, "predate"), "not the absent route's words"
+        assert px.may_upload is True, "feedback is not the consent question"
+
+
+@pytest.mark.parametrize("status", [401, 410])
+def test_a_refusal_of_the_key_keeps_the_feedback_for_a_later_flush(
+    monkeypatch, tmp_path, quiet, status,
+):
+    """401 and 410 are about the key or the resource, as on ``/outcomes``:
+    sending stops for THIS FLUSH, nothing is dropped, and a later flush
+    tries again."""
+    total = _TURN_FEEDBACK_BATCH_MAX_ITEMS + 3
+    with warnings.catch_warnings(record=True) as caught, _over_http(
+        monkeypatch, tmp_path,
+        {**GRANTED, "POST /turn-feedback": (status, {"detail": "no"})},
+    ) as (px, seen):
+        warnings.simplefilter("always")
+        for index in range(total):
+            px.report_turn_feedback(
+                "accepted", episode_id=EPISODE, turn_index=index)
+        counts = px.flush()
+        assert (counts["feedback_sent"], counts["feedback_failed"],
+                counts["feedback_dropped"]) == (0, total, 0)
+        assert len(_waiting(tmp_path)) == total
+        assert seen.count("POST /turn-feedback") == 1, "not batch after batch"
+        assert _said(caught, f"HTTP {status}", "did not take")
+        assert px.report_turn_feedback(
+            "accepted", episode_id=EPISODE, turn_index=0) is not None
+        px.flush()
+        assert seen.count("POST /turn-feedback") == 2, "asked again later"
+
+
+@pytest.mark.parametrize("status", [400, 409, 413, 422])
+def test_one_refused_feedback_report_never_holds_back_the_rest(
+    monkeypatch, tmp_path, quiet, status,
+):
+    """A 4xx about the records is final for THAT record: the batch is split
+    as an outcome batch is, the good reports are sent and only the refused
+    one is dropped. It used to delete every report waiting and switch
+    feedback off for the process."""
+    ids = [f"fb{n}" for n in range(9)]
+    sent: list[str] = []
+
+    def route(request):
+        got = [f["feedback_id"]
+               for f in json.loads(request.content)["feedback"]]
+        if "fb5" in got:
+            return status, {"detail": "turn_index: not this one"}
+        sent.extend(got)
+        return 200, {"agent_id": "support", "feedback": [
+            {"feedback_id": i, "accepted": True, "duplicate": False}
+            for i in got]}
+
+    with warnings.catch_warnings(record=True) as caught, _over_http(
+        monkeypatch, tmp_path, {**GRANTED, "POST /turn-feedback": route},
+    ) as (px, seen):
+        warnings.simplefilter("always")
+        for index, feedback_id in enumerate(ids):
+            px.report_turn_feedback(
+                "accepted", episode_id=EPISODE, turn_index=index,
+                feedback_id=feedback_id)
+        counts = px.flush()
+        assert (counts["feedback_sent"], counts["feedback_failed"],
+                counts["feedback_dropped"]) == (8, 0, 1)
+        assert _waiting(tmp_path) == []
+        assert _said(caught, f"HTTP {status}", "per-turn feedback report(s)")
+        assert sorted(sent) == sorted(set(ids) - {"fb5"})
+        assert px.report_turn_feedback(
+            "accepted", episode_id=EPISODE, turn_index=0) is not None, (
+                "one bad report does not switch feedback off")
+
+
+def test_a_feedback_report_refused_by_name_is_said_by_its_id_and_not_resent(
+    monkeypatch, tmp_path, quiet,
+):
+    """A 200 can still refuse a report (``accepted: false`` and why). The
+    reply was never read: the report counted as sent and nothing said it was
+    not recorded."""
+    def route(request):
+        got = json.loads(request.content)["feedback"]
+        return 200, {"agent_id": "support", "feedback": [
+            {"feedback_id": f["feedback_id"], "accepted": False,
+             "duplicate": False, "error": "episode_not_found",
+             "detail": "no such episode"}
+            if f["feedback_id"] == "fb-lost" else
+            {"feedback_id": f["feedback_id"], "accepted": True,
+             "duplicate": False} for f in got]}
+
+    with warnings.catch_warnings(record=True) as caught, _over_http(
+        monkeypatch, tmp_path, {**GRANTED, "POST /turn-feedback": route},
+    ) as (px, seen):
+        warnings.simplefilter("always")
+        for feedback_id in ("fb-kept", "fb-lost"):
+            px.report_turn_feedback(
+                "accepted", episode_id=EPISODE, turn_index=0,
+                feedback_id=feedback_id)
+        counts = px.flush()
+        assert (counts["feedback_sent"], counts["feedback_failed"],
+                counts["feedback_dropped"]) == (1, 0, 1)
+        said = _said(caught, "did not record")
+        assert len(said) == 1, "said once"
+        assert "fb-lost (episode_not_found)" in said[0]
+        assert "fb-kept" not in said[0]
+        assert _waiting(tmp_path) == []
+        px.flush()
+        assert seen.count("POST /turn-feedback") == 1, "not sent again"
 
 
 def test_feedback_undelivered_for_a_week_is_dropped(

@@ -59,7 +59,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 # NOT imported at module scope. `_http` pulls in httpx, which is 83-87% of
 # this package's import time and ~88% of its resident memory -- and a process
@@ -386,13 +386,6 @@ def _feedback_file(root: str | os.PathLike[str], feedback_id: str) -> Path:
         f"{_FEEDBACK_FILE_PREFIX}{digest}{_OUTCOME_FILE_SUFFIX}")
 
 
-def _final_refusal(status: Any) -> bool:
-    """Whether an answer is a 4xx that sending again cannot change: not a
-    timeout (408) or a rate limit (429), which are blips."""
-    return (isinstance(status, int) and not isinstance(status, bool)
-            and 400 <= status < 500 and status not in (408, 429))
-
-
 def _rfc3339(value: Any, refusal: type[Exception] = InvalidOutcome) -> Any:
     """``occurred_at`` as the wire spells it. ``None`` is now; an aware
     ``datetime`` becomes UTC with milliseconds and ``Z`` (what the Node SDK's
@@ -469,6 +462,84 @@ def _outcome_batch_refused(status: Any) -> bool:
             and 400 <= status < 500
             and status not in _OUTCOME_ROUTE_REFUSALS
             and status not in _OUTCOME_NOT_A_BATCH_REFUSAL)
+
+
+#: A 4xx that says THE ROUTE IS NOT THERE: a control plane older than it
+#: answers 404, or 405 where another method has the path. The Node SDK's
+#: ``routeAbsent``.
+_ROUTE_ABSENT = frozenset({404, 405})
+
+
+def _route_absent(status: Any) -> bool:
+    """Whether an answer says the route does not exist on this control
+    plane. Every other 4xx is about the key or the records, and must never
+    be read as this: per-turn feedback deletes its queue on it
+    (``Attachment._flush_feedback``)."""
+    return status in _ROUTE_ABSENT
+
+
+class _ReportKind(NamedTuple):
+    """What ``Attachment._send_reports`` needs to know about one of the two
+    report routes: how to say it, where the reply lists its records, and how
+    to send a batch."""
+
+    #: "reported outcomes"
+    many: str
+    #: "reported outcome(s)"
+    counted: str
+    #: "an outcome"
+    one: str
+    #: The key of the reply's per-record list.
+    results: str
+    #: The key of a record's id, in the wire and in the reply.
+    id: str
+    #: The route's batch limit.
+    batch_max: int
+    #: The ``AttachTransport`` method that sends one batch.
+    send: str
+
+
+_OUTCOMES = _ReportKind(
+    "reported outcomes", "reported outcome(s)", "an outcome",
+    "outcomes", "outcome_id", _PRODUCTION_OUTCOME_BATCH_MAX_ITEMS,
+    "report_outcomes")
+_FEEDBACK = _ReportKind(
+    "per-turn feedback reports", "per-turn feedback report(s)",
+    "a feedback report", "feedback", "feedback_id",
+    _TURN_FEEDBACK_BATCH_MAX_ITEMS, "report_turn_feedback")
+
+
+def _reply_records(reply: Any, kind: _ReportKind) -> list[Mapping[str, Any]]:
+    """The per-record answers of an acknowledged batch; ``[]`` for a reply
+    that carries none. Never raises."""
+    results = reply.get(kind.results) if isinstance(reply, Mapping) else None
+    if not isinstance(results, list):
+        return []
+    return [r for r in results if isinstance(r, Mapping)]
+
+
+def _refused_by_name(reply: Any, kind: _ReportKind) -> list[str]:
+    """Each record of an acknowledged batch the control plane did NOT record
+    (``accepted: false``), as ``<its id> (<the control plane's word>)``. The
+    Node SDK's ``refusedByName``. Never raises."""
+    return [
+        f"{r.get(kind.id) or 'unnamed'} ({r.get('error') or 'refused'})"
+        for r in _reply_records(reply, kind) if r.get("accepted") is False
+    ]
+
+
+def _notes_not_stored(reply: Any, kind: _ReportKind) -> list[str]:
+    """Each record the control plane recorded WITHOUT its note
+    (``note.stored: false``), as ``<its id> (<the control plane's word>)``.
+    The Node SDK's ``notesNotStored``. Never raises."""
+    out = []
+    for r in _reply_records(reply, kind):
+        note = r.get("note")
+        if (r.get("accepted") is True and isinstance(note, Mapping)
+                and note.get("stored") is False):
+            out.append(f"{r.get(kind.id) or 'unnamed'} "
+                       f"({note.get('error') or 'not stored'})")
+    return out
 
 
 def _capture_refusal(exc: BaseException) -> str | None:
@@ -591,17 +662,18 @@ class Attachment:
         #: answer is UNKNOWN is kept for the flush that re-asks, and only an
         #: explicit no makes :meth:`report_outcome` a no-op.
         self._consent_refused = bool(consent_refused and not may_upload)
-        #: The cause of the last whole-batch outcome refusal said out loud
-        #: (:meth:`_warn_whole_batch_refusal`), so it is said once.
-        self._outcome_batch_refusal_said: str | None = None
+        #: The cause of the last whole-batch refusal said out loud, per kind
+        #: of report (:meth:`_warn_whole_batch_refusal`), so it is said once.
+        self._batch_refusal_said: dict[str, str] = {}
         #: The control plane refused an outcome that names only an episode
         #: while production capture is not enabled -- one that predates the
         #: episode join. Said once; no more are sent on those terms by this
         #: process (:meth:`_refuse_episode_outcomes`).
         self._episode_outcomes_refused = False
-        #: The control plane will not take per-turn feedback (one that
-        #: predates the route answers 404). Said once; after it
-        #: :meth:`report_turn_feedback` is a no-op.
+        #: The control plane will not take per-turn feedback from this
+        #: process: it has no such route (404, 405 -- what was waiting was
+        #: dropped) or it refused this key (403 -- what was waiting stays on
+        #: disk). Said once; after it :meth:`report_turn_feedback` is a no-op.
         self._turn_feedback_refused = False
         #: THE SECOND CONSENT TIER, as the control plane last said it: may a
         #: turn also carry what its model calls saw and said -- the system
@@ -979,8 +1051,11 @@ class Attachment:
 
         Returns the feedback's id once it is queued for upload, or ``None``
         when nothing was queued: with no control plane to send to, or once
-        the control plane has refused feedback (one that predates it answers
-        404; said once, and nothing more is kept or sent by this process).
+        the control plane has refused feedback (said once, and nothing more
+        is queued or sent by this process: one that predates the route
+        answers 404, and what was waiting is dropped; a 403 is its decision
+        about this key, and what was waiting stays on disk for its week). A
+        report it refuses by name is said by its id and not sent again.
         It needs no production-capture consent: it carries ids, one word and
         a time. Queued as one file under ``trajectory_root`` and uploaded off
         the calling thread; kept across a blip for at most a week.
@@ -1021,12 +1096,19 @@ class Attachment:
         """Upload the per-turn feedback waiting on disk. Caller holds
         ``_flush_lock``. Never raises.
 
-        Simpler than :meth:`_flush_outcomes` on purpose, because feedback is
-        the weakest label there is: an acknowledged batch is deleted; a blip
-        (no answer, a 5xx, a 408 or 429) leaves what is waiting for the next
-        flush, bounded by the outcomes' week and count; ANY OTHER 4xx IS
-        FINAL -- a control plane that predates the route (404), a key it does
-        not take -- so what is waiting is dropped, it is said once, and
+        THE OUTCOMES' RULES, through the outcomes' own sender
+        (:meth:`_send_reports`): an acknowledged batch is deleted, and a
+        report the control plane refused by name inside it is said by name
+        and not sent again; a blip leaves what is waiting for the next flush,
+        bounded by the outcomes' week and count; a 403 is its decision (a key
+        without the scope, a key bound elsewhere), so sending stops for this
+        process and what is waiting stays on disk; a 401 or 410 stops this
+        flush and it stays; any other 4xx is about the records, so the batch
+        is split and only the report it refused is dropped.
+
+        ONE DIFFERENCE: AN ABSENT ROUTE (:func:`_route_absent`, 404 or 405)
+        is a control plane that predates per-turn feedback, and nothing will
+        ever take what is waiting. It is dropped, said once, and
         :meth:`report_turn_feedback` is a no-op for the rest of the process.
 
         Counts, only when feedback was waiting: ``feedback_sent``,
@@ -1062,55 +1144,36 @@ class Attachment:
                 continue
         if not pending or self._turn_feedback_refused:
             return {"feedback_dropped": dropped} if dropped else {}
-        sent = 0
-        left = len(pending)
-        client = None
-        try:
-            from ._http import ControlPlaneClient
-            from .transport import AttachTransport
+        sent, failed, refused = self._send_reports(
+            pending, _FEEDBACK,
+            on_refusal=self._refuse_turn_feedback,
+            on_absent=self._turn_feedback_absent)
+        return {"feedback_sent": sent, "feedback_failed": failed,
+                "feedback_dropped": dropped + refused}
 
-            client = ControlPlaneClient(self._cp_url, self._api_key)
-            tr = AttachTransport(client, self.agent_id)
-            size = _TURN_FEEDBACK_BATCH_MAX_ITEMS
-            for start in range(0, len(pending), size):
-                batch = pending[start:start + size]
-                try:
-                    tr.report_turn_feedback(
-                        self.agent_id, [wire for _, wire in batch])
-                except Exception as exc:
-                    if _final_refusal(getattr(exc, "status_code", None)):
-                        self._turn_feedback_refused = True
-                        for path, _wire in pending[start:]:
-                            try:
-                                path.unlink()
-                            except OSError:
-                                pass
-                        dropped += left
-                        left = 0
-                        self._warn(
-                            "agent-flywheel: the control plane did not take "
-                            f"per-turn feedback ({exc}); it may predate it. "
-                            "What was waiting is dropped and no more is "
-                            "sent by this process.")
-                    break
-                for path, _wire in batch:
-                    try:
-                        path.unlink()
-                    except OSError:
-                        # Resent next flush; the intake answers a duplicate.
-                        pass
-                sent += len(batch)
-                left -= len(batch)
-        except Exception:
-            pass
-        finally:
-            if client is not None:
-                try:
-                    client.close()
-                except Exception:
-                    pass
-        return {"feedback_sent": sent, "feedback_failed": left,
-                "feedback_dropped": dropped}
+    def _refuse_turn_feedback(self, reason: str) -> None:
+        """The control plane refused per-turn feedback (a 403: its decision
+        about this key). Said ONCE; what is waiting stays on disk for its
+        week, and no more is queued or sent by this process. Never raises."""
+        if self._turn_feedback_refused:
+            return
+        self._turn_feedback_refused = True
+        self._warn(
+            "agent-flywheel: the control plane refused per-turn feedback "
+            f"({reason}). What is waiting stays on disk and no more is sent "
+            "by this process.")
+
+    def _turn_feedback_absent(self, reason: str) -> None:
+        """The control plane has no per-turn feedback route (404, 405): it
+        predates it. Said ONCE; the sender has dropped what was waiting, and
+        no more is queued or sent by this process. Never raises."""
+        if self._turn_feedback_refused:
+            return
+        self._turn_feedback_refused = True
+        self._warn(
+            "agent-flywheel: the control plane did not take per-turn "
+            f"feedback ({reason}); it may predate it. What was waiting is "
+            "dropped and no more is sent by this process.")
 
     def _queued_files(self, prefix: str) -> list[Path]:
         """The files with this prefix waiting in the trajectory root, in name
@@ -1206,15 +1269,62 @@ class Attachment:
         sends just the outcomes that name an episode and nothing else
         (``contract.names_only_an_episode``), the ones consent is not the
         question for; a 403 then stops those alone
-        (:meth:`_refuse_episode_outcomes`). Never raises.
+        (:meth:`_refuse_episode_outcomes`). Never raises. The rules are
+        :meth:`_send_reports`'s.
+
+        Counts: ``outcomes_sent``, the outcomes the control plane recorded;
+        ``outcomes_failed``, the outcomes still on disk for a later flush,
+        each counted once; ``outcomes_dropped``, the records the control
+        plane refused.
+        """
+        pending: list[tuple[Path, dict[str, Any]]] = []
+        for path in files:
+            try:
+                pending.append((path, production_outcome(
+                    json.loads(path.read_text(encoding="utf-8")))))
+            except (OSError, ValueError, InvalidOutcome):
+                # Unreadable or not ours to send; one file costs that file.
+                continue
+        if episodes_only:
+            pending = [p for p in pending if names_only_an_episode(p[1])]
+        if not pending:
+            return {}
+        sent, failed, refused = self._send_reports(
+            pending, _OUTCOMES,
+            on_refusal=(self._refuse_episode_outcomes if episodes_only
+                        else self._refuse_upload))
+        return {"outcomes_sent": sent, "outcomes_failed": failed,
+                "outcomes_dropped": refused}
+
+    def _send_reports(
+        self,
+        pending: list[tuple[Path, dict[str, Any]]],
+        kind: _ReportKind,
+        *,
+        on_refusal: Any,
+        on_absent: Any = None,
+    ) -> tuple[int, int, int]:
+        """Send the reports waiting on disk -- outcomes or per-turn feedback,
+        ``kind`` says which -- and return ``(sent, failed, dropped)``: the
+        ones the control plane recorded, the ones still on disk for a later
+        flush (each counted once), the ones it refused. Caller holds
+        ``_flush_lock``. Never raises.
+
+        ONE SENDER FOR BOTH ROUTES. Feedback had its own, which read every
+        final 4xx as "the route is not there" and deleted the queue for it.
 
         THE TURNS' RULES: a batch the control plane acknowledged is deleted;
-        a 403 is its decision, so sending stops (:meth:`_refuse_upload`) and
-        the outcomes stay on disk; a blip (no answer, a 5xx, a 408 or 429
-        that outlasted the retries) leaves the batch for the next flush. An
-        outcome the control plane refused BY NAME inside an acknowledged batch
-        (a conflicting replay) would be refused again, so it is dropped and
-        said out loud.
+        a 403 is its decision, so sending stops (``on_refusal`` is told its
+        words) and the reports stay on disk; a blip (no answer, a 5xx, a 408
+        or 429 that outlasted the retries) leaves the batch for the next
+        flush.
+
+        A REPORT REFUSED BY NAME inside an acknowledged batch
+        (``accepted: false`` -- a conflicting replay, an unknown episode)
+        would be refused again: it is not sent again, it counts as dropped
+        and not as sent, and it is said BY ITS ID with the control plane's
+        own word (:func:`_refused_by_name`). An outcome recorded without its
+        note is said the same way (:func:`_notes_not_stored`).
 
         A 4xx ABOUT THE RECORDS IS FINAL FOR THEM
         (:func:`_outcome_batch_refused`). A refused batch is split in halves,
@@ -1225,7 +1335,7 @@ class Attachment:
         Unless both halves are refused with the same status and the same
         words: then the refusal was about THE BATCH, not a record in it -- a
         422 from a control plane on another contract minor, a proxy's 400 --
-        and splitting further would drop every outcome at two requests each.
+        and splitting further would drop every report at two requests each.
         Sending stops for this flush, they stay on disk (the week's expiry
         still applies), and the cause is said once.
 
@@ -1240,33 +1350,21 @@ class Attachment:
 
         A 4xx about the ROUTE or the KEY (401, 404, 405, 410) is not the
         records' fault either: sending stops for this flush and they stay on
-        disk, said out loud.
-
-        Counts: ``outcomes_sent``; ``outcomes_failed``, the outcomes still on
-        disk for a later flush, each counted once; ``outcomes_dropped``, the
-        records the control plane refused.
+        disk, said out loud. Unless the caller passes ``on_absent`` and the
+        route is ABSENT (:func:`_route_absent`): then everything waiting is
+        dropped, counted as dropped, and ``on_absent`` is told the words.
         """
-        pending: list[tuple[Path, dict[str, Any]]] = []
-        for path in files:
-            try:
-                pending.append((path, production_outcome(
-                    json.loads(path.read_text(encoding="utf-8")))))
-            except (OSError, ValueError, InvalidOutcome):
-                # Unreadable or not ours to send; one file costs that file.
-                continue
-        if episodes_only:
-            pending = [p for p in pending if names_only_an_episode(p[1])]
-        if not pending:
-            return {}
-        size = _PRODUCTION_OUTCOME_BATCH_MAX_ITEMS
+        size = kind.batch_max
         Batch = list[tuple[Path, dict[str, Any]]]
         # Every GROUP still to send, in order: a batch on its own, or the two
         # halves of one refused batch, which are tried together. A refused
         # half's own halves go back to the front.
         queue: list[list[Batch]] = [
             [pending[i:i + size]] for i in range(0, len(pending), size)]
-        sent = failed = split_requests = 0
+        sent = failed = split_requests = absent = 0
         dropped: list[str] = []
+        by_name: list[str] = []
+        noteless: list[str] = []
         client = None
 
         def _left() -> int:
@@ -1285,7 +1383,7 @@ class Attachment:
             from .transport import AttachTransport
 
             client = ControlPlaneClient(self._cp_url, self._api_key)
-            tr = AttachTransport(client, self.agent_id)
+            send = getattr(AttachTransport(client, self.agent_id), kind.send)
             while queue:
                 group = queue.pop(0)
                 halves = len(group) == 2
@@ -1294,8 +1392,8 @@ class Attachment:
                     failed += sum(len(b) for b in group) + _left()
                     queue.clear()
                     self._warn(
-                        "agent-flywheel: the control plane refused reported "
-                        "outcomes, and finding which ones reached "
+                        f"agent-flywheel: the control plane refused "
+                        f"{kind.many}, and finding which ones reached "
                         f"{_OUTCOME_SPLIT_MAX_REQUESTS} requests in this "
                         "flush; the rest stay on disk for a later flush.")
                     break
@@ -1305,24 +1403,31 @@ class Attachment:
                     if halves:
                         split_requests += 1
                     try:
-                        reply = tr.report_outcomes(
+                        reply = send(
                             self.agent_id, [wire for _, wire in batch])
                     except Exception as exc:
                         # Kept by a stop: this half, the half not tried
                         # yet, a half already refused beside it, the queue.
-                        untried = (sum(len(b) for b in group[index + 1:])
-                                   + sum(len(b) for b, _ in refused))
+                        beside = ([r for b in group[index + 1:] for r in b]
+                                  + [r for b, _ in refused for r in b])
+                        untried = len(beside)
                         refusal = _capture_refusal(exc)
                         if refusal is not None:
-                            if episodes_only:
-                                self._refuse_episode_outcomes(refusal)
-                            else:
-                                self._refuse_upload(refusal)
+                            on_refusal(refusal)
                             failed += len(batch) + untried + _left()
                             queue.clear()
                             stop = True
                             break
                         status = getattr(exc, "status_code", None)
+                        if on_absent is not None and _route_absent(status):
+                            gone = batch + beside + [
+                                r for g in queue for b in g for r in b]
+                            _forget(gone)
+                            absent += len(gone)
+                            queue.clear()
+                            on_absent(str(exc))
+                            stop = True
+                            break
                         if _outcome_batch_refused(status):
                             refused.append((batch, (status, str(exc))))
                             continue
@@ -1336,7 +1441,7 @@ class Attachment:
                                 said = f"HTTP {status}: {said}"
                             self._warn(
                                 "agent-flywheel: the control plane did not "
-                                f"take reported outcomes ({said}); they stay "
+                                f"take {kind.many} ({said}); they stay "
                                 "on disk and are sent again on a later "
                                 "flush.")
                             stop = True
@@ -1344,8 +1449,10 @@ class Attachment:
                         failed += len(batch)
                         continue
                     _forget(batch)
-                    sent += len(batch)
-                    self._note_refused_outcomes(reply)
+                    named = _refused_by_name(reply, kind)[:len(batch)]
+                    by_name.extend(named)
+                    noteless.extend(_notes_not_stored(reply, kind))
+                    sent += len(batch) - len(named)
                 if stop:
                     break
                 if (halves and len(refused) == 2
@@ -1353,7 +1460,7 @@ class Attachment:
                         and not _outcome_refused_for_size(refused[0][1][0])):
                     failed += sum(len(b) for b, _ in refused) + _left()
                     queue.clear()
-                    self._warn_whole_batch_refusal(refused[0][1][1])
+                    self._warn_whole_batch_refusal(kind, refused[0][1][1])
                     break
                 split: list[list[Batch]] = []
                 for batch, (status, cause) in refused:
@@ -1361,7 +1468,7 @@ class Attachment:
                         _forget(batch)
                         if _outcome_refused_for_size(status):
                             cause = (
-                                f"{cause} (an outcome of "
+                                f"{cause} ({kind.one} of "
                                 f"{_outcome_wire_bytes(batch[0][1])} bytes, "
                                 "too large to send even alone)")
                         dropped.append(cause)
@@ -1380,43 +1487,31 @@ class Attachment:
         if dropped:
             self._warn(
                 f"agent-flywheel: the control plane refused {len(dropped)} "
-                "reported outcome(s), so they were dropped and the rest of "
+                f"{kind.counted}, so they were dropped and the rest of "
                 f"their batch was sent: {'; '.join(sorted(set(dropped)))}")
-        return {"outcomes_sent": sent, "outcomes_failed": failed,
-                "outcomes_dropped": len(dropped)}
+        if by_name:
+            self._warn(
+                f"agent-flywheel: the control plane did not record "
+                f"{len(by_name)} {kind.counted}; they will not be sent "
+                f"again: {', '.join(by_name)}")
+        if noteless:
+            self._warn(
+                f"agent-flywheel: the control plane recorded {len(noteless)} "
+                f"{kind.counted} without the note: {', '.join(noteless)}")
+        return sent, failed, len(dropped) + len(by_name) + absent
 
-    def _warn_whole_batch_refusal(self, cause: str) -> None:
-        """Say ONCE per cause that the control plane refuses whole outcome
+    def _warn_whole_batch_refusal(self, kind: _ReportKind, cause: str) -> None:
+        """Say ONCE per kind and cause that the control plane refuses whole
         batches: it holds for every flush until one side is upgraded, and a
         warning per flush would be a week of the same line."""
-        if cause == self._outcome_batch_refusal_said:
+        if self._batch_refusal_said.get(kind.many) == cause:
             return
-        self._outcome_batch_refusal_said = cause
+        self._batch_refusal_said[kind.many] = cause
         self._warn(
             "agent-flywheel: the control plane refused whole batches of "
-            f"reported outcomes ({cause}), which is about the batch, not a "
+            f"{kind.many} ({cause}), which is about the batch, not a "
             "record in it; they stay on disk, are sent again on a later "
             "flush, and are dropped only after a week undelivered.")
-
-    def _note_refused_outcomes(self, reply: Any) -> None:
-        """Say which outcomes of an acknowledged batch the control plane did
-        not record, in its own words. Never raises."""
-        try:
-            results = (
-                reply.get("outcomes") if isinstance(reply, Mapping) else None)
-            refused = sorted({
-                str(result.get("error") or "refused")
-                for result in results or ()
-                if isinstance(result, Mapping)
-                and result.get("accepted") is False
-            })
-            if refused:
-                self._warn(
-                    "agent-flywheel: the control plane did not record some "
-                    f"reported outcomes ({', '.join(refused)}); they will not "
-                    "be sent again.")
-        except Exception:
-            return
 
     @staticmethod
     def _warn(message: str) -> None:
