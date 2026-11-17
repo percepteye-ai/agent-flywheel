@@ -73,7 +73,7 @@ Hand-written means drift is possible, so the suite asserts agreement. Three test
 | `reward` | `float \| None` | `None` | only when set; **advisory only** |
 | `success` | `bool \| None` | `None` | only when set |
 | `agent_fingerprint` | `dict \| None` | `None` | only when set |
-| `checks` | `list[dict] \| None` | `None` | only when set; the first 200 rows |
+| `checks` | `list[dict] \| None` | `None` | only when a non-empty list; the first 200 rows (an empty list states nothing; anything else is refused) |
 | `checks_dropped` | `int` | `0` | only when positive: how many checks the episode ran that this report does not carry |
 | `termination` | `dict \| None` | `None` | only when set; `{class, detail}` |
 | `seeds` | `dict \| None` | `None` | only when set; `{environment, sampling}` |

@@ -45,8 +45,11 @@ repository's.
     capture is not enabled for the agent, and a 403 from the intake stops
     outcomes as it stops turns. Reported while that answer is still unknown
     (the registration that asks failed on a blip), the outcome is kept, and
-    reporting it starts the flush that asks again; at most 1,000 are kept
-    while it is unknown, oldest dropped first with a warning. A 401, 403 or
+    reporting it starts the flush that asks again; at most 1,000 of the
+    outcomes that wait on that answer are kept while it is unknown, oldest
+    dropped first with a warning that says the control plane has not answered
+    (an outcome naming only an episode does not wait on it, and is never
+    counted or dropped by this bound). A 401, 403 or
     404 on the verdict read, or an answer with no verdict in it, is an
     answer: no.
 
@@ -55,7 +58,9 @@ repository's.
   - **Episode join.** `report_outcome(..., episode_id=)` /
     `reportOutcome(outcome, {episodeId})`. The episode id is the one the
     platform gives the agent with each served episode
-    (`current_rollout_id()` / the request's `rolloutId`). An outcome names a
+    (`current_rollout_id()` / `currentRolloutId(ctx)` on what the Node
+    plugin's `register()` returns, asked with the host context of the session
+    running the episode). An outcome names a
     turn, a conversation, an episode, or any of them together; published as
     `episode_id` on `ProductionOutcome`. Mission Control keeps it beside that
     episode's evidence as a weak reading.
@@ -84,8 +89,14 @@ repository's.
     also said once and stops sending, but keeps what is waiting on disk; a
     401 or 410 keeps it for a later flush. A report refused alone -- in a
     4xx, or by name inside a 200 -- is dropped alone, named once in the
-    control plane's own word, and the rest of its batch is sent. Nothing
-    raises into the agent's loop.
+    control plane's own word, and the rest of its batch is sent. A control
+    plane whose episode intake is switched off answers 503 with a
+    Retry-After: the request is retried as the header says, and what is
+    waiting stays for a later flush. Nothing raises into the agent's loop.
+  - **Text the wire can carry.** An id (outcome, turn, conversation, episode,
+    feedback) or a note holding a lone surrogate is refused at the call
+    (`InvalidOutcome` / `InvalidFeedback`; a turn id is not used), as the
+    control plane's parser refuses it at the wire.
 
 - **The customer-API client speaks customer contract 1.51.0** (it declared
   1.31.0 while Mission Control published 1.50.0). Both SDKs, same surface:
