@@ -577,8 +577,23 @@ TERMINATION_CLASSES = (
 )
 #: Most checks one report may carry.
 MAX_REPORTED_CHECKS = 200
+#: The largest integer seed: the largest a JSON number carries exactly in
+#: every language (JavaScript's ``Number.MAX_SAFE_INTEGER``).
+MAX_SAFE_SEED = 2**53 - 1
 _CHECK_KEYS = frozenset({"id", "status", "value", "basis", "required",
                          "establishes"})
+
+
+def finite_number(value: Any) -> float | None:
+    """``value`` as a float when it is a finite number and not a bool, else
+    None. Never raises: an integer too large for a float is not finite."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _short_text(value: Any, limit: int, what: str) -> str:
@@ -592,15 +607,17 @@ def checks_to_wire(checks: Any) -> list[dict[str, Any]]:
     """The wire form of the checks an agent's own environment ran on an
     episode: ``[{"id", "status", "value", "basis", "required",
     "establishes"}]``, only ``id`` and ``status`` required. Raises
-    :class:`ContractViolation` naming the row and the field at fault."""
+    :class:`ContractViolation` naming the row and the field at fault.
+
+    AT MOST :data:`MAX_REPORTED_CHECKS` ROWS, THE FIRST ONES. A longer list
+    used to be refused whole, which cost the episode every check it ran for
+    stating one too many. The rows past the limit are not carried and not
+    read; :func:`checks_over_limit` counts them, and the report states the
+    count as ``checks_dropped`` (:meth:`RolloutOutput.to_wire`)."""
     if not isinstance(checks, (list, tuple)):
         raise ContractViolation("checks must be a list")
-    if len(checks) > MAX_REPORTED_CHECKS:
-        raise ContractViolation(
-            f"checks carries {len(checks)} rows; at most "
-            f"{MAX_REPORTED_CHECKS} are accepted")
     rows: list[dict[str, Any]] = []
-    for i, row in enumerate(checks):
+    for i, row in enumerate(checks[:MAX_REPORTED_CHECKS]):
         where = f"checks[{i}]"
         if not isinstance(row, Mapping):
             raise ContractViolation(f"{where} must be an object")
@@ -617,15 +634,15 @@ def checks_to_wire(checks: Any) -> list[dict[str, Any]]:
         out["status"] = status
         value = row.get("value")
         if value is not None:
-            if (isinstance(value, bool) or not isinstance(value, (int, float))
-                    or not math.isfinite(float(value))):
+            number = finite_number(value)
+            if number is None:
                 raise ContractViolation(
                     f"{where}.value must be a finite number or None")
             if status != "measured":
                 raise ContractViolation(
                     f"{where}.value is stated but its status is {status!r}; "
                     f"only a measured check has a value")
-            out["value"] = float(value)
+            out["value"] = number
         if row.get("basis") is not None:
             out["basis"] = _short_text(row["basis"], 200, f"{where}.basis")
         if row.get("required") is not None:
@@ -640,6 +657,14 @@ def checks_to_wire(checks: Any) -> list[dict[str, Any]]:
             out["establishes"] = row["establishes"]
         rows.append(out)
     return rows
+
+
+def checks_over_limit(checks: Any) -> int:
+    """How many of ``checks`` :func:`checks_to_wire` leaves behind: the rows
+    past :data:`MAX_REPORTED_CHECKS`. 0 for anything that is not a list."""
+    if not isinstance(checks, (list, tuple)):
+        return 0
+    return max(len(checks) - MAX_REPORTED_CHECKS, 0)
 
 
 def termination_to_wire(termination: Any) -> dict[str, Any]:
@@ -662,7 +687,15 @@ def termination_to_wire(termination: Any) -> dict[str, Any]:
 
 def seeds_to_wire(seeds: Any) -> dict[str, Any]:
     """The wire form of the seeds the episode ran under:
-    ``{"environment", "sampling"}``, each an integer or a short string."""
+    ``{"environment", "sampling"}``, each an integer or a short string.
+
+    ONE RULE WITH THE NODE SDK's ``seedsToWire``, which reads the same
+    ``outcome.json``: a string is 1 to 128 characters; an integer is one a
+    JSON number carries exactly in every language (``|n| <= 2**53 - 1``), and
+    a float that is such an integer (``7.0``, which is how JavaScript and
+    many JSON writers spell 7) is that integer. A bool, a fraction, NaN and a
+    larger integer are refused. Python took any ``int`` and no ``float``, so
+    the two SDKs disagreed on ``7.0`` and on ``2**60``."""
     if not isinstance(seeds, Mapping):
         raise ContractViolation("seeds must be an object")
     extra = set(seeds) - {"environment", "sampling"}
@@ -674,12 +707,15 @@ def seeds_to_wire(seeds: Any) -> dict[str, Any]:
         value = seeds.get(key)
         if value is None:
             continue
-        if isinstance(value, bool) or not isinstance(value, (int, str)):
+        if isinstance(value, str):
+            out[key] = _short_text(value, 128, f"seeds.{key}")
+            continue
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or value != value or abs(value) > MAX_SAFE_SEED
+                or value != int(value)):
             raise ContractViolation(
                 f"seeds.{key} must be an integer or a string")
-        if isinstance(value, str):
-            _short_text(value, 128, f"seeds.{key}")
-        out[key] = value
+        out[key] = int(value)
     return out
 
 
@@ -691,7 +727,8 @@ def seeds_to_wire(seeds: Any) -> dict[str, Any]:
 WIRE_KEYS = frozenset({
     "final_text", "tool_calls", "tool_calls_omitted_count", "artifacts",
     "events", "timing", "llm_call_count", "reward", "success",
-    "agent_fingerprint", "exclusion", "checks", "termination", "seeds",
+    "agent_fingerprint", "exclusion", "checks", "checks_dropped",
+    "termination", "seeds",
 })
 
 
@@ -726,6 +763,13 @@ class RolloutOutput:
     #: one ``reward``/``success``: see :func:`checks_to_wire`. ``None`` is
     #: "not reported"; ``[]`` is not sent either (it states nothing).
     checks: list[dict[str, Any]] | None = None
+    #: How many checks this episode ran that the report does NOT carry: the
+    #: rows past :data:`MAX_REPORTED_CHECKS`, and every row of a ``checks``
+    #: the wire could not carry at all (``runner._wire_payload``). Sent as
+    #: ``checks_dropped`` when positive, so a reader of the stored episode can
+    #: tell "these were all its checks" from "these are the ones that fit".
+    #: Only a positive integer is stated; anything else is not sent.
+    checks_dropped: int = 0
     #: How the episode ended, ``{"class", "detail"}``, the class one of
     #: :data:`TERMINATION_CLASSES`. A statement, not a verdict: the platform
     #: decides from its own records whether the ending was the policy's.
@@ -761,8 +805,14 @@ class RolloutOutput:
                 "reason": self.exclusion_reason,
                 "detail": self.exclusion_detail,
             }
+        dropped = self.checks_dropped
+        if type(dropped) is not int or dropped < 0:
+            dropped = 0
         if self.checks:
             d["checks"] = checks_to_wire(self.checks)
+            dropped += checks_over_limit(self.checks)
+        if dropped:
+            d["checks_dropped"] = dropped
         if self.termination is not None:
             d["termination"] = termination_to_wire(self.termination)
         if self.seeds is not None:

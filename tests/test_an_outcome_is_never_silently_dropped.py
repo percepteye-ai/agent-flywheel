@@ -775,6 +775,67 @@ def test_one_malformed_evidence_part_does_not_cost_the_episode_its_outcome():
     assert wire["termination"] == {"class": "completed"}
     assert wire["seeds"] == {"environment": 7}
     assert out.checks, "the caller's object was mutated"
+    # ...AND THE STORED EPISODE SAYS SO. A warning reaches the process that
+    # ran the agent and nobody who reads the episode: without the count, an
+    # episode whose checks could not be sent reads as one that ran none.
+    assert wire["checks_dropped"] == 1
+
+
+def test_an_unsendable_termination_or_seed_claims_no_missing_checks():
+    """``checks_dropped`` counts checks. A report that lost another part
+    still carries every check it ran."""
+    import pytest
+
+    from agent_flywheel.runner import _wire_payload
+
+    out = RolloutOutput(
+        final_text="done", checks=[{"id": "a", "status": "measured"}],
+        termination={"class": "gave_up"})
+    with pytest.warns(RuntimeWarning, match="termination"):
+        wire = _wire_payload(out)
+    assert wire["checks"] == [{"id": "a", "status": "measured"}]
+    assert "termination" not in wire and "checks_dropped" not in wire
+
+
+def test_a_report_that_carries_the_first_checks_says_so_out_loud():
+    """Over the limit is not a refusal: the first rows go, the count goes
+    with them, and the process that stated too many is told once per
+    report."""
+    import pytest
+
+    from agent_flywheel.contract import MAX_REPORTED_CHECKS
+    from agent_flywheel.runner import _wire_payload
+
+    out = RolloutOutput(final_text="done", reward=1.0, checks=[
+        {"id": str(i), "status": "measured"}
+        for i in range(MAX_REPORTED_CHECKS + 2)])
+    with pytest.warns(RuntimeWarning, match="says 2 were not") as caught:
+        wire = _wire_payload(out)
+    assert len(caught) == 1
+    assert len(wire["checks"]) == MAX_REPORTED_CHECKS
+    assert wire["checks_dropped"] == 2 and wire["reward"] == 1.0
+    assert "exclusion" not in wire
+    # The count survives the spool and the child process, which both carry
+    # the wire form and rebuild the output from it.
+    assert _output_from_wire(wire).to_wire() == wire
+
+
+def test_the_salvage_says_the_checks_it_could_not_carry():
+    """When something besides the evidence is unsendable the report is
+    rebuilt from the two always-sendable fields, and it carries no check."""
+    import warnings as _warnings
+
+    from agent_flywheel.runner import _wire_payload
+
+    out = RolloutOutput(
+        final_text="done", llm_call_count=-1,
+        checks=[{"id": "a", "status": "measured"},
+                {"id": "b", "status": "error"}])
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore")
+        wire = _wire_payload(out)
+    assert wire["exclusion"]["reason"] == "flywheel_crash"
+    assert "checks" not in wire and wire["checks_dropped"] == 2
 
 
 def test_the_child_process_reports_through_the_same_seam(

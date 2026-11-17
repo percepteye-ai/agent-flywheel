@@ -8,6 +8,7 @@ entrypoint in a child, the same in-process, and a command (``PERCEPTEYE_TASK_ID`
 """
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import stat
@@ -15,7 +16,7 @@ import time
 
 import pytest
 
-from agent_flywheel import RolloutRequest, current_task_id
+from agent_flywheel import RolloutOutput, RolloutRequest, current_task_id
 from agent_flywheel.isolation import build_child_env
 from agent_flywheel.runner import RolloutRunner
 
@@ -170,3 +171,53 @@ def test_a_command_agent_reports_what_its_environment_checked(tmp_path):
     assert out.seeds == {"environment": 11}
     wire = out.to_wire()
     assert wire["checks"] == out.checks and wire["seeds"] == out.seeds
+
+
+def _outcome_file(tmp_path, body) -> RolloutOutput:
+    from agent_flywheel.runner import _attach_reported_outcome
+
+    (tmp_path / "outcome.json").write_text(json.dumps(body))
+    out = RolloutOutput(final_text="done")
+    _attach_reported_outcome(out, str(tmp_path))
+    return out
+
+
+def test_an_outcome_file_with_too_many_checks_keeps_the_first(tmp_path):
+    """More checks than a report carries is not a malformed part: the whole
+    list used to be ignored for it. Mutation: stop counting in
+    ``_attach_reported_outcome`` -> the report claims nothing is missing."""
+    out = _outcome_file(tmp_path, {"checks": [
+        {"id": str(i), "status": "measured"} for i in range(203)]})
+    assert [c["id"] for c in out.checks] == [str(i) for i in range(200)]
+    wire = out.to_wire()
+    assert len(wire["checks"]) == 200 and wire["checks_dropped"] == 3
+
+
+def test_an_outcome_file_number_too_large_to_be_one_is_ignored(tmp_path):
+    """``float(10**400)`` raised OverflowError out of the reader, which
+    catches only the contract's refusal: the episode's report went with it."""
+    out = _outcome_file(tmp_path, {
+        "reward": 10**400, "success": True,
+        "checks": [{"id": "a", "status": "measured", "value": 10**400}],
+        "seeds": {"environment": 10**400, "sampling": 7.0}})
+    assert out.reward is None and out.success is True
+    assert out.checks is None and out.seeds is None
+    out = _outcome_file(tmp_path, {"seeds": {"sampling": 7.0}})
+    assert out.seeds == {"sampling": 7}
+
+
+def test_an_outcome_file_that_spells_nan_keeps_everything_else(tmp_path):
+    """``json.dump`` writes ``NaN``/``Infinity``; they are read as null, the
+    way a JavaScript writer spells them and the Node reader reads them. A
+    name inside a string is left alone. Mutation: drop ``parse_constant`` ->
+    the ``NaN`` check value is a malformed row and the checks are lost."""
+    from agent_flywheel.runner import _attach_reported_outcome
+
+    (tmp_path / "outcome.json").write_text(
+        '{"reward": NaN, "success": true, "seeds": {"sampling": "NaN"}, '
+        '"checks": [{"id": "a", "status": "abstained", "value": -Infinity}]}')
+    out = RolloutOutput(final_text="done")
+    _attach_reported_outcome(out, str(tmp_path))
+    assert out.reward is None and out.success is True
+    assert out.seeds == {"sampling": "NaN"}
+    assert out.checks == [{"id": "a", "status": "abstained"}]

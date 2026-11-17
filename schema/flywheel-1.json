@@ -615,6 +615,11 @@
             "$ref": "#/$defs/ReportedCheck"
           }
         },
+        "checks_dropped": {
+          "description": "How many checks the episode ran that this report does NOT carry: the rows past the 200 a report holds, or every row when the checks could not be sent at all. Present only when positive. A STATEMENT by the flywheel, like the checks themselves.",
+          "type": "integer",
+          "minimum": 1
+        },
         "termination": {
           "description": "How the episode ended, as the flywheel saw it. The class is a statement; whether the ending was the policy's doing or the platform's is decided server-side from the gateway's own records, and nothing here can assert it.",
           "oneOf": [

@@ -35,10 +35,13 @@ from pathlib import Path
 from typing import Any
 
 from .contract import (
+    MAX_REPORTED_CHECKS,
     RolloutOutput,
     RolloutRequest,
     ToolCallOutcome,
+    checks_over_limit,
     checks_to_wire,
+    finite_number,
     seeds_to_wire,
     termination_to_wire,
 )
@@ -268,19 +271,30 @@ def _attach_reported_outcome(out: RolloutOutput, trajectory_dir: str) -> None:
     number is a reward and only a bool a success; anything else is ignored,
     never coerced. ``checks``, ``termination`` and ``seeds`` are read the same
     way (:func:`contract.checks_to_wire` and its siblings say what is
-    well-formed). A value the output already carries is not replaced."""
+    well-formed). A value the output already carries is not replaced.
+
+    MORE CHECKS THAN A REPORT CARRIES (``MAX_REPORTED_CHECKS``) are not a
+    malformed part: the first ones are kept and the rest are counted in
+    ``out.checks_dropped``, which the report states.
+
+    THE NODE SDK READS THE SAME FILE BY THE SAME RULES
+    (``wire.js reportedOutcome``); ``tests/test_reported_outcome_parity.py``
+    drives one table of files through both."""
     path = os.path.join(trajectory_dir, OUTCOME_FILENAME)
     try:
         with open(path, encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
+            # ``NaN``/``Infinity`` are not JSON, but ``json.dump`` writes them
+            # and this reader took them. Read as null -- which is how a
+            # JavaScript writer spells them, and what the Node reader does --
+            # so one file is the same statement under either runner.
+            data = json.load(fh, parse_constant=lambda _name: None)
+    except (OSError, ValueError, RecursionError):
         return
     if not isinstance(data, dict):
         return
-    reward = data.get("reward")
-    if (out.reward is None and isinstance(reward, (int, float))
-            and not isinstance(reward, bool) and math.isfinite(float(reward))):
-        out.reward = float(reward)
+    reward = finite_number(data.get("reward"))
+    if out.reward is None and reward is not None:
+        out.reward = reward
     success = data.get("success")
     if out.success is None and isinstance(success, bool):
         out.success = success
@@ -298,6 +312,8 @@ def _attach_reported_outcome(out: RolloutOutput, trajectory_dir: str) -> None:
             continue
         if stated:
             setattr(out, name, stated)
+            if name == "checks":
+                out.checks_dropped += checks_over_limit(data[name])
 
 
 def _attach_trajectory(out: RolloutOutput, trajectory_dir: str) -> None:
@@ -2645,11 +2661,24 @@ _EVIDENCE_PARTS = (
 )
 
 
+def _checks_not_carried(out: RolloutOutput) -> int:
+    """``checks_dropped`` for a report that carries NONE of ``out``'s checks:
+    every row the episode ran, and the ones it already counted as dropped.
+    The one evidence part with a place on the wire to say it went missing.
+    Never raises."""
+    checks = getattr(out, "checks", None)
+    stated = getattr(out, "checks_dropped", 0)
+    return (len(checks) if isinstance(checks, (list, tuple)) else 0) + (
+        stated if type(stated) is int and stated > 0 else 0)
+
+
 def _without_unsendable_evidence(
     out: RolloutOutput,
 ) -> tuple[RolloutOutput, list[str]]:
     """``out`` less each evidence part its own serialiser refuses, and the
-    names of the parts removed. Never raises."""
+    names of the parts removed. Never raises. Checks removed this way are
+    counted in ``checks_dropped``, so the stored episode says its checks are
+    missing and not that it ran none."""
     unsendable: list[str] = []
     for name, to_wire in _EVIDENCE_PARTS:
         value = getattr(out, name, None)
@@ -2661,8 +2690,11 @@ def _without_unsendable_evidence(
             unsendable.append(name)
     if not unsendable:
         return out, []
+    changes: dict[str, Any] = {name: None for name in unsendable}
+    if "checks" in unsendable:
+        changes["checks_dropped"] = _checks_not_carried(out)
     try:
-        return replace(out, **{name: None for name in unsendable}), unsendable
+        return replace(out, **changes), unsendable
     except Exception:
         return out, []
 
@@ -2686,7 +2718,7 @@ def _wire_payload(out: RolloutOutput) -> dict[str, Any]:
     produced" is legible without this SDK's source.
     """
     try:
-        return out.to_wire()
+        wire = out.to_wire()
     except Exception as exc:
         # The evidence parts are statements ABOUT the outcome, not the outcome.
         # One malformed check row (a NaN value, an unknown key) must not cost
@@ -2703,7 +2735,9 @@ def _wire_payload(out: RolloutOutput) -> dict[str, Any]:
                     f"[agent-flywheel] this rollout's {', '.join(unsendable)} "
                     f"could not be represented on the flywheel/1 wire "
                     f"({type(exc).__name__}: {exc}) and was not sent; the "
-                    f"rest of the result was.",
+                    f"rest of the result was"
+                    + (f", and it says {wire['checks_dropped']} checks are "
+                       f"missing." if wire.get("checks_dropped") else "."),
                     RuntimeWarning, stacklevel=2)
                 return wire
         # ``getattr``, because this function's whole contract is that it does
@@ -2726,6 +2760,7 @@ def _wire_payload(out: RolloutOutput) -> dict[str, Any]:
             final_text=out.final_text if isinstance(out.final_text, str) else "",
             exclusion_reason=out.exclusion_reason or "flywheel_crash",
             exclusion_detail=detail[:4000],
+            checks_dropped=_checks_not_carried(out),
         )
         try:
             return salvaged.to_wire()
@@ -2737,6 +2772,15 @@ def _wire_payload(out: RolloutOutput) -> dict[str, Any]:
                 exclusion_reason="flywheel_crash",
                 exclusion_detail=f"unrepresentable result: {type(exc).__name__}",
             ).to_wire()
+    over = checks_over_limit(out.checks)
+    if over:
+        warnings.warn(
+            f"[agent-flywheel] this rollout states {len(out.checks)} checks "
+            f"and a report carries at most {MAX_REPORTED_CHECKS}; the first "
+            f"{MAX_REPORTED_CHECKS} were sent and the report says {over} "
+            f"were not.",
+            RuntimeWarning, stacklevel=2)
+    return wire
 
 
 def _spooled_rollout(
@@ -2854,6 +2898,7 @@ def _output_from_wire(d: dict[str, Any]) -> RolloutOutput:
         timing=dict(d.get("timing") or {}),
         agent_fingerprint=d.get("agent_fingerprint"),
         checks=d.get("checks"),
+        checks_dropped=d.get("checks_dropped") or 0,
         termination=d.get("termination"),
         seeds=d.get("seeds"),
     )
