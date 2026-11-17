@@ -73,11 +73,26 @@ _PRODUCTION_TURN_IDENTIFIER_RE = re.compile(
 )
 
 
+def _well_formed_text(value: str) -> bool:
+    """Whether ``value`` is Unicode text a JSON parser takes: no LONE
+    SURROGATE. Python strings can hold one (``"\\ud800"``), and the wire
+    escapes it, but the control plane's parser refuses it -- a 422 for the
+    whole batch, then a record dropped by the split. Refused at the call
+    instead, so what is refused at the call and at the wire cannot differ.
+    The Node SDK's ``String.prototype.isWellFormed``."""
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _production_identifier(value: Any) -> str | None:
     """Return an exact identifier representable on the production-turn wire."""
     if (
         not isinstance(value, str)
         or not value
+        or not _well_formed_text(value)
         or len(value) > _PRODUCTION_IDENTIFIER_MAX_CHARS
         or _PRODUCTION_IDENTIFIER_RE.fullmatch(value) is None
     ):
@@ -90,6 +105,7 @@ def _production_turn_identifier(value: Any) -> str | None:
     if (
         not isinstance(value, str)
         or not value
+        or not _well_formed_text(value)
         or len(value) > _PRODUCTION_IDENTIFIER_MAX_CHARS
         or _PRODUCTION_TURN_IDENTIFIER_RE.fullmatch(value) is None
     ):
@@ -232,6 +248,8 @@ def production_outcome(wire: Any) -> dict[str, Any]:
             raise InvalidOutcome(
                 "note must be a non-empty string of at most "
                 f"{_PRODUCTION_OUTCOME_NOTE_MAX_CHARS} characters")
+        if not _well_formed_text(note):
+            raise InvalidOutcome("note must be well-formed Unicode text")
         out["note"] = note
     occurred_at = wire.get("occurred_at")
     if not _is_rfc3339_instant(occurred_at):

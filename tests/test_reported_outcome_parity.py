@@ -1,6 +1,6 @@
 """ONE reading of what an agent's environment states, in two languages.
 
-Five tables, each driven through this SDK and through the Node SDK, and the
+Six tables, each driven through this SDK and through the Node SDK, and the
 two answers compared:
 
 * ``OUTCOME_FILES`` -- raw ``outcome.json`` texts, through
@@ -15,6 +15,8 @@ two answers compared:
   that the two SDKs refuse the same reports in the same words.
 * ``CHECKS`` -- what a report's ``checks`` may be, through
   ``RolloutOutput.to_wire`` and ``rolloutOutputToWire``.
+* ``TEXTS`` -- ids and notes holding a lone surrogate, which the control
+  plane's parser refuses; both SDKs now refuse them at the call.
 * ``EPISODE_IDS`` -- through ``current_rollout_id`` and the Node plugin's
   ``currentRolloutId``: the episode id an outcome is reported against. Node
   once had no producer of it for application code.
@@ -205,11 +207,13 @@ import {
 } from './src/wire.js';
 let raw = '';
 for await (const chunk of process.stdin) raw += chunk;
-const { files, seeds, outcomes, feedback, checks } = JSON.parse(raw);
+const { files, seeds, outcomes, feedback, checks, texts } = JSON.parse(raw);
 const answer = (fn) => {
   try { return { ok: fn() }; } catch (err) { return { refused: err.message }; }
 };
-const out = { files: {}, seeds: {}, outcomes: {}, feedback: {}, checks: {} };
+const out = {
+  files: {}, seeds: {}, outcomes: {}, feedback: {}, checks: {}, texts: {},
+};
 const dir = mkdtempSync(join(tmpdir(), 'outcome-parity-'));
 try {
   for (const [name, text] of Object.entries(files)) {
@@ -227,6 +231,10 @@ for (const [name, wire] of Object.entries(outcomes)) {
 }
 for (const [name, wire] of Object.entries(feedback)) {
   out.feedback[name] = answer(() => turnFeedback(wire));
+}
+for (const [name, [kind, wire]] of Object.entries(texts)) {
+  out.texts[name] = answer(() => (
+    kind === 'outcome' ? productionOutcome(wire) : turnFeedback(wire)));
 }
 for (const [name, value] of Object.entries(checks)) {
   out.checks[name] = answer(() => {
@@ -248,13 +256,36 @@ _FEEDBACK = {"feedback_id": "f-1", "signal": "accepted", "episode_id": "e-1",
 OUTCOMES = {n: _stating(_OUTCOME, v) for n, v in OCCURRED_AT.items()}
 FEEDBACK = {n: _stating(_FEEDBACK, v) for n, v in OCCURRED_AT.items()}
 
+_LONE = "case-\ud800"
+_PAIRED = "case-\U0001F600"
+_AT = {"occurred_at": "2026-11-10T09:00:00Z"}
+#: name -> ("outcome" | "feedback", the report). A LONE SURROGATE in an id or
+#: a note is not text a JSON parser takes: both SDKs once accepted it and the
+#: control plane refused the batch (422). A paired one is an emoji, and kept.
+TEXTS: dict[str, tuple[str, dict]] = {
+    **{f"a lone surrogate in an outcome's {field}": ("outcome", {
+        **_OUTCOME, **_AT, field: _LONE}) for field in (
+            "outcome_id", "turn_id", "conversation_id", "episode_id", "note")},
+    **{f"a lone surrogate in feedback's {field}": ("feedback", {
+        **_FEEDBACK, **_AT, field: _LONE}) for field in (
+            "feedback_id", "episode_id")},
+    **{f"an emoji in an outcome's {field}": ("outcome", {
+        **_OUTCOME, **_AT, field: _PAIRED}) for field in (
+            "outcome_id", "turn_id", "conversation_id", "episode_id", "note")},
+    **{f"an emoji in feedback's {field}": ("feedback", {
+        **_FEEDBACK, **_AT, field: _PAIRED}) for field in (
+            "feedback_id", "episode_id")},
+}
+
+
+
 
 @pytest.fixture(scope="module")
 def node() -> dict[str, dict]:
     sdk, binary = require_node_sdk()
     return json.loads(run_node(sdk, binary, _NODE, stdin=json.dumps({
         "files": OUTCOME_FILES, "seeds": SEEDS, "outcomes": OUTCOMES,
-        "feedback": FEEDBACK, "checks": CHECKS})))
+        "feedback": FEEDBACK, "checks": CHECKS, "texts": TEXTS})))
 
 
 def _python_reads(text: str, tmp_path) -> dict:
@@ -429,3 +460,13 @@ def test_the_checks_table_refuses_and_accepts(node):
     assert "refused" in node["checks"]["an empty object"]
     assert node["checks"]["one row"]["ok"]["checks"] == [
         {"id": "row", "status": "abstained"}]
+
+
+@pytest.mark.parametrize("name", sorted(TEXTS))
+def test_both_sdks_refuse_the_same_text(node, name):
+    kind, wire = TEXTS[name]
+    python = _answer(production_outcome if kind == "outcome" else turn_feedback,
+                     wire)
+    assert node["texts"][name] == python, (
+        f"{name}: Node {node['texts'][name]!r}, Python {python!r}")
+    assert ("refused" in python) == name.startswith("a lone surrogate"), name
