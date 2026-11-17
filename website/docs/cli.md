@@ -107,7 +107,7 @@ The group, not the process, and that is load-bearing. A real CLI agent spawns fr
 
 ## Tool outcomes with no instrumentation
 
-Two routes in. Neither requires a line of code inside the agent.
+Two routes in. Neither requires a line of code inside the agent. A third file, below, carries the episode's grade.
 
 ### 1. An explicit adapter for the event stream your CLI already prints
 
@@ -158,6 +158,21 @@ One JSON object per line. `name` and `outcome` are required; `outcome` is one of
 **One unreadable line costs that line and nothing else.** A truncated final write is the expected case, not an exotic one — the deadline kill lands mid-write. The lost records are counted and travel as `tool_calls_omitted_count`, because a call we know executed and cannot read is not a call that did not happen.
 
 **The trajectory wins.** If anything was recorded there — including `[]`, which is a positive claim that zero calls were made — the stream parse is not consulted. An agent that wrote to the trajectory made a deliberate assertion about its own behavior, and a parse must never overwrite it.
+
+### 3. State the episode's grade in a file
+
+An agent whose own environment grades the episode says so by writing one JSON object to `outcome.json` in the same directory. No SDK, no import.
+
+```bash
+printf '{"reward": 1.0, "success": true, "termination": {"class": "completed"}}\n' \
+  > "$PERCEPTEYE_TRAJECTORY_DIR/outcome.json"
+```
+
+Every key is optional: `reward` (a finite number), `success` (`true` or `false`), and the three evidence parts of the [contract](contract.md) — `checks`, `termination`, `seeds`. Nothing is coerced: a `reward` of `"1"` or `true` is not a reward.
+
+**A part that is malformed is ignored, alone.** A check with a status outside the vocabulary costs the file its checks and nothing else; a file that is not JSON, or not an object, states nothing, and the rollout is still reported. More than 200 checks is not malformed: the first 200 are reported and the report says how many were not (`checks_dropped`). `NaN` and `Infinity` are not JSON but many writers produce them; they are read as `null`.
+
+**The Node plugin reads the same file by the same rules** when it drives a rollout itself, once, as the agent's run ends, and removes it. One table of files is driven through both readers by [`tests/test_reported_outcome_parity.py`](https://github.com/percepteye-ai/agent-flywheel/blob/main/tests/test_reported_outcome_parity.py).
 
 ## Registration: describing a CLI agent
 

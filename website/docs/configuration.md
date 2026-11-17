@@ -336,7 +336,7 @@ Symlinks are **never** followed — one dropped in the agent's own directory wou
 | `PERCEPTEYE_NO_PROMPT` | Set to anything to stop `serve()` offering to create a key in a terminal. It never offers in CI, or when stdin or stderr is not a terminal. |
 | `PERCEPTEYE_INTROSPECT` | Set to `0`, `false`, `no` or `off` to disable agent discovery. |
 | `PERCEPTEYE_ROLLOUT_ID` | *Set by us* for the child. Read it to tag your own logs. |
-| `PERCEPTEYE_TRAJECTORY_DIR` | *Set by us* for the child — already this rollout's directory. Append to `$PERCEPTEYE_TRAJECTORY_DIR/tool_calls.jsonl`; any other file you leave there is collected as an artifact. Also the variable the Node plugins read. |
+| `PERCEPTEYE_TRAJECTORY_DIR` | *Set by us* for the child — already this rollout's directory. Append to `$PERCEPTEYE_TRAJECTORY_DIR/tool_calls.jsonl`, and state the episode's own grade in `outcome.json` beside it ([CLI harnesses](cli.md#3-state-the-episodes-grade-in-a-file)); any other file you leave there is collected as an artifact. Also the variable the Node plugins read. |
 | `PERCEPTEYE_TURN_INPUT` | *Set by us* for a command entrypoint. The task, also on stdin. |
 
 Only `PERCEPTEYE_AGENT_MODE` and `PERCEPTEYE_INTROSPECT` change behavior. The optional Prime example also reads its own documented route settings in `examples/prime_agent`; those are example inputs, not SDK child-environment policy. `PERCEPTEYE_INTROSPECT` and `introspect=` are ANDed — either one off disables discovery — and **only a deliberate value disables it**: a typo leaves it on rather than silently switching capture off while you believe it is running.

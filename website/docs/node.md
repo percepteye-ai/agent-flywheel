@@ -48,7 +48,7 @@ That is the kill switch, and it is the only one: it returns from `register` befo
     Production mode captures every served turn to disk **with `PERCEPTEYE_TRAJECTORY_DIR` unset** — the user's message, the tool calls, and the agent's answer. Nothing leaves the machine without both a key and the control plane's per-agent consent, but it is on disk either way. An operator leaving the plugin installed "because it does nothing without the variable" is accumulating their end users' messages. `PERCEPTEYE_CAPTURE=0` is what makes an install record nothing, and `retentionTurns` in the plugin's config bounds how many turns stay on disk, as `retention_turns=` does for `attach()`.
 
 !!! note
-    `fw.serve()` sets `PERCEPTEYE_TRAJECTORY_DIR` for the child it spawns, already pointed at that rollout's directory — see [CLI harnesses](cli.md). Setting it by hand is for a run you are driving yourself.
+    `fw.serve()` sets `PERCEPTEYE_TRAJECTORY_DIR` for the child it spawns, already pointed at that rollout's directory — see [CLI harnesses](cli.md). Setting it by hand is for a run you are driving yourself. When the plugin drives a rollout it also reads the `outcome.json` the agent's own environment wrote into that directory, exactly as the Python runner does — see [State the episode's grade in a file](cli.md).
 
 ## Observe only, structurally
 

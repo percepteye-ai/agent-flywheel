@@ -78,9 +78,14 @@ repository's.
   - **Older control planes.** One that predates `episode_id` ignores the
     field. One that refuses an episode-only outcome for want of capture
     consent (403) is said once; those outcomes stay on disk and no more are
-    queued by that process. One without `/turn-feedback` (any final 4xx) is
+    queued by that process. One without `/turn-feedback` (a 404 or 405) is
     said once; waiting feedback is dropped and `report_turn_feedback` returns
-    `None` for the rest of the process. Nothing raises into the agent's loop.
+    `None` for the rest of the process. A 403 (a key without the scope) is
+    also said once and stops sending, but keeps what is waiting on disk; a
+    401 or 410 keeps it for a later flush. A report refused alone -- in a
+    4xx, or by name inside a 200 -- is dropped alone, named once in the
+    control plane's own word, and the rest of its batch is sent. Nothing
+    raises into the agent's loop.
 
 - **The customer-API client speaks customer contract 1.51.0** (it declared
   1.31.0 while Mission Control published 1.50.0). Both SDKs, same surface:
@@ -134,8 +139,9 @@ repository's.
   the episode ended and which seeds it ran under.** Three optional parts on
   the report, both SDKs, same words (`schema/flywheel-1.json`:
   `ReportedCheck`, `ReportedTermination`, `ReportedSeeds`):
-  - `checks`: up to 200 rows `{id, status, value, basis, required,
-    establishes}`. `status` is one of `measured`, `unavailable`, `error`,
+  - `checks`: rows `{id, status, value, basis, required, establishes}`. A
+    report carries the first 200; stating more is not an error, and the
+    report says how many it left behind in `checks_dropped`. `status` is one of `measured`, `unavailable`, `error`,
     `abstained`, `not_applicable` (`CHECK_STATUSES`); only a measured check
     carries a `value`, so a check that could not run is never a zero.
     `establishes` is one of `CHECK_ESTABLISHES`.
@@ -143,14 +149,21 @@ repository's.
     `turn_limit`, `token_limit`, `time_limit`, `error`, `cancelled`
     (`TERMINATION_CLASSES`). It is a statement: whether the ending was the
     model's doing is decided by Mission Control from its own records.
-  - `seeds`: `{environment, sampling}`, each an integer or a short string.
+  - `seeds`: `{environment, sampling}`, each a string of 1 to 128 characters
+    or an integer a JSON number carries exactly (at most 2^53 − 1 in
+    magnitude; `7.0` is 7). One rule in both SDKs.
 
-  Python: `RolloutOutput(checks=, termination=, seeds=)`, or the same three
-  keys in a command agent's `outcome.json`. Node: `checks`, `termination` and
-  `seeds` on the report object. A malformed part raises `ContractViolation` /
-  `ContractError` naming the row and field; in `outcome.json` it is ignored
-  whole, like a malformed `reward`. A Mission Control that predates them
-  ignores all three.
+  Python: `RolloutOutput(checks=, termination=, seeds=)`. Node: `checks`,
+  `termination` and `seeds` on the report object. Either: the same three keys
+  in `$PERCEPTEYE_TRAJECTORY_DIR/outcome.json`, which the Python runner reads
+  for a command agent and the Node plugin reads (and removes) when it drives a
+  rollout, by one set of rules -- `reward` and `success` included, `NaN` and
+  `Infinity` read as null. A malformed part raises `ContractViolation` /
+  `ContractError` naming the row and field when converted directly; in
+  `outcome.json`, and in a report about to be sent, it is left out alone with
+  a warning and the outcome is still reported. When the part left out is the
+  checks, `checks_dropped` counts them, so the stored episode says they are
+  missing. A Mission Control that predates these keys ignores them.
 
 ### Changed
 
