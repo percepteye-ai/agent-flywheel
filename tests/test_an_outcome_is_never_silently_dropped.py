@@ -332,6 +332,10 @@ def test_a_payload_the_wire_cannot_carry_does_not_strand_the_other_leases(tmp_pa
                 name="grep", arguments={"q": "x"}, status_code=None,
                 outcome="ok",
             )]
+            out.checks = [{"id": "balance_restored", "status": "measured",
+                           "value": 1.0}]
+            out.termination = {"class": "completed"}
+            out.seeds = {"environment": 7}
         return out
     runner.run_one = poisoned
 
@@ -354,7 +358,7 @@ def test_a_payload_the_wire_cannot_carry_does_not_strand_the_other_leases(tmp_pa
     # and reward that WERE captured are gone with no trace that they existed.
     detail = bad["exclusion"]["detail"]
     assert "dropped by the salvage" in detail, detail
-    for lost in ("tool_calls", "reward"):
+    for lost in ("tool_calls", "reward", "checks", "termination", "seeds"):
         assert lost in detail.split("dropped by the salvage:")[1], (
             f"{lost} was populated, was discarded, and is not named: {detail}"
         )
