@@ -2692,10 +2692,11 @@ def attach(
             except Exception:
                 pass
         raise
-    if declared is not None:
+    if declared is not None and declared.describes:
         # What the customer declared wins where they gave it; with no
         # entrypoint it is the whole description. And it is their word, not an
         # observation of what runs, so it anchors no execution identity.
+        # (``api_spec`` alone describes nothing and changes neither.)
         described = _declaration.apply(declared, reflected=described,
                                        agent_name=agent_id)
         agent_fingerprint = None
@@ -2813,6 +2814,10 @@ def attach(
                     registration["discovered_agent"] = (
                         described.to_wire() if described is not None else None
                     )
+                if declared is not None:
+                    # Where the agent's API spec is published, when describe=
+                    # says (declaration.py): a reference, never the document.
+                    registration.update(declared.registration_fields())
                 reg = tr.register(registration)
                 # WHAT THE SERVER SAID, not what we assume, and asked through
                 # the ONE predicate `_recheck_capture` asks -- see

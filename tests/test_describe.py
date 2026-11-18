@@ -406,3 +406,58 @@ def test_a_callable_that_raises_leaves_no_adapter_bound(monkeypatch, tmp_path):
     with pytest.raises(ConfigurationError, match="describe= raised KeyError"):
         fw.attach(agent_id="support", trajectory_root=str(tmp_path), describe=describe)
     assert bound == [1] and undone == [1]
+
+
+# ── api_spec: a reference beside the description ───────────────────────────
+
+SPEC_URL = "https://api.acme.example/openapi.json"
+
+
+def test_a_declared_api_spec_rides_beside_the_description(captured):  # noqa: F811
+    spec = _serve(captured, describe={"api_spec": f"  {SPEC_URL}\n",
+                                      "tools": TOOLS[:1]})
+    assert spec["api_spec"] == SPEC_URL
+    assert "api_spec" not in spec["discovered_agent"]
+    plain = _serve(captured, describe={"tools": TOOLS[:1]})
+    assert "api_spec" not in plain
+    # The description is the one the same tools alone register.
+    assert spec["discovered_agent"] == plain["discovered_agent"]
+
+
+def test_an_api_spec_alone_describes_nothing_and_withholds_nothing(
+        captured, monkeypatch):  # noqa: F811
+    asked: list[bool] = []
+    real = RolloutRunner.configure_execution_identity
+
+    def spy(self, described, **kw):
+        asked.append(kw["discovery_enabled"])
+        return real(self, described, **kw)
+
+    monkeypatch.setattr(RolloutRunner, "configure_execution_identity", spy)
+    alone = _serve(captured, describe={"api_spec": SPEC_URL})
+    plain = _serve(captured)
+    assert asked == [True, True]
+    assert alone["discovered_agent"] == plain["discovered_agent"]
+    assert alone["api_spec"] == SPEC_URL
+
+
+@pytest.mark.parametrize("bad", ["./openapi.yaml", "/srv/spec.json",
+                                 "file:///spec.json", "ftp://h/spec",
+                                 "https://", 5])
+def test_an_api_spec_that_is_not_a_url_refuses_at_startup(captured, bad):  # noqa: F811
+    with pytest.raises(ConfigurationError, match=r"describe\['api_spec'\] must be"):
+        _serve(captured, describe={"api_spec": bad})
+
+
+def test_attach_sends_the_api_spec_and_keeps_its_identity(monkeypatch, tmp_path):
+    monkeypatch.setattr("agent_flywheel.introspection.introspect",
+                        lambda fn: _exact_description())
+    kwargs = dict(adapters=[], execution_entrypoint=_IdentityAgent(),
+                  execution_input_shape="messages",
+                  attested_execution_components={"customer.release": "a" * 64})
+    tr = _Transport()
+    with _attached(monkeypatch, tmp_path, tr, describe={"api_spec": SPEC_URL},
+                   **kwargs) as px:
+        assert px.agent_fingerprint is not None
+    assert tr.registered["api_spec"] == SPEC_URL
+    assert tr.registered["discovered_agent"]["source_type"] != "sdk_declared"

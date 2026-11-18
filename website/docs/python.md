@@ -34,7 +34,7 @@ px.record_answer(turn_id, reply)          # after the scope closes: the answer e
 | `execution_entrypoint` | `None` | the live Python agent/import spec to describe for exact execution identity |
 | `execution_input_shape` · `execution_method` | `"text"` · `None` | the declared call surface of `execution_entrypoint` |
 | `attested_execution_components` | `None` | opaque exact adapter evidence for implementation/state discovery cannot observe |
-| `describe` | `None` | the agent's own `system_prompt` / `tools` / `model` — without `execution_entrypoint`, the whole description this registration sends ([`describe=`](how-it-works.md#an-agent-nothing-can-read-describe)) |
+| `describe` | `None` | the agent's own `system_prompt` / `tools` / `model` — without `execution_entrypoint`, the whole description this registration sends — and, optionally, `api_spec`, the URL of its API spec ([`describe=`](how-it-works.md#an-agent-nothing-can-read-describe)) |
 | `rules` | `None` | the Product's workflow rules, declared once after the registration, exactly as for [`serve()`](configuration.md#a-products-workflow-rules-rules); `None` sends nothing, `[]` retracts |
 
 With `register=True` the call makes exactly two outbound requests, once, at startup: `POST /agents` then `GET /policy/current` — and a third, `POST /agents/{agent_id}/rulebook`, only when `rules=` is given, sent in the background after the policy read: `attach()` returns without waiting for its answer. It registers as `mode: "production"` — `serve()` sends `"rollout"`, and a training donor versus a production reader is the one distinction a `mode` on a registration exists to draw. `register=False` skips every one of them, for a process that should make no outbound connection at all.
@@ -435,7 +435,7 @@ On a practice task whose text is `"count to three"`, the reported trajectory is:
 
 **`unknown`, not `ok`.** The tool returned a string and nothing observed whether the call succeeded. `Tool.invoke({"q": ...})` with a plain dict has no tool-call id to attach, so LangChain returns raw content rather than a `ToolMessage` — and raw content from a tool that worked is byte-identical to raw content from a tool that caught its own exception and returned prose. Calling that `ok` is the single most consequential lie a capture can tell, so the adapter does not.
 
-That is the honest floor zero instrumentation buys you, and it is enforced by [`tests/test_zero_instrumentation.py`](https://github.com/percepteye-ai/agent-flywheel/blob/main/tests/test_zero_instrumentation.py) inside the 1975-test suite. Drive the same tool through a model-issued tool call and the same adapter reports `"outcome": "ok"` with the model's `tool_call_id` attached, because then there is a `ToolMessage` with a real `status`.
+That is the honest floor zero instrumentation buys you, and it is enforced by [`tests/test_zero_instrumentation.py`](https://github.com/percepteye-ai/agent-flywheel/blob/main/tests/test_zero_instrumentation.py) inside the 1992-test suite. Drive the same tool through a model-issued tool call and the same adapter reports `"outcome": "ok"` with the model's `tool_call_id` attached, because then there is a `ToolMessage` with a real `status`.
 
 One call where you *do* know the answer gets you the rest:
 

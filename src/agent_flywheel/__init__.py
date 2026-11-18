@@ -846,7 +846,7 @@ def _describe_via_host(
         )
         return described
 
-    if declared is None:
+    if declared is None or not declared.describes:
         consequence = (
             "This agent will register as introspection_state=unreadable, no "
             "workflows will be generated for it, and every phase downstream of "
@@ -1064,7 +1064,13 @@ def serve(
             anchors an execution identity -- it is your word, not an
             observation. ``introspect=False`` with ``describe=`` is a
             contradiction and raises; ``PERCEPTEYE_INTROSPECT=0`` wins over
-            it, with a warning.
+            it, with a warning. Optionally ``api_spec``: the absolute
+            http(s) URL where the agent's API spec is published, in any
+            format the control plane reads. Sent as a reference beside the
+            description (never the document) and recorded as the spec of
+            the Product that declares this agent, so its tools are matched to
+            the operations they call; it is not part of the description and
+            withholds no execution identity.
         rules: the workflow rules of the Product this agent belongs to, one
             prose rule per string, sent once at startup, after registration,
             to ``POST /agents/{agent_id}/rulebook``. The control plane files
@@ -1346,6 +1352,10 @@ def serve(
         described = _declaration.apply(declared, reflected=described,
                                        agent_name=agent_id)
         payload["discovered_agent"] = described.to_wire() if described else None
+        # Where the agent's API spec is published, when describe= says: a
+        # reference beside the description, never part of it (declaration.py).
+        if declared is not None:
+            payload.update(declared.registration_fields())
 
     # The rollout fingerprint is authored here, after discovery, from the same
     # framework-neutral facts registration sends plus exact pre-projection
@@ -1357,7 +1367,9 @@ def serve(
     # about their agent, not an observation of what runs.
     runner.configure_execution_identity(
         described,
-        discovery_enabled=discovery_enabled and declared is None,
+        # ``api_spec`` alone describes nothing, so it withholds nothing.
+        discovery_enabled=discovery_enabled and not (
+            declared is not None and declared.describes),
         sdk=payload["sdk"],
         contract_version=CONTRACT_VERSION,
     )
