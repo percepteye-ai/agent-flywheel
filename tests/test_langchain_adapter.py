@@ -277,9 +277,9 @@ def test_a_raised_traceback_keeps_its_exception_line(monkeypatch, tmp_path):
 
 
 def test_events_outside_a_binding_are_ignored():
-    """The handler is registered process-wide once; only a bound context
-    records. Otherwise a sub-agent or worker thread would attribute its tools
-    to whatever rollout ran last."""
+    """The hook is registered process-wide once and outlives every bind; with
+    nothing bound -- no context binding and no process-wide one -- the
+    handler records nothing."""
     from agent_flywheel.adapters.langchain import _ACTIVE, _build_handler_cls
 
     assert _ACTIVE.get() is None
