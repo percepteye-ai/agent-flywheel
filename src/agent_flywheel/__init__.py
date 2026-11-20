@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal
@@ -317,6 +318,49 @@ def current_mode() -> str:
     wherever it is first read rather than only at startup.
     """
     return resolve_mode()
+
+
+#: Words that make a flag or a ``NAME=`` assignment a secret's: a flag whose
+#: name, split on ``-`` and ``_``, contains one of these has its value
+#: replaced in the registered entrypoint. Whole words, so ``--max-tokens``
+#: is not ``--token``.
+_SECRET_WORDS = frozenset({
+    "token", "key", "apikey", "password", "passwd", "pwd", "secret",
+    "auth", "credential", "credentials", "bearer",
+})
+_REDACTED_ARG = "[REDACTED]"
+
+
+def _secret_name(name: str) -> bool:
+    words = re.split(r"[-_]+", name.lstrip("-").lower())
+    return any(w in _SECRET_WORDS for w in words)
+
+
+def _registered_argv(command: Sequence[Any]) -> list[str]:
+    """A command entrypoint's argv as it is REGISTERED: every word a string,
+    every minted key (``pefw_``, ``mck_``) redacted by its shape
+    (:func:`~agent_flywheel._http.redact_keys`), and the value of every
+    secret-named flag (``--api-key X``, ``--token=X``) or assignment
+    (``API_KEY=X``) replaced. The argv the runner EXECUTES is untouched."""
+    from ._http import redact_keys
+
+    out: list[str] = []
+    hide_next = False
+    for raw in command:
+        arg = str(redact_keys(str(raw)))
+        if hide_next:
+            out.append(_REDACTED_ARG)
+            hide_next = False
+            continue
+        name, eq, _value = arg.partition("=")
+        if eq and _secret_name(name):
+            out.append(f"{name}={_REDACTED_ARG}")
+        elif arg.startswith("-") and _secret_name(arg):
+            out.append(arg)
+            hide_next = True
+        else:
+            out.append(arg)
+    return out
 
 
 def _env_true(name: str, *, default: bool) -> bool:
@@ -1281,7 +1325,10 @@ def serve(
         # raised TypeError here — the same class of bug the line above records
         # having shipped once, where reading .name off a command entrypoint
         # failed every non-Python agent at registration.
-        else " ".join(str(a) for a in (getattr(runner, "_command", None) or []))
+        # SCRUBBED (_registered_argv): an argv routinely carries a secret
+        # (``--api-key sk-...``), and this label is stored and shown by the
+        # control plane.
+        else " ".join(_registered_argv(getattr(runner, "_command", None) or []))
         or "command"
     )
 
@@ -1296,8 +1343,10 @@ def serve(
         "sdk": f"agent-flywheel-python/{__version__}",
         "contract_version": CONTRACT_VERSION,
         "reports_tool_calls": bool(reports_tool_calls),
-        "isolation": isolation,
-        "concurrency": concurrency,
+        # What the runner WILL do, not what was asked: a command entrypoint
+        # always runs as its own process, whatever ``isolation`` said.
+        "isolation": runner.isolation,
+        "concurrency": runner.concurrency,
         "input_shape": input_shape,
         "entrypoint": entrypoint_label,
     }

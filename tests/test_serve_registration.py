@@ -266,3 +266,30 @@ def test_serve_says_when_mission_controls_switch_is_off(
     assert ("Allow practice runs" in out) is says, out
     if says:
         assert "practice runs are not allowed for this agent." in out
+
+
+# ── PY-M18: the registered entrypoint carries no secret, and the truth ─────
+
+
+def test_a_command_argv_is_registered_without_its_secrets(captured):
+    """The control plane stores and shows this label; an argv routinely
+    carries a key. The argv the runner executes is not touched."""
+    key = "pefw_" + "Q" * 43
+    spec = captured([
+        "node", "agent.js", "--api-key", "sk-live-123", "--token=tok-456",
+        "OPENAI_API_KEY=sk-env-789", key, "--max-tokens", "512",
+    ])
+    label = spec["entrypoint"]
+    for secret in ("sk-live-123", "tok-456", "sk-env-789", key):
+        assert secret not in label, label
+    assert label == (
+        "node agent.js --api-key [REDACTED] --token=[REDACTED] "
+        "OPENAI_API_KEY=[REDACTED] pefw_[REDACTED] --max-tokens 512"
+    )
+
+
+def test_a_command_entrypoint_registers_the_isolation_it_runs_with(captured):
+    """A command is its own process whatever ``isolation`` said; the
+    registration reported the argument instead of what the runner does."""
+    spec = captured(["python", "my_agent.py"], isolation="inprocess")
+    assert spec["isolation"] == "subprocess"
