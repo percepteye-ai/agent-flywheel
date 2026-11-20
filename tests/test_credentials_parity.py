@@ -89,3 +89,107 @@ def test_python_finds_what_node_stored(tmp_path):
     creds.save_stored(creds.StoredCredential(
         control_plane_url=CP, agent_id="alpha", api_key="pefw_" + "A" * 43), env)
     assert creds.find_stored(CP, "openclaw", env).api_key == KEY
+
+
+# ── one lock for both SDKs ────────────────────────────────────────────────
+
+
+def test_both_sdks_lock_the_file_by_one_protocol(tmp_path):
+    """The same lock file, the same stale timeout, the same wait: each SDK's
+    lock is the other's. Mutation: either SDK back to a lock of its own
+    (Python's flock, Node's ``credentials.json.node-lock``) -> red."""
+    sdk, node = require_node_sdk()
+    script = (
+        "import { LOCK_FILENAME, LOCK_STALE_MS, LOCK_WAIT_MS } "
+        "from './src/credentials.js';\n"
+        "console.log(JSON.stringify([LOCK_FILENAME, LOCK_STALE_MS, LOCK_WAIT_MS]));\n"
+    )
+    assert json.loads(run_node(sdk, node, script)) == [
+        creds.LOCK_FILENAME, creds.LOCK_STALE_S * 1000, creds.LOCK_WAIT_S * 1000]
+
+
+def test_a_python_writer_waits_on_a_node_writers_lock(tmp_path):
+    """A lock Node holds (fresh, so not stale) keeps a Python write out
+    until it is released; a stale one Node left is taken over."""
+    import threading
+    import time as _time
+
+    sdk, node = require_node_sdk()
+    home = tmp_path / "home"
+    env = {"PERCEPTEYE_HOME": str(home)}
+    script = (
+        "import { saveStored } from './src/credentials.js';\n"
+        "import { existsSync } from 'node:fs';\n"
+        "let input = '';\n"
+        "process.stdin.on('data', (c) => { input += c; });\n"
+        "process.stdin.on('end', () => {\n"
+        "  const { env } = JSON.parse(input);\n"
+        "  saveStored({ control_plane_url: %r, agent_id: 'node', api_key: %r }, env);\n"
+        "  console.log(existsSync(env.PERCEPTEYE_HOME + '/credentials.json.lock'));\n"
+        "});\n" % (CP, KEY)
+    )
+    # Node's own write leaves no lock behind.
+    assert run_node(sdk, node, script, stdin=json.dumps({"env": env})).strip() == "false"
+    lock = home / creds.LOCK_FILENAME
+    lock.write_text("99999 0\n")
+    done = threading.Event()
+    threading.Thread(target=lambda: (creds.save_stored(creds.StoredCredential(
+        control_plane_url=CP, agent_id="py", api_key=KEY), env), done.set()),
+        daemon=True).start()
+    assert not done.wait(0.4), "Python wrote while the lock was held"
+    lock.unlink()
+    assert done.wait(5)
+    assert {c.agent_id for c in creds.load_stored(env)} == {"node", "py"}
+    old = _time.time() - creds.LOCK_STALE_S - 5
+    lock.write_text("99999 0\n")
+    os.utime(lock, (old, old))
+    creds.save_stored(creds.StoredCredential(
+        control_plane_url=CP, agent_id="late", api_key=KEY), env)
+    assert not lock.exists()
+    assert not list(home.glob(creds.LOCK_FILENAME + ".stale-*")), "left aside"
+
+
+def test_concurrent_python_and_node_logins_lose_no_key(tmp_path):
+    """Writers from BOTH languages at once, each storing its own agents: every
+    key survives, and no lock is left behind. Mutation: Python back to an
+    flock (or Node to its own lock file) -> a writer of one language reads,
+    the other writes, and the first's write drops the second's key: red."""
+    import subprocess
+    import sys
+
+    sdk, node = require_node_sdk()
+    home = tmp_path / "home"
+    env = {**os.environ, "PERCEPTEYE_HOME": str(home)}
+    per_writer, writers = 15, 3
+    node_script = (
+        "const { saveStored } = await import('./src/credentials.js');\n"
+        "const me = process.argv[1];\n"
+        f"for (let i = 0; i < {per_writer}; i += 1) {{\n"
+        f"  saveStored({{ control_plane_url: {json.dumps(CP)}, "
+        "agent_id: `${me}-${i}`, api_key: 'pefw_x' }, process.env);\n"
+        "}\n"
+    )
+    py_script = (
+        "import sys\n"
+        "from agent_flywheel import credentials as c\n"
+        "me = sys.argv[1]\n"
+        f"for i in range({per_writer}):\n"
+        f"    c.save_stored(c.StoredCredential(control_plane_url={CP!r}, "
+        "agent_id=f'{me}-{i}', api_key='pefw_x'))\n"
+    )
+    procs = []
+    for w in range(writers):
+        procs.append(subprocess.Popen(
+            [node, "--input-type=module", "-e", node_script, f"node{w}"],
+            cwd=sdk, env=env, stderr=subprocess.PIPE, text=True))
+        procs.append(subprocess.Popen(
+            [sys.executable, "-c", py_script, f"py{w}"],
+            env=env, stderr=subprocess.PIPE, text=True))
+    for p in procs:
+        _, err = p.communicate(timeout=120)
+        assert p.returncode == 0, err
+    stored = {c.agent_id for c in creds.load_stored({"PERCEPTEYE_HOME": str(home)})}
+    want = {f"{lang}{w}-{i}" for lang in ("node", "py")
+            for w in range(writers) for i in range(per_writer)}
+    assert stored == want, f"lost {len(want - stored)} keys: {sorted(want - stored)[:5]}"
+    assert not (home / creds.LOCK_FILENAME).exists(), "the lock was left behind"

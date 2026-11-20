@@ -5,8 +5,9 @@ per ``(control-plane URL, agent id)`` in ``$PERCEPTEYE_HOME/credentials.json``
 (``~/.percepteye/credentials.json`` when ``PERCEPTEYE_HOME`` is unset), a file
 only its owner can read (0600), in a directory only its owner can enter
 (0700), and that is replaced, never edited in place. Every read-modify-write
-of it holds an advisory lock (``credentials.json.lock`` beside it), so two
-logins at once cannot lose one another's key.
+of it holds a lock file (``credentials.json.lock`` beside it), so two
+logins at once -- from this SDK or the Node SDK -- cannot lose one another's
+key.
 The Node SDK reads and writes the same file in the same format
 (``src/credentials.js``), so a key stored by either is found by both;
 ``tests/test_credentials_parity.py`` holds the two to one table.
@@ -45,6 +46,8 @@ import re
 import shlex
 import sys
 import tempfile
+import time
+import uuid
 from collections.abc import Iterator, Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -73,8 +76,18 @@ __all__ = [
 
 ENV_HOME = "PERCEPTEYE_HOME"
 CREDENTIALS_FILENAME = "credentials.json"
-#: The advisory lock every read-modify-write of the file holds.
+#: The lock every read-modify-write of the file holds, by ONE protocol both
+#: SDKs implement (the Node SDK's ``src/credentials.js``): created exclusively
+#: (``O_EXCL``), holding the writer's pid and the time it was taken, removed
+#: when the write is done, and taken over once it is older than
+#: :data:`LOCK_STALE_S` -- a process killed mid-write leaves one behind.
+#: An ``flock`` would not do: Node has none, so a Python and a Node login at
+#: once each held a lock the other never asked about, and one key was lost.
 LOCK_FILENAME = CREDENTIALS_FILENAME + ".lock"
+#: A lock older than this was left by a process that died holding it.
+LOCK_STALE_S = 30.0
+#: How long a writer waits for another one before saying so.
+LOCK_WAIT_S = 10.0
 #: The file's own format version. A reader refuses a version it does not know
 #: rather than guess, and a writer refuses to replace one: a newer SDK's file
 #: is never rewritten by an older one into a shape that loses its entries.
@@ -306,8 +319,9 @@ def save_stored(
     ATOMIC: the new file is written beside the old one, created 0600 so the
     key is never readable by anyone else even for a moment, flushed, and
     renamed over it. The directory holding it is made 0700. LOCKED: the
-    read, the change and the write hold the file's advisory lock, so a
-    concurrent login's key is never lost. A blank key is refused.
+    read, the change and the write hold the file's lock (:func:`_locked`,
+    shared with the Node SDK), so a concurrent login's key is never lost. A
+    blank key is refused.
     """
     if not cred.api_key.strip():
         raise ConfigurationError(f"refusing to store a blank key for agent {cred.agent_id!r}")
@@ -367,24 +381,55 @@ def _private_dir(directory: Path) -> None:
 
 @contextlib.contextmanager
 def _locked(path: Path) -> Iterator[None]:
-    """Hold the advisory lock on ``path``'s store for a read-modify-write.
+    """Hold the lock on ``path``'s store for a read-modify-write.
 
-    ``fcntl.flock`` on ``credentials.json.lock`` beside the file; where there
-    is no ``fcntl`` (Windows) it is a no-op and the write stays atomic, only
-    not serialised against another writer.
+    :data:`LOCK_FILENAME` beside the file, created with ``O_EXCL`` -- the
+    protocol the Node SDK implements too, so the two exclude each other, on
+    every platform. One older than :data:`LOCK_STALE_S` is moved aside (only
+    one rename of a name succeeds, so two writers taking it over at once
+    cannot both win) and removed. Waits at most :data:`LOCK_WAIT_S`, then
+    refuses with :class:`ConfigurationError` naming the lock.
     """
-    try:
-        import fcntl
-    except ImportError:  # pragma: no cover - Windows
-        yield
-        return
     _private_dir(path.parent)
-    fd = os.open(str(path.parent / LOCK_FILENAME), os.O_RDWR | os.O_CREAT, 0o600)
+    lock = path.parent / LOCK_FILENAME
+    give_up = time.monotonic() + LOCK_WAIT_S
+    while True:
+        try:
+            fd = os.open(str(lock), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise ConfigurationError(f"cannot lock {path} ({lock}): {exc}") from exc
+        else:
+            try:
+                os.write(fd, f"{os.getpid()} {int(time.time() * 1000)}\n".encode())
+            finally:
+                os.close(fd)
+            break
+        try:
+            age = time.time() - lock.stat().st_mtime
+        except FileNotFoundError:
+            continue  # just released
+        if age > LOCK_STALE_S:
+            aside = lock.with_name(f"{LOCK_FILENAME}.stale-{uuid.uuid4().hex[:8]}")
+            try:
+                os.rename(lock, aside)
+                os.unlink(aside)
+            except OSError:
+                pass  # lost the race to another writer
+            continue
+        if time.monotonic() >= give_up:
+            raise ConfigurationError(
+                f"another process has been writing {path} for over "
+                f"{LOCK_WAIT_S:g} s; try again, or remove {lock} if nothing is")
+        time.sleep(0.025)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
-        os.close(fd)  # closing releases the lock
+        try:
+            os.unlink(lock)
+        except OSError:
+            pass
 
 
 def _write(path: Path, entries: list[dict[str, Any]]) -> None:
