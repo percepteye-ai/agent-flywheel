@@ -449,7 +449,7 @@ record_tool_call("charge_card", {"amount": 4200}, outcome="ok", status_code=201)
 
 ??? note "Routing a chat model you constructed yourself"
 
-    `LangChainAdapter(llm=...)` re-points a chat model at the per-task gateway and reads the value back to check it took. It exists because `ChatOpenAI(base_url=...)` in your own code beats every environment variable: the task completes, the completions go to a live third party, and nothing distinguishes it from a clean run. A client whose endpoint is fixed at construction raises `RoutingNotInstallable(reason="HardcodedBaseUrl")`.
+    `LangChainAdapter(llm=...)` re-points a chat model at the per-task gateway: it rewrites the model's endpoint and key, rebuilds the provider client the model sends through, reads the base URL back off that client to check it took, and puts everything back when the task ends. It exists because `ChatOpenAI(base_url=...)` in your own code beats every environment variable: the task completes, the completions go to a live third party, and nothing distinguishes it from a clean run. A model whose client cannot be rebuilt (it still sends to its original URL) raises `RoutingNotInstallable(reason="HardcodedBaseUrl")`.
 
     This is reachable only by passing an adapter **instance**, which means `isolation="inprocess"` — the subprocess payload is JSON, and an adapter object cannot cross it. `adapters=["langchain"]` constructs the adapter with `llm=None`, which touches routing not at all. The ordinary arrangement is the default one: the child's environment routes, because the agent is constructed inside a child that already has those variables set. Build your model inside the factory and it is handled for you.
 

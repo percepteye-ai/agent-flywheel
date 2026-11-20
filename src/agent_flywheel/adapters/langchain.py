@@ -2,9 +2,12 @@
 
 **What this adapter is for, stated precisely.** Its job is per-tool-call
 outcome capture. It routes LLM traffic only when you hand it the chat model
-object, because LangChain's endpoint is a property of the client instance and
-an already-constructed client cannot be reached from the outside. When you do
-not pass one, routing is the child environment's job -- and that is the
+object, because LangChain's endpoint is a property of the provider client the
+model built at construction, and nothing outside the model can reach that
+client. Given the model, ``bind`` rewrites its endpoint fields, rebuilds the
+provider client(s) it actually sends through, and reads the base URL back off
+THOSE clients; ``unbind`` puts every rewritten field and client back. When you
+do not pass one, routing is the child environment's job -- and that is the
 default, working arrangement, not a degraded one.
 
 The distinction matters because of the trap this adapter exists to surface:
@@ -26,6 +29,7 @@ is worth writing rather than telling people to call ``record_tool_call``.
 """
 from __future__ import annotations
 
+import functools
 import threading
 import time
 from contextvars import ContextVar
@@ -49,18 +53,56 @@ _REQUIRED = (
     "langchain_core.messages.tool:ToolMessage",
 )
 
-#: The active binding. A context variable, not a module global: two rollouts in
-#: one process must not see each other's.
-#: Holds the HANDLER INSTANCE for the rollout on this context, not the URL.
-#: langchain's configure hook reads this variable and, when no handler class is
-#: registered alongside it, uses the value ITSELF as a callback handler -- so a
-#: string here made every tool call raise
+#: The binding of THIS context: what ``serve()`` scopes per rollout, since the
+#: rollout runs inside a copy of the context that bound it.
+#: Holds the HANDLER INSTANCE, not the URL. langchain's configure hook uses the
+#: value it reads ITSELF as a callback handler when no handler class is
+#: registered alongside it -- so a string here made every tool call raise
 #: ``'str' object has no attribute 'ignore_agent'`` and captured nothing.
+#:
+#: Not the only binding. ``attach()`` binds once, on the thread that starts the
+#: server, and Flask / Django / gthread / ThreadPoolExecutor workers start with
+#: an EMPTY context -- they never see that thread's value, and every tool and
+#: model call they made went uncaptured. So a bind also holds the process-wide
+#: fallback below, which is read whenever this context has no binding of its
+#: own. The handler only collects; WHICH rollout or turn a call lands in is
+#: decided by ``outcomes``' own scope, so the fallback cannot misattribute.
 _ACTIVE: ContextVar[Any] = ContextVar("percepteye_lc_active", default=None)
 
 _lock = threading.Lock()
 _handler_cls: type | None = None
 _hook_registered = False
+#: The process-wide binding, live while at least one bind is (``_fallback_refs``
+#: counts them, under ``_lock``).
+_fallback: Any = None
+_fallback_refs = 0
+
+
+def _active() -> Any:
+    """The handler bound for this context, else the process-wide one, else None.
+
+    A context value whose bind was already undone (unbound from another
+    thread, where the context variable cannot be reset) does not count.
+    """
+    handler = _ACTIVE.get()
+    if handler is not None and not getattr(handler, "_unbound", False):
+        return handler
+    return _fallback
+
+
+class _HookVar:
+    """What langchain's configure hook reads in place of the context variable.
+
+    The hook calls only ``.get()`` on what it was registered with; this answers
+    with :func:`_active`, so a worker thread that never saw the bind still gets
+    the handler.
+    """
+
+    def get(self) -> Any:
+        return _active()
+
+
+_HOOK_VAR = _HookVar()
 
 
 def _build_handler_cls() -> type:
@@ -149,7 +191,7 @@ def _build_handler_cls() -> type:
         # earlier implementation discarded it and kept a single mutable
         # "current tool" field, so concurrent tools overwrote each other.
         def on_tool_start(self, serialized, input_str, *, run_id=None, **kw):
-            if _ACTIVE.get() is None:
+            if _active() is None:
                 return
             name = (serialized or {}).get("name") or "tool"
             self._open[run_id] = {
@@ -169,7 +211,7 @@ def _build_handler_cls() -> type:
 
         def on_tool_end(self, output, *, run_id=None, **kw):
             state = self._open.pop(run_id, None)
-            if state is None or _ACTIVE.get() is None:
+            if state is None or _active() is None:
                 return
             outcome, error = _classify_output(output, ToolMessage)
             # The model-assigned call id rides on the ToolMessage itself, and
@@ -199,7 +241,7 @@ def _build_handler_cls() -> type:
 
         def on_tool_error(self, error, *, run_id=None, **kw):
             state = self._open.pop(run_id, None)
-            if state is None or _ACTIVE.get() is None:
+            if state is None or _active() is None:
                 return
             record_tool_call(
                 state["name"], state["arguments"],
@@ -562,68 +604,186 @@ class LangChainAdapter:
 
     def bind(self, *, llm_url: str, api_key: str) -> Any:
         handler_cls = _build_handler_cls()
-        self._route(llm_url, api_key)
+        restore = self._route(llm_url, api_key)
 
-        global _hook_registered
+        global _hook_registered, _fallback, _fallback_refs
         with _lock:
             if not _hook_registered:
                 from langchain_core.tracers.context import register_configure_hook
 
                 # No ``env_var``: passing one makes langchain construct the
-                # handler whenever that variable is set, EVEN IF the context
-                # variable is unset -- which would attach an unbound handler
-                # in forked children and worker threads.
+                # handler whenever that variable is set, EVEN IF nothing is
+                # bound -- which would attach an unbound handler in forked
+                # children.
                 #
                 # No handler CLASS either: langchain would then construct its
                 # own instance and ignore ours, and our per-rollout state lives
-                # on the instance. The context variable carries the instance.
-                register_configure_hook(_ACTIVE, True)
+                # on the instance. What the hook reads carries the instance.
+                register_configure_hook(_HOOK_VAR, True)  # type: ignore[arg-type]
                 _hook_registered = True
+            if _fallback_refs == 0:
+                _fallback = handler_cls()
+            _fallback_refs += 1
 
-        token = _ACTIVE.set(handler_cls())
+        handler = handler_cls()
+        token = _ACTIVE.set(handler)
+        done = False
 
         def _unbind() -> None:
-            _ACTIVE.reset(token)
+            global _fallback, _fallback_refs
+            nonlocal done
+            with _lock:
+                if done:
+                    return
+                done = True
+                _fallback_refs -= 1
+                if _fallback_refs == 0:
+                    _fallback = None
+            # Read by _active(): the context that bound may not be this one.
+            handler._unbound = True
+            try:
+                _ACTIVE.reset(token)
+            except (ValueError, RuntimeError):
+                # Unbound from another thread or context (a server's shutdown
+                # hook): the token belongs to the context that bound, and
+                # reset() refuses it. The mark above already retires the value.
+                pass
+            restore()
 
         return _unbind
 
-    def _route(self, llm_url: str, api_key: str) -> None:
-        """Re-point the supplied chat model, and verify it took.
+    def _route(self, llm_url: str, api_key: str) -> Any:
+        """Re-point the supplied chat model, verify it took, and return the
+        callable that puts it back.
 
-        Setting an attribute that a model ignores is worse than not setting it,
-        so this reads the value back. A client that cannot be re-pointed is a
-        refusal: its traffic would go to a live third party and the rollout
-        would still complete.
+        No endpoint means "do not touch routing": ``attach()`` binds with
+        ``llm_url=""``, and rewriting a production model's endpoint and key to
+        empty strings would break every live call it makes.
+
+        Setting the endpoint FIELD is not routing. ``langchain_openai``'s
+        ``ChatOpenAI`` builds its provider clients once, at construction, from
+        that field; rewriting the field afterwards leaves every request going
+        to the old URL while the field reads back as the new one. So the
+        clients are rebuilt from the rewritten fields and the check reads the
+        base URL off the clients the model actually sends through. A model
+        that still points elsewhere is a refusal, restored first: its traffic
+        would go to a live third party and the rollout would still complete.
         """
-        if self.llm is None:
-            return
-        applied = False
-        for attr in ("openai_api_base", "base_url"):
-            if hasattr(self.llm, attr):
+        if self.llm is None or not llm_url:
+            return lambda: None
+        llm = self.llm
+        saved: dict[str, Any] = {}
+        cached: dict[str, Any] = {}
+
+        def _set(attr: str, value: Any) -> None:
+            if attr not in saved:
+                saved[attr] = getattr(llm, attr)
+            setattr(llm, attr, value)
+
+        def restore() -> None:
+            for attr, value in saved.items():
                 try:
-                    setattr(self.llm, attr, llm_url)
-                    applied = str(getattr(self.llm, attr, "")).startswith(llm_url)
-                except Exception:
-                    applied = False
-                if applied:
-                    break
-        for attr in ("openai_api_key", "api_key"):
-            if hasattr(self.llm, attr):
-                try:
-                    setattr(self.llm, attr, api_key)
+                    setattr(llm, attr, value)
                 except Exception:
                     pass
-        if not applied:
-            raise RoutingNotInstallable(
-                reason="HardcodedBaseUrl",
-                evidence=(
-                    f"{type(self.llm).__name__} did not accept a new base URL; "
-                    f"its endpoint is fixed at construction"
-                ),
-                remedy=(
-                    "construct the model inside your entrypoint factory so each "
-                    "rollout builds its own, or drop llm= and let the child "
-                    "environment route (only works if you did not pass an "
-                    "explicit base_url)"
-                ),
-            )
+            state = getattr(llm, "__dict__", None)
+            if isinstance(state, dict):
+                for attr in _CACHED_CLIENTS:
+                    state.pop(attr, None)
+                state.update(cached)
+
+        try:
+            fields = [a for a in _URL_FIELDS if hasattr(llm, a)]
+            for attr in fields[:1]:
+                _set(attr, llm_url)
+            for attr in [a for a in _KEY_FIELDS if hasattr(llm, a)][:1]:
+                current = getattr(llm, attr)
+                _set(attr, type(current)(api_key)
+                     if hasattr(current, "get_secret_value") else api_key)
+            _rebuild_clients(llm, _set, cached)
+            evidence = _not_repointed(llm, llm_url, fields)
+        except Exception as exc:
+            evidence = f"{type(exc).__name__}: {exc}"
+        if evidence is None:
+            return restore
+        restore()
+        raise RoutingNotInstallable(
+            reason="HardcodedBaseUrl",
+            evidence=f"{type(llm).__name__} {evidence}",
+            remedy=(
+                "construct the model inside your entrypoint factory so each "
+                "rollout builds its own, or drop llm= and let the child "
+                "environment route (only works if you did not pass an "
+                "explicit base_url)"
+            ),
+        )
+
+
+#: Where a chat model keeps its endpoint and key, in the order tried:
+#: langchain_openai's fields, langchain_anthropic's, then the plain spelling.
+_URL_FIELDS = ("openai_api_base", "anthropic_api_url", "base_url")
+_KEY_FIELDS = ("openai_api_key", "anthropic_api_key", "api_key")
+#: Provider clients built in a validator at construction (langchain_openai).
+_BUILT_CLIENTS = ("client", "async_client", "root_client", "root_async_client")
+#: Provider clients built lazily and cached on first use (langchain_anthropic).
+_CACHED_CLIENTS = ("_client_params", "_client", "_async_client")
+
+
+def _rebuild_clients(llm: Any, set_attr: Any, cached: dict[str, Any]) -> None:
+    """Rebuild the provider clients ``llm`` sends through from its fields.
+
+    Constructor-built clients are cleared and the model's own validator that
+    built them is run again; lazily cached ones are dropped (kept in
+    ``cached`` for restore) so the next use builds them from the new fields.
+    """
+    built = [a for a in _BUILT_CLIENTS if getattr(llm, a, None) is not None]
+    if built and callable(getattr(llm, "validate_environment", None)):
+        for attr in built:
+            set_attr(attr, None)
+        llm.validate_environment()
+    state = getattr(llm, "__dict__", None)
+    if isinstance(state, dict):
+        for attr in _CACHED_CLIENTS:
+            if isinstance(getattr(type(llm), attr, None),
+                          functools.cached_property) and attr in state:
+                cached[attr] = state.pop(attr)
+
+
+def _client_base_url(client: Any) -> str | None:
+    for obj in (client, getattr(client, "_client", None)):
+        url = getattr(obj, "base_url", None)
+        if url is not None:
+            return str(url)
+    return None
+
+
+def _not_repointed(llm: Any, llm_url: str, fields: list[str]) -> str | None:
+    """Why ``llm`` would still send elsewhere, or None when it will not.
+
+    Read off the provider clients when the model has any -- the field is only
+    what they were built from. A model with no client of either kind is read
+    back through its endpoint field.
+    """
+    want = llm_url.rstrip("/")
+    seen = False
+    for attr in (*_BUILT_CLIENTS, *(a for a in _CACHED_CLIENTS
+                                     if a != "_client_params")):
+        if attr in _CACHED_CLIENTS and not isinstance(
+                getattr(type(llm), attr, None), functools.cached_property):
+            continue
+        client = getattr(llm, attr, None)
+        url = _client_base_url(client) if client is not None else None
+        if url is None:
+            continue
+        seen = True
+        if not url.rstrip("/").startswith(want):
+            return (f"still sends to {url} through its {attr}: the client was "
+                    f"built at construction and could not be rebuilt")
+    if seen:
+        return None
+    if not fields:
+        return "has no base URL field to re-point"
+    got = str(getattr(llm, fields[0], "") or "")
+    if not got.startswith(llm_url):
+        return f"did not accept a new {fields[0]} (reads back {got!r})"
+    return None
