@@ -28,7 +28,7 @@ from typing import Any, Literal
 from .contract import (
     Outcome,
     ToolCallOutcome,
-    _production_identifier,
+    _task_identifier,
 )
 from .errors import ContractViolation
 from .evidence import extract_entity_ids
@@ -792,12 +792,14 @@ def _normalize_task_id(value: Any) -> str | None:
     The identifier is deliberately not parsed as a UUID or given any product
     semantics: customer agents use many task-id formats.  It is still kept
     conservative at the wire boundary.  Non-strings, leading/trailing
-    whitespace, C0/C1 control characters and values beyond the control
-    plane's 255-character field cannot be exact joins, so they remain absent
-    rather than being silently rewritten into a different id. This calls the
-    same predicate whose pattern is published in ``flywheel-1.json``.
+    whitespace, any character ``str.isprintable()`` refuses (controls,
+    separators other than the space, format, unassigned and private-use
+    code points) and values beyond the control plane's 255-character field
+    cannot be exact joins, so they remain absent rather than being silently
+    rewritten into a different id. This calls the control plane's own
+    predicate (:func:`~agent_flywheel.contract._task_identifier`).
     """
-    return _production_identifier(value)
+    return _task_identifier(value)
 
 
 def _write_task_id(path: Path, task_id: Any) -> None:

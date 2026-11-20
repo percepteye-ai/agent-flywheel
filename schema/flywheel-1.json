@@ -132,21 +132,21 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 255,
-          "pattern": "^(?!\\.{1,2}$)(?!\\s)(?!.*\\s$)(?!.*[\\\\/])[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+          "pattern": "^(?!\\.{1,2}$)(?![\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])(?![\\s\\S]*[\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]$)(?![\\s\\S]*[\\\\/])[^\\u0000-\\u001F\\u007F-\\u009F]+$"
         },
         "task_id": {
-          "description": "Optional opaque task/case/work-item identifier supplied by the customer. It is an exact correlation candidate for control-plane validation, never a success label, hint, policy identity, or permission to train.",
+          "description": "Optional opaque task/case/work-item identifier supplied by the customer. It is an exact correlation candidate for control-plane validation, never a success label, hint, policy identity, or permission to train. Valid iff it equals its own Python str.strip() and every character satisfies Python str.isprintable() (the control plane's is_canonical_task_id): no control, format, separator other than the ASCII space, unassigned, private-use or surrogate code point. The pattern carries the part of that rule an ECMA-262 pattern can name; an SDK omits a task_id that fails the full rule rather than sending it.",
           "type": "string",
           "minLength": 1,
           "maxLength": 255,
-          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+          "pattern": "^(?! )(?![\\s\\S]* $)[^\\u0000-\\u001F\\u007F-\\u00A0\\u00AD\\u0378\\u0379\\u0600-\\u0605\\u061C\\u06DD\\u070F\\u1680\\u180E\\u2000-\\u200F\\u2028-\\u202F\\u205F-\\u206F\\u3000\\uE000-\\uF8FF\\uFEFF\\uFFF9-\\uFFFB]+$"
         },
         "conversation_id": {
           "description": "Optional opaque correlation id using the shared production identifier grammar: no leading/trailing whitespace or C0/C1 control characters.",
           "type": "string",
           "minLength": 1,
           "maxLength": 255,
-          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+          "pattern": "^(?![\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])(?![\\s\\S]*[\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]$)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
         },
         "turn_index": {
           "type": "integer",
@@ -215,7 +215,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 255,
-          "pattern": "^(?!\\.{1,2}$)(?!\\s)(?!.*\\s$)(?!.*[\\\\/])[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+          "pattern": "^(?!\\.{1,2}$)(?![\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])(?![\\s\\S]*[\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]$)(?![\\s\\S]*[\\\\/])[^\\u0000-\\u001F\\u007F-\\u009F]+$"
         },
         "turns": {
           "type": "array",
@@ -259,7 +259,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 255,
-          "pattern": "^(?!\\.{1,2}$)(?!\\s)(?!.*\\s$)(?!.*[\\\\/])[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+          "pattern": "^(?!\\.{1,2}$)(?![\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])(?![\\s\\S]*[\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]$)(?![\\s\\S]*[\\\\/])[^\\u0000-\\u001F\\u007F-\\u009F]+$"
         },
         "outcome": {
           "description": "The closed vocabulary.",
@@ -277,21 +277,21 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 255,
-          "pattern": "^(?!\\.{1,2}$)(?!\\s)(?!.*\\s$)(?!.*[\\\\/])[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+          "pattern": "^(?!\\.{1,2}$)(?![\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])(?![\\s\\S]*[\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]$)(?![\\s\\S]*[\\\\/])[^\\u0000-\\u001F\\u007F-\\u009F]+$"
         },
         "conversation_id": {
           "description": "The conversation this is the outcome of: the exact conversation_id its turns carry.",
           "type": "string",
           "minLength": 1,
           "maxLength": 255,
-          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+          "pattern": "^(?![\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])(?![\\s\\S]*[\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]$)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
         },
         "episode_id": {
           "description": "The platform-run episode this is the outcome of: the exact rollout_id of the RolloutRequest the agent was handed. Optional; a control plane that predates it refuses the report and the SDK then stops sending episode-only outcomes.",
           "type": "string",
           "minLength": 1,
           "maxLength": 255,
-          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+          "pattern": "^(?![\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])(?![\\s\\S]*[\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]$)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
         },
         "value": {
           "description": "Optional business metric attached by the customer. Opaque: no unit, never interpreted.",
@@ -325,7 +325,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 255,
-          "pattern": "^(?!\\.{1,2}$)(?!\\s)(?!.*\\s$)(?!.*[\\\\/])[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+          "pattern": "^(?!\\.{1,2}$)(?![\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])(?![\\s\\S]*[\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]$)(?![\\s\\S]*[\\\\/])[^\\u0000-\\u001F\\u007F-\\u009F]+$"
         },
         "outcomes": {
           "type": "array",
@@ -354,14 +354,14 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 255,
-          "pattern": "^(?!\\.{1,2}$)(?!\\s)(?!.*\\s$)(?!.*[\\\\/])[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+          "pattern": "^(?!\\.{1,2}$)(?![\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])(?![\\s\\S]*[\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]$)(?![\\s\\S]*[\\\\/])[^\\u0000-\\u001F\\u007F-\\u009F]+$"
         },
         "episode_id": {
           "description": "The episode the turn belongs to: the exact rollout_id of the RolloutRequest the agent was handed.",
           "type": "string",
           "minLength": 1,
           "maxLength": 255,
-          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+          "pattern": "^(?![\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])(?![\\s\\S]*[\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]$)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
         },
         "turn_index": {
           "description": "The turn's position inside the episode, counted from 0.",
@@ -401,7 +401,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 255,
-          "pattern": "^(?!\\.{1,2}$)(?!\\s)(?!.*\\s$)(?!.*[\\\\/])[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+          "pattern": "^(?!\\.{1,2}$)(?![\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])(?![\\s\\S]*[\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]$)(?![\\s\\S]*[\\\\/])[^\\u0000-\\u001F\\u007F-\\u009F]+$"
         },
         "feedback": {
           "type": "array",

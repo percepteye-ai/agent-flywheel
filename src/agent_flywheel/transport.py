@@ -545,9 +545,11 @@ class AttachTransport:
                 raise ContractViolation(
                     f"production turn {index} has an invalid conversation_id"
                 )
+            # An explicit ``"task_id": None`` is refused too: the wire says
+            # "no task id" by omitting the key, and the intake refuses a null.
             if (
                 "task_id" in turn
-                and _normalize_task_id(turn.get("task_id")) != turn.get("task_id")
+                and _normalize_task_id(turn["task_id"]) is None
             ):
                 raise ContractViolation(
                     f"production turn {index} has an invalid task_id"
