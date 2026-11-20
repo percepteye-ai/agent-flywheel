@@ -51,23 +51,27 @@ def _run(agent, tmp_path, timeout_s=0.5, adapters=None):
                                   timeout_s=timeout_s, adapters=adapters)
 
 
-@pytest.mark.parametrize("agent,reason", [
-    (_CallsThenRaises(), "entrypoint_error"),
-    (_CallsThenHangs(), "deadline_exceeded"),
+# The crash case gets a generous budget: it raises at once, and a short one
+# on a loaded machine turns it into a timeout before the agent has run.
+@pytest.mark.parametrize("agent,reason,budget", [
+    (_CallsThenRaises(), "entrypoint_error", 30.0),
+    (_CallsThenHangs(), "deadline_exceeded", 0.5),
 ])
-def test_the_calls_made_before_a_crash_or_timeout_are_kept(tmp_path, agent, reason):
-    out = _run(agent, tmp_path)
+def test_the_calls_made_before_a_crash_or_timeout_are_kept(
+        tmp_path, agent, reason, budget):
+    out = _run(agent, tmp_path, timeout_s=budget)
     assert out.exclusion_reason == reason, out.exclusion_detail
     assert out.tool_calls is not None and [c.name for c in out.tool_calls] == [
         "lookup"], "the calls that explain the failure were dropped"
 
 
-@pytest.mark.parametrize("agent", [_CallsThenRaises(), _CallsThenHangs()])
-def test_adapters_are_unbound_on_a_crash_or_timeout(tmp_path, monkeypatch, agent):
+@pytest.mark.parametrize("agent,budget", [
+    (_CallsThenRaises(), 30.0), (_CallsThenHangs(), 0.5)])
+def test_adapters_are_unbound_on_a_crash_or_timeout(tmp_path, monkeypatch, agent, budget):
     unbound: list[str] = []
     monkeypatch.setattr(_binding, "bind_selected",
                         lambda *a, **k: (None, [lambda: unbound.append("x")]))
-    _run(agent, tmp_path, adapters="auto")
+    _run(agent, tmp_path, timeout_s=budget, adapters="auto")
     assert unbound == ["x"], "the rollout's framework patches outlived it"
 
 
