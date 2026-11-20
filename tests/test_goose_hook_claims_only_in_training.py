@@ -96,7 +96,7 @@ def host(tmp_path):
     return tmp_path, work
 
 
-def _fire(host, url, mode, event):
+def _fire(host, url, mode, event, *, key="pefw_test"):
     root, work = host
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("PERCEPTEYE_")
@@ -107,10 +107,11 @@ def _fire(host, url, mode, event):
         "GOOSE_PATH_ROOT": str(root),
         "PERCEPTEYE_HOME": str(root / ".percepteye"),
         "PERCEPTEYE_CONTROL_PLANE_URL": url,
-        "PERCEPTEYE_API_KEY": "pefw_test",
         "PERCEPTEYE_AGENT_MODE": mode,
         "NO_PROXY": "127.0.0.1,localhost",
     })
+    if key is not None:
+        env["PERCEPTEYE_API_KEY"] = key
     proc = subprocess.run(
         [sys.executable, str(RECORDER)],
         input=json.dumps({"session_id": SESSION, "working_dir": str(work),
@@ -200,3 +201,51 @@ def test_training_still_claims_and_reports(host, control_plane):
     assert [c["name"] for c in body["tool_calls"]] == ["shell"]
     assert not (_session_dir(host) / CLAIM_FILENAME).exists(), (
         "a reported claim must be consumed")
+
+
+# ── PY-H40: the lease token on disk, a key stored by login, a long turn ─────
+
+
+def test_the_claim_record_is_readable_only_by_its_owner(host, control_plane):
+    """``claim.json`` carries the lease token, a bearer credential for the
+    rollout: 0600 from the moment it exists, in a 0700 directory, under a
+    0700 ``$PERCEPTEYE_HOME`` (which also holds ``credentials.json``)."""
+    import stat
+
+    url, _ = control_plane
+    _fire(host, url, "training", {"event": "SessionStart"})
+    claim = _session_dir(host) / CLAIM_FILENAME
+    assert json.loads(claim.read_text(encoding="utf-8"))["lease_token"] == "lease-1"
+    for path, want in ((claim, 0o600), (_session_dir(host), 0o700),
+                       (host[0] / ".percepteye", 0o700)):
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        assert mode == want, f"{path}: {oct(mode)}"
+
+
+def test_a_key_stored_by_login_is_the_hooks_key_too(host, control_plane):
+    """``agent-flywheel login --agent-id goose`` stores a key; the hook used to
+    read only ``PERCEPTEYE_API_KEY`` and so claimed nothing with it."""
+    from agent_flywheel import credentials as creds
+
+    url, seen = control_plane
+    creds.save_stored(creds.StoredCredential(
+        control_plane_url=url, agent_id="goose", api_key="pefw_" + "S" * 43,
+    ), {"PERCEPTEYE_HOME": str(host[0] / ".percepteye")})
+    _fire(host, url, "training", {"event": "SessionStart"}, key=None)
+    assert _rollout_requests(seen) == [("POST", "/api/flywheel/v1/rollouts/claim")]
+
+
+def test_a_long_non_ascii_turn_is_shortened_not_dropped(host, control_plane):
+    """A turn record has no ``arguments``; ``_fit`` subscripted them anyway, so
+    any turn whose JSON-escaped text passed the one-write cap (non-ASCII text
+    over ~1.2k characters) raised KeyError and vanished."""
+    url, _ = control_plane
+    task = "задача " * 500
+    _fire(host, url, "production", {"event": "UserPromptSubmit", "message": task})
+    lines = (_session_dir(host) / "turns.jsonl").read_bytes().splitlines()
+    assert len(lines) == 1
+    assert len(lines[0]) <= _REC._MAX_RECORD_BYTES
+    record = json.loads(lines[0])
+    assert record["kind"] == "task"
+    assert record["text"].startswith(task.strip()[:200])
+    assert "truncated" in record["text"]

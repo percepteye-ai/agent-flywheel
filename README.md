@@ -246,8 +246,11 @@ that are mechanisms, not intentions:
   provider that accepts a connection and never answers costs you one timeout
   instead of the whole episode. Adapters translate that ceiling into whatever
   their harness understands; the arithmetic lives in one place.
-- **No bearer credential is written to disk.** The outbox sits inside the
-  directory your agent runs in, so the lease token is held only in memory.
+- **`serve()` writes no bearer credential to disk.** The outbox sits inside the
+  directory your agent runs in, so the lease token is held only in memory. (The
+  goose hook, which has no long-lived process to hold it, keeps the lease of the
+  one rollout it claimed in a `claim.json` only you can read — 0600, in a 0700
+  directory — until it reports.)
 
 The reason this is spelled out: a delivery path that fails silently is
 indistinguishable from an idle queue. `on_event` is how you tell them apart —

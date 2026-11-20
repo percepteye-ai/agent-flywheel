@@ -289,7 +289,7 @@ Every event is in [Configuration](configuration.md#watching-a-flywheel-on_event)
 - **Spooled before the first send.** The result is written to a durable outbox under your `artifacts_dir` *before* it is POSTed, so a process killed mid-request still delivers. The next process over the same directory drains it, and **that drain runs before the next claim**, so a held result is never starved by new work.
 - **A permanent refusal is retired, never deleted.** If the control plane refuses in a way redelivery cannot fix, the reason is written into the record and the file is renamed out of the retry set, with the task's trajectory kept beside it. Retired names are uniquified, so a second refusal cannot overwrite the first. After three such refusals in a row, `serve()` stops claiming. A result still undeliverable after seven days is kept and no longer retried.
 - **Your agent's turn is bounded well inside the task.** `serve()` derives a per-call ceiling from the task budget and leaves a delivery reserve, so a provider that accepts a connection and never answers costs one timeout instead of the whole task.
-- **No bearer credential is written to disk.** The lease token is held only in memory.
+- **`serve()` writes no bearer credential to disk.** The lease token is held only in memory. (The goose hook, which has no long-lived process to hold it, keeps the lease of the one rollout it claimed in a `claim.json` only you can read — 0600, in a 0700 directory — until it reports.)
 
 `outcome_spooled` and `outcome_undeliverable` name a result that is being held or has been retired.
 
