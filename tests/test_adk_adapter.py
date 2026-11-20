@@ -29,7 +29,11 @@ class _Tool:
 
 
 class _Ctx:
-    """The fields the adapter reads off a real ToolContext."""
+    """The fields the adapter reads off a real ToolContext, plus the one ADK's
+    own dispatch writes: from ADK 2.15 ``PluginManager._run_callbacks`` saves
+    and restores ``_callback_info`` on the context around every callback."""
+
+    _callback_info = None
 
     def __init__(self, call_id: str = "fc_1", agent_name: str | None = "planner") -> None:
         self.function_call_id = call_id
@@ -40,6 +44,7 @@ class _ExplodingCtx:
     """A context whose id cannot be read -- stands in for any capture bug."""
 
     agent_name = "planner"
+    _callback_info = None
 
     @property
     def function_call_id(self):
@@ -120,6 +125,53 @@ def test_installing_twice_does_not_double_record(bound, tmp_path):
         assert len(_calls(tmp_path)) == 1
     finally:
         second()
+
+
+def test_a_real_runner_records_its_tool_call(bound, tmp_path):
+    """The whole path, with ADK building every context itself: a customer's
+    ``InMemoryRunner`` runs an agent whose model calls one tool, and that call
+    is recorded. Every other test here hands ADK's dispatch a stand-in
+    context; this one is what proves the install works on the ADK actually
+    installed, whatever its dispatch now reads off a context."""
+    from google.adk.agents import LlmAgent
+    from google.adk.models.base_llm import BaseLlm
+    from google.adk.models.llm_response import LlmResponse
+    from google.adk.runners import InMemoryRunner
+    from google.genai import types
+
+    class _Model(BaseLlm):
+        model: str = "scripted"
+
+        async def generate_content_async(self, llm_request, stream=False):
+            answered = any(p.function_response
+                           for p in llm_request.contents[-1].parts or [])
+            part = types.Part(text="done") if answered else types.Part(
+                function_call=types.FunctionCall(
+                    name="lookup", args={"q": "x"}, id="call_1"))
+            yield LlmResponse(content=types.Content(role="model", parts=[part]))
+
+    def lookup(q: str) -> dict:
+        """Look something up."""
+        return {"answer": q}
+
+    async def drive():
+        runner = InMemoryRunner(
+            agent=LlmAgent(name="planner", model=_Model(), tools=[lookup]),
+            app_name="app")
+        session = await runner.session_service.create_session(
+            app_name="app", user_id="u")
+        async for _ in runner.run_async(
+                user_id="u", session_id=session.id,
+                new_message=types.Content(role="user",
+                                          parts=[types.Part(text="hi")])):
+            pass
+
+    with _RolloutScope("rl_adk", str(tmp_path)):
+        asyncio.run(drive())
+    (call,) = _calls(tmp_path)
+    assert (call.name, call.arguments, call.output) == (
+        "lookup", {"q": "x"}, {"answer": "x"})
+    assert (call.agent_name, call.tool_call_id) == ("planner", "call_1")
 
 
 # ── the outcome, which is the whole point ──────────────────────────────────

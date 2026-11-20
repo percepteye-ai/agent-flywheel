@@ -164,6 +164,7 @@ def test_adk_adapter_uses_the_function_call_id(tmp_path):
     class _Ctx:
         function_call_id = "fc_42"
         agent_name = "planner"
+        _callback_info = None  # ADK >= 2.15's dispatch scopes this per callback
 
     adapter = ADKAdapter()
     unbind = adapter.bind(llm_url="https://gw.invalid/v1", api_key="perk_x")
