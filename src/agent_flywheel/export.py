@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -63,7 +64,9 @@ from .outcomes import (
     Trajectory,
     _read_execution_fingerprint,
     read_conversation_id,
+    read_task_id,
     read_turn_text,
+    turn_started_at,
 )
 
 #: Every public name here, including ``conversation_to_record`` -- it is the
@@ -124,7 +127,18 @@ def turn_to_record(
     fingerprint = _read_execution_fingerprint(path)
     if fingerprint is not None:
         record["agent_fingerprint"] = fingerprint
+    caller_task = read_task_id(path)
+    if caller_task:
+        record[_CALLER_TASK_ID] = caller_task
     return record
+
+
+#: The caller's own ``turn(task_id=...)`` correlation, which the upload path
+#: sends as the turn's ``task_id``. Under our own key here, because this
+#: record's ``task_id`` is its IDENTITY (the turn or conversation id the
+#: ingest side's identity ladder reads), and a caller's task id is shared by
+#: every turn of that task.
+_CALLER_TASK_ID = "percepteye_task_id"
 
 
 def _tool_call(call: Any) -> dict[str, Any]:
@@ -154,14 +168,21 @@ def _tool_call(call: Any) -> dict[str, Any]:
         out["success"] = True
     elif call.outcome == "failed":
         out["success"] = False
+    # Everything the upload path's ``ToolCallOutcome.to_wire`` carries, so
+    # the two renderers never disagree on the evidence: ``error_class`` and
+    # ``agent_name`` were dropped here, and ``entity_ids`` -- the identity a
+    # read-back needs to confirm a write landed -- with them.
     for src, dst in (
         ("status_code", "status_code"), ("output", "output"),
-        ("error", "error"), ("tool_call_id", "id"),
-        ("latency_ms", "latency_ms"),
+        ("error", "error"), ("error_class", "error_class"),
+        ("tool_call_id", "id"), ("latency_ms", "latency_ms"),
+        ("agent_name", "agent_name"),
     ):
         value = getattr(call, src, None)
         if value is not None:
             out[dst] = value
+    if getattr(call, "entity_ids", None):
+        out["entity_ids"] = dict(call.entity_ids)
     return out
 
 
@@ -198,6 +219,7 @@ def conversation_to_record(
     omitted = 0
     first_id: str | None = None
     fingerprints: list[dict[str, str] | None] = []
+    caller_tasks: list[str | None] = []
     # WHICH ASSISTANT TURN A CALL BELONGS TO. The ingest side chunks the
     # messages list into one transition per assistant message, and matches the
     # top-level tool_calls list by ``step_index`` -- treating a MISSING
@@ -217,6 +239,7 @@ def conversation_to_record(
         calls = traj.read()
         if text or calls:
             fingerprints.append(_read_execution_fingerprint(d))
+            caller_tasks.append(read_task_id(d))
         omitted += traj.malformed
         if text.get("task"):
             messages.append({"role": "user", "content": text["task"]})
@@ -267,6 +290,11 @@ def conversation_to_record(
         and all(value == fingerprints[0] for value in fingerprints)
     ):
         record["agent_fingerprint"] = fingerprints[0]
+    if caller_tasks and caller_tasks[0] and all(
+            value == caller_tasks[0] for value in caller_tasks):
+        # Only when every turn names the same one: a conversation spanning
+        # two tasks has no single task to name.
+        record[_CALLER_TASK_ID] = caller_tasks[0]
     return record
 
 
@@ -277,9 +305,18 @@ def iter_records(
 ) -> Iterator[dict[str, Any]]:
     """Every capturable turn under a trajectory root, oldest first.
 
-    Ordered by modification time so a conversation's turns arrive in the order
-    they happened -- the ingest side chunks by assistant turn, and an
-    out-of-order stream would attach one turn's outcome to another's answer.
+    Ordered by when each turn STARTED (``outcomes.turn_started_at``, the
+    order the upload path's ``turn_index`` uses) so a conversation's turns
+    arrive in the order they happened -- the ingest side chunks by assistant
+    turn, and an out-of-order stream would attach one turn's outcome to
+    another's answer. Not the directory's modification time: a turn's own
+    capture writes into its directory after it began (an answer recorded
+    late), which floated it after the turn that followed it.
+
+    A CONVERSATION WITH NO ANSWER AT ALL is emitted turn by turn, as
+    ``group_conversations=False`` would: it has no assistant turn for its
+    calls to belong to, so as one record it carried none of them and was
+    dropped whole -- tool-only conversations never reached a corpus.
 
     ``group_conversations`` (the default) emits ONE record per
     ``conversation_id``, which is what lets each non-final turn carry the
@@ -293,7 +330,7 @@ def iter_records(
         dirs = [d for d in root.iterdir() if d.is_dir()]
     except OSError:
         return
-    ordered = sorted(dirs, key=lambda p: _mtime(p))
+    ordered = sorted(dirs, key=lambda p: (turn_started_at(p), p.name))
 
     if not group_conversations:
         for d in ordered:
@@ -312,16 +349,15 @@ def iter_records(
             continue
         grouped.setdefault(cid, []).append(d)
     for cid, turn_dirs in grouped.items():
+        if not any((read_turn_text(d) or {}).get("answer") for d in turn_dirs):
+            for d in turn_dirs:
+                record = turn_to_record(d, turn_id=d.name)
+                if record is not None:
+                    yield record
+            continue
         record = conversation_to_record(turn_dirs, conversation_id=cid)
         if record is not None:
             yield record
-
-
-def _mtime(p: Path) -> float:
-    try:
-        return p.stat().st_mtime
-    except OSError:
-        return 0.0
 
 
 def write_records(
@@ -337,8 +373,20 @@ def write_records(
     written = 0
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "w", encoding="utf-8") as fh:
-        for record in iter_records(trajectory_root):
-            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-            written += 1
+    # WRITTEN WHOLE, then renamed over ``out_path``: a crash or a reader
+    # mid-export never sees half a corpus where the previous one was.
+    tmp = out.with_name(f".{out.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            for record in iter_records(trajectory_root):
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+                written += 1
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, out)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
     return written

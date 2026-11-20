@@ -111,6 +111,7 @@ from .outcomes import (
     read_task_id,
     read_turn_text,
     record_turn_text,
+    turn_started_at,
 )
 from .policy import missing_credentials_cause
 from .transport import (
@@ -322,39 +323,6 @@ _RULEBOOK_PENDING = (
     "the control plane has not answered the rules passed as rules= yet; "
     "Attachment.wait_for_rulebook() waits for its answer."
 )
-
-
-def _started_at(d: Path) -> float:
-    """When this turn STARTED, for ordering a conversation.
-
-    THE ``conversation_id`` FILE'S mtime, NOT THE DIRECTORY'S -- and that
-    distinction is the whole point. A directory's mtime advances every time a
-    file is CREATED inside it, which this module already knows and already
-    designed around once: see ``_UPLOADED_INDEX``, which is one file at the
-    root rather than a marker in each turn for exactly this reason. But a
-    turn's own capture creates files inside its directory long after the turn
-    began -- ``record_answer`` creates ``turns.jsonl`` whenever ``input_text``
-    was not passed to :meth:`Attachment.turn` (both are documented optional),
-    and the first ``record_tool_call`` creates the trajectory file. So the
-    directory's mtime says "last written to", and ordering a conversation by
-    it puts a turn whose answer arrived late AFTER the turn that followed it:
-    the conversation is uploaded in the wrong order and MC stores the wrong
-    ``turn_index`` verbatim.
-
-    The ``conversation_id`` file is written once, at scope entry, and never
-    touched again. It exists for exactly the turns that have an index at all,
-    so nothing new has to be written to get this -- and a turn that predates
-    this ordering, or whose file cannot be read, still falls back to the
-    directory mtime rather than losing its place entirely.
-    """
-    try:
-        return (d / CONVERSATION_ID_FILENAME).stat().st_mtime
-    except OSError:
-        pass
-    try:
-        return d.stat().st_mtime
-    except OSError:
-        return 0.0
 
 
 #: A reported outcome waiting to be uploaded is ONE FILE in the trajectory
@@ -2119,7 +2087,7 @@ class Attachment:
                 continue
             if read_conversation_id(d) != conversation_id:
                 continue
-            siblings.append((_started_at(d), d.name))
+            siblings.append((turn_started_at(d), d.name))
         siblings.sort()
         for i, (_, name) in enumerate(siblings):
             if name == turn_dir.name:

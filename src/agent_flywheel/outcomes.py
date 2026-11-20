@@ -821,6 +821,43 @@ def record_turn_text(
     return True
 
 
+def turn_started_at(d: Path) -> float:
+    """When this turn STARTED, for ordering a conversation.
+
+    THE ``conversation_id`` FILE'S mtime, NOT THE DIRECTORY'S -- and that
+    distinction is the whole point. A directory's mtime advances every time a
+    file is CREATED inside it, which this module already knows and already
+    designed around once: see ``Attachment._UPLOADED_INDEX``, which is one file at the
+    root rather than a marker in each turn for exactly this reason. But a
+    turn's own capture creates files inside its directory long after the turn
+    began -- ``record_answer`` creates ``turns.jsonl`` whenever ``input_text``
+    was not passed to :meth:`Attachment.turn` (both are documented optional),
+    and the first ``record_tool_call`` creates the trajectory file. So the
+    directory's mtime says "last written to", and ordering a conversation by
+    it puts a turn whose answer arrived late AFTER the turn that followed it:
+    the conversation is uploaded in the wrong order and MC stores the wrong
+    ``turn_index`` verbatim.
+
+    The ``conversation_id`` file is written once, at scope entry, and never
+    touched again. It exists for exactly the turns that have an index at all,
+    so nothing new has to be written to get this -- and a turn that predates
+    this ordering, or whose file cannot be read, still falls back to the
+    directory mtime rather than losing its place entirely.
+
+    ONE ANSWER FOR BOTH READERS: the upload path's ``turn_index`` and
+    ``export.iter_records``, which ordered by the directory's mtime and so
+    put a late-answered turn after the one that followed it.
+    """
+    try:
+        return (d / CONVERSATION_ID_FILENAME).stat().st_mtime
+    except OSError:
+        pass
+    try:
+        return d.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def read_conversation_id(path: Any) -> str | None:
     """Which conversation this turn directory declared, or ``None``.
 
