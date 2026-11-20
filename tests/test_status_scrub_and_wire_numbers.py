@@ -94,3 +94,116 @@ def test_a_reward_the_wire_cannot_carry_is_refused(reward):
 @pytest.mark.parametrize("reward", [0, 1, 0.5, -2.0])
 def test_a_finite_reward_is_sent_as_given(reward):
     assert RolloutOutput(final_text="", reward=reward).to_wire()["reward"] == reward
+
+
+# ── one rule in both SDKs ─────────────────────────────────────────────────
+
+#: Bodies an unknown call may carry, each scrubbed by both SDKs. Strings,
+#: booleans, nulls and integers only: a float's spelling is the one thing
+#: JavaScript's parser loses (``contract._scrub_status`` names it).
+SCRUB_TABLE = [
+    "got HTTP 404 back",
+    "HTTP/1.1 200 OK and http/2 201 and HTTP 3000 and HTTP\t502",
+    "HTTP٢٠٠ is not a status",          # Arabic-Indic digits
+    "xHTTP 200 and HTTP 200x stay",
+    '"HTTP 200 inside a JSON string"',
+    "42",
+    '{"status": 200, "body": "{\\"Status_Code\\": 201, \\"id\\": \\"PROJ-1\\"}"}',
+    '[{"STATUS": "201", "k": "vé\u007f"}, "HTTP/2 204"]',
+    '{"a": NaN, "code": 1, "b": -Infinity}',
+    '{"broken": ',
+    {"status": 200, "statusCode": 201, "ok": "HTTP 200 OK",
+     "nested": [{"code": 7, "note": "n"}]},
+    {"body": '{"http_status": 500, "msg": "fine ☃"}', "HTTP_STATUS": 1},
+    ["HTTP/1.0 200", {"Code": 3, "keep": True, "none": None}],
+    7,
+]
+
+
+def test_both_sdks_scrub_status_byte_for_byte():
+    """The Node SDK's ``scrubStatus`` and this ``_scrub_status`` return the
+    same bytes for every body above. Mutation: either side back to its
+    pre-PY-H13 rule (case-sensitive keys, ``HTTP nnn`` only, dict strings
+    only regex-scrubbed and stripped) -> red."""
+    from agent_flywheel.contract import _scrub_status
+
+    from .node_sdk import require_node_sdk, run_node
+
+    sdk, node = require_node_sdk()
+    script = (
+        "import { scrubStatus } from './src/wire.js';\n"
+        "let input = '';\n"
+        "process.stdin.on('data', (c) => { input += c; });\n"
+        "process.stdin.on('end', () => {\n"
+        "  console.log(JSON.stringify(JSON.parse(input).map(scrubStatus)));\n"
+        "});\n"
+    )
+    node_out = json.loads(run_node(sdk, node, script, stdin=json.dumps(SCRUB_TABLE)))
+    python_out = [_scrub_status(body) for body in SCRUB_TABLE]
+    for body, theirs, ours in zip(SCRUB_TABLE, node_out, python_out):
+        assert theirs == ours, f"{body!r}: Node {theirs!r}, Python {ours!r}"
+    # Spot checks that the rule is the one stated, not merely shared.
+    assert python_out[2] == SCRUB_TABLE[2], "a Unicode digit is no status"
+    assert python_out[8] == '{"a": null, "b": null}'
+    assert python_out[9] == SCRUB_TABLE[9]
+
+
+def test_both_sdks_take_the_same_identity_fields():
+    """``entity_ids`` keys are refused or lowercased against one set."""
+    from agent_flywheel.evidence import IDENTITY_FIELDS
+
+    from .node_sdk import require_node_sdk, run_node
+
+    sdk, node = require_node_sdk()
+    script = (
+        "import { IDENTITY_FIELDS } from './src/evidence.js';\n"
+        "console.log(JSON.stringify([...IDENTITY_FIELDS].sort()));\n"
+    )
+    assert json.loads(run_node(sdk, node, script)) == sorted(IDENTITY_FIELDS)
+
+
+#: Ids for the two id rules both SDKs apply: the URL path segment and the
+#: task id. Each row is (id, a note); the answers are compared, not listed.
+ID_TABLE = [
+    "rl_1", "", ".", "..", "a/b", "a\\b", "a\x00b", "a\x7fb", "a\x85b",
+    "it's (a)*!?#%", "café", "x" * 256, "x" * 257,
+    "\U0001F600" * 129, "\U0001F600" * 256, "\U0001F600" * 257,
+    " lead", "trail ", "\tlead", "a​b", "a b", "a b",
+    "a­b", "﻿a", "ab", "͸", "a b", "x" * 255,
+]
+
+
+def test_both_sdks_apply_one_path_segment_rule_and_one_task_id_rule():
+    """``_path_segment`` / ``urlSegment`` and ``_task_identifier`` /
+    ``productionTaskIdentifier`` give the same answer for every id above:
+    the same refusals, the same percent-encoding. Mutation: Node's segment
+    length back to UTF-16 units -> the 129-emoji row differs, red."""
+    from agent_flywheel.contract import _path_segment, _task_identifier
+
+    from .node_sdk import require_node_sdk, run_node
+
+    def python(value):
+        try:
+            segment = _path_segment(value, "id")
+        except ContractViolation:
+            segment = None
+        return [segment, _task_identifier(value)]
+
+    sdk, node = require_node_sdk()
+    script = (
+        "import { urlSegment } from './src/transport.js';\n"
+        "import { productionTaskIdentifier } from './src/wire.js';\n"
+        "let input = '';\n"
+        "process.stdin.on('data', (c) => { input += c; });\n"
+        "process.stdin.on('end', () => {\n"
+        "  console.log(JSON.stringify(JSON.parse(input).map((v) => {\n"
+        "    let segment = null;\n"
+        "    try { segment = urlSegment(v, 'id'); } catch { segment = null; }\n"
+        "    return [segment, productionTaskIdentifier(v)];\n"
+        "  })));\n"
+        "});\n"
+    )
+    theirs = json.loads(run_node(sdk, node, script, stdin=json.dumps(ID_TABLE)))
+    for value, node_answer in zip(ID_TABLE, theirs):
+        assert node_answer == python(value), (
+            f"{value!r}: Node {node_answer!r}, Python {python(value)!r}")

@@ -507,8 +507,13 @@ _VALID_OUTCOMES = ("ok", "failed", "unknown")
 _STATUS_KEYS = frozenset(
     ("status_code", "status", "http_status", "code", "statuscode"))
 #: ``HTTP 200``, and the status line's own spelling: ``HTTP/1.1 200``,
-#: ``HTTP/2 200``.
-_HTTP_IN_TEXT = re.compile(r"\bHTTP(?:/\d(?:\.\d)?)?\s*\d{3}\b", re.I)
+#: ``HTTP/2 200``. ASCII classes only (``[0-9]``, the six ASCII spaces,
+#: ``re.ASCII``'s ``\b``): the Node SDK's ``HTTP_IN_TEXT`` is this pattern
+#: character for character, and Python's ``\d``/``\s``/``\b`` read Unicode
+#: digits, spaces and word characters that ECMA-262's do not.
+_HTTP_IN_TEXT = re.compile(
+    r"\bHTTP(?:/[0-9](?:\.[0-9])?)?[\t\n\v\f\r ]*[0-9]{3}\b",
+    re.I | re.ASCII)
 
 
 def _scrub_status(output: Any) -> Any:
@@ -525,6 +530,14 @@ def _scrub_status(output: Any) -> Any:
     -- a dict's ``{"body": "{\"status_code\": 200}"}`` included, which used
     to keep its status -- and any other has its ``HTTP 200`` /
     ``HTTP/1.1 200`` removed. Status keys are matched case-insensitively.
+    A non-finite constant in the body (``NaN``) is written back null.
+
+    THE NODE SDK'S ``scrubStatus`` IS THIS RULE, and writes the body back in
+    ``json.dumps``'s spelling, so both send the same bytes -- except where
+    JavaScript's parser has already lost what this one keeps (a float's
+    ``12.0``, an integer past 2**53, the position of integer-like keys).
+    ``tests/test_status_scrub_and_wire_numbers.py`` drives both over one
+    table.
 
     The human-readable content is preserved -- the trajectory still reads the
     same to a judge, it simply carries no status the scorer can mistake for an
@@ -532,7 +545,10 @@ def _scrub_status(output: Any) -> Any:
     """
     if isinstance(output, str):
         try:
-            body = json.loads(output)
+            # ``NaN``/``Infinity`` read as null, as the Node SDK reads them
+            # (``parseJsonWithConstants``): the body is still scrubbed, and
+            # written back as JSON a parser takes.
+            body = json.loads(output, parse_constant=lambda _c: None)
         except Exception:
             body = None
         if isinstance(body, (dict, list)):
