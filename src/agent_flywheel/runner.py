@@ -480,6 +480,11 @@ _OUTBOX_SCHEMA = "percepteye.outbox/v1"
 #: a credential an operator has to reissue by hand.
 _OUTBOX_MAX_AGE_S = 7 * 24 * 3600.0
 
+#: Backoff between redeliveries of one held result: first retry ~10s after a
+#: failure, doubling per attempt, never more than ten minutes apart.
+_OUTBOX_RETRY_BASE_S = 10.0
+_OUTBOX_RETRY_MAX_S = 600.0
+
 #: Consecutive PERMANENT refusals before the loop stops claiming. Counts only
 #: the terminal 4xx branch -- never 408/429/5xx/network, which recover on their
 #: own -- and resets on the first success. Three, because one is a bad payload
@@ -1188,6 +1193,7 @@ class RolloutRunner:
             self._permanent_refusals = 0
             self._outbox_lock = threading.Lock()
             self._lease_tokens = {}
+            self._retry_due = {}
             return
         if command_output_adapter is not None:
             raise ConfigurationError(
@@ -1262,6 +1268,9 @@ class RolloutRunner:
         #: and the outbox is a directory the customer's untrusted agent can read
         #: (see ``_spool_write``). Dropped the moment the outcome settles.
         self._lease_tokens: dict[str, str] = {}
+        #: When each held spool file (by name) is next worth sending. See
+        #: ``_schedule_retry``.
+        self._retry_due: dict[str, float] = {}
 
     @property
     def execution_sha256(self) -> str | None:
@@ -2159,7 +2168,9 @@ class RolloutRunner:
             # undelivered has had every chance this process can give it, and
             # what remains on disk is what the next start will pick up.
             try:
-                delivered += self._drain_outbox()
+                # Every held result once more, due or not: this is the last
+                # chance this process has to deliver it.
+                delivered += self._drain_outbox(force=True)
             except Exception:  # never let housekeeping mask the real exit
                 pass
             self._beat_stop.set()
@@ -2445,6 +2456,9 @@ class RolloutRunner:
             )
             return False
         if record.get("lease_lost") and time.time() < deadline_ts:
+            # Not before the deadline, so the drain need not look before then.
+            with self._outbox_lock:
+                self._retry_due[path.name] = deadline_ts
             # NEVER RACE A LIVE HOLDER. The lease is gone, so the control plane
             # may already have handed this rollout to someone else, and for an
             # ordinary rollout its report route performs no ownership check —
@@ -2682,6 +2696,11 @@ class RolloutRunner:
         not possible, so a warning quoting it still points at something real).
         """
         key = _record_key(record)
+        if delivered or retire is not None:
+            with self._outbox_lock:
+                self._retry_due.pop(path.name, None)
+        else:
+            self._schedule_retry(path, record)
         if delivered:
             with self._outbox_lock:
                 self._lease_tokens.pop(key, None)
@@ -2702,13 +2721,33 @@ class RolloutRunner:
             self._lease_tokens.pop(key, None)
         return _move_aside(path, retire)
 
-    def _drain_outbox(self) -> int:
-        """Deliver everything the outbox still holds. Returns how many landed.
+    def _schedule_retry(self, path: Path, record: Mapping[str, Any]) -> None:
+        """Hold a result that failed to send until it is worth sending again.
+
+        Jittered exponential backoff on the record's own attempt count, from
+        10s to ten minutes. The drain runs on EVERY slot completion under
+        continuous claiming, and it used to resend every held result each time
+        -- a just-failed delivery was retried at once, each retry spending the
+        transport's full envelope, while the free slots it ran in front of
+        waited to claim. Many workers backing off in step against one control
+        plane is the other half of an outage, hence the jitter.
+        """
+        import random
+
+        attempts = max(1, int(record.get("attempts") or 1))
+        delay = min(_OUTBOX_RETRY_MAX_S, _OUTBOX_RETRY_BASE_S * 2 ** (attempts - 1))
+        with self._outbox_lock:
+            self._retry_due[path.name] = time.time() + delay * random.uniform(0.8, 1.2)
+
+    def _drain_outbox(self, *, force: bool = False) -> int:
+        """Deliver everything the outbox holds that is DUE. Returns how many landed.
 
         Called at the top of the claim loop — BEFORE claiming, because a result
         already produced is worth more than the next rollout — and once more on
-        the way out. A rollout still in flight is skipped: its own worker owns
-        that file until it is finished with it.
+        the way out (``force``: every held result, due or not). A rollout still
+        in flight is skipped: its own worker owns that file until it is
+        finished with it. A result not yet due (``_schedule_retry``) is skipped
+        without being read, so a drain with nothing due costs one listing.
         """
         root = self._outbox_dir()
         if not root.is_dir():
@@ -2718,7 +2757,12 @@ class RolloutRunner:
             paths = sorted(root.glob("*.json"))
         except OSError:
             return 0
+        now = time.time()
+        with self._outbox_lock:
+            due = dict(self._retry_due)
         for path in paths:
+            if not force and due.get(path.name, 0.0) > now:
+                continue
             try:
                 delivered += self._drain_one(path)
             except Exception as exc:
