@@ -19,7 +19,7 @@ import pytest
 from agent_flywheel import RolloutRequest
 from agent_flywheel._http import ControlPlaneClient
 from agent_flywheel.errors import LeaseLost, TransportError
-from agent_flywheel.runner import RolloutRunner
+from agent_flywheel.runner import RolloutRunner, _InFlight
 
 TESTS_DIR = str(pathlib.Path(__file__).resolve().parent)
 
@@ -692,6 +692,35 @@ def test_a_granted_lease_sets_the_interval_to_a_third_of_it(tmp_path):
     assert 28.0 <= interval <= 31.0, interval          # a third of 90s
     # and the requested lease is NOT what was used, which is the whole point
     assert interval < 600.0
+
+
+def test_no_beat_is_sent_once_the_lease_has_reached_the_deadline(tmp_path):
+    """The control plane caps a lease at the rollout's deadline, so once a
+    beat answers that cap no beat can extend it further. Paced against the
+    shrinking remainder, the beats came faster and faster up to the deadline
+    (a third of what was left, down to the 1 s floor) -- a dozen useless POSTs
+    per long rollout, in every tenant. Mutation: drop the deadline rule from
+    ``_next_beat_at`` -> the next beat is due within the remainder, red."""
+    rollout = _req(tmp_path, "rl_1", seconds=300.0)
+    answers = [rollout.deadline_ts - 200.0, rollout.deadline_ts]
+
+    class Capped(FakeTransport):
+        def heartbeat(self, r, *, progress=None):
+            super().heartbeat(r, progress=progress)
+            return answers.pop(0)
+
+    runner = _runner(tmp_path, Capped([]))
+    entry = _InFlight(rollout, 60.0, time.time())
+
+    # A lease short of the deadline: the next beat comes, sooner than the
+    # interval because a third of what is left is less.
+    runner._beat_one(entry)
+    assert entry.next_beat_at < time.time() + 60.0
+
+    # The lease reached the deadline: nothing more is due for it.
+    runner._beat_one(entry)
+    assert entry.next_beat_at == float("inf"), entry.next_beat_at - time.time()
+    assert entry.beating is False
 
 
 def test_one_malformed_rollout_costs_the_batch_nothing_and_is_given_back():

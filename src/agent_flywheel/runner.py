@@ -529,6 +529,11 @@ def _is_permanent_refusal(exc: TransportError) -> bool:
 #: is in flight, it is wrong for all of them.
 _BEAT_TICK_S = 1.0
 
+#: A lease the control plane states within this of the rollout's deadline is
+#: AT the deadline, which caps it (``_next_beat_at``): the two are serialized
+#: separately, and a beat a second early buys nothing either way.
+_LEASE_AT_DEADLINE_SLACK_S = 1.0
+
 
 def _kill_tree(proc: subprocess.Popen[str]) -> None:
     """Kill the command AND everything it spawned.
@@ -1992,10 +1997,23 @@ class RolloutRunner:
 
     def _next_beat_at(self, entry: _InFlight, now: float) -> float:
         """The next beat: a beat interval from now, sooner if the lease the
-        control plane last stated has less than three of those left."""
+        control plane last stated has less than three of those left -- and
+        NEVER once that lease has reached the rollout's deadline.
+
+        The control plane caps a lease at the rollout's ``deadline_at``: no
+        beat can carry it further, and the only other answer a beat gets,
+        lease_lost, needs a lease that lapsed, which cannot happen before the
+        deadline, by which time the child has been stopped. Pacing on against
+        the shrinking remainder sent a burst of useless POSTs at the end of
+        every long rollout (a third of what is left each time, down to the
+        1 s floor: 200, 133, 89, ... 1, 1 s), in every tenant at once.
+        """
         delay = entry.beat_interval
         expires = entry.lease_expires_ts
         if isinstance(expires, (int, float)):
+            deadline = entry.rollout.deadline_ts
+            if deadline > 0 and float(expires) >= deadline - _LEASE_AT_DEADLINE_SLACK_S:
+                return float("inf")
             delay = min(delay, (float(expires) - now) / 3.0)
         return now + max(1.0, delay)
 
