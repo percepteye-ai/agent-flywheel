@@ -1403,8 +1403,15 @@ class RolloutRunner:
         })
         self._warn_if_call_ceiling_is_inert(plan)
         timeout_s = plan.child_s
-        trajectory_dir = self._trajectory_dir(_attempt_key(rollout))
-        Path(trajectory_dir).mkdir(parents=True, exist_ok=True)
+        checked = self._contained_trajectory_dir(_attempt_key(rollout))
+        if checked is None:
+            raise ContractViolation(
+                f"rollout id {rollout.rollout_id!r} does not name a directory "
+                f"directly inside {Path(self.artifacts_dir) / '_percepteye'}; "
+                f"refusing to run it there"
+            )
+        trajectory_dir = str(checked)
+        checked.mkdir(parents=True, exist_ok=True)
 
         if self._command is not None:
             return self._run_command_with_execution_snapshot(
@@ -1692,6 +1699,33 @@ class RolloutRunner:
     def _trajectory_dir(self, key: str) -> str:
         """Where one claimed attempt runs: ``_percepteye/<attempt key>``."""
         return str(Path(self.artifacts_dir) / "_percepteye" / key)
+
+    def _contained_trajectory_dir(self, key: str) -> Path | None:
+        """``_trajectory_dir(key)`` if it is a real directory slot DIRECTLY
+        inside ``_percepteye``; ``None`` if it is not.
+
+        The id comes off the wire, and this path is created, run in, read into
+        the report and rmtree'd. ``../x`` or an absolute id escaped the base,
+        so collection inlined host files into the report and the purge deleted
+        a host directory. A name starting with ``_`` is the SDK's own
+        (``_outbox``). And a symlink in the slot -- which another rollout's
+        agent, whose cwd is a sibling, can plant -- is refused rather than
+        followed. Checked on every use, not once: the agent can change the
+        directory between them.
+        """
+        base = Path(self.artifacts_dir) / "_percepteye"
+        if (not key or key in (".", "..") or key.startswith("_")
+                or "/" in key or "\\" in key or "\x00" in key):
+            return None
+        path = base / key
+        try:
+            if path.is_symlink():
+                return None
+            if path.resolve().parent != base.resolve():
+                return None
+        except (OSError, ValueError):
+            return None
+        return path
 
     def _run_in_subprocess(
         self, rollout: RolloutRequest, *, trajectory_dir: str, timeout_s: float,
@@ -2720,7 +2754,15 @@ class RolloutRunner:
         # about through PERCEPTEYE_TRAJECTORY_DIR and can therefore actually write
         # to. ``rollout.artifacts_dir`` is the SERVER's name for this rollout's
         # storage ("rollouts/rl_x") and is not a path on this machine.
-        root = Path(self._trajectory_dir(_attempt_key(rollout)))
+        root = self._contained_trajectory_dir(_attempt_key(rollout))
+        if root is None:
+            self._emit("artifact_failed", {
+                "rollout_id": rollout.rollout_id, "name": "*",
+                "error": "the trajectory directory is not a directory inside "
+                         "_percepteye (a symlink, or an id that escapes it); "
+                         "nothing was collected",
+            })
+            return
         if not root.is_dir():
             return
         inline_budget = MAX_INLINE_TOTAL_BYTES
@@ -2788,8 +2830,11 @@ class RolloutRunner:
         One directory per rollout accumulated for the life of the process, so a
         flywheel serving continuously grew its artifacts tree without bound.
         """
+        path = self._contained_trajectory_dir(key)
+        if path is None:  # never follow a planted link, never leave the base
+            return
         try:
-            shutil.rmtree(Path(self._trajectory_dir(key)), ignore_errors=True)
+            shutil.rmtree(path, ignore_errors=True)
         except OSError:  # pragma: no cover - best effort, never fails a rollout
             pass
 
