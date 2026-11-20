@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import time
+import warnings
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -783,3 +784,54 @@ def test_a_late_answer_does_not_reorder_the_conversation(monkeypatch, tmp_path):
     assert idx == {"t0": 0, "t1": 1}, (
         f"a late answer inverted the conversation: {idx}"
     )
+
+
+# ── an answered no on the capture read stops the upload it precedes ────────
+
+
+class _Revoking(_Transport):
+    """Consent granted at registration; the capture read now answers no."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.asked = 0
+
+    def capture_current(self, agent_id):
+        self.asked += 1
+        return {"capture": {"turns": False, "reason": "an operator revoked it"}}
+
+
+def test_an_answered_no_on_the_capture_read_stops_the_same_flush(
+        monkeypatch, tmp_path):
+    """The re-read runs at the top of every flush while the model-content tier
+    is withheld. An ANSWERED no there used to record the refusal and leave
+    ``may_upload`` True, so the turn upload right after it sent the end user's
+    message and answer to a control plane that had just said not to."""
+    tr = _Revoking()
+    monkeypatch.setattr(fw.Attachment, "_flush_soon", lambda self: None)
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        assert px.may_upload is True and px.may_capture_model_content is False
+        _turn(px, "t1", ask="my card number is on file", answer="ok")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            counts = px.flush()
+        assert tr.asked >= 1
+        assert tr.sent == [], "a turn left after an answered no"
+        assert counts.get("not_permitted") == 1
+        assert px.may_upload is False
+        assert px.may_capture_model_content is False
+        assert px.upload_refusal == "an operator revoked it"
+        assert px.model_content_refusal == "an operator revoked it"
+        assert any("uploading has stopped" in str(w.message) for w in caught)
+    assert tr.sent == [], "nor at close"
+
+
+def test_a_blip_on_the_capture_read_never_revokes(monkeypatch, tmp_path):
+    """The other half of the rule: no answer is not a no."""
+    tr = _Revoking()
+    tr.capture_current = lambda agent_id: {}
+    monkeypatch.setattr(fw.Attachment, "_flush_soon", lambda self: None)
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _turn(px, "t1", ask="hi", answer="hello")
+        assert px.flush()["sent"] == 1
+        assert px.may_upload is True

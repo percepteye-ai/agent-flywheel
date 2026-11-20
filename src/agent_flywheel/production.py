@@ -2027,15 +2027,24 @@ class Attachment:
             _flush_at_exit(self)
 
     def _refuse_upload(self, reason: str) -> None:
-        """The intake terminally refused these turns. Stop sending, say why.
+        """The control plane said NO. Stop sending, say why.
 
-        THE ONE PLACE ``may_upload`` turns False after it was True, and it says
-        so out loud because nothing else would: ``upload_refusal`` would
-        otherwise still read whatever startup said, the operator would see
-        repeated 403s in the control plane's logs with nothing in the
-        customer's, and the customer would see a serving process making an
-        outbound request every cadence that can never succeed.
+        THE ONE PLACE ``may_upload`` turns False after startup, for every
+        way the no arrives: the intake's 403 on turns or outcomes, and an
+        ANSWERED refusal on the capture read (:meth:`_recheck_capture`). The
+        read used to record the refusal and leave ``may_upload`` True, so the
+        turn upload that follows it in the same flush sent end users' text
+        to a control plane that had just said not to.
+
+        Said out loud when it STOPS an upload, because nothing else would:
+        ``upload_refusal`` would otherwise still read whatever startup said,
+        the operator would see repeated 403s in the control plane's logs with
+        nothing in the customer's, and the customer would see a serving
+        process making an outbound request every cadence that can never
+        succeed. A no repeated to an agent that was not uploading changes
+        only the sentence, silently.
         """
+        stopped = self.may_upload
         self.may_upload = False
         self.upload_refusal = reason
         self._consent_refused = True
@@ -2043,6 +2052,8 @@ class Attachment:
         # too, for the same reason.
         self.may_capture_model_content = False
         self.model_content_refusal = reason
+        if not stopped:
+            return
         try:
             warnings.warn(
                 f"agent-flywheel: the control plane refused this agent's captured "
@@ -2064,13 +2075,19 @@ class Attachment:
         introspection as ``disabled`` -- so polling for permission would have
         repeatedly disabled the agent's own description.
 
-        ONLY EVER TURNS CAPTURE ON, never off. A control plane that cannot
-        answer returns ``{}``, and reading that as a revocation would stop a
-        consenting customer's uploads on a network blip. Revocation is enforced
-        where it belongs: the intake refuses. ``_flush_locked`` reads that
-        refusal -- a 403 is a decision, not a blip -- stops sending, and leaves
-        the turns on disk; this method is then how consent is picked back up if
-        it is re-granted.
+        AN ANSWER TURNS CAPTURE EITHER WAY; A BLIP NEVER REVOKES. A yes goes
+        through :meth:`_grant_upload`. An ANSWERED no goes through
+        :meth:`_refuse_upload`, the seam the intake's 403 goes through, so
+        ``may_upload`` and the model-content tier are False before this flush
+        sends anything. A control plane that cannot answer returns ``{}``
+        (``answered`` False), and reading that as a revocation would stop a
+        consenting customer's uploads on a network blip, so it changes
+        nothing.
+
+        THE NO THAT ENDS THE WAITING. Outcomes reported while the answer was
+        unknown were kept for this answer; an answered no means nothing will
+        ever send them, so they are deleted (:meth:`_purge_unanswered_outcomes`),
+        exactly as :meth:`report_outcome` keeps none after a no.
         """
         if not self._cp_url or not self._api_key:
             return
@@ -2084,28 +2101,25 @@ class Attachment:
                 AttachTransport(client, self.agent_id).capture_current(self.agent_id))
             if verdict.may_upload:
                 self._grant_upload()
-            if verdict.answered:
-                # The second tier is read off the same answer, both ways: this
-                # is a verdict the control plane GAVE, not a blip, so a grant
-                # turns model-content recording on from the next turn and a
-                # refusal keeps it off with the server's current sentence.
-                self.may_capture_model_content = (
-                    verdict.may_capture_model_content and self.may_upload)
+                # The second tier is read off the same answer, both ways: a
+                # grant turns model-content recording on from the next turn and
+                # a refusal keeps it off with the server's current sentence.
+                self.may_capture_model_content = verdict.may_capture_model_content
                 self.model_content_refusal = (
                     None if self.may_capture_model_content
                     else verdict.model_content_reason)
-            if not verdict.may_upload and verdict.answered:
+            elif verdict.answered:
                 # Keep the reason current even while the answer stays no: an
                 # operator who fixes consent but not the key's scope should see
                 # the second sentence, not the first one from startup.
                 #
                 # ONLY WHEN IT ANSWERED. A poll that came back with no capture
                 # block is a blip, and overwriting a specific refusal with the
-                # generic one would lose the sentence the operator needs --
-                # the same argument that stops an empty answer revoking
-                # consent two lines up.
-                self.upload_refusal = verdict.reason
-                self._consent_refused = True
+                # generic one would lose the sentence the operator needs.
+                was_unknown = not self.may_upload and not self._consent_refused
+                self._refuse_upload(verdict.reason or "")
+                if was_unknown:
+                    self._purge_unanswered_outcomes()
         except Exception:
             # A capture bug costs the observation, never the turn.
             pass
@@ -2115,6 +2129,31 @@ class Attachment:
                     client.close()
                 except Exception:
                     pass
+
+    def _purge_unanswered_outcomes(self) -> None:
+        """Delete the outcomes that waited on the consent answer, now that it
+        is no. An outcome naming only an episode never waited on it
+        (``contract.names_only_an_episode``) and stays. Said once, with the
+        count and the control plane's sentence. Never raises."""
+        dropped = 0
+        for path in self._outcome_files():
+            try:
+                wire = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                wire = None
+            if isinstance(wire, Mapping) and names_only_an_episode(wire):
+                continue
+            try:
+                path.unlink()
+                dropped += 1
+            except OSError:
+                continue
+        if dropped:
+            self._warn(
+                f"agent-flywheel: {dropped} reported outcome(s) kept while the "
+                "control plane had not answered were deleted: it answered that "
+                f"this agent may not upload production traffic "
+                f"({self.upload_refusal})")
 
     def _note_model_content_refusal(self, reply: Any) -> None:
         """Stop recording model content the intake says it may not take.

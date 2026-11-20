@@ -315,15 +315,23 @@ def test_an_explicit_no_learned_later_makes_reporting_a_no_op_again(
     monkeypatch, tmp_path, quiet,
 ):
     """Only the control plane's answered no ends the waiting: what was kept
-    stays on disk like a refused turn, and nothing new is kept."""
+    for that answer is deleted, since nothing will ever send it, and nothing
+    new is kept -- the terms ``report_outcome`` keeps after a no. An outcome
+    naming only an episode never waited on consent and stays."""
     tr = _Unanswered(later={"turns": False, "reason": "opt-in per agent"})
     with _attached(monkeypatch, tmp_path, tr) as px:
         assert px.report_outcome("resolved", turn_id="t1") is not None
-        px.flush()
+        episode = px.report_outcome("resolved", episode_id="rl_ep1")
+        assert episode is not None
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            px.flush()
         assert px.may_upload is False and px.upload_refusal == "opt-in per agent"
         assert px.report_outcome("reopened", turn_id="t1") is None
-        assert len(_pending(tmp_path)) == 1
-    assert tr.outcomes == []
+        assert _pending(tmp_path) == [], "the consent-gated outcome is purged"
+        assert any("1 reported outcome(s)" in str(w.message)
+                   and "opt-in per agent" in str(w.message) for w in caught)
+    assert [o["outcome_id"] for o in tr.outcomes] == [episode]
 
 
 @pytest.mark.parametrize("answer", [
@@ -356,7 +364,8 @@ def test_a_definitive_answer_on_the_verdict_read_ends_the_waiting(
             assert "did not grant" in px.upload_refusal
             if answer[0] != 200:
                 assert f"HTTP {answer[0]}" in px.upload_refusal
-            assert len(_pending(tmp_path)) == 1, "kept like a refused turn"
+            assert _pending(tmp_path) == [], (
+                "kept for an answer that came back no: nothing will send it")
 
 
 def test_an_outcome_kept_while_consent_is_unknown_still_expires(
@@ -861,7 +870,10 @@ def _over_http(monkeypatch, root, routes):
         px.close()
 
 
-GRANTED = {"POST /agents": (200, {"capture": {"turns": True}})}
+#: A control plane that granted capture, at registration and on the verdict
+#: read the flush re-asks while model content is withheld.
+GRANTED = {"POST /agents": (200, {"capture": {"turns": True}}),
+           "GET /agents/support/capture": (200, {"capture": {"turns": True}})}
 
 
 @pytest.mark.parametrize("status", [401, 404, 405, 410])
