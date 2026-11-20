@@ -47,12 +47,24 @@ def main(argv: list[str] | None = None) -> int:
         run_rollout_in_process,
     )
 
-    # THE CONSTANT, not a third copy of 900.0. The parent always sends
-    # ``timeout_s`` (it is the episode plan's ``child_s``), so this fallback is
-    # for a payload that lost it -- and a fallback that silently disagreed with
-    # the budget the parent computes is how a child outlives the window the
-    # parent reserved delivery time inside.
-    timeout_s: float = float(payload.get("timeout_s") or DEFAULT_ROLLOUT_TIMEOUT_S)
+    # The parent always sends ``timeout_s`` (it is the episode plan's
+    # ``child_s``). A payload that lost it is planned the SAME way, from the
+    # rollout's own deadline -- a fallback that disagreed with the budget the
+    # parent computes is how a child outlives the window the parent reserved
+    # delivery time inside.
+    timeout_s = payload.get("timeout_s")
+    if not timeout_s:
+        import time as _time
+
+        from .runner import episode_plan
+
+        deadline = (payload.get("rollout") or {}).get("deadline_ts")
+        if not isinstance(deadline, (int, float)):
+            raise SystemExit("child payload carries neither timeout_s nor a deadline")
+        timeout_s = episode_plan(
+            float(deadline) - _time.time(),
+            rollout_timeout_s=DEFAULT_ROLLOUT_TIMEOUT_S).child_s
+    timeout_s = float(timeout_s)
 
     resolved = resolve_entrypoint(
         build_agent(spec), input_shape=input_shape, method=payload.get("method")

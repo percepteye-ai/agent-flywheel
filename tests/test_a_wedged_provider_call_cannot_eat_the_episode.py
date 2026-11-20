@@ -72,7 +72,7 @@ def _runner_kill_deadline_s(budget_s: float = OBSERVED_EPISODE_BUDGET_S) -> floa
 
     return episode_plan(
         budget_s,
-        rollout_timeout_s=float(serve_default),
+        rollout_timeout_s=serve_default,
         envelope_s=default_delivery_envelope_s(),
     ).child_s
 
