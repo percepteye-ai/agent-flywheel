@@ -146,93 +146,110 @@ def run_rollout_in_process(
     process the agent runs in -- a callback registered in the parent would
     never see a child's tool calls.
     """
+    import asyncio
+
     started = time.time()
     unbinds: list[Any] = []
-    if adapters is not None:
-        from .binding import bind_selected
+    # The unbinds run in a ``finally``. They used to follow the ``with`` below,
+    # after two ``return`` statements, so a timed-out or crashed rollout never
+    # unbound and its framework patches outlived it -- in-process, for the
+    # life of the serving process.
+    try:
+        if adapters is not None:
+            from .binding import bind_selected
 
-        report, unbinds = bind_selected(
-            adapters, llm_url=rollout.llm_url, api_key=rollout.api_key
-        )
-        _ = report
-    from .policy_calls import count_policy_calls
+            report, unbinds = bind_selected(
+                adapters, llm_url=rollout.llm_url, api_key=rollout.api_key
+            )
+            _ = report
+        from .policy_calls import count_policy_calls
 
-    with _RolloutScope(rollout.rollout_id, trajectory_dir,
-                       task_id=(rollout.metadata or {}).get("task_id"),
-                       hosted_url=hosted_base_for(rollout.llm_url)), \
-            count_policy_calls(rollout.llm_url) as policy_calls:
-        arg = resolved.build_arg(rollout.turn_input)
-        try:
-            if resolved.is_async:
-                import asyncio
-
-                raw = asyncio.run(_await_with_timeout(resolved.fn(arg), timeout_s))
+        with _RolloutScope(rollout.rollout_id, trajectory_dir,
+                           task_id=(rollout.metadata or {}).get("task_id"),
+                           hosted_url=hosted_base_for(rollout.llm_url)), \
+                count_policy_calls(rollout.llm_url) as policy_calls:
+            arg = resolved.build_arg(rollout.turn_input)
+            try:
+                if resolved.is_async:
+                    raw = asyncio.run(_await_with_timeout(resolved.fn(arg), timeout_s))
+                else:
+                    # A worker thread starts with an EMPTY context, so the
+                    # rollout binding set just above would be invisible inside
+                    # the agent and every recorded outcome would be silently
+                    # discarded. Copy the context in explicitly and run the
+                    # agent inside it.
+                    ctx = contextvars.copy_context()
+                    # Deliberately NOT a `with` block. Executor.__exit__ calls
+                    # shutdown(wait=True), which on the timeout path BLOCKS
+                    # during unwinding until the hung agent returns -- so the
+                    # TimeoutError could not escape and the budget was
+                    # cosmetic. Measured: a 1s budget against an 8s agent
+                    # returned after 8s, carrying the right reason, which is
+                    # why tests asserting the reason passed. The subprocess
+                    # path below carries the same warning; this was the one
+                    # place that had the bug the comment describes.
+                    pool = _cf.ThreadPoolExecutor(max_workers=1)
+                    fut = pool.submit(ctx.run, resolved.fn, arg)
+                    try:
+                        raw = fut.result(timeout=timeout_s)
+                    except BaseException:
+                        # wait=False: stop waiting on the wedged worker. Python
+                        # cannot kill a thread, which is exactly why subprocess
+                        # is the default and the only isolation with a real
+                        # timeout.
+                        pool.shutdown(wait=False, cancel_futures=True)
+                        raise
+                    pool.shutdown(wait=True)
+            # The policy calls counted so far ride EVERY exit, not only the
+            # agent's return. A timed-out or crashed rollout with no count is
+            # held out as ``llm_calls_unobserved`` by both reconcilers, which
+            # undid Mission Control scoring a policy that ran out of time as a
+            # failure (τ³ 2c3f5922: 60 such rollouts).
+            #
+            # BOTH timeout classes. On Python 3.10 ``asyncio.wait_for`` raises
+            # ``asyncio.TimeoutError``, which is neither the builtin nor the
+            # ``concurrent.futures`` one (they were unified in 3.11), so a
+            # timed-out ASYNC agent was reported as ``entrypoint_error`` --
+            # its own failure -- on the oldest Python this SDK supports.
+            except (_cf.TimeoutError, asyncio.TimeoutError):
+                out = RolloutOutput(
+                    final_text="",
+                    exclusion_reason="deadline_exceeded",
+                    exclusion_detail=f"entrypoint exceeded {timeout_s:.0f}s",
+                    llm_call_count=policy_calls.value,
+                )
+            except Exception as exc:
+                # The customer's agent raising is a rollout result, not our
+                # error.
+                out = RolloutOutput(
+                    final_text="",
+                    success=False,
+                    exclusion_reason="entrypoint_error",
+                    exclusion_detail=f"{type(exc).__name__}: {exc}",
+                    llm_call_count=policy_calls.value,
+                )
             else:
-                # A worker thread starts with an EMPTY context, so the rollout
-                # binding set just above would be invisible inside the agent and
-                # every recorded outcome would be silently discarded. Copy the
-                # context in explicitly and run the agent inside it.
-                ctx = contextvars.copy_context()
-                # Deliberately NOT a `with` block. Executor.__exit__ calls
-                # shutdown(wait=True), which on the timeout path BLOCKS during
-                # unwinding until the hung agent returns -- so the TimeoutError
-                # could not escape and the budget was cosmetic. Measured: a 1s
-                # budget against an 8s agent returned after 8s, carrying the
-                # right reason, which is why tests asserting the reason passed.
-                # The subprocess path below carries the same warning; this
-                # was the one place that had the bug the comment describes.
-                pool = _cf.ThreadPoolExecutor(max_workers=1)
-                fut = pool.submit(ctx.run, resolved.fn, arg)
-                try:
-                    raw = fut.result(timeout=timeout_s)
-                except BaseException:
-                    # wait=False: stop waiting on the wedged worker. Python
-                    # cannot kill a thread, which is exactly why subprocess is
-                    # the default and the only isolation with a real timeout.
-                    pool.shutdown(wait=False, cancel_futures=True)
-                    raise
-                pool.shutdown(wait=True)
-        # The policy calls counted so far ride EVERY exit, not only the
-        # agent's return. A timed-out or crashed rollout with no count is
-        # held out as ``llm_calls_unobserved`` by both reconcilers, which
-        # undid Mission Control scoring a policy that ran out of time as a
-        # failure (τ³ 2c3f5922: 60 such rollouts).
-        except _cf.TimeoutError:
-            return RolloutOutput(
-                final_text="",
-                exclusion_reason="deadline_exceeded",
-                exclusion_detail=f"entrypoint exceeded {timeout_s:.0f}s",
-                timing={"elapsed_s": time.time() - started},
-                llm_call_count=policy_calls.value,
-            )
-        except Exception as exc:
-            # The customer's agent raising is a rollout result, not our error.
-            return RolloutOutput(
-                final_text="",
-                success=False,
-                exclusion_reason="entrypoint_error",
-                exclusion_detail=f"{type(exc).__name__}: {exc}",
-                timing={"elapsed_s": time.time() - started},
-                llm_call_count=policy_calls.value,
-            )
+                out = _coerce_output(raw)
+                # The agent's own count wins; otherwise the SDK's, counted at
+                # the client (``policy_calls``). Without one Mission Control
+                # cannot reconcile what its gateway observed and holds every
+                # rollout out of training.
+                if out.llm_call_count is None:
+                    out.llm_call_count = policy_calls.value
+    finally:
+        for u in unbinds:
+            # Best effort: a failed unbind must not lose a rollout's result.
+            try:
+                if callable(u):
+                    u()
+            except Exception:
+                pass
 
-    for u in unbinds:
-        # Best effort: a failed unbind must not lose a completed rollout, and
-        # the process is short-lived anyway under the default isolation.
-        try:
-            if callable(u):
-                u()
-        except Exception:
-            pass
-
-    out = _coerce_output(raw)
     out.timing["elapsed_s"] = time.time() - started
+    # On EVERY exit, as the command path does. A timed-out or crashed agent
+    # still made the tool calls it recorded before it stopped, and those are
+    # the calls that explain why it stopped.
     _attach_trajectory(out, trajectory_dir)
-    # The agent's own count wins; otherwise the SDK's, counted at the client
-    # (``policy_calls``). Without one Mission Control cannot reconcile what
-    # its gateway observed and holds every rollout out of training.
-    if out.llm_call_count is None:
-        out.llm_call_count = policy_calls.value
     return out
 
 
