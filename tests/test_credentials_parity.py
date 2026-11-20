@@ -124,9 +124,10 @@ def test_a_python_writer_waits_on_a_node_writers_lock(tmp_path):
         "process.stdin.on('data', (c) => { input += c; });\n"
         "process.stdin.on('end', () => {\n"
         "  const { env } = JSON.parse(input);\n"
-        "  saveStored({ control_plane_url: %r, agent_id: 'node', api_key: %r }, env);\n"
+        "  saveStored({ control_plane_url: "
+        f"{CP!r}, agent_id: 'node', api_key: {KEY!r} }}, env);\n"
         "  console.log(existsSync(env.PERCEPTEYE_HOME + '/credentials.json.lock'));\n"
-        "});\n" % (CP, KEY)
+        "});\n"
     )
     # Node's own write leaves no lock behind.
     assert run_node(sdk, node, script, stdin=json.dumps({"env": env})).strip() == "false"

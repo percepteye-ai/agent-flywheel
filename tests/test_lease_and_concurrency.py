@@ -692,3 +692,38 @@ def test_a_granted_lease_sets_the_interval_to_a_third_of_it(tmp_path):
     assert 28.0 <= interval <= 31.0, interval          # a third of 90s
     # and the requested lease is NOT what was used, which is the whole point
     assert interval < 600.0
+
+
+def test_one_malformed_rollout_costs_the_batch_nothing_and_is_given_back():
+    """One item the SDK cannot read used to raise out of the whole claim, so
+    every rollout in the batch sat leased by a worker that never saw them
+    until their leases lapsed. Now the readable ones run and the bad one is
+    abandoned at once as the SDK's own fault. Mutation: parse the batch in one
+    comprehension again -- ContractViolation, red."""
+    from agent_flywheel.transport import AttachTransport
+
+    abandoned: list[tuple[str, dict]] = []
+
+    def good(rid):
+        return {"rollout_id": rid, "turn_input": "x", "llm_url": "http://g",
+                "api_key": "k", "artifacts_dir": f"rollouts/{rid}",
+                "deadline_ts": 1.0, "lease_token": f"lt-{rid}"}
+
+    def handler(request):
+        if request.url.path.endswith("/abandon"):
+            abandoned.append((request.url.path, json.loads(request.content)))
+            return httpx.Response(200, json={"requeued": False})
+        bad = {**good("rl_bad"), "deadline_ts": "soon"}
+        return httpx.Response(200, json={
+            "rollouts": [good("rl_1"), bad, good("rl_2")], "poll_after_ms": 1000})
+
+    tr = AttachTransport(_client(handler), "agent-1")
+    rollouts, _ = tr.claim(4)
+
+    assert [r.rollout_id for r in rollouts] == ["rl_1", "rl_2"]
+    assert len(abandoned) == 1
+    path, body = abandoned[0]
+    assert path.endswith("/rollouts/rl_bad/abandon")
+    assert body["reason"] == "flywheel_crash"
+    assert body["lease_token"] == "lt-rl_bad"
+    assert "deadline_ts" in body["detail"]

@@ -104,7 +104,7 @@ def test_a_finite_reward_is_sent_as_given(reward):
 SCRUB_TABLE = [
     "got HTTP 404 back",
     "HTTP/1.1 200 OK and http/2 201 and HTTP 3000 and HTTP\t502",
-    "HTTP٢٠٠ is not a status",          # Arabic-Indic digits
+    "HTTP\u0662\u0660\u0660 is not a status",          # Arabic-Indic digits
     "xHTTP 200 and HTTP 200x stay",
     '"HTTP 200 inside a JSON string"',
     "42",
@@ -140,7 +140,7 @@ def test_both_sdks_scrub_status_byte_for_byte():
     )
     node_out = json.loads(run_node(sdk, node, script, stdin=json.dumps(SCRUB_TABLE)))
     python_out = [_scrub_status(body) for body in SCRUB_TABLE]
-    for body, theirs, ours in zip(SCRUB_TABLE, node_out, python_out):
+    for body, theirs, ours in zip(SCRUB_TABLE, node_out, python_out, strict=True):
         assert theirs == ours, f"{body!r}: Node {theirs!r}, Python {ours!r}"
     # Spot checks that the rule is the one stated, not merely shared.
     assert python_out[2] == SCRUB_TABLE[2], "a Unicode digit is no status"
@@ -168,8 +168,8 @@ ID_TABLE = [
     "rl_1", "", ".", "..", "a/b", "a\\b", "a\x00b", "a\x7fb", "a\x85b",
     "it's (a)*!?#%", "café", "x" * 256, "x" * 257,
     "\U0001F600" * 129, "\U0001F600" * 256, "\U0001F600" * 257,
-    " lead", "trail ", "\tlead", "a​b", "a b", "a b",
-    "a­b", "﻿a", "ab", "͸", "a b", "x" * 255,
+    " lead", "trail ", "\tlead", "a\u200bb", "a\u2028b", "a\u00a0b",
+    "a\u00adb", "\ufeffa", "a\ue000b", "\u0378", "a b", "x" * 255,
 ]
 
 
@@ -204,6 +204,6 @@ def test_both_sdks_apply_one_path_segment_rule_and_one_task_id_rule():
         "});\n"
     )
     theirs = json.loads(run_node(sdk, node, script, stdin=json.dumps(ID_TABLE)))
-    for value, node_answer in zip(ID_TABLE, theirs):
+    for value, node_answer in zip(ID_TABLE, theirs, strict=True):
         assert node_answer == python(value), (
             f"{value!r}: Node {node_answer!r}, Python {python(value)!r}")

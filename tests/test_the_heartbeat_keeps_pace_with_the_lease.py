@@ -104,6 +104,17 @@ def test_one_slow_beat_does_not_starve_the_other_leases():
 
 
 def test_the_heartbeat_path_carries_the_id_as_one_segment():
+    """The beat names its rollout by the same one-segment rule as report and
+    abandon (``contract._path_segment``): an id that cannot be one segment is
+    refused before anything is sent, and any other is percent-encoded."""
+    import pytest
+
+    from agent_flywheel.errors import ContractViolation
+
     client = _Client()
-    AttachTransport(client, agent_id="a").heartbeat(_req("../admin"))
-    assert client.calls[-1][1] == "/rollouts/..%2Fadmin/heartbeat"
+    tr = AttachTransport(client, agent_id="a")
+    with pytest.raises(ContractViolation):
+        tr.heartbeat(_req("../admin"))
+    assert client.calls == []
+    tr.heartbeat(_req("r?1#2"))
+    assert client.calls[-1][1] == "/rollouts/r%3F1%232/heartbeat"

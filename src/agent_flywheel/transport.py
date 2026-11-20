@@ -202,7 +202,12 @@ class FlywheelTransport(Protocol):
         """Return (rollouts, poll_after_ms). An empty list is normal."""
         ...
 
-    def heartbeat(self, rollout: RolloutRequest, *, progress: str | None = None) -> None:
+    def heartbeat(
+        self, rollout: RolloutRequest, *, progress: str | None = None
+    ) -> float | None:
+        """Extend the lease. May return the new ``lease_expires_ts``; the
+        runner schedules the next beat from it, and paces by the grant when
+        a transport returns ``None``."""
         ...
 
     def report(self, rollout: RolloutRequest, output: RolloutOutput) -> dict[str, Any]:
@@ -430,7 +435,41 @@ class AttachTransport:
         )
         raw = body.get("rollouts") or []
         poll_after = int(body.get("poll_after_ms") or 1000)
-        return [RolloutRequest.from_wire(r) for r in raw], poll_after
+        # Each leased rollout is parsed ON ITS OWN. One malformed item used to
+        # raise out of the whole claim, so every rollout in the batch -- the
+        # well-formed ones included -- sat leased by a worker that never saw
+        # them until their leases lapsed. The bad one is handed straight back
+        # as the SDK's fault (``flywheel_crash``: not the policy's, never
+        # trained on); the rest run.
+        parsed: list[RolloutRequest] = []
+        for item in raw:
+            try:
+                parsed.append(RolloutRequest.from_wire(item))
+            except ContractViolation as exc:
+                self._give_back_unparseable(item, exc)
+        return parsed, poll_after
+
+    def _give_back_unparseable(self, item: Any, exc: ContractViolation) -> None:
+        """Abandon a claimed rollout this SDK could not read, when it can at
+        least be named: its lease would otherwise be held by nobody until it
+        lapsed. Best effort -- an id that is not one path segment, or a
+        transport failure, leaves it to lapse as before."""
+        if not isinstance(item, dict):
+            return
+        try:
+            rid = _path_segment(item.get("rollout_id"), "rollout_id")
+            token = item.get("lease_token")
+            self._c.request(
+                "POST", f"/rollouts/{rid}/abandon",
+                json_body={
+                    "lease_token": token if isinstance(token, str) else None,
+                    "reason": "flywheel_crash",
+                    "detail": f"the SDK could not read the claimed rollout: {exc}"[:2000],
+                },
+                idempotency_key=f"abandon-{item.get('rollout_id')}",
+            )
+        except (ContractViolation, TransportError):
+            pass
 
     #: Each beat's own budget, whole call: one attempt, and a second only if
     #: the first fails fast. A beat is worth retrying on the NEXT beat, not
@@ -458,9 +497,7 @@ class AttachTransport:
         }
         if progress:
             payload["progress"] = progress
-        # One path segment, whatever the id holds. The integrator reconciles
-        # this to the py-wire stream's contract._path_segment after merge.
-        rid = quote(str(rollout.rollout_id), safe="")
+        rid = _path_segment(rollout.rollout_id, "rollout_id")
         body = self._c.request(
             "POST", f"/rollouts/{rid}/heartbeat", json_body=payload,
             timeout=self.HEARTBEAT_ATTEMPT_S,
