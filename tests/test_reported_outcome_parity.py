@@ -390,8 +390,10 @@ const cases = JSON.parse(await new Promise((ok) => {
   let s = ""; process.stdin.on("data", (d) => { s += d; });
   process.stdin.on("end", () => ok(s));
 }));
+// A host that can register the rollout's gateway provider: without
+// api.registerProvider the Node plugin claims no rollouts at all.
 const api = {
-  on() {}, logger: { info() {}, warn() {} },
+  on() {}, registerProvider() {}, logger: { info() {}, warn() {} },
   config: { plugins: { entries: { "agent-flywheel": {
     hooks: { allowConversationAccess: true } } } } },
   session: { workflow: { enqueueNextTurnInjection: async () => ({ enqueued: true }) } },

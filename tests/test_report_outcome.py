@@ -1360,7 +1360,12 @@ def test_both_sdks_isolate_a_refused_outcome_alike(
         "if(ids.includes(id))return a;return null;};\n"
         "const reply=(status,body)=>new Response(JSON.stringify(body),"
         "{status,headers:{'content-type':'application/json'}});\n"
+        # The capture read granted, as GRANTED answers it on this side: the
+        # flush re-asks while model content is withheld, and an empty 200 is
+        # an answered no in both SDKs.
         "const fetchImpl=async(url,init)=>{"
+        "if(String(url).endsWith('/capture'))"
+        "return reply(200,{capture:{turns:true}});"
         "if(!String(url).endsWith('/outcomes'))return reply(200,{});"
         "const ids=JSON.parse(init.body).outcomes.map((o)=>o.outcome_id);"
         "tried.push(ids);const a=answer(ids);"
