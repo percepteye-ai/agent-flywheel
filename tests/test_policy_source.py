@@ -210,6 +210,26 @@ def test_a_raising_observer_never_breaks_serving():
     assert src.current().base_url == GATEWAY
 
 
+def test_an_observer_may_read_and_close_the_handle_it_observes():
+    """The observer used to run under the handle's non-reentrant state lock:
+    one that called ``current()`` or ``close()`` deadlocked, and with it every
+    reader of the handle. Run on a thread so a regression fails, not hangs."""
+    seen: list = []
+    holder: dict = {}
+
+    def _observer(snap):
+        seen.append(holder["src"].current().base_url)
+        holder["src"].close()
+
+    src, _ = _source([_body()], on_change=_observer)
+    holder["src"] = src
+    t = threading.Thread(target=src.current, daemon=True)
+    t.start()
+    t.join(timeout=5)
+    assert not t.is_alive(), "on_change deadlocked the handle"
+    assert seen == [GATEWAY]
+
+
 # ── last-good retention: the behaviour the whole design turns on ─────
 
 

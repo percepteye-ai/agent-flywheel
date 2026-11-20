@@ -511,6 +511,7 @@ class PolicySource:
         # know which of the two is load-bearing.
         if not self._refresh_lock.acquire(blocking=False):
             return
+        changed: PolicySnapshot | None = None
         try:
             with self._state_lock:
                 # Re-check: another thread may have just refreshed.
@@ -540,15 +541,26 @@ class PolicySource:
                 except Exception:
                     answer = None
             with self._state_lock:
-                self._absorb(body, now, answer)
+                changed = self._absorb(body, now, answer)
         finally:
             self._refresh_lock.release()
+        # The observer runs with NO lock held. Under ``_state_lock`` (where it
+        # used to run) an observer that called ``current()`` or ``close()``
+        # deadlocked on that non-reentrant lock -- and with it every reader of
+        # this handle -- and a slow one stalled every reader for its duration.
+        if changed is not None and self._on_change is not None:
+            try:
+                self._on_change(changed)
+            except Exception:
+                pass
 
     def _absorb(self, body: dict[str, Any], now: float,
-                answer: dict[str, Any] | None = None) -> None:
+                answer: dict[str, Any] | None = None) -> PolicySnapshot | None:
         """Fold a successful response into the cache. Called under
         ``_state_lock``. ``answer`` is the ``/prompt/current`` body when it
-        was read this refresh."""
+        was read this refresh. Returns the snapshot to hand ``on_change`` when
+        this answer is a change, else None: the caller notifies, after it has
+        released the lock."""
         from . import endpoint_kwargs
 
         self._last_ok_at = now
@@ -603,7 +615,7 @@ class PolicySource:
                 ) or self._snap.serving_generation,
                 prompt=prompt,
             )
-            return
+            return None
 
         generation = body.get("serving_generation") if isinstance(body, dict) else None
         generation = str(generation) if isinstance(generation, str) else ""
@@ -638,11 +650,7 @@ class PolicySource:
                 (body.get("reason") if isinstance(body, dict) else None)
                 or "withdrawn=true",
             )
-        if changed and self._on_change is not None:
-            try:
-                self._on_change(self._snap)
-            except Exception:
-                pass
+        return self._snap if changed else None
 
     def _fetch_prompt(self) -> dict[str, Any]:
         """``/prompt/current`` through the client ``_fetch`` built. Fail-open
