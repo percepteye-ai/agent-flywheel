@@ -1452,3 +1452,26 @@ def test_the_same_words_at_two_statuses_are_no_refusal_of_the_batch(
     assert not any("whole batches" in str(w.message) for w in caught)
     assert counts["outcomes_dropped"] == len(ids)
     assert len(tr.tried) > 3, "split on, not stopped at the halves"
+
+
+def test_a_batch_of_one_refused_is_kept_not_dropped(
+    monkeypatch, tmp_path, quiet,
+):
+    """Every ``report_outcome`` flushes, so its outcome usually travels
+    alone. A 4xx on a batch of one that was never split cannot be told from a
+    refusal of the batch -- a control plane on another contract minor refuses
+    every batch alike -- and reading it as the record's dropped each outcome
+    as it was reported. It stays on disk, said once, and goes with the next."""
+    tr = _Outcomes(outcomes_raise=TransportError(
+        "POST /outcomes -> HTTP 422: unknown field", status_code=422))
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        px.report_outcome("resolved", turn_id="t1")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            counts = px.flush()
+        assert (counts["outcomes_sent"], counts["outcomes_failed"],
+                counts["outcomes_dropped"]) == (0, 1, 0)
+        assert len(_pending(tmp_path)) == 1
+        assert any("batch of one" in str(w.message) for w in caught)
+        tr.outcomes_raise = None
+        assert px.flush()["outcomes_sent"] == 1
