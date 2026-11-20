@@ -97,6 +97,7 @@ def _agent():
 
             class Ctx:
                 invocation_id, agent_name, function_call_id = "inv", "a", "fc_1"
+                _callback_info = None  # ADK >= 2.15's dispatch scopes this
 
             class T:
                 name = "lookup_order"

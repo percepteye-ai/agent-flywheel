@@ -184,6 +184,8 @@ class UninstrumentedADK:
                 self.name = name
 
         class _Ctx:
+            _callback_info = None  # ADK >= 2.15's dispatch scopes this
+
             def __init__(self, cid, agent):
                 self.function_call_id, self.agent_name = cid, agent
 

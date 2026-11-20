@@ -312,6 +312,7 @@ def test_adk_capture_yields_identity_with_no_instrumentation(tmp_path):
 
     class _Ctx:
         function_call_id, agent_name = "fc_1", "coder"
+        _callback_info = None  # ADK >= 2.15's dispatch scopes this per callback
 
     report, unbinds = bind_selected(["adk"], llm_url="https://gw/x", api_key="k")
     assert "adk" in report.bound

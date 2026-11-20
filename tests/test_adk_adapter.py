@@ -29,7 +29,11 @@ class _Tool:
 
 
 class _Ctx:
-    """The fields the adapter reads off a real ToolContext."""
+    """The fields the adapter reads off a real ToolContext, plus the one ADK's
+    own dispatch writes: from ADK 2.15 ``PluginManager._run_callbacks`` saves
+    and restores ``_callback_info`` on the context around every callback."""
+
+    _callback_info = None
 
     def __init__(self, call_id: str = "fc_1", agent_name: str | None = "planner") -> None:
         self.function_call_id = call_id
@@ -40,6 +44,7 @@ class _ExplodingCtx:
     """A context whose id cannot be read -- stands in for any capture bug."""
 
     agent_name = "planner"
+    _callback_info = None
 
     @property
     def function_call_id(self):
@@ -120,6 +125,103 @@ def test_installing_twice_does_not_double_record(bound, tmp_path):
         assert len(_calls(tmp_path)) == 1
     finally:
         second()
+
+
+def test_an_overlapping_bind_keeps_capture_until_the_last_unbind(tmp_path):
+    """Two attachments in one process, the first closed while the second is
+    still running: the second's runners must still get the plugin. Restoring
+    the constructor on the FIRST unbind silently ended the second's capture."""
+    first = ADKAdapter().bind(llm_url="u", api_key="k")
+    second = ADKAdapter().bind(llm_url="u", api_key="k")
+    try:
+        first()
+        first()  # idempotent: must not release the second bind's hold too
+        pm = PluginManager()
+        assert any(p.name == "agent_flywheel" for p in pm.plugins)
+        with _RolloutScope("rl_adk", str(tmp_path)):
+            asyncio.run(_one_call(pm, _Tool(), _Ctx(), result={"ok": 1}))
+        assert len(_calls(tmp_path)) == 1
+    finally:
+        second()
+    assert not any(p.name == "agent_flywheel" for p in PluginManager().plugins)
+
+
+def test_a_runner_built_while_bound_records_nothing_after_unbind(tmp_path):
+    """A runner constructed while bound keeps our plugin for its whole life.
+    Once unbound, that plugin must go quiet, not keep recording for an
+    attachment that has closed."""
+    unbind = ADKAdapter().bind(llm_url="u", api_key="k")
+    pm = PluginManager()
+    unbind()
+    with _RolloutScope("rl_adk", str(tmp_path)):
+        asyncio.run(_one_call(pm, _Tool(), _Ctx(), result={"ok": 1}))
+        asyncio.run(_one_call(pm, _Tool(), _Ctx("fc_2"), error=ValueError("x")))
+    assert not _calls(tmp_path)
+
+
+def test_an_empty_text_does_not_hide_a_parts_real_payload():
+    """A Part may carry ``text=""`` beside a function_call or inline bytes.
+    Reading the empty string first recorded the call (or the media) as an
+    empty text part, so the model's tool call vanished from the boundary."""
+    from google.genai import types
+
+    from agent_flywheel.adapters.adk import _part
+
+    call = types.Part(text="", function_call=types.FunctionCall(
+        name="lookup", args={"q": "x"}, id="call_1"))
+    assert _part(call) == {"type": "tool_call", "id": "call_1",
+                           "name": "lookup", "arguments": {"q": "x"}}
+    media = _part(types.Part(text="", inline_data=types.Blob(
+        mime_type="image/png", data=b"\x89PNG")))
+    assert media is not None and media["type"] != "text"
+    assert _part(types.Part(text="")) == {"type": "text", "content": ""}
+
+
+def test_a_real_runner_records_its_tool_call(bound, tmp_path):
+    """The whole path, with ADK building every context itself: a customer's
+    ``InMemoryRunner`` runs an agent whose model calls one tool, and that call
+    is recorded. Every other test here hands ADK's dispatch a stand-in
+    context; this one is what proves the install works on the ADK actually
+    installed, whatever its dispatch now reads off a context."""
+    from google.adk.agents import LlmAgent
+    from google.adk.models.base_llm import BaseLlm
+    from google.adk.models.llm_response import LlmResponse
+    from google.adk.runners import InMemoryRunner
+    from google.genai import types
+
+    class _Model(BaseLlm):
+        model: str = "scripted"
+
+        async def generate_content_async(self, llm_request, stream=False):
+            answered = any(p.function_response
+                           for p in llm_request.contents[-1].parts or [])
+            part = types.Part(text="done") if answered else types.Part(
+                function_call=types.FunctionCall(
+                    name="lookup", args={"q": "x"}, id="call_1"))
+            yield LlmResponse(content=types.Content(role="model", parts=[part]))
+
+    def lookup(q: str) -> dict:
+        """Look something up."""
+        return {"answer": q}
+
+    async def drive():
+        runner = InMemoryRunner(
+            agent=LlmAgent(name="planner", model=_Model(), tools=[lookup]),
+            app_name="app")
+        session = await runner.session_service.create_session(
+            app_name="app", user_id="u")
+        async for _ in runner.run_async(
+                user_id="u", session_id=session.id,
+                new_message=types.Content(role="user",
+                                          parts=[types.Part(text="hi")])):
+            pass
+
+    with _RolloutScope("rl_adk", str(tmp_path)):
+        asyncio.run(drive())
+    (call,) = _calls(tmp_path)
+    assert (call.name, call.arguments, call.output) == (
+        "lookup", {"q": "x"}, {"answer": "x"})
+    assert (call.agent_name, call.tool_call_id) == ("planner", "call_1")
 
 
 # ── the outcome, which is the whole point ──────────────────────────────────
