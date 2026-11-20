@@ -211,3 +211,99 @@ def test_an_object_with_a_tools_attribute_that_is_not_langchain_does_not_match()
         tools: ClassVar[list] = ["a string", 42]
 
     assert introspect(NotAnAgent()) is None
+
+
+# ── a whole observation, read once ──────────────────────────────────────────
+
+
+def _lc_agent(prompt, tools):
+    """A LangChain-shaped agent with a prompt, tools and a model."""
+    class _LLM:
+        model_name = "gpt-x"
+        temperature = 0.0
+
+    class Agent:
+        pass
+
+    a = Agent()
+    a.system_prompt = prompt
+    a.tools = tools
+    a.llm = _LLM()
+    return a
+
+
+def _deploy_tool():
+    from langchain_core.tools import tool
+
+    @tool
+    def deploy(service: str) -> str:
+        """Deploy a service."""
+        return service
+
+    return deploy
+
+
+def test_a_generator_of_tools_is_read_once_not_consumed_by_the_match():
+    """The match test's any(...) used to drain a generator, and the
+    catalogue was then read from the empty remainder."""
+    pytest.importorskip("langchain_core")
+    deploy = _deploy_tool()
+    got = introspect(_lc_agent("p", (t for t in [deploy, deploy])))
+    assert got is not None
+    assert [t.name for t in got.tool_definitions] == ["deploy", "deploy"]
+
+
+def test_a_prompt_past_the_wire_cap_still_carries_an_exact_observation():
+    """A prompt cut to 20,000 characters is ambiguous, so the execution
+    identity needs the digest of the WHOLE observation -- which introspection
+    never set, so an agent with a long prompt never got an execution_sha256."""
+    pytest.importorskip("langchain_core")
+    from agent_flywheel.introspection import _MAX_PROMPT_CHARS
+    from agent_flywheel.runner import _description_is_exact
+
+    deploy = _deploy_tool()
+    head = "x" * _MAX_PROMPT_CHARS
+    one = introspect(_lc_agent(head + "ONE", [deploy]))
+    two = introspect(_lc_agent(head + "TWO", [deploy]))
+    assert one.system_prompt == two.system_prompt == head   # the wire is cut
+    assert one.exact_observation_sha256 != two.exact_observation_sha256
+    assert _description_is_exact(one)
+
+
+def test_an_uncut_observation_digests_to_what_its_wire_does():
+    """Nothing cut, nothing changed: an existing agent keeps its identity."""
+    pytest.importorskip("langchain_core")
+    from agent_flywheel.execution_identity import canonical_observation_sha256
+
+    got = introspect(_lc_agent("short", [_deploy_tool()]))
+    assert got.exact_observation_sha256 == canonical_observation_sha256(got.to_wire())
+
+
+def test_a_langchain_tool_keeps_required_and_defs():
+    """``t.args`` is only the properties: every argument read as optional, and
+    a nested model's $ref pointed at $defs that were dropped."""
+    pytest.importorskip("langchain_core")
+    from langchain_core.tools import StructuredTool, tool
+    from pydantic import BaseModel
+
+    class Address(BaseModel):
+        city: str
+
+    def ship(addr, qty: int = 1) -> str:
+        """Ship."""
+        return "ok"
+
+    ship.__annotations__ = {"addr": Address, "qty": int, "return": str}
+    ship = tool(ship)
+
+    declared = StructuredTool.from_function(
+        func=lambda x: x, name="d", description="d",
+        args_schema={"type": "object", "properties": {"x": {"type": "string"}},
+                     "required": ["x"]})
+
+    got = introspect(_lc_agent("p", [ship, declared]))
+    by = {t.name: t.input_schema for t in got.tool_definitions}
+    assert by["ship"]["required"] == ["addr"]
+    assert by["ship"]["properties"]["addr"] == {"$ref": "#/$defs/Address"}
+    assert "Address" in by["ship"]["$defs"]
+    assert by["d"]["required"] == ["x"]

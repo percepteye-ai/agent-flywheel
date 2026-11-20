@@ -133,8 +133,22 @@ def _f64_hex(value: int | float, *, path: str) -> str:
     return struct.pack(">d", number).hex()
 
 
-def _json_value(value: Any, *, path: str = "$") -> Any:
-    """Return one typed, cross-language canonical value."""
+def _json_value(value: Any, *, path: str = "$",
+                _open: frozenset[int] = frozenset()) -> Any:
+    """Return one typed, cross-language canonical value.
+
+    ``_open`` holds the containers on the path to ``value``. A container that
+    contains itself has no JSON value, and recursing into it ended in an
+    unhandled ``RecursionError`` that took ``serve()`` down; it is a
+    ConfigurationError like every other value with no canonical form. A
+    container shared by two siblings is not a cycle and is hashed twice.
+    """
+    if isinstance(value, (list, tuple, Mapping)):
+        if id(value) in _open:
+            raise ConfigurationError(
+                f"execution identity contains a reference cycle at {path}"
+            )
+        _open = _open | {id(value)}
     if value is None:
         return ["null"]
     if isinstance(value, str):
@@ -149,7 +163,7 @@ def _json_value(value: Any, *, path: str = "$") -> Any:
         return [
             "array",
             [
-                _json_value(item, path=f"{path}[{index}]")
+                _json_value(item, path=f"{path}[{index}]", _open=_open)
                 for index, item in enumerate(value)
             ],
         ]
@@ -161,7 +175,8 @@ def _json_value(value: Any, *, path: str = "$") -> Any:
                     f"execution identity contains a non-string object key at {path}"
                 )
             _unicode_string(key, path=f"{path} key")
-            out.append([key, _json_value(item, path=f"{path}.{key}")])
+            out.append([key, _json_value(item, path=f"{path}.{key}",
+                                         _open=_open)])
         out.sort(key=lambda pair: pair[0])
         return ["object", out]
     raise ConfigurationError(
