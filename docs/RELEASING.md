@@ -31,7 +31,7 @@ Follow this in order; each step links to the detail. When something fails,
    Mission Control misbehaves. **Run the Mission Control gate
    ([§1a](#1a-the-mission-control-gate)) against the Mission Control the
    release targets, in both repositories, and do not tag until both print
-   `ok`.** 0.5.0 is why: both SDKs declare customer contract 1.51.0 and upload
+   `ok`.** 0.5.0 is why: both SDKs declare customer contract 1.54.0 and upload
    to `POST /api/flywheel/v1/outcomes`; tagged before that route was
    deployed, every reported outcome would have been refused for a week and
    then dropped. If the dashboard's install line pins the new

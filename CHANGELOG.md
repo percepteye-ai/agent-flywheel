@@ -111,7 +111,7 @@ repository's.
     (`InvalidOutcome` / `InvalidFeedback`; a turn id is not used), as the
     control plane's parser refuses it at the wire.
 
-- **The customer-API client speaks customer contract 1.51.0** (it declared
+- **The customer-API client speaks customer contract 1.54.0** (it declared
   1.31.0 while Mission Control published 1.50.0). Both SDKs, same surface:
   - `training_eligibility(training_location=)` / `trainingEligibility({
     trainingLocation })` asks what a run could train on `platform_pool` or
@@ -153,6 +153,14 @@ repository's.
     comparisons and saves, observability sources, serving an artifact, a
     champion's rollback) are ones neither SDK calls or documents, and a
     refusal by one still raises `CustomerRefusal` with its code.
+  - `TRAINING_REFUSAL_CODES` adds 1.52.0's `hillclimb_start_invalid` (422)
+    and `base_merge_failed` (502, the platform's) -- a hill climb started from
+    a model the organization already trained -- and 1.54.0's
+    `authority_ruling_requires_org_admin` (403): a ruling on the reward plan's
+    Decision by anyone but an org admin. Each run `list_runs` / `listRuns`
+    returns carries 1.53.0's `latest_activity_at`, `latest_status`,
+    `attempts`, `best_measured` and `measured` (`None` / `null` where they do
+    not apply).
   - Documented response fields: a run's `objective`, `security_mode`,
     `base_model`, `benchmark_eval_set_id`, `algorithm` and `owner_run_id`;
     eligibility's `flash_reinforce`, `opsd.trainable_models` and
