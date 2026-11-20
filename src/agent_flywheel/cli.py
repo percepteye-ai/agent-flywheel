@@ -119,17 +119,26 @@ def _cmd_report(args: argparse.Namespace) -> int:
         # under a root only it knew; asking it for that root rather than
         # rebuilding the join here is what keeps the reader pointed at the
         # same place the writer writes.
+        #
+        # "Most recent" is the session whose RECORDS were written last -- the
+        # mtime of its tool_calls.jsonl, not of its directory, which changes
+        # only when an entry is added or removed. A session deleted while this
+        # scans is skipped, not a crash.
         root = recorder.turns_root()
+        sessions: list[tuple[float, str]] = []
         try:
-            sessions = [
-                os.path.join(root, d) for d in os.listdir(root)
-                if os.path.isfile(
-                    os.path.join(root, d, reporter.TOOL_CALLS_FILENAME))
-            ]
+            names = os.listdir(root)
         except OSError:
-            sessions = []
+            names = []
+        for d in names:
+            calls = os.path.join(root, d, reporter.TOOL_CALLS_FILENAME)
+            try:
+                if os.path.isfile(calls):
+                    sessions.append((os.path.getmtime(calls), os.path.join(root, d)))
+            except OSError:
+                continue
         if sessions:
-            target = max(sessions, key=os.path.getmtime)
+            target = max(sessions)[1]
             print(f"agent-flywheel: the most recent session under {root}\n")
         else:
             # The reporter's own empty-state help, which names the directory
@@ -221,7 +230,11 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
     st = installed_state()
     if not st["installed"]:
-        if st["foreign"]:
+        if st.get("corrupt"):
+            print(f"agent-flywheel: the plugin at {st['root']} has an install stamp "
+                  f"this command cannot read; run `agent-flywheel install-hooks "
+                  f"--force` to reinstall it.")
+        elif st["foreign"]:
             print(f"agent-flywheel: a plugin exists at {st['root']} that this command "
                   f"did not install; run `agent-flywheel install-hooks --force` to "
                   f"replace it.")
@@ -233,15 +246,26 @@ def _cmd_status(args: argparse.Namespace) -> int:
     print(f"                contract  {st.get('contract_version')}")
     print(f"                recorder  {st.get('recorder')}"
           f"{'' if st.get('recorder_present') else '   [MISSING]'}")
-    # Reported from a RECONCILE, not from the stamp: it re-reads the config and
-    # the mode, so this prints where traffic will actually go on the next run
-    # rather than where the install once pointed it.
+    print(f"                python    {st.get('python')}"
+          f"{'' if st.get('python_present') else '   [MISSING]'}")
+    if not st.get("hooks_current"):
+        print("                hooks     not the hooks.json this release renders")
+    # Reported from a DRY-RUN reconcile, not from the stamp: it re-reads the
+    # config and the mode, so this prints where traffic will actually go on the
+    # next run rather than where the install once pointed it -- and, being a
+    # status, changes nothing. The next goose session start applies it.
     from .install_hooks import reconcile_endpoint
 
     try:
-        _print_endpoint(reconcile_endpoint())
-    except OSError as exc:
-        print(f"                endpoint  UNREADABLE — {exc}")
+        ep = reconcile_endpoint(dry_run=True)
+    except (OSError, ConfigurationError) as exc:
+        # A bad PERCEPTEYE_AGENT_MODE: said here, and the rest still printed.
+        print(f"                endpoint  UNKNOWN — {exc}")
+    else:
+        _print_endpoint(ep)
+        if ep.get("would_change"):
+            print(f"                (the config still says {ep.get('from')!r}; the "
+                  "next goose session or `agent-flywheel install-hooks` applies it)")
     # Printed on STATUS as well as install, because "where does my traffic go"
     # and "am I contributing" are the two questions this command exists to
     # answer and only the first one was answered.
@@ -308,8 +332,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         return int(args.func(args))
     except ConfigurationError as exc:
-        # A bad PERCEPTEYE_AGENT_MODE reaches here from either subcommand, both
-        # of which resolve the mode to decide the endpoint. The MESSAGE is
+        # A bad PERCEPTEYE_AGENT_MODE reaches here from install-hooks, which
+        # resolves the mode to decide the endpoint (status says it in its own
+        # endpoint line and prints the rest). The MESSAGE is
         # already the right one -- it names the variable, the value, and every
         # spelling that works -- so the only thing wrong with a traceback here
         # is that it buries that message under a stack the customer cannot act

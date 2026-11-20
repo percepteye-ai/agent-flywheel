@@ -56,3 +56,9 @@ abi/
 # The built documentation site. Generated from website/docs by mkdocs;
 # the source is tracked, the output is not.
 website/site/
+
+# Internal planning notes and a coding agent's local settings: never part of
+# the public SDK. Removed from the tree on 2026-11-20 (one named a competitor);
+# they remain in history, which only an owner / GitHub Support purge removes.
+docs/plan-*.md
+.claude/

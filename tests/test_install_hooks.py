@@ -110,19 +110,36 @@ def test_the_command_is_absolute_on_both_halves(tmp_path):
     install_goose(plugins_dir=tmp_path, python="/opt/venv/bin/python")
     doc = json.loads((tmp_path / PLUGIN_NAME / "hooks" / "hooks.json").read_text())
     cmd = doc["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-    assert cmd.startswith('"/opt/venv/bin/python"')
+    assert cmd.startswith("/opt/venv/bin/python ")
     assert str(RECORDER) in cmd
     assert "${PLUGIN_ROOT}" not in cmd
     assert "python3 " not in cmd
 
 
-def test_paths_are_quoted_because_virtualenv_paths_contain_spaces(tmp_path):
-    """The command is handed to ``sh -c``; "Application Support" is a real path
-    on every macOS install."""
-    install_goose(plugins_dir=tmp_path, python="/opt/Application Support/py")
+@pytest.mark.parametrize("python", [
+    "/opt/Application Support/py",      # a real path on every macOS install
+    '/opt/$(touch pwned)/`id`/"x"/py',  # what double quotes would still run
+])
+def test_paths_are_shell_quoted_because_the_command_is_run_by_sh(tmp_path, python):
+    """The command is handed to ``sh -c``. Double quotes alone still expand
+    ``$()``, backticks and an embedded ``"``, so it is ``shlex``-quoted: the
+    shell must split it back into exactly the two paths, unexpanded."""
+    import shlex
+
+    install_goose(plugins_dir=tmp_path, python=python)
     doc = json.loads((tmp_path / PLUGIN_NAME / "hooks" / "hooks.json").read_text())
     cmd = doc["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-    assert cmd.startswith('"/opt/Application Support/py"')
+    assert shlex.split(cmd) == [python, str(RECORDER)]
+    # And sh itself agrees, running nothing: the words it builds are the two
+    # paths verbatim, and the command substitution never ran.
+    import subprocess
+
+    words = subprocess.run(
+        ["sh", "-c", f'set -- {cmd}; printf "%s\\n" "$@"'],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+    assert words == [python, str(RECORDER)]
+    assert not (tmp_path / "pwned").exists()
 
 
 def test_pre_tool_use_is_never_subscribed(tmp_path):

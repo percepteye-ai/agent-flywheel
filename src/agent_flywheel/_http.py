@@ -31,10 +31,17 @@ __all__ = [
 
 #: What a Flywheel key in an outgoing body is replaced with.
 REDACTED_KEY = "pefw_[REDACTED]"
-#: A Flywheel key as the control plane mints one: the prefix and 32 random
-#: bytes, URL-safe base64 (43 characters). Matched WHOLE, so a longer token
-#: that merely starts like one is left alone.
-_FLYWHEEL_KEY = re.compile(r"pefw_[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])")
+#: A key as the control plane mints one: a Flywheel key (``pefw_``) or a
+#: Mission Control API key (``mck_``), each the prefix and 32 random bytes,
+#: URL-safe base64 (43 characters). At LEAST 43, and the whole run of key
+#: characters is replaced: a key printed with a ``_``, a letter or a digit
+#: glued to its end is still the key, and matching exactly 43 left it whole.
+_KEY_SHAPE = re.compile(r"(pefw|mck)_[A-Za-z0-9_-]{43,}")
+
+
+def _redact_match(m: re.Match[str]) -> str:
+    return f"{m.group(1)}_[REDACTED]"
+
 #: A secret shorter than this is not a key anyone minted (a minted one is 48
 #: characters) and is not searched for by value: replacing every ``"k"`` in a
 #: report because a test authenticated as ``"k"`` would corrupt the report.
@@ -52,14 +59,17 @@ def redact_keys(value: Any, secret: str | None = None) -> Any:
     otherwise travel inside a report into the training data. Every key the
     control plane mints is matched by its shape, and the key this client
     authenticates with -- whatever its shape, an environment key included --
-    by its exact value.
+    by its exact value. A Mission Control API key (``mck_``) is matched by its
+    shape too: it opens more than one agent.
 
     Strings are replaced wherever they sit, dictionary keys too. A structure
     with nothing to replace is returned AS IS, not copied, so the common case
-    costs one walk and no allocation.
+    costs one walk and no allocation. A mapping comes back a ``dict``; a named
+    tuple comes back the same named tuple, and any other tuple subclass that
+    cannot be rebuilt from one iterable comes back a plain ``tuple``.
     """
     if isinstance(value, str):
-        out = _FLYWHEEL_KEY.sub(REDACTED_KEY, value)
+        out = _KEY_SHAPE.sub(_redact_match, value)
         if secret and len(secret) >= _MIN_SECRET_LEN and secret in out:
             out = out.replace(secret, REDACTED_KEY)
         return out
@@ -74,7 +84,15 @@ def redact_keys(value: Any, secret: str | None = None) -> Any:
     if isinstance(value, (list, tuple)):
         redacted = [redact_keys(v, secret) for v in value]
         if any(r is not v for r, v in zip(redacted, value, strict=True)):
-            return type(value)(redacted) if isinstance(value, tuple) else redacted
+            if not isinstance(value, tuple):
+                return redacted
+            if type(value) is tuple:
+                return tuple(redacted)
+            make = getattr(type(value), "_make", None)  # a namedtuple
+            try:
+                return make(redacted) if callable(make) else type(value)(redacted)
+            except TypeError:
+                return tuple(redacted)
         return value
     return value
 

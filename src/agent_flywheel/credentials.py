@@ -3,7 +3,10 @@
 A ``pefw_`` key is bound to one agent on one control plane, so it is stored
 per ``(control-plane URL, agent id)`` in ``$PERCEPTEYE_HOME/credentials.json``
 (``~/.percepteye/credentials.json`` when ``PERCEPTEYE_HOME`` is unset), a file
-only its owner can read (0600) and that is replaced, never edited in place.
+only its owner can read (0600), in a directory only its owner can enter
+(0700), and that is replaced, never edited in place. Every read-modify-write
+of it holds an advisory lock (``credentials.json.lock`` beside it), so two
+logins at once cannot lose one another's key.
 The Node SDK reads and writes the same file in the same format
 (``src/credentials.js``), so a key stored by either is found by both;
 ``tests/test_credentials_parity.py`` holds the two to one table.
@@ -35,11 +38,14 @@ Flywheel key, the one it authenticates with or any other.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import re
+import shlex
 import sys
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,11 +67,14 @@ __all__ = [
     "remove_stored",
     "resolve_api_key",
     "save_stored",
+    "shell_quote",
     "stored_key_refusal",
 ]
 
 ENV_HOME = "PERCEPTEYE_HOME"
 CREDENTIALS_FILENAME = "credentials.json"
+#: The advisory lock every read-modify-write of the file holds.
+LOCK_FILENAME = CREDENTIALS_FILENAME + ".lock"
 #: The file's own format version. A reader refuses a version it does not know
 #: rather than guess, and a writer refuses to replace one: a newer SDK's file
 #: is never rewritten by an older one into a shape that loses its entries.
@@ -96,9 +105,15 @@ class StoredCredential:
     client: str | None = None
 
     def expired(self, now: datetime | None = None) -> bool:
+        """Past its ``expires_at``. A key that never expires has none; an
+        ``expires_at`` that cannot be read is treated as past, so a corrupted
+        or foreign timestamp fails CLOSED rather than lending the key out
+        forever."""
+        if not self.expires_at:
+            return False
         when = _parse_time(self.expires_at)
         if when is None:
-            return False
+            return True
         return when <= (now or datetime.now(timezone.utc))
 
 
@@ -130,13 +145,27 @@ def _normalise_url(url: str) -> str:
     return url.strip().rstrip("/")
 
 
+#: The fractional seconds of an RFC 3339 time, any number of digits.
+_FRACTION = re.compile(r"\.(\d+)")
+
+
+def shell_quote(value: str) -> str:
+    """``value`` as one shell word, for a command this SDK tells a person to
+    paste: an agent id is free text, and an unquoted one could run as code."""
+    return shlex.quote(value)
+
+
 def _parse_time(value: str | None) -> datetime | None:
+    """An RFC 3339 / ISO 8601 time, ``None`` when it cannot be read."""
     if not value:
         return None
+    # ``Z`` is what JavaScript's ``toISOString`` writes; Python before 3.11
+    # parses only the offset spelling, and only 3 or 6 fractional digits, so
+    # the fraction is padded or cut to 6 first.
+    text = value.strip().replace("z", "Z").replace("Z", "+00:00")
+    text = _FRACTION.sub(lambda m: "." + (m.group(1) + "000000")[:6], text, count=1)
     try:
-        # ``Z`` is what JavaScript's ``toISOString`` writes; Python before
-        # 3.11 parses only the offset spelling.
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
@@ -168,9 +197,16 @@ def _read(path: Path) -> list[dict[str, Any]]:
             f"{path} is credentials format version {version!r}; this SDK "
             f"reads version {FORMAT_VERSION}. Upgrade agent-flywheel."
         )
-    entries = doc.get("credentials")
-    if not isinstance(entries, list):
+    if "credentials" not in doc:
         return []
+    entries = doc["credentials"]
+    if not isinstance(entries, list):
+        # Never read as "no keys": the next save would write an empty list
+        # over whatever this is.
+        raise ConfigurationError(
+            f"{path} has a 'credentials' that is not a list; move it aside "
+            "and run `agent-flywheel login` again"
+        )
     return [e for e in entries if isinstance(e, dict)]
 
 
@@ -178,7 +214,7 @@ def _entry(raw: Mapping[str, Any]) -> StoredCredential | None:
     url, agent, key = raw.get("control_plane_url"), raw.get("agent_id"), raw.get("api_key")
     if not (isinstance(url, str) and isinstance(agent, str) and isinstance(key, str)):
         return None
-    if not (url and agent and key):
+    if not (url and agent and key.strip()):
         return None
     extra = {
         f: raw.get(f) if isinstance(raw.get(f), str) else None
@@ -257,7 +293,7 @@ def stored_key_refusal(
 
 def login_hint(agent_id: str | None) -> str:
     """The command that gets this agent a key, as a sentence fragment."""
-    target = f" --agent-id {agent_id}" if agent_id else ""
+    target = f" --agent-id {shell_quote(agent_id)}" if agent_id else ""
     return f"run `agent-flywheel login{target}` to create one"
 
 
@@ -269,17 +305,22 @@ def save_stored(
 
     ATOMIC: the new file is written beside the old one, created 0600 so the
     key is never readable by anyone else even for a moment, flushed, and
-    renamed over it. A directory this creates is 0700.
+    renamed over it. The directory holding it is made 0700. LOCKED: the
+    read, the change and the write hold the file's advisory lock, so a
+    concurrent login's key is never lost. A blank key is refused.
     """
+    if not cred.api_key.strip():
+        raise ConfigurationError(f"refusing to store a blank key for agent {cred.agent_id!r}")
     path = credentials_path(environ)
-    existing = _read(path)  # raises rather than lose entries it cannot read
-    kept = [
-        e for e in existing
-        if not ((c := _entry(e)) is not None
-                and _match(c, cred.control_plane_url, cred.agent_id))
-    ]
-    kept.append({f: v for f, v in asdict(cred).items()})
-    _write(path, kept)
+    with _locked(path):
+        existing = _read(path)  # raises rather than lose entries it cannot read
+        kept = [
+            e for e in existing
+            if not ((c := _entry(e)) is not None
+                    and _match(c, cred.control_plane_url, cred.agent_id))
+        ]
+        kept.append({f: v for f, v in asdict(cred).items()})
+        _write(path, kept)
     return path
 
 
@@ -294,21 +335,60 @@ def remove_stored(
     revoked in Mission Control (Settings), which is what stops it everywhere.
     """
     path = credentials_path(environ)
-    existing = _read(path)
-    kept = [
-        e for e in existing
-        if not ((c := _entry(e)) is not None
-                and _match(c, control_plane_url, agent_id))
-    ]
-    if len(kept) == len(existing):
+    if not path.exists():
         return False
-    _write(path, kept)
+    with _locked(path):
+        existing = _read(path)
+        kept = [
+            e for e in existing
+            if not ((c := _entry(e)) is not None
+                    and _match(c, control_plane_url, agent_id))
+        ]
+        if len(kept) == len(existing):
+            return False
+        _write(path, kept)
     return True
 
 
+def _private_dir(directory: Path) -> None:
+    """``directory``, existing and 0700: it holds keys. One made here is
+    created so; one that already exists (the goose recorder's, an older
+    SDK's) is tightened. Best effort on a directory this user cannot chmod --
+    the file inside is 0600 regardless."""
+    directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if os.name == "nt":
+        return
+    try:
+        if directory.stat().st_mode & 0o077:
+            os.chmod(directory, 0o700)
+    except OSError:
+        pass
+
+
+@contextlib.contextmanager
+def _locked(path: Path) -> Iterator[None]:
+    """Hold the advisory lock on ``path``'s store for a read-modify-write.
+
+    ``fcntl.flock`` on ``credentials.json.lock`` beside the file; where there
+    is no ``fcntl`` (Windows) it is a no-op and the write stays atomic, only
+    not serialised against another writer.
+    """
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - Windows
+        yield
+        return
+    _private_dir(path.parent)
+    fd = os.open(str(path.parent / LOCK_FILENAME), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)  # closing releases the lock
+
+
 def _write(path: Path, entries: list[dict[str, Any]]) -> None:
-    if not path.parent.exists():
-        path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    _private_dir(path.parent)
     body = json.dumps(
         {"version": FORMAT_VERSION, "credentials": entries}, indent=2,
     ) + "\n"
@@ -316,8 +396,12 @@ def _write(path: Path, entries: list[dict[str, Any]]) -> None:
         prefix=".credentials.", suffix=".tmp", dir=str(path.parent),
     )
     try:
-        # mkstemp creates 0600 already; said again for platforms that differ.
-        os.chmod(tmp, 0o600)
+        try:
+            # mkstemp creates 0600 already; said again for platforms that differ.
+            os.chmod(tmp, 0o600)
+        except BaseException:
+            os.close(fd)
+            raise
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(body)
             fh.flush()
@@ -355,7 +439,7 @@ def announce_stored_key(resolved: ResolvedKey, control_plane_url: str) -> None:
         ("stored", str(resolved.path), cred.agent_id, _normalise_url(control_plane_url)),
         f"[percepteye] using the key stored for agent {cred.agent_id!r} in "
         f"{resolved.path} (control plane {control_plane_url}). Run "
-        f"`agent-flywheel logout --agent-id {cred.agent_id}` to stop.",
+        f"`agent-flywheel logout --agent-id {shell_quote(cred.agent_id)}` to stop.",
     )
 
 
@@ -376,10 +460,10 @@ def resolve_api_key(
     from . import ENV_API_KEY
 
     env = os.environ if environ is None else environ
-    if explicit:
+    if explicit and explicit.strip():
         return ResolvedKey(explicit, "argument")
     from_env = env.get(ENV_API_KEY)
-    if from_env:
+    if from_env and from_env.strip():
         return ResolvedKey(from_env, "environment")
     if not agent_id:
         return None
