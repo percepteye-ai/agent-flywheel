@@ -189,11 +189,11 @@ Two events separate the two ways a claim can return nothing. Without an `on_even
 
 ### Leases, heartbeats, and redelivery
 
-A claim grants a lease. One daemon thread renews every in-flight lease, ticking each second and beating each rollout at **one third of the lease the server actually granted** (`lease_expires_ts`), so two beats may be lost before anything lapses. The interval is computed once, at claim, against the granted expiry — pacing it against the shrinking remainder turns nine heartbeats into roughly six hundred.
+A claim grants a lease. One daemon thread ticks each second and hands every due beat to a small pool, so one slow renewal never holds up another lease's. Each rollout is beaten at **one third of the shorter of the lease the server actually granted** (`lease_expires_ts`) and the extension each beat asks for, so two beats may be lost before anything lapses; each beat then schedules the next from the expiry the control plane answered. The interval is computed once, at claim — pacing it against the shrinking remainder turns nine heartbeats into roughly six hundred. A beat spends at most 10s, not the report's two-minute retry envelope.
 
 The work budget and the lease are **separate numbers for separate jobs**: `deadline_ts` bounds the work, the lease is liveness. A heartbeat extends the lease by up to 10 minutes; it never moves the deadline.
 
-A `410` from any control-plane call raises `LeaseLost`. The heartbeat thread then marks the rollout, emits `lease_lost`, and **kills the child** — under an earlier design the child kept working for the rest of its timeout against a credential the server had already revoked.
+A `410` from any control-plane call raises `LeaseLost`. The heartbeat worker then marks the rollout, emits `lease_lost`, and **kills the child** — under an earlier design the child kept working for the rest of its timeout against a credential the server had already revoked.
 
 **A crashed worker needs no cleanup call.** Nothing in this package handles `SIGINT` or `SIGTERM`, so a killed process orphans its in-flight rollouts rather than abandoning them; the control plane reclaims them by lease expiry — up to 30 minutes — and hands them to the next claimer. `max_rollouts=N` is the only clean exit, checked at the top of the loop.
 
@@ -206,7 +206,7 @@ A `410` from any control-plane call raises `LeaseLost`. The heartbeat thread the
 | `subprocess` *(default)* | real — a child can be killed | any | must be importable (`"module:attr"`) |
 | `inprocess` | advisory — Python cannot kill a thread | `1` only | accepts a constructed object |
 
-The constraint is checked at construction, not discovered at rollout time. Under subprocess isolation the parent spawns `python -m agent_flywheel.child`, hands it the job as JSON on stdin, and reads the result from the last line of stdout. A [command entrypoint](cli.md) is already its own process: it runs in a new session, in the rollout's own directory, with the task on stdin *and* in `PERCEPTEYE_TURN_INPUT`.
+The constraint is checked at construction, not discovered at rollout time. Under subprocess isolation the parent spawns `python -m agent_flywheel.child`, hands it the job as JSON on stdin, and reads the result from the child's original stdout — which the child takes for itself before any agent code runs, pointing the agent's own stdout at stderr, so nothing the agent prints can reach the result. When that channel closes the child has exited, and its whole process group is killed, so nothing the agent started outlives the rollout. A [command entrypoint](cli.md) is already its own process: it runs in a new session, in the rollout's own directory, with the task on stdin *and* in `PERCEPTEYE_TURN_INPUT` (stdin only for a task over 100 KiB, which the environment cannot carry).
 
 **Configuration crosses into a fresh child at spawn, never into a running parent.** `RolloutRequest` has no `environment` field, and it is a contract violation to send one — an earlier SDK wrote server-supplied values into the host process's `os.environ`, which was both a global mutation in a live application and useless, because the agent's client had already read its base URL when it was constructed.
 

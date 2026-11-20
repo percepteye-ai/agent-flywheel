@@ -27,6 +27,7 @@ __all__ = [
     "ROUTING_VARS",
     "UNROUTABLE_PROVIDER_VARS",
     "build_child_env",
+    "check_endpoint_env",
     "is_environment_overlay",
     "overlay_environment",
     "unroutable_providers_present",
@@ -102,6 +103,14 @@ UNROUTABLE_PROVIDER_VARS = (
     # is the same credential a customer's agent uses for S3, and taking that
     # would break agents that never touch a model through it.
     "AWS_BEARER_TOKEN_BEDROCK",
+    # Claude Code's own provider switches. Either one sends every completion
+    # to Bedrock or Vertex and ignores ANTHROPIC_BASE_URL entirely.
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    # A bearer credential the Anthropic clients send IN PLACE of the API key.
+    # Left set, the customer's live token rides every request to our gateway
+    # instead of the rollout key, and the gateway refuses it.
+    "ANTHROPIC_AUTH_TOKEN",
     # OpenAI-compatible resellers. Their base URL is redirectable in principle,
     # but only if the agent reads it from the environment, and each SDK spells
     # that differently. Removing the key is the reliable half.
@@ -128,6 +137,27 @@ _BASELINE_PASSTHROUGH = (
 def _is_our_namespace(name: str) -> bool:
     """Names owned by Percepteye and therefore subject to our scrub policy."""
     return name.startswith(PERCEPTEYE_NAMESPACE)
+
+
+def check_endpoint_env(endpoint_env: tuple[str, str] | None) -> None:
+    """Refuse an ``endpoint_env`` that names a variable in our namespace.
+
+    The pair is written AFTER the rollout identity, so a name such as
+    ``PERCEPTEYE_ROLLOUT_ID`` would replace the SDK's scoped value with the
+    gateway URL or the rollout key. Checked where the child environment is
+    built and, so a bad declaration stops startup, where it is configured.
+    """
+    if not endpoint_env:
+        return
+    for name in endpoint_env:
+        if _is_our_namespace(str(name)):
+            from .errors import ConfigurationError
+
+            raise ConfigurationError(
+                f"endpoint_env names {name!r}, which is in the "
+                f"{PERCEPTEYE_NAMESPACE}* namespace this SDK sets for the "
+                f"rollout; name the variables your agent's client reads instead"
+            )
 
 
 def is_environment_overlay(overlay: Mapping[object, object]) -> bool:
@@ -184,8 +214,9 @@ def build_child_env(
     1. No variable in the Percepteye namespace is inherited from the parent.
        The control-plane key lives there and stays in the parent.
     2. Adapter-owned ``extra`` values are overlaid, except for our protected
-       namespace. They can supply process layout such as a private HOME but
-       cannot override rollout identity or routing. A ``None`` value removes
+       namespace and the provider configuration we cannot route. They can
+       supply process layout such as a private HOME but cannot override
+       rollout identity or routing. A ``None`` value removes
        that name from the child, inherited or baseline alike -- an interpreter
        variable an adapter's runtime must not see, say.
     3. Percepteye variables are then SET, scoped to this rollout: the
@@ -212,13 +243,17 @@ def build_child_env(
     for name in UNROUTABLE_PROVIDER_VARS:
         env.pop(name, None)
 
-    # (2b) Adapter-owned execution layout. Do this before rollout identity and
-    # routing so no adapter can replace the SDK's scoped identifiers or send a
-    # completion around the gateway with an ambient/provider credential.
+    # (2b) Adapter-owned execution layout. Applied before rollout identity and
+    # routing, which are SET below, so no adapter can replace the SDK's scoped
+    # identifiers or the gateway route. The provider configuration scrubbed in
+    # (2) is filtered out of the overlay too: applied after that scrub, an
+    # adapter's ``GEMINI_API_KEY`` (say) re-entered the child and the agent
+    # sampled from the live provider around the gateway.
     if extra:
         overlay_environment(env, {
             k: v for k, v in extra.items()
-            if not _is_our_namespace(k) or k in _SETTABLE_BY_CALLER
+            if (not _is_our_namespace(k) or k in _SETTABLE_BY_CALLER)
+            and k not in UNROUTABLE_PROVIDER_VARS
         })
 
     # (3) Rollout-scoped, and nothing else from our side.
@@ -262,6 +297,7 @@ def build_child_env(
     # default above; the mapping is explicit rather than guessed. Additive:
     # defaults stay because a process may use more than one compatible client.
     if endpoint_env:
+        check_endpoint_env(endpoint_env)
         url_var, key_var = endpoint_env
         env[str(url_var)] = llm_url
         env[str(key_var)] = api_key

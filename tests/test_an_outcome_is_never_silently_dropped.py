@@ -32,7 +32,7 @@ import warnings
 from agent_flywheel import RolloutRequest
 from agent_flywheel.contract import RolloutOutput, ToolCallOutcome
 from agent_flywheel.errors import LeaseLost, TransportError
-from agent_flywheel.runner import RolloutRunner, _output_from_wire
+from agent_flywheel.runner import RolloutRunner, _attempt_key, _output_from_wire
 
 # ── the world ──────────────────────────────────────────────────────────────
 
@@ -496,7 +496,7 @@ def test_a_sealed_rollout_the_control_plane_refuses_forever_keeps_everything(
     assert "done" in kept["result"]["final_text"]
     assert kept["result"]["artifacts"]["answer.txt"]["content"] == "solved\n"
 
-    trajectory = tmp_path / "_percepteye" / "rl_1"
+    trajectory = tmp_path / "_percepteye" / _attempt_key(_req(tmp_path))
     assert (trajectory / "answer.txt").read_text() == "solved\n", (
         "the evidence was purged behind a result that can never be delivered"
     )
@@ -541,7 +541,8 @@ def test_the_drain_keeps_the_evidence_of_what_it_could_not_deliver_either(
         f"the drain destroyed the result: "
         f"{sorted(p.name for p in _outbox(tmp_path).iterdir())}"
     )
-    assert (tmp_path / "_percepteye" / "rl_1" / "answer.txt").read_text() == "solved\n", (
+    answer = tmp_path / "_percepteye" / _attempt_key(_req(tmp_path)) / "answer.txt"
+    assert answer.read_text() == "solved\n", (
         "the drain purged the evidence behind a result it could not deliver"
     )
 
@@ -619,7 +620,7 @@ def test_the_trajectory_is_kept_while_its_outcome_is_undelivered(tmp_path):
         runner.serve_forever(max_rollouts=1)
 
     assert tr.reported == []
-    assert (tmp_path / "_percepteye" / "rl_1").is_dir(), (
+    assert (tmp_path / "_percepteye" / _attempt_key(_req(tmp_path))).is_dir(), (
         "the evidence was deleted while the result was still undelivered"
     )
 
@@ -627,7 +628,7 @@ def test_the_trajectory_is_kept_while_its_outcome_is_undelivered(tmp_path):
     alive = ScriptedTransport([])
     _runner(tmp_path, alive, ["sh", _script(tmp_path, "echo x\n")]).serve_forever()
     assert alive.reported == ["rl_1"]
-    assert not (tmp_path / "_percepteye" / "rl_1").exists()
+    assert not (tmp_path / "_percepteye" / _attempt_key(_req(tmp_path))).exists()
 
 
 def test_a_crash_the_control_plane_never_heard_about_is_still_delivered(tmp_path):
@@ -855,7 +856,8 @@ def test_the_child_process_reports_through_the_same_seam(
     monkeypatch.setattr(child.RolloutRequest, "from_wire",
                         classmethod(lambda cls, d: _req(tmp_path)))
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({
-        "spec": "m:a", "rollout": {}, "trajectory_dir": str(tmp_path)})))
+        "spec": "m:a", "rollout": {}, "trajectory_dir": str(tmp_path),
+        "timeout_s": 5})))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         assert child.main() == 0

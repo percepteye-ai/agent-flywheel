@@ -16,10 +16,10 @@ A `list` or `tuple` first argument means the agent is a **process**, not an obje
 | channel | when | notes |
 |:--|:--|:--|
 | **stdin** | always, unless `fw.TASK` is in the argv | written, then closed |
-| **`PERCEPTEYE_TURN_INPUT`** | always | inert unless the CLI reads it |
+| **`PERCEPTEYE_TURN_INPUT`** | unless the task is over 100 KiB (too big for one environment variable) | inert unless the CLI reads it |
 | **an argv position** | only where `fw.TASK` appears | every occurrence is substituted |
 
-The first two are sent together because CLIs differ and guessing wrongly is silent. `fw.TASK` makes the choice a declaration: with the sentinel in the argv, **stdin gets the empty string** so an agent that reads both does not act on the same instruction twice. `PERCEPTEYE_TURN_INPUT` stays set either way.
+The first two are sent together because CLIs differ and guessing wrongly is silent. `fw.TASK` makes the choice a declaration: with the sentinel in the argv, **stdin gets the empty string** so an agent that reads both does not act on the same instruction twice. `PERCEPTEYE_TURN_INPUT` stays set either way, as long as the task fits in one environment variable.
 
 `fw.TASK` is a **sentinel object, not the string `"{task}"`**. A literal argument that happens to contain the placeholder text survives verbatim, and an unsubstituted sentinel surfaces as a type error rather than as an agent receiving four characters and doing something confident with them.
 
@@ -56,7 +56,7 @@ those bytes as the answer would fabricate a response the agent never made.
 
 ## The working directory is the rollout
 
-Each rollout's child starts with its cwd set to that rollout's own directory — the same path it is handed as `PERCEPTEYE_TRAJECTORY_DIR`, namely `<artifacts_dir>/_percepteye/<rollout_id>`. For a coding or REPL agent the files it leaves there **are** the deliverable, so every one of them is collected as an artifact. Two exceptions: `tool_calls.jsonl` is the trajectory, not an artifact; and a symlink is recorded as `skipped:symlink` rather than followed, because the agent authors that directory and `ln -s ~/.aws/credentials creds.txt` would otherwise be read at its target. The directory is removed once the report is out.
+Each rollout's child starts with its cwd set to that rollout's own directory — the same path it is handed as `PERCEPTEYE_TRAJECTORY_DIR`, namely `<artifacts_dir>/_percepteye/<rollout_id>.<lease digest>` — one directory per claim, because a rollout whose lease lapsed can be claimed again by the same process while its first attempt is still finishing. For a coding or REPL agent the files it leaves there **are** the deliverable, so every one of them is collected as an artifact. Two exceptions: `tool_calls.jsonl` is the trajectory, not an artifact; and a symlink is recorded as `skipped:symlink` rather than followed, because the agent authors that directory and `ln -s ~/.aws/credentials creds.txt` would otherwise be read at its target. The directory is removed once the report is out.
 
 `artifacts_dir=` defaults to `$PWD/.percepteye-artifacts`. A CLI agent has a real shell and this SDK's isolation is a process boundary and an environment scrub — it says nothing about the filesystem. **Point `artifacts_dir=` outside any checkout.**
 
@@ -101,7 +101,7 @@ Either side missing leaves the argv untouched, which is exactly the pre-gate beh
 
 ## Timeouts kill the process group
 
-`rollout_timeout_s` (default `900.0`) is capped by the rollout's own remaining budget less a 10s margin, held back so artifacts and the report can still be delivered against a live lease. On expiry the whole **process group** is killed with `SIGKILL`.
+The agent's budget is the rollout's own remaining budget less a delivery reserve (at least 10s) and a 5s teardown, held back so artifacts and the report can still be delivered against a live lease; `rollout_timeout_s` (default `None`) can only lower it. On expiry the whole **process group** is killed with `SIGKILL`.
 
 The group, not the process, and that is load-bearing. A real CLI agent spawns freely — a shell, a compiler, a test runner — and killing only the process we launched leaves those children alive holding the stdout pipe open, so `communicate()` blocks and the timeout never returns. Measured: a 1.5s budget against `sh -c 'sleep 120'` took the full 120s. The child is spawned with `start_new_session=True` on POSIX, so a spawning agent leaves nothing behind. Windows has no process groups; only the launched process is killed.
 

@@ -142,7 +142,7 @@ One unit of work, handed to the agent by the control plane.
 
 **`deadline_ts` and `lease_expires_ts` are separate numbers for separate jobs.** The deadline bounds the work and does not move. The lease is liveness, and a heartbeat renews it. `seconds_remaining(now)` reads the deadline only, and moves for exactly one reason: time passing.
 
-The lease expiry is read **once, at claim**, and paces heartbeats at a third of the remaining grant for the life of the rollout — measured from what the server *granted*, not what the client requested. A server that clamps the request and does not report the clamp is exactly how a heartbeat ends up slower than the lease it exists to keep alive; when the field is absent the client falls back to the lease it asked for, which is wrong in precisely that case.
+The lease expiry is read **once, at claim**, and paces heartbeats at a third of the shorter of the remaining grant and the per-beat extension — measured from what the server *granted*, not what the client requested; each beat's answered `lease_expires_ts` then schedules the next. A server that clamps the request and does not report the clamp is exactly how a heartbeat ends up slower than the lease it exists to keep alive; when the field is absent the client falls back to the lease it asked for, which is wrong in precisely that case.
 
 ??? note "There is deliberately no `environment` key"
     A previous SDK wrote server-supplied values into the running process's `os.environ`. It was both dangerous and useless — the LLM client had already read its `base_url` at construction. The only configuration channel into an agent is subprocess environment at spawn: configuration crosses into a fresh child, never into a running parent.
