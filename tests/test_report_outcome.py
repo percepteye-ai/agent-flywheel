@@ -785,6 +785,35 @@ def test_a_batch_of_one_refused_by_its_location_is_the_records_refusal(
         assert _pending(tmp_path) == []
 
 
+def test_both_sdks_read_a_record_location_off_the_same_words():
+    """The two SDKs share one sender rule, so they must agree on which
+    refusals name a record: driven through both with the same table. Mutation:
+    either side's pattern changed -> red."""
+    from .node_sdk import require_node_sdk, run_node
+
+    sdk, node = require_node_sdk()
+    causes = [
+        'HTTP 422: [{"type":"missing","loc":["body","turns",3,"turn_id"],'
+        '"msg":"Field required"}]',
+        'HTTP 422: [{"type":"missing","loc":["body","outcomes"],"msg":"x"}]',
+        'HTTP 422: [{"loc":["body","a\\"b",0,"note"]}]',
+        'HTTP 422: {"error":"tool_call_not_object","index":2}',
+        'HTTP 400: bad request 3',
+        'outcomes.0.note: Extra inputs are not permitted',
+    ]
+    script = (
+        "import { readFileSync } from 'node:fs';\n"
+        "import { refusalMayBeOfTheBatch } from './src/capture.js';\n"
+        "const causes = JSON.parse(readFileSync(0, 'utf8'));\n"
+        "process.stdout.write(JSON.stringify("
+        "causes.map((c) => refusalMayBeOfTheBatch(422, c))));\n"
+    )
+    theirs = json.loads(run_node(sdk, node, script, stdin=json.dumps(causes)))
+    ours = [production._refusal_may_be_of_the_batch(422, c) for c in causes]
+    assert ours == [False, True, False, False, True, True]
+    assert theirs == ours
+
+
 def test_a_413_is_about_size_so_the_split_goes_on_until_it_fits(
     monkeypatch, tmp_path, quiet,
 ):
