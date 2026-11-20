@@ -278,9 +278,12 @@ def test_the_rollout_timeout_is_declared_in_exactly_one_place():
                     and isinstance(node.value, (int, float)) \
                     and not isinstance(node.value, bool):
                 literal_sites.append(f"{path.name}:{node.lineno}")
-            if isinstance(node, ast.Assign) and any(
+            targets = (node.targets if isinstance(node, ast.Assign)
+                       else [node.target] if isinstance(node, ast.AnnAssign)
+                       else [])
+            if any(
                 isinstance(t, ast.Name) and t.id == "DEFAULT_ROLLOUT_TIMEOUT_S"
-                for t in node.targets
+                for t in targets
             ):
                 declarations.append(f"{path.name}:{node.lineno}")
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -311,9 +314,12 @@ def test_the_rollout_timeout_is_declared_in_exactly_one_place():
         f"these rollout_timeout_s defaults are copies of the value rather than "
         f"the constant DEFAULT_ROLLOUT_TIMEOUT_S: {copied_defaults}"
     )
-    assert literal_sites == declarations, (
-        f"the number 900 appears at {literal_sites}; it may appear only where "
-        f"DEFAULT_ROLLOUT_TIMEOUT_S is declared, which is {declarations}"
+    # The default is NONE now -- the episode budget is the bound -- so the
+    # old number may appear nowhere; a 900 reappearing is a ceiling sneaking
+    # back in under another name.
+    assert literal_sites == [], (
+        f"the number 900 appears at {literal_sites}; the rollout timeout has "
+        f"no default value (DEFAULT_ROLLOUT_TIMEOUT_S is None at {declarations})"
     )
 
 

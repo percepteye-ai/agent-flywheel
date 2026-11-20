@@ -193,12 +193,18 @@ def run_rollout_in_process(
                     pool.shutdown(wait=False, cancel_futures=True)
                     raise
                 pool.shutdown(wait=True)
+        # The policy calls counted so far ride EVERY exit, not only the
+        # agent's return. A timed-out or crashed rollout with no count is
+        # held out as ``llm_calls_unobserved`` by both reconcilers, which
+        # undid Mission Control scoring a policy that ran out of time as a
+        # failure (τ³ 2c3f5922: 60 such rollouts).
         except _cf.TimeoutError:
             return RolloutOutput(
                 final_text="",
                 exclusion_reason="deadline_exceeded",
                 exclusion_detail=f"entrypoint exceeded {timeout_s:.0f}s",
                 timing={"elapsed_s": time.time() - started},
+                llm_call_count=policy_calls.value,
             )
         except Exception as exc:
             # The customer's agent raising is a rollout result, not our error.
@@ -208,6 +214,7 @@ def run_rollout_in_process(
                 exclusion_reason="entrypoint_error",
                 exclusion_detail=f"{type(exc).__name__}: {exc}",
                 timing={"elapsed_s": time.time() - started},
+                llm_call_count=policy_calls.value,
             )
 
     for u in unbinds:
@@ -361,9 +368,20 @@ MAX_RESERVE_FRACTION = 0.25
 #: while costing the delivery window — see :func:`_kill_and_drain`.
 TEARDOWN_DRAIN_S = 5.0
 
-#: Default agent budget, named so the value that bounds a rollout and the value
-#: an identity-sealed adapter setting is sized against are the same object.
-DEFAULT_ROLLOUT_TIMEOUT_S = 900.0
+#: Default agent ceiling: NONE. The episode budget the control plane minted
+#: for the rollout (its ``deadline_ts``) is the bound; ``serve(rollout_timeout_s=)``
+#: is an optional ceiling BELOW it, never a default one. Named so the value
+#: that bounds a rollout and the value an identity-sealed adapter setting is
+#: sized against are the same object.
+#:
+#: It was 900.0, and that silently overrode every longer budget: τ³ banking,
+#: 2026-11-19 (Mission Control prompt evolution 2c3f5922), episodes minted
+#: ~3455s were killed at 900s on every long task -- 200 of 562 rollouts --
+#: so the policy was graded on a quarter of the time the control plane gave
+#: it. It never bound the one sealed adapter setting sized against it
+#: (``prime_agent``'s 894s reference budget is below 900), so that identity
+#: is unchanged.
+DEFAULT_ROLLOUT_TIMEOUT_S: float | None = None
 
 #: The share of the child's window ONE blocking harness call may take. Half
 #: would mean a single wedged provider call can eat the episode and still look
@@ -388,7 +406,7 @@ class EpisodePlan:
 def episode_plan(
     budget_s: float,
     *,
-    rollout_timeout_s: float = DEFAULT_ROLLOUT_TIMEOUT_S,
+    rollout_timeout_s: float | None = DEFAULT_ROLLOUT_TIMEOUT_S,
     envelope_s: float = REPORT_MARGIN_S,
 ) -> EpisodePlan:
     """Turn an episode budget into a child deadline. THE one place.
@@ -403,14 +421,17 @@ def episode_plan(
     """
     budget = max(0.0, float(budget_s))
     delivery_s = min(max(REPORT_MARGIN_S, float(envelope_s)), budget * MAX_RESERVE_FRACTION)
-    child_s = max(1.0, min(float(rollout_timeout_s), budget - delivery_s - TEARDOWN_DRAIN_S))
+    window = budget - delivery_s - TEARDOWN_DRAIN_S
+    if rollout_timeout_s is not None:
+        window = min(float(rollout_timeout_s), window)
+    child_s = max(1.0, window)
     return EpisodePlan(child_s=child_s, teardown_s=TEARDOWN_DRAIN_S, delivery_s=delivery_s)
 
 
 def harness_call_ceiling_s(
     budget_s: float,
     *,
-    rollout_timeout_s: float = DEFAULT_ROLLOUT_TIMEOUT_S,
+    rollout_timeout_s: float | None = DEFAULT_ROLLOUT_TIMEOUT_S,
     envelope_s: float | None = None,
 ) -> float:
     """The longest ONE blocking harness call may run, for an episode this long.
@@ -933,7 +954,7 @@ class RolloutRunner:
         #: out while the adapter that freezes a harness ceiling into an agent's
         #: sealed identity derived that ceiling from the constant. Two
         #: declarations of one budget, with nothing comparing them.
-        rollout_timeout_s: float = DEFAULT_ROLLOUT_TIMEOUT_S,
+        rollout_timeout_s: float | None = DEFAULT_ROLLOUT_TIMEOUT_S,
         method: str | None = None,
         adapters: list[str] | str | None = "auto",
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
@@ -1821,9 +1842,32 @@ class RolloutRunner:
         beat.start()
         try:
             with _cf.ThreadPoolExecutor(max_workers=self.concurrency) as pool:
+                # CONTINUOUS, not batch by batch. The loop used to claim N, then
+                # wait for ALL N to finish before claiming again, so the agent
+                # sat behind its slowest rollout while work queued: tau3
+                # 7456644c waited 1-2 minutes per rollout to be claimed by
+                # agents with free slots. Now a slot that frees is refilled at
+                # once: claim up to the FREE capacity, and block only when every
+                # slot is busy.
+                active: set[_cf.Future] = set()
+
+                def _harvest(done: Any) -> None:
+                    nonlocal served, delivered
+                    for fut in done:
+                        active.discard(fut)
+                        # _serve_one does not raise (see its docstring).
+                        if fut.result():
+                            delivered += 1
+                        served += 1
+
                 while not self._stop:
+                    _harvest([f for f in active if f.done()])
                     if max_rollouts is not None and served >= max_rollouts:
                         break
+                    if len(active) >= self.concurrency:
+                        _harvest(_cf.wait(
+                            active, return_when=_cf.FIRST_COMPLETED).done)
+                        continue
                     # DRAIN BEFORE CLAIMING. A result the previous process (or
                     # the previous minute) could not deliver is worth more than
                     # the next rollout, and doing it here is what makes a
@@ -1868,9 +1912,13 @@ class RolloutRunner:
                     # Never claim more than we still intend to run. Claiming a
                     # full batch when one rollout remained left the rest leased
                     # to a runner that was about to exit.
-                    want = self.concurrency
+                    want = self.concurrency - len(active)
                     if max_rollouts is not None:
-                        want = min(want, max_rollouts - served)
+                        want = min(want, max_rollouts - served - len(active))
+                    if want <= 0:
+                        _harvest(_cf.wait(
+                            active, return_when=_cf.FIRST_COMPLETED).done)
+                        continue
                     try:
                         rollouts, poll_after_ms = self.transport.claim(want)
                     except TransportError as exc:
@@ -1884,7 +1932,14 @@ class RolloutRunner:
                         # silent sleep, and the only other signal, claim_failed,
                         # fires only on the failing one.
                         self._emit("claim_empty", {"poll_after_ms": poll_after_ms})
-                        sleep_ms(poll_after_ms)
+                        if active:
+                            # Busy slots: wake for the first to finish or the
+                            # poll interval, whichever comes first.
+                            _harvest(_cf.wait(
+                                active, timeout=poll_after_ms / 1000.0,
+                                return_when=_cf.FIRST_COMPLETED).done)
+                        else:
+                            sleep_ms(poll_after_ms)
                         continue
                     # Concurrently, which is what claiming N meant all along.
                     # Serving them one after another held N-1 leases on work
@@ -1897,18 +1952,16 @@ class RolloutRunner:
                             self._inflight[r.rollout_id] = _InFlight(
                                 r, _interval, now + _interval
                             )
-                    futures = [pool.submit(self._serve_one, r) for r in rollouts]
-                    for fut in _cf.as_completed(futures):
-                        # _serve_one really does not raise now — it has the
-                        # `except Exception` this line's comment used to CLAIM
-                        # it had. Before, a ContractViolation from `to_wire`
-                        # (not a TransportError) came out here, stopped the
-                        # loop, and took the heartbeat thread down with it, so
-                        # ONE malformed payload ended lease renewal for every
-                        # concurrent rollout.
-                        if fut.result():
-                            delivered += 1
-                        served += 1
+                    # _serve_one really does not raise now — it has the
+                    # `except Exception` this line's comment used to CLAIM it
+                    # had. Before, a ContractViolation from `to_wire` (not a
+                    # TransportError) came out here, stopped the loop, and took
+                    # the heartbeat thread down with it, so ONE malformed
+                    # payload ended lease renewal for every concurrent rollout.
+                    active.update(pool.submit(self._serve_one, r) for r in rollouts)
+                # Stopping claims nothing more; what is running finishes and
+                # is counted, as a batch's rollouts always were.
+                _harvest(_cf.wait(active).done)
         finally:
             # One last drain while the process is still alive: anything still
             # undelivered has had every chance this process can give it, and

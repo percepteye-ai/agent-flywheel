@@ -944,7 +944,7 @@ def serve(
     #: bounded by this one, and changing either left the agent's sealed
     #: identity sized against arithmetic the runner no longer performed --
     #: silently, because nothing compared them.
-    rollout_timeout_s: float = DEFAULT_ROLLOUT_TIMEOUT_S,
+    rollout_timeout_s: float | None = DEFAULT_ROLLOUT_TIMEOUT_S,
     #: How this agent's CLI spells its completion-gate option, e.g.
     #: ``"--autonomous-gate"``. Required before any gate is passed: the flag is
     #: a fact about the binary and cannot be guessed, and handing an unknown

@@ -200,3 +200,26 @@ class HostedProbe:
 
 def build_hosted_probe() -> HostedProbe:
     return HostedProbe()
+
+
+class SlowAfterPolicyCalls:
+    """Makes three policy calls on the rollout's own completion URL, then
+    hangs past its budget -- the τ³ shape: a synchronous agent still working
+    when the child's timeout fires."""
+
+    def invoke(self, task: str) -> str:
+        import time
+
+        import httpx
+
+        base = os.environ["OPENAI_BASE_URL"].rstrip("/") + "/"
+        transport = httpx.MockTransport(lambda r: httpx.Response(200, json={}))
+        with httpx.Client(transport=transport) as c:
+            for _ in range(3):
+                c.post(base + "chat/completions", json={})
+        time.sleep(120)
+        return "late"
+
+
+def build_slow_after_policy_calls() -> SlowAfterPolicyCalls:
+    return SlowAfterPolicyCalls()
