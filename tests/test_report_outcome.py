@@ -732,6 +732,59 @@ def test_a_refusal_of_the_whole_batch_keeps_every_outcome(
     assert tr.outcomes == []
 
 
+def test_two_bad_outcomes_at_one_offset_of_each_half_are_isolated_not_held(
+    monkeypatch, tmp_path, quiet,
+):
+    """The control plane's 422 names each refused record by its index WITHIN
+    the batch it was sent (``loc``), so two bad records at the same offset of
+    each half answer in identical words. Read as a refusal of the whole
+    batch, that held every healthy outcome beside them, flush after flush. A
+    refusal naming a record is never the batch's: the split goes on.
+    Mutation: drop the record-location rule -> held whole, red."""
+    ids = [f"o{n}" for n in range(8)]
+    bad: set[str] = set()
+
+    def answer(batch):
+        if not bad:
+            # Offset 1 of each half, in the order the flush sends them.
+            bad.update((batch[1], batch[5]))
+        locs = [n for n, i in enumerate(batch) if i in bad]
+        if not locs:
+            return None
+        return 422, json.dumps([
+            {"type": "finite_number", "loc": ["body", "outcomes", n, "value"],
+             "msg": "Input should be a finite number"} for n in locs
+        ], separators=(",", ":"))
+
+    tr = _Refusing(answer)
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _report(px, *ids)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            counts = px.flush()
+        assert (counts["outcomes_sent"], counts["outcomes_failed"],
+                counts["outcomes_dropped"]) == (6, 0, 2)
+        assert _pending(tmp_path) == []
+        assert not any("whole batches" in str(w.message) for w in caught)
+    assert sorted(o["outcome_id"] for o in tr.outcomes) == sorted(
+        set(ids) - bad)
+
+
+def test_a_batch_of_one_refused_by_its_location_is_the_records_refusal(
+    monkeypatch, tmp_path, quiet,
+):
+    """A batch of one has nothing beside it, so a refusal of it is kept --
+    unless the refusal names the record, which makes it the record's: dropped
+    like any record refused alone, not resent forever."""
+    tr = _Refusing(lambda batch: (422, '[{"type":"missing","loc":["body",'
+                                       '"outcomes",0,"turn_id"],"msg":"x"}]'))
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _report(px, "o1")
+        counts = px.flush()
+        assert counts["outcomes_dropped"] == 1
+        assert _pending(tmp_path) == []
+
+
 def test_a_413_is_about_size_so_the_split_goes_on_until_it_fits(
     monkeypatch, tmp_path, quiet,
 ):

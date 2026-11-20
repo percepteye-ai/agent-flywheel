@@ -48,6 +48,7 @@ import atexit
 import hashlib
 import json
 import os
+import re
 import shutil
 import threading
 import time
@@ -426,6 +427,30 @@ def _outcome_refused_for_size(status: Any) -> bool:
     and a record that draws it alone is too large on its own. The Node SDK's
     ``outcomeRefusedForSize``."""
     return status == _OUTCOME_TOO_LARGE
+
+
+#: A refusal's detail that NAMES A RECORD: a 422's ``loc`` carrying an item
+#: index (``["body","outcomes",3,"note"]``, as the control plane's validation
+#: answers every batch route), or a handler's ``"index"``. Read off the detail
+#: as both SDKs render it -- compact JSON, ``_http._detail`` and the Node
+#: client's ``detail`` -- so the Node SDK's ``REFUSAL_NAMES_A_RECORD`` is this
+#: pattern, byte for byte.
+_REFUSAL_NAMES_A_RECORD = re.compile(
+    r'"loc":\[(?:"(?:[^"\\]|\\.)*",)*\d+[,\]]|"index":\d')
+
+
+def _refusal_may_be_of_the_batch(status: Any, cause: str) -> bool:
+    """Whether a refusal CAN be about the batch rather than a record in it.
+
+    Never one about the body's size (:func:`_outcome_refused_for_size`), and
+    never one whose detail names a record (:data:`_REFUSAL_NAMES_A_RECORD`).
+    That location is the index WITHIN the half that was sent, so two bad
+    records at the same offset of each half answered in identical words, and
+    reading those as a refusal of the batch held every healthy record beside
+    them, flush after flush -- turns for good, since turns never expire. The
+    Node SDK's ``refusalMayBeOfTheBatch``."""
+    return (not _outcome_refused_for_size(status)
+            and not _REFUSAL_NAMES_A_RECORD.search(cause or ""))
 
 
 def _outcome_wire_bytes(wire: Mapping[str, Any]) -> int:
@@ -1486,7 +1511,10 @@ class Attachment:
         422 from a control plane on another contract minor, a proxy's 400 --
         and splitting further would drop every report at two requests each.
         Sending stops for this flush, they stay on disk (the week's expiry
-        still applies), and the cause is said once.
+        still applies), and the cause is said once. Never when the words NAME
+        A RECORD (:func:`_refusal_may_be_of_the_batch`): a 422's location is
+        the index within the half, so two bad records at one offset of each
+        half say the same words, and the split goes on to isolate them.
 
         Except a 413 (:func:`_outcome_refused_for_size`): it is about the
         body's SIZE, so both halves of a batch too large for a proxy answer
@@ -1499,7 +1527,8 @@ class Attachment:
         it is kept for a later flush, where it travels with others, and said
         once. (Every ``report_outcome`` flushes; reading that refusal as the
         record's dropped each outcome a control plane on another contract
-        minor refused whole.)
+        minor refused whole.) Unless its words name the record: that refusal
+        is the record's, and it is dropped like any record refused alone.
 
         Splitting is bounded per flush (:data:`_OUTCOME_SPLIT_MAX_REQUESTS`);
         what the bound leaves unsent stays for the next flush.
@@ -1634,13 +1663,13 @@ class Attachment:
                     break
                 if (halves and len(refused) == 2
                         and refused[0][1] == refused[1][1]
-                        and not _outcome_refused_for_size(refused[0][1][0])):
+                        and _refusal_may_be_of_the_batch(*refused[0][1])):
                     failed += sum(len(b) for b, _ in refused) + _left()
                     queue.clear()
                     self._warn_whole_batch_refusal(kind, refused[0][1][1])
                     break
                 if (not halves and refused and len(refused[0][0]) == 1
-                        and not _outcome_refused_for_size(refused[0][1][0])):
+                        and _refusal_may_be_of_the_batch(*refused[0][1])):
                     failed += 1
                     self._warn_whole_batch_refusal(
                         kind, refused[0][1][1], alone=True)
