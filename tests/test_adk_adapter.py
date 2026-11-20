@@ -159,6 +159,24 @@ def test_a_runner_built_while_bound_records_nothing_after_unbind(tmp_path):
     assert not _calls(tmp_path)
 
 
+def test_an_empty_text_does_not_hide_a_parts_real_payload():
+    """A Part may carry ``text=""`` beside a function_call or inline bytes.
+    Reading the empty string first recorded the call (or the media) as an
+    empty text part, so the model's tool call vanished from the boundary."""
+    from google.genai import types
+
+    from agent_flywheel.adapters.adk import _part
+
+    call = types.Part(text="", function_call=types.FunctionCall(
+        name="lookup", args={"q": "x"}, id="call_1"))
+    assert _part(call) == {"type": "tool_call", "id": "call_1",
+                           "name": "lookup", "arguments": {"q": "x"}}
+    media = _part(types.Part(text="", inline_data=types.Blob(
+        mime_type="image/png", data=b"\x89PNG")))
+    assert media is not None and media["type"] != "text"
+    assert _part(types.Part(text="")) == {"type": "text", "content": ""}
+
+
 def test_a_real_runner_records_its_tool_call(bound, tmp_path):
     """The whole path, with ADK building every context itself: a customer's
     ``InMemoryRunner`` runs an agent whose model calls one tool, and that call

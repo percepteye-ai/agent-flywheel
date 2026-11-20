@@ -345,10 +345,11 @@ def _jsonable(value: Any) -> Any:
 
 def _part(part: Any) -> dict[str, Any] | None:
     text = getattr(part, "text", None)
-    if isinstance(text, str):
-        if getattr(part, "thought", None):
-            return {"type": "reasoning", "content": text}
-        return {"type": "text", "content": text}
+    # Non-empty text only: a Part may carry ``text=""`` beside its real
+    # payload (a function_call, inline_data), and reading the empty string
+    # first would record the call or the media as an empty text part.
+    if isinstance(text, str) and text:
+        return _text_part(part, text)
     call = getattr(part, "function_call", None)
     if call is not None:
         call_id = getattr(call, "id", None)
@@ -369,11 +370,19 @@ def _part(part: Any) -> dict[str, Any] | None:
     if file_data is not None:
         return media_part(mime_type=getattr(file_data, "mime_type", None),
                           uri=getattr(file_data, "file_uri", None))
+    if isinstance(text, str):
+        return _text_part(part, text)  # empty, and nothing else in the part
     dumped = _jsonable(part)
     if isinstance(dumped, dict) and dumped:
         kind = next(iter(dumped))
         return {"type": kind, kind: dumped[kind]}
     return None
+
+
+def _text_part(part: Any, text: str) -> dict[str, Any]:
+    if getattr(part, "thought", None):
+        return {"type": "reasoning", "content": text}
+    return {"type": "text", "content": text}
 
 
 def _message(content: Any) -> dict[str, Any]:
