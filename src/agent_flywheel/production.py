@@ -302,6 +302,19 @@ _FLUSH_EVERY = 32
 #: next process to attach uploads it.
 _CLOSE_FLUSH_GRACE_S = 5.0
 
+#: How long ``close()`` may spend in all, waiting for the upload lock AND
+#: flushing once it has it -- every request of that last flush included.
+#:
+#: The grace above bounded only the WAIT. Once the lock was taken the flush
+#: ran with the client's own envelope, four 30s attempts per request, for every
+#: pending batch of turns, outcomes and feedback in turn: during an outage the
+#: ``atexit`` hook held a customer's process open for minutes. Now each request
+#: is clamped to what is left of this (``ControlPlaneClient.request``'s
+#: ``deadline``), nothing new starts once it is spent, and the first failure
+#: that is not a refusal ends the flush. What it does not send is still on
+#: disk for the next process that attaches.
+_CLOSE_FLUSH_BUDGET_S = 10.0
+
 #: What :attr:`Attachment.rulebook_refusal` says while the control plane has
 #: not yet answered ``attach(rules=...)``.
 _RULEBOOK_PENDING = (
@@ -604,6 +617,29 @@ def _recorded_anything(
     return bool(text.get("task") or text.get("answer") or calls or task_id)
 
 
+class _DeadlineBound:
+    """A ``ControlPlaneClient`` whose every request carries one deadline.
+
+    ``AttachTransport`` builds each request itself and passes no deadline, so
+    the bound is applied here, beneath it, rather than in each of its
+    methods."""
+
+    def __init__(self, client: Any, deadline: float) -> None:
+        self._client = client
+        self._deadline = deadline
+
+    def request(self, *args: Any, **kwargs: Any) -> Any:
+        kwargs.setdefault("deadline", self._deadline)
+        return self._client.request(*args, **kwargs)
+
+    @property
+    def delivery_envelope_s(self) -> float:
+        return float(self._client.delivery_envelope_s)
+
+    def close(self) -> None:
+        self._client.close()
+
+
 class Attachment:
     """A bound capture session for one process. Returned by :func:`attach`.
 
@@ -723,6 +759,26 @@ class Attachment:
         #: at startup OR later, and can be taken away and re-granted, so the
         #: hook is claimed once rather than once per grant.
         self._exit_flush_registered = False
+        #: The absolute ``time.time()`` past which the flush in progress may
+        #: start no request, or ``None``: set by :meth:`close` for its last
+        #: flush (:data:`_CLOSE_FLUSH_BUDGET_S`), under ``_flush_lock``.
+        self._deadline: float | None = None
+
+    def _control_plane(self) -> Any:
+        """A client for one flush's requests, bounded by :attr:`_deadline`
+        when one is set: every request it sends is clamped to the time left.
+        The one place an attachment builds its client. Raises what building
+        one raises."""
+        from ._http import ControlPlaneClient
+
+        client = ControlPlaneClient(self._cp_url, self._api_key)
+        deadline = self._deadline
+        return client if deadline is None else _DeadlineBound(client, deadline)
+
+    def _past_deadline(self) -> bool:
+        """Whether the flush in progress may start no further request."""
+        deadline = self._deadline
+        return deadline is not None and time.time() >= deadline
 
     @property
     def rulebook(self) -> RulebookReceipt | None:
@@ -1451,13 +1507,17 @@ class Attachment:
                     pass
 
         try:
-            from ._http import ControlPlaneClient
             from .transport import AttachTransport
 
-            client = ControlPlaneClient(self._cp_url, self._api_key)
+            client = self._control_plane()
             send = getattr(AttachTransport(client, self.agent_id), kind.send)
             while queue:
                 group = queue.pop(0)
+                if self._past_deadline():
+                    # close()'s budget is spent: nothing new starts.
+                    failed += sum(len(b) for b in group) + _left()
+                    queue.clear()
+                    break
                 halves = len(group) == 2
                 if halves and (split_requests + 2
                                > _OUTCOME_SPLIT_MAX_REQUESTS):
@@ -1519,6 +1579,13 @@ class Attachment:
                             stop = True
                             break
                         failed += len(batch)
+                        if self._deadline is not None:
+                            # close()'s last flush: a blip ends it. The next
+                            # batch would wait out the same outage.
+                            failed += untried + _left()
+                            queue.clear()
+                            stop = True
+                            break
                         continue
                     _forget(batch)
                     named = _refused_by_name(reply, kind)[:len(batch)]
@@ -2089,14 +2156,13 @@ class Attachment:
         ever send them, so they are deleted (:meth:`_purge_unanswered_outcomes`),
         exactly as :meth:`report_outcome` keeps none after a no.
         """
-        if not self._cp_url or not self._api_key:
+        if not self._cp_url or not self._api_key or self._past_deadline():
             return
         client = None
         try:
-            from ._http import ControlPlaneClient
             from .transport import AttachTransport
 
-            client = ControlPlaneClient(self._cp_url, self._api_key)
+            client = self._control_plane()
             verdict = capture_verdict(
                 AttachTransport(client, self.agent_id).capture_current(self.agent_id))
             if verdict.may_upload:
@@ -2331,10 +2397,9 @@ class Attachment:
 
         client = None
         try:
-            from ._http import ControlPlaneClient
             from .transport import AttachTransport
 
-            client = ControlPlaneClient(self._cp_url, self._api_key)
+            client = self._control_plane()
             tr = AttachTransport(client, self.agent_id)
             requested_batch_size = (
                 batch_size
@@ -2347,6 +2412,10 @@ class Attachment:
             )
             for i in range(0, len(pending), wire_batch_size):
                 chunk = pending[i:i + wire_batch_size]
+                if self._past_deadline():
+                    # close()'s budget is spent: the rest stay on disk.
+                    failed += len(pending) - i
+                    break
                 try:
                     reply = tr.report_turns(self.agent_id, [w for _, w in chunk])
                 except Exception as exc:
@@ -2363,12 +2432,19 @@ class Attachment:
                         refused = True
                         failed += len(pending) - sent
                         break
-                    # Whole chunk unacknowledged. Leave every marker unwritten
-                    # so the next flush retries it: the intake dedupes on
-                    # turn_id, so a retry of a batch that DID land is answered
-                    # as a duplicate rather than stored twice.
-                    failed += len(chunk)
-                    continue
+                    # Unacknowledged. Leave every marker unwritten so the next
+                    # flush retries it: the intake dedupes on turn_id, so a
+                    # retry of a batch that DID land is answered as a
+                    # duplicate rather than stored twice.
+                    #
+                    # AND STOP. A transport failure or a 5xx that outlasted
+                    # the client's retries is an outage, and the next chunk
+                    # would wait it out again -- up to the client's whole
+                    # envelope per chunk, which inside close() held a
+                    # customer's process open for minutes. Every unsent turn
+                    # is counted once.
+                    failed += len(pending) - i
+                    break
                 self._mark_uploaded([d.name for d, _ in chunk])
                 sent += len(chunk)
                 self._note_model_content_refusal(reply)
@@ -2424,13 +2500,21 @@ class Attachment:
         # one it avoids: a turn we do not send now is still on disk, and the
         # next process that attaches uploads it. So give the running flush a
         # short grace period and then let go.
+        #
+        # And the flush itself is bounded by the same clock
+        # (:data:`_CLOSE_FLUSH_BUDGET_S`): each request is clamped to the time
+        # left, none starts once it is spent, and a failure that is not a
+        # refusal ends it.
+        deadline = time.time() + _CLOSE_FLUSH_BUDGET_S
         if self._flush_lock.acquire(timeout=_CLOSE_FLUSH_GRACE_S):
+            self._deadline = deadline
             try:
                 self._flush_locked(include_unanswered=True)
             except Exception:
                 # Shutdown must not raise. The turns remain on disk.
                 pass
             finally:
+                self._deadline = None
                 self._flush_lock.release()
         # The rules' declaration, if the control plane has not answered it
         # yet: a process closing moments after attach() would otherwise kill
