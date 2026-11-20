@@ -16,6 +16,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from typing import Any, Literal
+from urllib.parse import quote
 
 #: The one vocabulary a refusal names a value's type in, shared with
 #: ``describe=`` and with the Node SDK's ``jsonType`` -- ``got null``, never
@@ -146,6 +147,49 @@ def _production_turn_identifier(value: Any) -> str | None:
 def _production_agent_identifier(value: Any) -> str | None:
     """Return an exact wire id safe as the agent URL path segment."""
     return _production_turn_identifier(value)
+
+
+#: The longest id this package puts in a URL path segment.
+_PATH_SEGMENT_MAX_CHARS = 256
+
+
+def _path_segment(value: Any, what: str) -> str:
+    """``value`` as ONE percent-encoded URL path segment, or
+    :class:`ContractViolation` naming why it cannot be one.
+
+    THE ONE GATE for every id this package puts in a request path -- a
+    rollout id (and :meth:`RolloutRequest.from_wire`, where one arrives), an
+    agent id, a hill climb's run id. Refused: a non-string, an empty string,
+    ``.`` and ``..`` (a client or proxy that normalises the path moves the
+    request to a different route), a ``/`` or ``\\`` (a second segment), a
+    control character, a lone surrogate (no UTF-8 spelling), more than
+    :data:`_PATH_SEGMENT_MAX_CHARS` characters. Anything else is kept and
+    quoted with no safe characters, so ``?``, ``#`` and ``%`` stay inside
+    the segment. Deliberately not ``[A-Za-z0-9_-]``: ids from other planes
+    and tests use other characters, and the rule is what makes a path unsafe,
+    not what a platform id happens to look like.
+    """
+    if not isinstance(value, str):
+        raise ContractViolation(
+            f"{what} must be a string, got {_json_type(value)}")
+    if not value:
+        raise ContractViolation(f"{what} must not be empty")
+    if value in (".", ".."):
+        raise ContractViolation(
+            f"{what} {value!r} is a dot segment, not an id")
+    if "/" in value or "\\" in value:
+        raise ContractViolation(
+            f"{what} must not contain a path separator, got {value!r}")
+    if any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in value):
+        raise ContractViolation(
+            f"{what} must not contain a control character, got {value!r}")
+    if not _well_formed_text(value):
+        raise ContractViolation(f"{what} must be well-formed Unicode text")
+    if len(value) > _PATH_SEGMENT_MAX_CHARS:
+        raise ContractViolation(
+            f"{what} must be at most {_PATH_SEGMENT_MAX_CHARS} characters, "
+            f"got {len(value)}")
+    return quote(value, safe="")
 
 
 def _task_identifier(value: Any) -> str | None:
@@ -643,6 +687,15 @@ class RolloutRequest:
 
     @classmethod
     def from_wire(cls, d: dict[str, Any]) -> RolloutRequest:
+        """One claimed rollout as the wire carries it, or
+        :class:`ContractViolation` naming the field at fault -- never another
+        exception type, and nothing coerced: a ``None`` was ``"None"`` and
+        ``true`` was a deadline of ``1.0``. ``rollout_id`` must be one URL
+        path segment (:func:`_path_segment`): it is put in this rollout's
+        request paths and in its directory on disk."""
+        if not isinstance(d, Mapping):
+            raise ContractViolation(
+                f"a rollout must be a JSON object, got {_json_type(d)}")
         missing = [
             k
             for k in ("rollout_id", "turn_input", "llm_url", "api_key",
@@ -657,19 +710,44 @@ class RolloutRequest:
                 "removed: configuration reaches the agent through subprocess "
                 "env at spawn, never by mutating a running process."
             )
+        _path_segment(d["rollout_id"], "RolloutRequest.rollout_id")
+        for name in ("turn_input", "llm_url", "api_key", "artifacts_dir"):
+            if not isinstance(d[name], str):
+                raise ContractViolation(
+                    f"RolloutRequest.{name} must be a string, got "
+                    f"{_json_type(d[name])}")
+        deadline_ts = finite_number(d["deadline_ts"])
+        if deadline_ts is None:
+            raise ContractViolation(
+                "RolloutRequest.deadline_ts must be a finite number, got "
+                f"{_json_type(d['deadline_ts'])}")
+        lease_expires_ts = None
+        if d.get("lease_expires_ts") is not None:
+            lease_expires_ts = finite_number(d["lease_expires_ts"])
+            if lease_expires_ts is None:
+                raise ContractViolation(
+                    "RolloutRequest.lease_expires_ts must be a finite number "
+                    f"or null, got {_json_type(d['lease_expires_ts'])}")
+        lease_token = d.get("lease_token")
+        if lease_token is not None and not isinstance(lease_token, str):
+            raise ContractViolation(
+                "RolloutRequest.lease_token must be a string or null, got "
+                f"{_json_type(lease_token)}")
+        metadata = d.get("metadata")
+        if metadata is not None and not isinstance(metadata, Mapping):
+            raise ContractViolation(
+                "RolloutRequest.metadata must be an object or null, got "
+                f"{_json_type(metadata)}")
         return cls(
-            rollout_id=str(d["rollout_id"]),
-            turn_input=str(d["turn_input"]),
-            llm_url=str(d["llm_url"]),
-            api_key=str(d["api_key"]),
-            artifacts_dir=str(d["artifacts_dir"]),
-            deadline_ts=float(d["deadline_ts"]),
-            lease_expires_ts=(
-                float(d["lease_expires_ts"])
-                if d.get("lease_expires_ts") is not None else None
-            ),
-            lease_token=d.get("lease_token"),
-            metadata=dict(d.get("metadata") or {}),
+            rollout_id=d["rollout_id"],
+            turn_input=d["turn_input"],
+            llm_url=d["llm_url"],
+            api_key=d["api_key"],
+            artifacts_dir=d["artifacts_dir"],
+            deadline_ts=deadline_ts,
+            lease_expires_ts=lease_expires_ts,
+            lease_token=lease_token,
+            metadata=dict(metadata or {}),
         )
 
     def seconds_remaining(self, now: float) -> float:

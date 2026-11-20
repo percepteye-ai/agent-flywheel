@@ -32,11 +32,12 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from typing import Any
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
 from ._version import __version__
+from .contract import _path_segment
 from .control_plane import resolve_control_plane_url
 from .errors import ConfigurationError
 
@@ -394,5 +395,9 @@ class CustomerApiClient:
         (1.45.0) are unpaired, ungated arms. Each is ``None`` (``checkpoints``
         ``[]``) on a run that did not choose cyber, and absent on an older
         server. A run that is not a hill climb of this organization is
-        refused 404 ``hillclimb_not_found``."""
-        return self._get(f"/hillclimbs/{quote(str(run_id), safe='')}/security", {})
+        refused 404 ``hillclimb_not_found``. A ``run_id`` that cannot be one
+        URL path segment (``..``, a ``/``, a control character, not a
+        string) raises :class:`~agent_flywheel.errors.ContractViolation`
+        before anything is sent."""
+        return self._get(
+            f"/hillclimbs/{_path_segment(run_id, 'run_id')}/security", {})

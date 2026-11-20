@@ -37,6 +37,7 @@ from .contract import (
     RolloutRequest,
     RulebookReceipt,
     RulebookRequest,
+    _path_segment,
     _production_agent_identifier,
     _production_identifier,
     _production_turn_identifier,
@@ -317,8 +318,10 @@ class AttachTransport:
         if not isinstance(request, RulebookRequest):
             request = RulebookRequest(request)
         body = request.to_wire()
-        agent = quote(self.agent_id, safe="-._~")
         try:
+            # Inside the try: an agent id that cannot be a path segment is
+            # named as why there is no receipt, like any other cause.
+            agent = _path_segment(self.agent_id, "agent_id")
             reply = self._c.request(
                 "POST",
                 f"/agents/{agent}/rulebook",
@@ -442,7 +445,8 @@ class AttachTransport:
         )
         return self._c.request(
             "POST",
-            f"/rollouts/{rollout.rollout_id}/result",
+            f"/rollouts/{_path_segment(rollout.rollout_id, 'rollout_id')}"
+            "/result",
             json_body=output.to_wire(),
             # The server keys on (rollout_id, attempt); an identical replay is
             # acknowledged as a duplicate rather than double-counted.
@@ -489,7 +493,7 @@ class AttachTransport:
             return {}
         try:
             body = self._c.request(
-                "GET", f"/agents/{quote(agent_id, safe='')}/capture")
+                "GET", f"/agents/{_path_segment(agent_id, 'agent_id')}/capture")
         except TransportError as exc:
             status = exc.status_code
             if status in CAPTURE_READ_REFUSALS:
@@ -650,7 +654,8 @@ class AttachTransport:
         """
         self._c.request(
             "POST",
-            f"/rollouts/{rollout.rollout_id}/abandon",
+            f"/rollouts/{_path_segment(rollout.rollout_id, 'rollout_id')}"
+            "/abandon",
             json_body={
                 "lease_token": rollout.lease_token,
                 "reason": reason,

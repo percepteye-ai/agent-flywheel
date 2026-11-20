@@ -163,8 +163,8 @@ def test_without_a_location_an_older_answer_is_returned_unchanged():
 def test_hillclimb_security_reads_the_runs_record():
     calls: list = []
     c = _client(200, {"measurement": {"state": "not_measured"}}, calls)
-    assert c.hillclimb_security("r/1")["measurement"]["state"] == "not_measured"
-    assert calls[0].url.raw_path == b"/api/v2/hillclimbs/r%2F1/security"
+    assert c.hillclimb_security("r?1#2")["measurement"]["state"] == "not_measured"
+    assert calls[0].url.raw_path == b"/api/v2/hillclimbs/r%3F1%232/security"
     c = _client(404, {"detail": {"code": "hillclimb_not_found", "message": "no"}}, calls)
     with pytest.raises(CustomerRefusal) as info:
         c.hillclimb_security("r2")
