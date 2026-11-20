@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+import typing
 import warnings
 
 from agent_flywheel import RolloutRequest
@@ -61,7 +62,7 @@ def test_an_unreadable_claimed_rollout_does_not_stop_the_loop(tmp_path, monkeypa
     class _T:
         agent_id = "a"
         calls = 0
-        reported: list[str] = []
+        reported: typing.ClassVar[list[str]] = []
 
         def claim(self, n):
             _T.calls += 1
@@ -74,7 +75,9 @@ def test_an_unreadable_claimed_rollout_does_not_stop_the_loop(tmp_path, monkeypa
             return [], 10
 
         def heartbeat(self, r, *, progress=None): return None
-        def report(self, r, o): _T.reported.append(r.rollout_id); return {}
+        def report(self, r, o):
+            _T.reported.append(r.rollout_id)
+            return {}
         def abandon(self, r, *, reason, detail=""): return None
 
     runner = RolloutRunner(["true"], transport=_T(), input_shape="text",

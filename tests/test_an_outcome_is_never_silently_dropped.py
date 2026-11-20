@@ -541,7 +541,8 @@ def test_the_drain_keeps_the_evidence_of_what_it_could_not_deliver_either(
         f"the drain destroyed the result: "
         f"{sorted(p.name for p in _outbox(tmp_path).iterdir())}"
     )
-    assert (tmp_path / "_percepteye" / _attempt_key(_req(tmp_path)) / "answer.txt").read_text() == "solved\n", (
+    answer = tmp_path / "_percepteye" / _attempt_key(_req(tmp_path)) / "answer.txt"
+    assert answer.read_text() == "solved\n", (
         "the drain purged the evidence behind a result it could not deliver"
     )
 

@@ -25,9 +25,9 @@ from collections.abc import Iterable, Mapping
 __all__ = [
     "PERCEPTEYE_NAMESPACE",
     "ROUTING_VARS",
-    "check_endpoint_env",
     "UNROUTABLE_PROVIDER_VARS",
     "build_child_env",
+    "check_endpoint_env",
     "is_environment_overlay",
     "overlay_environment",
     "unroutable_providers_present",
