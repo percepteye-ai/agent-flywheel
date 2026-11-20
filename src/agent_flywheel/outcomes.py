@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import uuid
 import warnings
 from contextvars import ContextVar
 from pathlib import Path
@@ -594,14 +595,61 @@ def _append(path: Path, line: str) -> None:
         _write_execution_fingerprint(path.parent, _current_execution_sha256.get())
 
 
+#: What :func:`_publish_once` returns when THIS call published the sidecar.
+_PUBLISHED = object()
+
+
+def _publish_once(target: Path, content: str) -> Any:
+    """Publish ``content`` at ``target`` unless something is already there.
+
+    Returns :data:`_PUBLISHED` when this call published it, else the text
+    already at ``target`` (``None`` when that cannot be read). Raises
+    ``OSError`` for a directory it cannot write.
+
+    THE TARGET IS NEVER SEEN EMPTY. Creating it with ``open("x")`` and then
+    writing left a window in which a concurrent writer of the SAME identity
+    -- two tool calls of one turn, in parallel -- got ``FileExistsError``,
+    read the still-empty file, compared ``""`` with what it meant to write
+    and wrote the permanent conflict marker: measured, 8 threads writing one
+    identity into a fresh directory produced a false ``.conflict`` about
+    55% of the time. The content is written whole to a file of this
+    writer's own, flushed to disk, and only then linked into place:
+    ``os.link`` fails rather than replace, so the first writer wins and
+    every later one reads a complete file to compare against.
+    """
+    tmp = target.with_name(
+        f".{target.name}.{os.getpid()}.{threading.get_ident()}."
+        f"{uuid.uuid4().hex}.tmp")
+    try:
+        with open(tmp, "x", encoding="utf-8") as output:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        try:
+            os.link(tmp, target)
+            return _PUBLISHED
+        except FileExistsError:
+            pass
+        try:
+            return target.read_text(encoding="utf-8")
+        except OSError:
+            return None
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def _write_execution_fingerprint(path: Path, execution_sha256: str | None) -> None:
     """Persist one exact SDK identity, invalidating a conflicting claim.
 
     Never raises. Capture cannot fail a customer turn. A second process may
     reuse a caller-chosen turn id; if it carries a different identity, leaving
     either digest in place would falsely bind half the turn, so a monotonic
-    conflict marker makes readers refuse the identity.  Keeping that marker in
-    a separate file also closes the create/write race between two processes.
+    conflict marker makes readers refuse the identity.  The sidecar is
+    published whole (:func:`_publish_once`), so a concurrent writer of the
+    same identity never reads it half-written and calls that a conflict.
     """
     if not is_lower_sha256(execution_sha256):
         return
@@ -612,15 +660,12 @@ def _write_execution_fingerprint(path: Path, execution_sha256: str | None) -> No
         path.mkdir(parents=True, exist_ok=True)
         if conflict.exists():
             return
-        try:
-            with sidecar.open("x", encoding="utf-8") as output:
-                output.write(json.dumps(expected, sort_keys=True))
+        existing = _publish_once(sidecar, json.dumps(expected, sort_keys=True))
+        if existing is _PUBLISHED:
             return
-        except FileExistsError:
-            pass
         try:
-            current = json.loads(sidecar.read_text(encoding="utf-8"))
-        except (OSError, TypeError, ValueError):
+            current = json.loads(existing)
+        except (TypeError, ValueError):
             current = None
         if current == expected:
             return
@@ -811,17 +856,8 @@ def _write_task_id(path: Path, task_id: Any) -> None:
         path.mkdir(parents=True, exist_ok=True)
         if conflict.exists():
             return
-        try:
-            with sidecar.open("x", encoding="utf-8") as output:
-                output.write(value)
-            return
-        except FileExistsError:
-            pass
-        try:
-            current = sidecar.read_text(encoding="utf-8")
-        except OSError:
-            current = None
-        if current == value:
+        existing = _publish_once(sidecar, value)
+        if existing is _PUBLISHED or existing == value:
             return
         try:
             conflict.open("x", encoding="utf-8").close()
