@@ -502,8 +502,13 @@ ExclusionReason = Literal[
 ]
 
 _VALID_OUTCOMES = ("ok", "failed", "unknown")
-_STATUS_KEYS = ("status_code", "status", "http_status", "code", "statusCode")
-_HTTP_IN_TEXT = re.compile(r"\bHTTP\s*\d{3}\b", re.I)
+#: Compared lowercased, so ``Status``, ``STATUS_CODE`` and ``statusCode``
+#: are all found: a body's own spelling is the server's choice, not ours.
+_STATUS_KEYS = frozenset(
+    ("status_code", "status", "http_status", "code", "statuscode"))
+#: ``HTTP 200``, and the status line's own spelling: ``HTTP/1.1 200``,
+#: ``HTTP/2 200``.
+_HTTP_IN_TEXT = re.compile(r"\bHTTP(?:/\d(?:\.\d)?)?\s*\d{3}\b", re.I)
 
 
 def _scrub_status(output: Any) -> Any:
@@ -515,6 +520,12 @@ def _scrub_status(output: Any) -> Any:
     treat an unobserved call as a landed one. Absence of evidence must not be
     recoverable as evidence of success through a side channel.
 
+    EVERY STRING IS READ THE SAME WAY, wherever it sits: one that parses as a
+    JSON object or array is scrubbed as that body and written back as JSON
+    -- a dict's ``{"body": "{\"status_code\": 200}"}`` included, which used
+    to keep its status -- and any other has its ``HTTP 200`` /
+    ``HTTP/1.1 200`` removed. Status keys are matched case-insensitively.
+
     The human-readable content is preserved -- the trajectory still reads the
     same to a judge, it simply carries no status the scorer can mistake for an
     outcome.
@@ -523,14 +534,14 @@ def _scrub_status(output: Any) -> Any:
         try:
             body = json.loads(output)
         except Exception:
-            return _HTTP_IN_TEXT.sub("", output)
-        scrubbed = _scrub_status(body)
-        return json.dumps(scrubbed) if not isinstance(scrubbed, str) else scrubbed
+            body = None
+        if isinstance(body, (dict, list)):
+            return json.dumps(_scrub_status(body))
+        return _HTTP_IN_TEXT.sub("", output)
     if isinstance(output, dict):
-        out = {k: v for k, v in output.items() if k not in _STATUS_KEYS}
         return {
-            k: (_HTTP_IN_TEXT.sub("", v).strip() if isinstance(v, str) else _scrub_status(v))
-            for k, v in out.items()
+            k: _scrub_status(v) for k, v in output.items()
+            if str(k).lower() not in _STATUS_KEYS
         }
     if isinstance(output, list):
         return [_scrub_status(v) for v in output]
@@ -630,6 +641,20 @@ class ToolCallOutcome:
                         f"ToolCallOutcome.entity_ids[{k!r}] must be a "
                         f"non-empty string, got {v!r}"
                     )
+            # Stored, and so sent, under the field's canonical name: the
+            # check above read ``"ID"`` as ``id``, and the schema's key enum
+            # is lowercase, so ``"ID"`` passed here and failed there. Two
+            # spellings of one field are two claims about it: refused.
+            normalized: dict[str, str] = {}
+            for k, v in self.entity_ids.items():
+                name = str(k).strip().lower()
+                if name in normalized:
+                    raise ContractViolation(
+                        f"ToolCallOutcome.entity_ids names the identity field "
+                        f"{name!r} twice ({k!r} and another spelling)"
+                    )
+                normalized[name] = v
+            object.__setattr__(self, "entity_ids", normalized)
 
         if self.outcome == "unknown":
             # Enforced, not requested. An unknown outcome carrying a 2xx is the
@@ -988,6 +1013,14 @@ class RolloutOutput:
         ):
             raise ContractViolation(
                 "llm_call_count must be a nonnegative integer or None"
+            )
+        # A bool is not a reward and NaN/infinity are not JSON: the first
+        # trained as 1.0/0.0, the second was refused by the control plane as
+        # the whole report.
+        if self.reward is not None and finite_number(self.reward) is None:
+            raise ContractViolation(
+                f"reward must be a finite number or None, got "
+                f"{self.reward!r}"
             )
         d: dict[str, Any] = {
             "final_text": self.final_text,
