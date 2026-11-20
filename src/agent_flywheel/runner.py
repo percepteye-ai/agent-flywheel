@@ -1371,6 +1371,15 @@ class RolloutRunner:
                 "gate_flag": self._configured_gate_flag,
                 "endpoint_env": self._configured_endpoint_env,
                 "reports_tool_calls": self._reports_tool_calls,
+                # Behaviour-bearing, and absent before: the adapter decides what
+                # of stdout is the answer and the evidence, and the ceiling
+                # bounds how long the agent may act. Present only when set, so
+                # an agent that sets neither keeps the digest it registered.
+                **({"command_output_adapter": str(
+                    self._command_output_adapter.adapter_name).strip()}
+                   if self._command_output_adapter is not None else {}),
+                **({"rollout_timeout_s": float(self.rollout_timeout_s)}
+                   if self.rollout_timeout_s is not None else {}),
             },
             "discovered_agent": projected,
             "discovery_observation_sha256": observation_sha256,
@@ -2135,6 +2144,21 @@ class RolloutRunner:
                         rollouts, poll_after_ms = self.transport.claim(want)
                     except TransportError as exc:
                         self._emit("claim_failed", {"error": str(exc)})
+                        sleep_ms(5_000)
+                        continue
+                    except ContractViolation as exc:
+                        # A claimed rollout this SDK cannot read. Not a reason
+                        # to stop serving: it used to escape here and end the
+                        # loop -- and the heartbeat thread with it -- for every
+                        # rollout in flight. The unreadable rollout's lease
+                        # lapses and the control plane re-queues it.
+                        self._emit("claim_failed", {
+                            "error": f"ContractViolation: {exc}",
+                        })
+                        warnings.warn(
+                            f"a claimed rollout could not be read ({exc}); it "
+                            f"was not run and its lease will lapse. Serving "
+                            f"continues.", RuntimeWarning, stacklevel=2)
                         sleep_ms(5_000)
                         continue
                     if not rollouts:
@@ -2913,10 +2937,20 @@ class RolloutRunner:
                 out.artifacts[str(path.relative_to(root))] = "skipped:escapes_root"
                 continue
             name = str(path.relative_to(root))
+            # ONE read: the digest, the size and the inlined content all come
+            # from the same bytes. Separate reads let the file change between
+            # them, and ``read_text`` translated CRLF to LF, so the content a
+            # grader read did not match the digest it was sent with. Opened
+            # without following a link that replaced the file since the check
+            # above.
             try:
-                digest, size = sha256_file(path)
+                read = _read_artifact(path)
             except OSError:
                 continue
+            if read is None:
+                out.artifacts[name] = "skipped:symlink"
+                continue
+            digest, size, raw = read
             if size > MAX_ARTIFACT_BYTES:
                 # Named, not silently dropped: an artifact too large to
                 # collect is a fact about the rollout, and a scorer expecting
@@ -2927,10 +2961,10 @@ class RolloutRunner:
             # needs bytes, not proofs about bytes. Binary or over-cap files
             # keep the digest-string value — same wire shape as before.
             content: str | None = None
-            if size <= MAX_INLINE_ARTIFACT_BYTES and size <= inline_budget:
+            if raw is not None and size <= inline_budget:
                 try:
-                    content = path.read_text(encoding="utf-8", errors="strict")
-                except (OSError, UnicodeDecodeError):
+                    content = raw.decode("utf-8", errors="strict")
+                except UnicodeDecodeError:
                     content = None
             if content is not None:
                 inline_budget -= size
@@ -3289,14 +3323,40 @@ def _output_from_wire(d: dict[str, Any]) -> RolloutOutput:
     )
 
 
-def sha256_file(path: str | os.PathLike[str]) -> tuple[str, int]:
-    h = hashlib.sha256()
-    size = 0
-    with open(path, "rb") as fh:
+def _read_artifact(path: Path) -> tuple[str, int, bytes | None] | None:
+    """``(sha256, size, bytes-if-small)`` from ONE open of ``path``.
+
+    ``None`` when the path is not a regular file it can open without following
+    a link (it was swapped for one after the caller looked). The bytes are kept
+    only for a file within ``MAX_INLINE_ARTIFACT_BYTES``; past that the digest
+    is streamed and the bytes discarded.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        import errno
+
+        if exc.errno == errno.ELOOP:
+            return None
+        raise
+    with os.fdopen(fd, "rb") as fh:
+        import stat as _stat
+
+        if not _stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            return None
+        h = hashlib.sha256()
+        size = 0
+        kept: list[bytes] | None = []
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             h.update(chunk)
             size += len(chunk)
-    return h.hexdigest(), size
+            if kept is not None:
+                if size <= MAX_INLINE_ARTIFACT_BYTES:
+                    kept.append(chunk)
+                else:
+                    kept = None
+        return h.hexdigest(), size, (b"".join(kept) if kept is not None else None)
 
 
 _ = TOOL_CALLS_FILENAME  # re-exported for adapters writing their own file
