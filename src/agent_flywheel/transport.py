@@ -418,16 +418,41 @@ class AttachTransport:
         poll_after = int(body.get("poll_after_ms") or 1000)
         return [RolloutRequest.from_wire(r) for r in raw], poll_after
 
-    def heartbeat(self, rollout: RolloutRequest, *, progress: str | None = None) -> None:
+    #: Each beat's own budget, whole call: one attempt, and a second only if
+    #: the first fails fast. A beat is worth retrying on the NEXT beat, not
+    #: inside this one: the client's default report envelope (4 x 30s plus
+    #: backoff) held the heartbeat for two minutes against a lease it exists
+    #: to renew.
+    HEARTBEAT_BUDGET_S = 10.0
+    HEARTBEAT_ATTEMPT_S = 5.0
+
+    @property
+    def heartbeat_extend_ms(self) -> int:
+        """What each beat asks the lease to be extended by. Read by the runner
+        to pace beats against it; the one place the number is chosen."""
+        return min(self.lease_ms, 600_000)
+
+    def heartbeat(
+        self, rollout: RolloutRequest, *, progress: str | None = None
+    ) -> float | None:
+        """Extend this rollout's lease. Returns the new ``lease_expires_ts``
+        the control plane answered with (``None`` if it named none), which the
+        runner schedules the next beat from."""
         payload: dict[str, Any] = {
             "lease_token": rollout.lease_token,
-            "extend_ms": min(self.lease_ms, 600_000),
+            "extend_ms": self.heartbeat_extend_ms,
         }
         if progress:
             payload["progress"] = progress
-        self._c.request(
-            "POST", f"/rollouts/{rollout.rollout_id}/heartbeat", json_body=payload
+        body = self._c.request(
+            "POST", f"/rollouts/{rollout.rollout_id}/heartbeat", json_body=payload,
+            timeout=self.HEARTBEAT_ATTEMPT_S,
+            deadline=time.time() + self.HEARTBEAT_BUDGET_S,
         )
+        expires = (body or {}).get("lease_expires_ts")
+        if isinstance(expires, (int, float)) and not isinstance(expires, bool):
+            return float(expires)
+        return None
 
     def report(
         self,

@@ -247,13 +247,14 @@ This is additive — the defaults stay set, because an agent may read a mixture.
 
 | bound | value |
 |:--|:--|
-| `rollout_timeout_s` | `900.0` by default |
-| the agent's actual budget | `min(rollout_timeout_s, server deadline − 10s)` |
-| subprocess hard kill | `budget + 15s` on the child, then `SIGKILL` |
-| heartbeat interval | a third of the **granted** lease, floor 1s |
+| `rollout_timeout_s` | `None` by default — the control plane's episode budget is the bound; set it only to cap below that |
+| the agent's actual budget | server deadline − the delivery reserve (at least 10s, sized from the transport's retry envelope, at most a quarter of the episode) − 5s teardown, capped by `rollout_timeout_s` |
+| subprocess hard kill | `budget + 15s` on the child, then `SIGKILL` of its process group |
+| heartbeat interval | a third of the shorter of the **granted** lease and the per-beat extension (10 minutes at most), floor 1s; each beat is then scheduled from the expiry the control plane answered |
+| one heartbeat | 10s in all, at most 5s per attempt; beats for different leases run in parallel |
 | lease reclaimed by the server | up to 30 minutes after the last beat |
 
-The agent is stopped 10s short of the server deadline so there is time to collect artifacts and land the report while the lease is still good. A rollout whose deadline has already passed when claimed is handed straight back as `deadline_exceeded` rather than run.
+The agent is stopped short of the server deadline so there is time to collect artifacts and land the report while the lease is still good. A rollout whose deadline has already passed when claimed is handed straight back as `deadline_exceeded` rather than run.
 
 A rollout that arrives past its deadline, a lost lease, a crash and a blown budget all come back as **typed exclusions**, so a substrate fault is never scored as a bad decision by your agent: `flywheel_crash` · `substrate_unavailable` · `credential_expired` · `deadline_exceeded` · `entrypoint_error` · `agent_exit_nonzero` · `cancelled` · `capacity`.
 

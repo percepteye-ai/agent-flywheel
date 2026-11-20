@@ -886,7 +886,8 @@ def _attach_command_projection(
 class _InFlight:
     """One rollout being served right now, as the heartbeat thread sees it."""
 
-    __slots__ = ("beat_interval", "lease_lost", "next_beat_at", "plan", "proc", "rollout")
+    __slots__ = ("beat_interval", "beating", "lease_expires_ts", "lease_lost",
+                 "next_beat_at", "plan", "proc", "rollout")
 
     def __init__(self, rollout: RolloutRequest, beat_interval: float,
                  next_beat_at: float) -> None:
@@ -896,6 +897,12 @@ class _InFlight:
         #: Fixed for the life of the rollout. See RolloutRunner._beat_interval_for.
         self.beat_interval = beat_interval
         self.next_beat_at = next_beat_at
+        #: The lease's expiry as last stated by the control plane: at claim,
+        #: then by every beat that answered one. Read only by the heartbeat
+        #: thread and its workers.
+        self.lease_expires_ts = rollout.lease_expires_ts
+        #: A beat for this lease is in flight on a worker; never two at once.
+        self.beating = False
         #: Written by ``run_one`` (the producer), read by ``_serve_one_inner``
         #: (the consumer) so the time RESERVED for delivery is the same number
         #: delivery is then allowed to spend. ``None`` until the rollout starts,
@@ -1878,32 +1885,23 @@ class RolloutRunner:
             return bool(entry and entry.lease_lost)
 
     def _beat_interval_for(self, rollout: RolloutRequest) -> float:
-        """A third of the lease the server GRANTED AT CLAIM.
+        """A third of the SHORTER of the lease granted at claim and the
+        extension each beat asks for.
 
         Measured from the lease the server actually granted, not the one we
-        asked for. The server clamps our request, so a deployment with a lower
-        ceiling than our default would reap every long rollout underneath a
-        heartbeat pacing itself against a lease it never got. Falls back to the
-        requested value for a server that does not report what it granted.
+        asked for: the server clamps our request, so pacing against the
+        request would let a deployment with a lower ceiling reap every long
+        rollout. Falls back to the requested lease for a server that does not
+        report what it granted.
 
-        HONEST ABOUT WHAT THIS DOES NOT GIVE YOU. This used to claim "so two
-        beats may be lost first", and that is true only of the FIRST beat. Each
-        beat asks the control plane to extend by ``min(lease_ms, 600_000)``,
-        and the control plane SETS the expiry to now plus that -- so once the
-        claim-time lease has been replaced, the interval and the extension are
-        the same length and every later beat is scheduled at the expiry it
-        exists to pre-empt. The margin after beat #1 is one POST's latency, not
-        two intervals.
-
-        Left as it is deliberately, and reported rather than fixed here: the
-        arithmetic says it cannot fire inside the episode lengths this
-        deployment mints (the first beat is not due until ~600s and pushes the
-        expiry to ~1200s, against episodes of 300-894s), and bundling an
-        unrelated change into this one would make the mutation test for the
-        actual fix ambiguous. It is a real defect for any rollout past ~1200s.
-        The seam it needs is already there on the wire: the control plane
-        returns the new ``lease_expires_ts`` from every heartbeat and
-        ``AttachTransport.heartbeat`` discards it.
+        Against the EXTENSION too, because after the first beat that -- not
+        the claim-time lease -- is the lease: a control plane that sets the
+        expiry to now + extend left a 1800s grant paced at 600s against 600s
+        extensions, so every beat after the first was due at the very expiry
+        it exists to pre-empt. A third of the shorter one leaves two beats of
+        margin either way. The loop then schedules each beat from the
+        ``lease_expires_ts`` the previous one returned (``_beat_one``), so a
+        server that grants less than asked is followed, not assumed.
         """
         granted = rollout.lease_expires_ts
         if granted is not None:
@@ -1916,9 +1914,13 @@ class RolloutRunner:
             # Nothing was reaped -- the server extends on every beat -- so it
             # was pure load, invisible from here and paid for by the control
             # plane. Callers must compute this once, at claim, and reuse it.
-            return max(1.0, (granted - time.time()) / 3.0)
-        lease_ms = getattr(self.transport, "lease_ms", 1_800_000)
-        return max(1.0, (lease_ms / 1000.0) / 3.0)
+            lease_s = granted - time.time()
+        else:
+            lease_s = getattr(self.transport, "lease_ms", 1_800_000) / 1000.0
+        extend_ms = getattr(self.transport, "heartbeat_extend_ms", None)
+        if isinstance(extend_ms, (int, float)) and extend_ms > 0:
+            lease_s = min(lease_s, extend_ms / 1000.0)
+        return max(1.0, lease_s / 3.0)
 
     def _heartbeat_loop(self) -> None:
         """Keep every in-flight lease alive until its rollout finishes.
@@ -1928,62 +1930,90 @@ class RolloutRunner:
         was revoked mid-flight, the work was handed to someone else, and the
         report arrived against a lease that no longer existed. Long rollouts --
         the ones this product exists for -- hit it every time.
+
+        Each due beat runs on a small pool, one at a time per lease. On this
+        thread a slow beat for one lease -- a control plane taking its time,
+        a retry -- held up the beats for every other lease this process holds.
         """
-        while not self._beat_stop.wait(_BEAT_TICK_S):
-            now = time.time()
-            with self._inflight_lock:
-                entries = [
-                    e for e in self._inflight.values()
-                    if not e.lease_lost and now >= e.next_beat_at
-                ]
-            for entry in entries:
-                entry.next_beat_at = now + entry.beat_interval
-                try:
-                    self.transport.heartbeat(entry.rollout)
-                except LeaseLost:
-                    # The server has already taken it back. Stop the work now
-                    # rather than let it run to completion for nothing. Marked
-                    # and read under the lock ``_attach_proc`` holds, so a
-                    # child is either seen here or killed there.
-                    with self._inflight_lock:
-                        entry.lease_lost = True
-                        proc = entry.proc
-                    self._emit("lease_lost", {"rollout_id": entry.rollout.rollout_id})
-                    if proc is not None and proc.poll() is None:
-                        # The GROUP, not the one process. A command agent is a
-                        # shell that spawns freely, so killing only the process
-                        # we launched left its children alive holding the
-                        # pipes: MEASURED, the runner then sat in the child's
-                        # own `communicate()` for the full 120s timeout after
-                        # the lease was already gone. `proc.kill()` here was
-                        # written when this could only ever be a Python child.
-                        _kill_tree(proc)
-                except TransportError as exc:
-                    # Transient. The next beat may well succeed, and there are
-                    # two more before the lease lapses.
-                    self._emit("heartbeat_failed", {
-                        "rollout_id": entry.rollout.rollout_id, "error": str(exc),
-                    })
-                except Exception as exc:
-                    # ANYTHING ELSE, and this is the whole reason the loop is
-                    # worth guarding: ``FlywheelTransport`` is a Protocol, so a
-                    # customer implementation can raise whatever it likes, and
-                    # an exception raised here does not fail ONE rollout -- it
-                    # unwinds the single thread that renews EVERY lease this
-                    # process holds. Every in-flight rollout then runs to
-                    # completion against a lease nobody is renewing, the
-                    # control plane's reaper writes abandoned/deadline_exceeded
-                    # over all of them, and no report is ever accepted. That is
-                    # the incident this module was rewritten for, reproduced
-                    # from one unexpected exception type.
-                    #
-                    # Treated exactly like a transient failure: the next beat
-                    # is already scheduled, and a beat that raises is not
-                    # evidence the lease is gone (only a LeaseLost is).
-                    self._emit("heartbeat_failed", {
-                        "rollout_id": entry.rollout.rollout_id,
-                        "error": f"{type(exc).__name__}: {exc}",
-                    })
+        pool = _cf.ThreadPoolExecutor(
+            max_workers=max(1, min(self.concurrency, 8)),
+            thread_name_prefix="percepteye-beat",
+        )
+        try:
+            while not self._beat_stop.wait(_BEAT_TICK_S):
+                now = time.time()
+                with self._inflight_lock:
+                    entries = [
+                        e for e in self._inflight.values()
+                        if not e.lease_lost and not e.beating
+                        and now >= e.next_beat_at
+                    ]
+                    for e in entries:
+                        e.beating = True
+                for entry in entries:
+                    try:
+                        pool.submit(self._beat_one, entry)
+                    except RuntimeError:  # pool shut down under us: stopping
+                        entry.beating = False
+        finally:
+            pool.shutdown(wait=False)
+
+    def _next_beat_at(self, entry: _InFlight, now: float) -> float:
+        """The next beat: a beat interval from now, sooner if the lease the
+        control plane last stated has less than three of those left."""
+        delay = entry.beat_interval
+        expires = entry.lease_expires_ts
+        if isinstance(expires, (int, float)):
+            delay = min(delay, (float(expires) - now) / 3.0)
+        return now + max(1.0, delay)
+
+    def _beat_one(self, entry: _InFlight) -> None:
+        """One beat for one lease, on a pool worker. Never raises."""
+        try:
+            try:
+                expires = self.transport.heartbeat(entry.rollout)
+                if isinstance(expires, (int, float)) and not isinstance(expires, bool):
+                    entry.lease_expires_ts = float(expires)
+            except LeaseLost:
+                # The server has already taken it back. Stop the work now
+                # rather than let it run to completion for nothing. Marked
+                # and read under the lock ``_attach_proc`` holds, so a
+                # child is either seen here or killed there.
+                with self._inflight_lock:
+                    entry.lease_lost = True
+                    proc = entry.proc
+                self._emit("lease_lost", {"rollout_id": entry.rollout.rollout_id})
+                if proc is not None and proc.poll() is None:
+                    # The GROUP, not the one process. A command agent is a
+                    # shell that spawns freely, so killing only the process
+                    # we launched left its children alive holding the
+                    # pipes: MEASURED, the runner then sat in the child's
+                    # own `communicate()` for the full 120s timeout after
+                    # the lease was already gone. `proc.kill()` here was
+                    # written when this could only ever be a Python child.
+                    _kill_tree(proc)
+            except TransportError as exc:
+                # Transient. The next beat may well succeed, and is scheduled
+                # against what is left of the lease, so it comes sooner.
+                self._emit("heartbeat_failed", {
+                    "rollout_id": entry.rollout.rollout_id, "error": str(exc),
+                })
+            except Exception as exc:
+                # ANYTHING ELSE. ``FlywheelTransport`` is a Protocol, so a
+                # customer implementation can raise whatever it likes. On the
+                # single heartbeat thread this used to unwind the thread that
+                # renews EVERY lease this process holds -- every in-flight
+                # rollout then ran on against a lease nobody renewed, and the
+                # reaper wrote abandoned/deadline_exceeded over all of them.
+                # Treated exactly like a transient failure: a beat that raises
+                # is not evidence the lease is gone (only a LeaseLost is).
+                self._emit("heartbeat_failed", {
+                    "rollout_id": entry.rollout.rollout_id,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+        finally:
+            entry.next_beat_at = self._next_beat_at(entry, time.time())
+            entry.beating = False
 
     # ── the loop ───────────────────────────────────────────────────────────
     def serve_forever(self, *, max_rollouts: int | None = None) -> int:
