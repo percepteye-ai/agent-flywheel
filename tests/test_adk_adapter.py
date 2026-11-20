@@ -127,6 +127,38 @@ def test_installing_twice_does_not_double_record(bound, tmp_path):
         second()
 
 
+def test_an_overlapping_bind_keeps_capture_until_the_last_unbind(tmp_path):
+    """Two attachments in one process, the first closed while the second is
+    still running: the second's runners must still get the plugin. Restoring
+    the constructor on the FIRST unbind silently ended the second's capture."""
+    first = ADKAdapter().bind(llm_url="u", api_key="k")
+    second = ADKAdapter().bind(llm_url="u", api_key="k")
+    try:
+        first()
+        first()  # idempotent: must not release the second bind's hold too
+        pm = PluginManager()
+        assert any(p.name == "agent_flywheel" for p in pm.plugins)
+        with _RolloutScope("rl_adk", str(tmp_path)):
+            asyncio.run(_one_call(pm, _Tool(), _Ctx(), result={"ok": 1}))
+        assert len(_calls(tmp_path)) == 1
+    finally:
+        second()
+    assert not any(p.name == "agent_flywheel" for p in PluginManager().plugins)
+
+
+def test_a_runner_built_while_bound_records_nothing_after_unbind(tmp_path):
+    """A runner constructed while bound keeps our plugin for its whole life.
+    Once unbound, that plugin must go quiet, not keep recording for an
+    attachment that has closed."""
+    unbind = ADKAdapter().bind(llm_url="u", api_key="k")
+    pm = PluginManager()
+    unbind()
+    with _RolloutScope("rl_adk", str(tmp_path)):
+        asyncio.run(_one_call(pm, _Tool(), _Ctx(), result={"ok": 1}))
+        asyncio.run(_one_call(pm, _Tool(), _Ctx("fc_2"), error=ValueError("x")))
+    assert not _calls(tmp_path)
+
+
 def test_a_real_runner_records_its_tool_call(bound, tmp_path):
     """The whole path, with ADK building every context itself: a customer's
     ``InMemoryRunner`` runs an agent whose model calls one tool, and that call

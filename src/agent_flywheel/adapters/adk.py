@@ -71,6 +71,10 @@ _PLUGIN_NAME = "agent_flywheel"
 _lock = threading.Lock()
 _plugin_cls: type | None = None
 _installed: Any = None  # the original PluginManager.__init__, while patched
+#: Live binds. The patch is process-global and binds overlap (two attachments
+#: in one process), so the LAST unbind restores the constructor -- not the
+#: first, which would strip capture from the attachment still running.
+_binds = 0
 
 
 def _build_plugin_cls() -> type:
@@ -113,7 +117,7 @@ def _build_plugin_cls() -> type:
         # on_model_error_callback swallows the error.
         async def before_model_callback(self, *, callback_context, llm_request):
             try:
-                if model_capture_active():
+                if _binds and model_capture_active():
                     key = _model_key(callback_context)
                     with self._open_lock:
                         # The REQUEST OBJECT, read when the response arrives:
@@ -130,7 +134,7 @@ def _build_plugin_cls() -> type:
 
         async def after_model_callback(self, *, callback_context, llm_response):
             try:
-                if model_capture_active() and not getattr(
+                if _binds and model_capture_active() and not getattr(
                         llm_response, "partial", False):
                     with self._open_lock:
                         state = self._open_models.pop(
@@ -145,7 +149,7 @@ def _build_plugin_cls() -> type:
         async def on_model_error_callback(self, *, callback_context,
                                           llm_request, error):
             try:
-                if model_capture_active():
+                if _binds and model_capture_active():
                     with self._open_lock:
                         state = self._open_models.pop(
                             _model_key(callback_context), None)
@@ -161,7 +165,7 @@ def _build_plugin_cls() -> type:
         async def before_tool_callback(self, *, tool, tool_args, tool_context):
             try:
                 key = _call_key(tool_context)
-                if key is None:
+                if key is None or not _binds:
                     return None
                 with self._open_lock:
                     self._open[key] = {
@@ -240,9 +244,14 @@ def _build_plugin_cls() -> type:
             return None
 
         def _take(self, tool_context) -> dict[str, Any] | None:
-            """Pop the open state, so exactly one callback can record a call."""
+            """Pop the open state, so exactly one callback can record a call.
+
+            Nothing once every bind is gone: a runner constructed while bound
+            keeps this plugin in its PluginManager for its whole life, and an
+            unbound plugin must stop recording rather than outlive its
+            attachment."""
             key = _call_key(tool_context)
-            if key is None:
+            if key is None or not _binds:
                 return None
             with self._open_lock:
                 return self._open.pop(key, None)
@@ -555,36 +564,44 @@ class ADKAdapter:
 
         plugin_cls = _build_plugin_cls()
 
-        global _installed
+        global _installed, _binds
         with _lock:
-            if _installed is not None:
-                # Already patched by an earlier bind in this process. Unbinding
-                # would restore a stale __init__ over the live one, so this
-                # bind owns nothing and its unbind is a no-op.
-                return lambda: None
-
-            original = PluginManager.__init__
-
-            def _patched(self, *a: Any, **kw: Any) -> None:
-                original(self, *a, **kw)
-                try:
-                    self.register_plugin(plugin_cls())
-                except ValueError:
-                    # ADK's duplicate-name guard. Already present: nothing to do.
-                    pass
-                except Exception:
-                    # Capture is never worth breaking a runner over.
-                    pass
-
-            PluginManager.__init__ = _patched  # type: ignore[method-assign]
-            _installed = original
+            _binds += 1
+            if _installed is None:
+                _installed = _install(PluginManager, plugin_cls)
+        released = False
 
         def _unbind() -> None:
-            global _installed
+            # Idempotent per bind: a second call must not release ANOTHER
+            # bind's hold on the patch.
+            global _installed, _binds
+            nonlocal released
             with _lock:
-                if _installed is None:
+                if released:
                     return
-                PluginManager.__init__ = _installed  # type: ignore[method-assign]
-                _installed = None
+                released = True
+                _binds -= 1
+                if _binds == 0 and _installed is not None:
+                    PluginManager.__init__ = _installed  # type: ignore[method-assign]
+                    _installed = None
 
         return _unbind
+
+
+def _install(PluginManager: Any, plugin_cls: type) -> Any:
+    """Patch ``PluginManager.__init__``; return the original. Under ``_lock``."""
+    original = PluginManager.__init__
+
+    def _patched(self, *a: Any, **kw: Any) -> None:
+        original(self, *a, **kw)
+        try:
+            self.register_plugin(plugin_cls())
+        except ValueError:
+            # ADK's duplicate-name guard. Already present: nothing to do.
+            pass
+        except Exception:
+            # Capture is never worth breaking a runner over.
+            pass
+
+    PluginManager.__init__ = _patched  # type: ignore[method-assign]
+    return original
