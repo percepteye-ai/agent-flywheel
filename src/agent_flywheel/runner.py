@@ -1199,6 +1199,7 @@ class RolloutRunner:
             self._outbox_lock = threading.Lock()
             self._lease_tokens = {}
             self._retry_due = {}
+            self._delivering = set()
             return
         if command_output_adapter is not None:
             raise ConfigurationError(
@@ -1276,6 +1277,8 @@ class RolloutRunner:
         #: When each held spool file (by name) is next worth sending. See
         #: ``_schedule_retry``.
         self._retry_due: dict[str, float] = {}
+        #: Spool files (by name) a delivery currently owns. See ``_drain_one``.
+        self._delivering: set[str] = set()
 
     @property
     def execution_sha256(self) -> str | None:
@@ -2435,6 +2438,20 @@ class RolloutRunner:
             "result": _wire_payload(out),
         }
         path = self._spool_path(key)
+        # This worker owns the file until its delivery settles; the drain
+        # leaves an owned file alone (``_drain_one``).
+        with self._outbox_lock:
+            self._delivering.add(path.name)
+        try:
+            return self._spool_and_deliver(path, record, rollout, deadline)
+        finally:
+            with self._outbox_lock:
+                self._delivering.discard(path.name)
+
+    def _spool_and_deliver(
+        self, path: Path, record: dict[str, Any], rollout: RolloutRequest,
+        deadline: float,
+    ) -> bool:
         try:
             self._spool_write(path, record)
         except OSError as exc:
@@ -2820,7 +2837,26 @@ class RolloutRunner:
         return delivered
 
     def _drain_one(self, path: Path) -> int:
-        """Deliver ONE spooled outcome. Returns 1 if it landed, else 0."""
+        """Deliver ONE spooled outcome. Returns 1 if it landed, else 0.
+
+        The file is CLAIMED before it is read. The drain used to read it and
+        only then ask whether its rollout was still in flight, so a worker
+        that reported, removed the file and left ``_inflight`` in between
+        passed the check, and the same result was sent twice.
+        """
+        with self._outbox_lock:
+            if path.name in self._delivering:
+                return 0
+            self._delivering.add(path.name)
+        try:
+            if not path.exists():  # delivered and removed since the listing
+                return 0
+            return self._drain_claimed(path)
+        finally:
+            with self._outbox_lock:
+                self._delivering.discard(path.name)
+
+    def _drain_claimed(self, path: Path) -> int:
         record = _read_spool(path)
         if record is None:
             if _foreign_schema(path) is not None:
