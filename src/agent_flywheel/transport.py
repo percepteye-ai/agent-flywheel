@@ -408,14 +408,19 @@ class AttachTransport:
             "POST",
             "/rollouts/claim",
             json_body=claim_body,
+            # ONE key per claim, kept across the client's retries (``_http``
+            # sets the header once, before its attempt loop).
             idempotency_key=str(uuid.uuid4()),
             timeout=(self.wait_ms / 1000.0) + 10.0,
-            # Claiming is NOT replayable. The control plane does not honour
-            # Idempotency-Key on this route, so resending a claim that may
-            # already have been processed leases a SECOND batch while the first
-            # is held by nobody -- those rollouts then sit until their leases
-            # lapse. Only a failure that never reached the server is retried.
-            retry_if_ambiguous=False,
+            # Claiming IS replayable under that key. The control plane keys a
+            # claim on Idempotency-Key and answers a resend with the batch it
+            # already leased (``RolloutRepository.claim``), re-issuing the
+            # inference credential, rather than leasing a second batch. So a
+            # failure after the request may have landed -- a read timeout, a
+            # dropped connection, a 502 -- is retried like any other, and the
+            # first batch reaches this worker instead of sitting unheld until
+            # its leases lapse.
+            retry_if_ambiguous=True,
         )
         raw = body.get("rollouts") or []
         poll_after = int(body.get("poll_after_ms") or 1000)
