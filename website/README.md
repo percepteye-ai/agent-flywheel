@@ -24,9 +24,10 @@ build rather than a 404 someone finds later.
 
 ## Why the site has its own content root
 
-The repo's top-level `docs/` holds internal planning notes (`plan-*.md`) and the
-figure renderers. Pointing mkdocs at it would publish the planning notes. This
-directory contains only what is meant to be public.
+The repo's top-level `docs/` holds the maintainers' runbooks and the figure
+renderers, and is where internal planning notes (`plan-*.md`, gitignored) are
+kept locally. Pointing mkdocs at it would publish them. This directory
+contains only what is meant to be public.
 
 ## The figures
 
