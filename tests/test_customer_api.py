@@ -1,4 +1,4 @@
-"""The customer API reads (contract 1.51.0), case for case with the Node
+"""The customer API reads (contract 1.54.0), case for case with the Node
 SDK's test/customer-api.test.js."""
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ def _client(status, body, calls):
 
 
 def test_pins_contract_and_new_codes():
-    assert CUSTOMER_CONTRACT_VERSION == "1.51.0"
+    assert CUSTOMER_CONTRACT_VERSION == "1.54.0"
     assert ATTACK_REFUSAL_CODES == (
         "attack_set_is_sealed",
         "attack_resistance_measuring",
@@ -61,7 +61,8 @@ def test_pins_contract_and_new_codes():
         "training_unhealthy", "training_pool_cannot_train_objective",
         "opsd_chosen_model_not_trainable", "hillclimb_base_model_invalid",
         "base_model_unresolvable", "destination_algorithm_unsupported",
-        "provider_checkpoint_not_owned")
+        "provider_checkpoint_not_owned", "hillclimb_start_invalid",
+        "base_merge_failed", "authority_ruling_requires_org_admin")
     assert RUN_LIST_REFUSAL_CODES == (
         "launch_uri_outside_org", "run_page_too_deep",
         "launch_input_requires_platform_operator",
@@ -301,6 +302,13 @@ def test_refusal_codes_are_the_control_planes():
                 # isolated sandbox for its code, or one not answering.
                 "code_sandbox_not_configured": 503,
                 "code_sandbox_unreachable": 503,
+                # 1.52.0: a hill climb started from a model the organization
+                # already trained.
+                "hillclimb_start_invalid": 422,
+                "base_merge_failed": 502,
+                # 1.54.0: a ruling on the reward plan's Decision by anyone
+                # but an org admin.
+                "authority_ruling_requires_org_admin": 403,
                 }
     known = (RUN_LIST_REFUSAL_CODES + PROMPT_RUN_REFUSAL_CODES
              + ATTACK_REFUSAL_CODES + CYBER_REFUSAL_CODES + TRAINING_REFUSAL_CODES
@@ -310,3 +318,28 @@ def test_refusal_codes_are_the_control_planes():
     for code, status in expected.items():
         assert published.get(code) == status, code
     assert doc["x-customer-contract-version"] == CUSTOMER_CONTRACT_VERSION
+
+
+def test_the_declared_contract_is_the_control_planes():
+    """``CUSTOMER_CONTRACT_VERSION`` is the one Mission Control's source
+    declares (``mission_control/api/customer_contract.py``). Read from the
+    source, not ``docs/openapi.json``, which is generated and can lag it.
+    When ``PERCEPTEYE_CONTROL_PLANE_CHECKOUT`` names its checkout (a
+    release, ``docs/RELEASING.md``) the two must be equal; a variable that is
+    set is a promise, so a missing file fails. Unnamed (every CI run, which
+    cannot name a private checkout) only the version's shape is checked --
+    never a skip, which the zero-skip gate refuses."""
+    import os
+    import re
+    from pathlib import Path
+
+    assert re.fullmatch(r"1\.[0-9]+\.[0-9]+", CUSTOMER_CONTRACT_VERSION)
+    checkout = os.environ.get("PERCEPTEYE_CONTROL_PLANE_CHECKOUT")
+    if not checkout:
+        return
+    source = (Path(checkout) / "mission_control" / "api"
+              / "customer_contract.py").read_text(encoding="utf-8")
+    declared = re.search(
+        r'^CUSTOMER_CONTRACT_VERSION(?:: *Final)? *= *"([^"]+)"', source, re.M)
+    assert declared is not None, "the control plane declares no version"
+    assert declared.group(1) == CUSTOMER_CONTRACT_VERSION
