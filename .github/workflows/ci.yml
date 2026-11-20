@@ -72,9 +72,27 @@ jobs:
       # goes unchecked. Node is installed here for the same reason: that test
       # runs the Node SDK's own transport. Both repositories are public
       # (2026-10-20), so the checkout needs no credential.
+      # THE NODE SDK THIS CHANGE SHIPS WITH. The two SDKs land in unison, on
+      # same-named branches; checking out the Node SDK's main for a Python
+      # branch whose Node half is not merged yet made every cross-language test
+      # red for a reason unrelated to the change. The same-named branch when
+      # the Node repo has one, main otherwise. The ref arrives through env, so
+      # a branch name is data to the shell, never script.
+      - id: node-ref
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          if git ls-remote --exit-code --heads \
+              https://github.com/percepteye-ai/agent-flywheel-node.git \
+              "refs/heads/$BRANCH" >/dev/null 2>&1; then
+            echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: percepteye-ai/agent-flywheel-node
+          ref: ${{ steps.node-ref.outputs.ref }}
           path: agent-flywheel-node
           persist-credentials: false
       - run: pip install -e ".[dev,adapters-test,otel,otel-test]"
@@ -243,9 +261,27 @@ jobs:
       # -- a NAMED path that is not there is an error there, not a skip.
       # `persist-credentials: false`: nothing after the checkout needs to
       # reach that repository.
+      # THE NODE SDK THIS CHANGE SHIPS WITH. The two SDKs land in unison, on
+      # same-named branches; checking out the Node SDK's main for a Python
+      # branch whose Node half is not merged yet made every cross-language test
+      # red for a reason unrelated to the change. The same-named branch when
+      # the Node repo has one, main otherwise. The ref arrives through env, so
+      # a branch name is data to the shell, never script.
+      - id: node-ref
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          if git ls-remote --exit-code --heads \
+              https://github.com/percepteye-ai/agent-flywheel-node.git \
+              "refs/heads/$BRANCH" >/dev/null 2>&1; then
+            echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: percepteye-ai/agent-flywheel-node
+          ref: ${{ steps.node-ref.outputs.ref }}
           path: agent-flywheel-node
           persist-credentials: false
       - name: what the plugins write is what the Python SDK reads
