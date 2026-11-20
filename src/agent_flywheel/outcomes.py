@@ -291,14 +291,17 @@ def _trajectory_path(rollout_id: str) -> Path | None:
         return Path(base) / TOOL_CALLS_FILENAME
     if not _warned_no_destination:
         _warned_no_destination = True
-        warnings.warn(
-            f"record_tool_call() was called for rollout {rollout_id!r} with no "
-            f"trajectory directory configured, so the outcome was DISCARDED. "
-            f"Tool outcomes recorded outside an agent-flywheel runner are "
-            f"not captured. This warning is emitted once.",
-            RuntimeWarning,
-            stacklevel=3,
-        )
+        try:
+            warnings.warn(
+                f"record_tool_call() was called for rollout {rollout_id!r} "
+                f"with no trajectory directory configured, so the outcome was "
+                f"DISCARDED. Tool outcomes recorded outside an agent-flywheel "
+                f"runner are not captured. This warning is emitted once.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        except Exception:  # -W error: a capture bug never fails the tool call
+            pass
     return None
 
 
@@ -454,8 +457,10 @@ def read_model_boundary(trajectory_dir: Any) -> dict[str, Any] | None:
     from .genai_otlp import OBSERVATION_FILENAME, observation_from_lines
 
     try:
+        # errors="replace": a SIGKILL can cut a multi-byte character in half,
+        # and a strict decode then failed this turn on every flush, for good.
         raw = (Path(trajectory_dir) / OBSERVATION_FILENAME).read_text(
-            encoding="utf-8")
+            encoding="utf-8", errors="replace")
     except OSError:
         return None
     return observation_from_lines(raw.splitlines())
@@ -510,14 +515,17 @@ class _Sink:
             return True
         except OSError as exc:
             self._broken = True
-            warnings.warn(
-                f"[percepteye] could not write the trajectory at "
-                f"{self._path.parent}: {type(exc).__name__}: {exc}. Outcomes "
-                f"for this trajectory are NOT being recorded. Capture is "
-                f"disabled for it; nothing else is affected.",
-                RuntimeWarning,
-                stacklevel=4,
-            )
+            try:
+                warnings.warn(
+                    f"[percepteye] could not write the trajectory at "
+                    f"{self._path.parent}: {type(exc).__name__}: {exc}. "
+                    f"Outcomes for this trajectory are NOT being recorded. "
+                    f"Capture is disabled for it; nothing else is affected.",
+                    RuntimeWarning,
+                    stacklevel=4,
+                )
+            except Exception:  # -W error turns the line above into a raise
+                pass
             return False
 
     def _write(self, line: str) -> None:
@@ -905,7 +913,9 @@ def read_turn_text(
         return None
     out: dict[str, str] = {}
     try:
-        raw = path.read_text(encoding="utf-8")
+        # errors="replace": a write cut mid-character by a SIGKILL is a
+        # truncated record like any other, never an unreadable turn.
+        raw = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
     for line in raw.splitlines():
@@ -916,6 +926,9 @@ def read_turn_text(
         except ValueError:
             # A truncated final write costs that record and nothing else --
             # the same rule Trajectory.read keeps.
+            continue
+        if not isinstance(rec, dict):
+            # A line that parses to something else (`7`, `[]`) is no record.
             continue
         kind, text = rec.get("kind"), rec.get("text")
         if kind in TURN_KINDS and isinstance(text, str) and text:
@@ -954,7 +967,9 @@ class Trajectory:
             return None
         self.malformed = 0
         out: list[ToolCallOutcome] = []
-        with self.path.open(encoding="utf-8") as fh:
+        # errors="replace": a SIGKILL that cuts a multi-byte character costs
+        # that line (it no longer parses), never the readable ones.
+        with self.path.open(encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
