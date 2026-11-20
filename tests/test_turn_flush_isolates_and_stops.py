@@ -9,14 +9,12 @@ same outage. A flush in which every turn failed to render said ``failed: 0``.
 """
 from __future__ import annotations
 
-import json
 import warnings
 from contextlib import contextmanager
 
 import pytest
 
 import agent_flywheel as fw
-from agent_flywheel import production
 from agent_flywheel.errors import TransportError
 
 from .test_production_turn_upload import _attached, _Transport
