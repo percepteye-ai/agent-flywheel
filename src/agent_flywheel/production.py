@@ -2348,8 +2348,12 @@ class Attachment:
               batch_size: int = 64) -> dict[str, int]:
         """Upload captured turns, and any reported outcomes still waiting, to
         the control plane. Returns counts: the turns' ``sent`` / ``skipped`` /
-        ``failed``, plus ``outcomes_sent`` / ``outcomes_failed`` when outcomes
-        were waiting.
+        ``failed`` (each unsent turn counted once), ``dropped`` when the
+        control plane refused turns that will not be sent again (they stay on
+        disk, marked sent), ``not_permitted`` when consent is no, plus
+        ``outcomes_sent`` / ``outcomes_failed`` / ``outcomes_dropped`` when
+        outcomes were waiting. A turn whose ``with px.turn()`` scope is still
+        open is never sent, and is counted ``skipped``.
 
         Serialized against the automatic background flush, so a manual call
         cannot race it into sending the same turn twice.
