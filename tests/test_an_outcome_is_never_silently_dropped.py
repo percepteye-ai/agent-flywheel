@@ -855,7 +855,8 @@ def test_the_child_process_reports_through_the_same_seam(
     monkeypatch.setattr(child.RolloutRequest, "from_wire",
                         classmethod(lambda cls, d: _req(tmp_path)))
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({
-        "spec": "m:a", "rollout": {}, "trajectory_dir": str(tmp_path)})))
+        "spec": "m:a", "rollout": {}, "trajectory_dir": str(tmp_path),
+        "timeout_s": 5})))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         assert child.main() == 0

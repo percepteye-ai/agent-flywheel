@@ -525,16 +525,31 @@ def _kill_tree(proc: subprocess.Popen[str]) -> None:
     """Kill the command AND everything it spawned.
 
     Whatever the agent started is in the same process group, so the group is
-    the unit that has to die. Falls back to killing the one process where
-    process groups do not exist.
+    the unit that has to die. Both spawners start the child in its OWN session
+    (``start_new_session``), so the group id IS the child's pid -- used
+    directly, because ``getpgid`` of a leader that has already exited (a
+    zombie, not yet reaped) fails on macOS, and the fallback then killed only
+    that zombie and left every grandchild alive holding the pipes. Falls back
+    to killing the one process where process groups do not exist.
     """
     if os.name != "nt":
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            os.killpg(proc.pid, signal.SIGKILL)
             return
         except (ProcessLookupError, PermissionError, OSError):
             pass
-    proc.kill()
+    try:
+        proc.kill()
+    except OSError:  # already reaped
+        pass
+
+
+def _reap(proc: subprocess.Popen[str], grace_s: float) -> None:
+    """Collect the killed child's exit status, so no zombie is left behind."""
+    try:
+        proc.wait(timeout=max(0.1, grace_s))
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def _kill_and_drain(
@@ -555,7 +570,9 @@ def _kill_and_drain(
 
     Q10, stated rather than hidden: when the grace period expires the child's
     output IS LOST, and the caller must say so in the detail it reports rather
-    than leave an empty stderr reading as "the agent said nothing".
+    than leave an empty stderr reading as "the agent said nothing". The child
+    itself is still REAPED on that path: closing the pipes used to be the last
+    step, and the killed child stayed a zombie for the life of the process.
     """
     _kill_tree(proc)
     try:
@@ -568,7 +585,70 @@ def _kill_and_drain(
                     pipe.close()
             except OSError:
                 pass
+        _reap(proc, grace_s)
         return "", "", False
+
+
+def _run_child_to_result(
+    proc: subprocess.Popen[str], payload: str, *, timeout_s: float,
+    grace_s: float,
+) -> tuple[str, str, bool, bool]:
+    """Feed the child its payload and read its result channel to EOF.
+
+    Returns ``(stdout, stderr, timed_out, drained)``. EOF on stdout is the
+    child EXITING: its result descriptor is private and not inherited across
+    ``exec`` (see ``child._private_result_channel``). So the moment it arrives,
+    the child's whole process GROUP is killed, and only then is stderr read to
+    EOF.
+
+    ``communicate()`` could not do that. It waits for EOF on BOTH pipes, and a
+    process the agent started still held stderr after the child had written
+    its result and exited: the parent sat out the rest of its timeout, then
+    reported the rollout as ``deadline_exceeded`` with the result it had
+    already received thrown away -- or, with ``returncode == 0`` and no
+    timeout, left the agent's processes running for good.
+    """
+    out_buf: list[str] = []
+    err_buf: list[str] = []
+
+    def _read(pipe: Any, buf: list[str]) -> None:
+        try:
+            buf.append(pipe.read())
+        except (OSError, ValueError):
+            pass
+
+    def _feed() -> None:
+        try:
+            proc.stdin.write(payload)  # type: ignore[union-attr]
+            proc.stdin.close()  # type: ignore[union-attr]
+        except (OSError, ValueError):
+            pass
+
+    readers = [
+        threading.Thread(target=_read, args=(proc.stdout, out_buf), daemon=True),
+        threading.Thread(target=_read, args=(proc.stderr, err_buf), daemon=True),
+    ]
+    feeder = threading.Thread(target=_feed, daemon=True)
+    for t in (*readers, feeder):
+        t.start()
+    readers[0].join(timeout_s)
+    timed_out = readers[0].is_alive()
+    # Either way the group goes now: the child has exited (EOF), or the clock
+    # ran out on it.
+    _kill_tree(proc)
+    grace_end = time.monotonic() + max(0.1, grace_s)
+    for t in readers:
+        t.join(max(0.0, grace_end - time.monotonic()))
+    drained = not any(t.is_alive() for t in readers)
+    if not drained:
+        for pipe in (proc.stdout, proc.stderr, proc.stdin):
+            try:
+                if pipe is not None:
+                    pipe.close()
+            except OSError:
+                pass
+    _reap(proc, max(0.1, grace_end - time.monotonic()))
+    return "".join(out_buf), "".join(err_buf), timed_out, drained
 
 
 def _is_command(entrypoint: Any) -> bool:
@@ -1666,12 +1746,23 @@ class RolloutRunner:
         )
         self._attach_proc(rollout.rollout_id, proc)
         try:
-            stdout, stderr = proc.communicate(
-                input=json.dumps(payload), timeout=timeout_s + 15.0
+            stdout, stderr, timed_out, drained = _run_child_to_result(
+                proc, json.dumps(payload), timeout_s=timeout_s + 15.0,
+                grace_s=teardown_s,
             )
-        except subprocess.TimeoutExpired:
-            stdout, stderr, drained = _kill_and_drain(proc, teardown_s)
-            return RolloutOutput(
+        finally:
+            self._detach_proc(rollout.rollout_id)
+
+        # EVERY exit attaches the trajectory: the tool calls the agent made
+        # before it timed out, crashed or lost its lease are the evidence of
+        # why. A result the child already carried keeps its own.
+        def _finalise(out: RolloutOutput) -> RolloutOutput:
+            out.timing.setdefault("elapsed_s", time.time() - started)
+            _attach_trajectory(out, trajectory_dir)
+            return out
+
+        if timed_out:
+            return _finalise(RolloutOutput(
                 final_text="",
                 exclusion_reason="deadline_exceeded",
                 exclusion_detail=(
@@ -1682,40 +1773,35 @@ class RolloutRunner:
                        f"of the kill — a descendant outside the killed process "
                        f"group still held the pipes")
                 ),
-                timing={"elapsed_s": time.time() - started},
-            )
-        finally:
-            self._detach_proc(rollout.rollout_id)
-
+            ))
         if self._lease_lost(rollout.rollout_id):
             # Killed by the heartbeat thread. Not the agent's failure, and not
             # ours to hand back: the lease is already gone, so there is nothing
             # left to abandon.
-            return RolloutOutput(
+            return _finalise(RolloutOutput(
                 final_text="",
                 exclusion_reason="credential_expired",
                 exclusion_detail="lease lost while the rollout was running",
-                timing={"elapsed_s": time.time() - started},
-            )
-        if proc.returncode != 0:
-            return RolloutOutput(
-                final_text="",
-                exclusion_reason="flywheel_crash",
-                exclusion_detail=(stderr or "")[-2000:],
-                timing={"elapsed_s": time.time() - started},
-            )
+            ))
+        # The result channel carries nothing but the result, so a line that
+        # parses IS the child's answer -- read before the exit status, because
+        # the group kill above can land while the child is still leaving and
+        # turn its own clean exit into a SIGKILL status.
         try:
             out = _output_from_wire(json.loads(stdout.strip().splitlines()[-1]))
         except Exception as exc:
-            return RolloutOutput(
+            if proc.returncode != 0:
+                return _finalise(RolloutOutput(
+                    final_text="",
+                    exclusion_reason="flywheel_crash",
+                    exclusion_detail=(stderr or "")[-2000:],
+                ))
+            return _finalise(RolloutOutput(
                 final_text="",
                 exclusion_reason="flywheel_crash",
                 exclusion_detail=f"unparseable child result: {exc}",
-                timing={"elapsed_s": time.time() - started},
-            )
-        out.timing.setdefault("elapsed_s", time.time() - started)
-        _attach_trajectory(out, trajectory_dir)
-        return out
+            ))
+        return _finalise(out)
 
     # ── leases ─────────────────────────────────────────────────────────────
     def _attach_proc(self, rollout_id: str, proc: subprocess.Popen[str]) -> None:

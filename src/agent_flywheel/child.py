@@ -1,9 +1,18 @@
-"""Child-process entry point: run exactly one rollout and print the result.
+"""Child-process entry point: run exactly one rollout and write the result.
 
 ``python -m agent_flywheel.child`` reads one JSON payload on stdin and
-writes one JSON line on stdout. Nothing else is written to stdout, so the
-parent can always parse the last line; the agent's own printing goes to
-stderr's side of the pipe and is captured for diagnostics.
+writes one JSON line on its ORIGINAL stdout, which nothing else can reach:
+before any agent code is imported, that descriptor is duplicated to a private
+one, descriptor 1 is pointed at stderr and ``sys.stdout`` is ``sys.stderr``
+(:func:`_private_result_channel`). The agent's own printing -- ``print``, a
+C extension writing to fd 1, a subprocess it starts, a timed-out thread still
+running -- lands on stderr and is captured for diagnostics. The private
+descriptor is not inherited across ``exec``, so the parent reading it to EOF
+means this process has exited.
+
+It used to say all of that while doing none of it: an agent's
+``print(..., end="")`` corrupted the result line, and a still-running
+timed-out thread's last write replaced it.
 
 This module is why per-tool-call capture works under the default isolation
 mode at all. Binding, context variables and in-memory state do not cross a
@@ -18,17 +27,44 @@ from __future__ import annotations
 import json
 import os
 import sys
-from typing import Any
+from typing import Any, TextIO
 
 from .contract import RolloutRequest
 from .entrypoint import resolve_entrypoint
 
 
-def main(argv: list[str] | None = None) -> int:
+def _private_result_channel() -> TextIO:
+    """Take descriptor 1 for the result, and give the agent stderr instead.
+
+    MUST run before any agent code is imported or run. ``os.dup`` returns a
+    non-inheritable descriptor (PEP 446), so a process the agent starts never
+    holds the result pipe; ``dup2(2, 1)`` sends everything written to fd 1 --
+    by Python or by anything below it -- to stderr.
+    """
+    sys.stdout.flush()
+    rfd = os.dup(1)
+    os.dup2(2, 1)
+    sys.stdout = sys.stderr
+    return os.fdopen(rfd, "w", encoding="utf-8")
+
+
+def main(argv: list[str] | None = None, *, result_out: TextIO | None = None) -> int:
+    """Run one rollout and write its wire payload to ``result_out``.
+
+    ``result_out`` is the private channel :func:`_private_result_channel`
+    reserved when this runs as a process; ``sys.stdout`` when called in-process
+    (tests).
+    """
+    out_stream = result_out if result_out is not None else sys.stdout
+
+    def _write_result(wire: dict[str, Any]) -> None:
+        out_stream.write(json.dumps(wire, default=str) + "\n")
+        out_stream.flush()
+
     raw = sys.stdin.read()
     if not raw.strip():
-        print(json.dumps({"final_text": "", "exclusion": {
-            "reason": "flywheel_crash", "detail": "child received no payload"}}))
+        _write_result({"final_text": "", "exclusion": {
+            "reason": "flywheel_crash", "detail": "child received no payload"}})
         return 0
 
     payload: dict[str, Any] = json.loads(raw)
@@ -81,8 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     # ``_wire_payload``, the one place a result the wire cannot carry is made
     # carriable: a bare ``to_wire`` here raised, and the child died holding a
     # result whose only fault was one malformed evidence row.
-    sys.stdout.write(json.dumps(_wire_payload(out), default=str) + "\n")
-    sys.stdout.flush()
+    _write_result(_wire_payload(out))
     return 0
 
 
@@ -91,11 +126,13 @@ def _exit_now(code: int) -> None:
 
     A normal exit waits for every non-daemon thread, and an agent that timed
     out is still running on one (Python cannot stop a thread). The result
-    line -- with the policy calls counted so far -- was already on stdout,
+    line -- with the policy calls counted so far -- was already written,
     but the process stayed alive until the parent killed it at its own
     timeout and discarded the output as a kill (τ³ 4c4ce5f1: the policy's
     own timeouts held out as ``llm_calls_unobserved``). The result is the
-    whole of this process's job, so once it is flushed nothing remains.
+    whole of this process's job, so once it is flushed nothing remains --
+    and the parent, seeing the result channel close, kills this process's
+    GROUP, so nothing the agent started outlives it holding the stderr pipe.
     """
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -106,4 +143,4 @@ def _exit_now(code: int) -> None:
 
 
 if __name__ == "__main__":  # pragma: no cover - process entry point
-    _exit_now(main())
+    _exit_now(main(result_out=_private_result_channel()))
