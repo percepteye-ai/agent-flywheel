@@ -156,14 +156,14 @@ if snap.changed:                  # rebuild ONLY on an actual change
 | `base_url` · `api_key` · `model` | `str` | what to run; empty when nothing is deployed or the control plane has never answered |
 | `changed` | `bool` | `True` on the **one** snapshot that first reports a change; consumed by whoever observes it, so build one client per handle |
 | `stale_for_s` | `float` | `0.0` while refreshes succeed; seconds **past the TTL** while they fail. The number to alert on |
-| `last_refresh_ok` | `bool` | `False` after a failed attempt — the snapshot still stands |
+| `last_refresh_ok` | `bool` | `False` after a failed attempt, including a newly served system prompt that could not be read — the snapshot still stands |
 | `serving_generation` | `str` | moves when *anything* about what to run moves, the prompt included; a fleet cycles a replica when it differs |
 
 `bool(snap)` is truthy only when there is something to act on, and `snap.as_kwargs()` returns the same shape as `apply_current_policy()`. `on_change=` fires on promotion and rollback alike, never on a failed refresh. `PolicySource` is a context manager, and `close()` is idempotent.
 
 | rule | value | why |
 |:--|:--|:--|
-| default TTL | `ttl_s=300.0` | |
+| default TTL | `ttl_s=300.0` | must be a finite number of seconds > 0; anything else raises `ConfigurationError` |
 | server hint | the body's `ttl_s` beats your `ttl_s=` | the control plane knows its own promotion cadence |
 | floor | `MIN_TTL_S = 30.0` s, beats both | a misconfigured `ttl_s=1` across a fleet would flood the control plane |
 | jitter | ±10%, drawn once per handle | replicas that boot together would otherwise refresh in lockstep |

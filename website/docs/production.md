@@ -85,7 +85,7 @@ The one thread this package does start is `attach()`'s turn upload, and it is no
 
 | rule | value | why |
 |:--|:--|:--|
-| default TTL | `ttl_s=300.0` | |
+| default TTL | `ttl_s=300.0` | must be a finite number of seconds > 0; anything else raises `ConfigurationError` |
 | server hint | the body's `ttl_s` beats your `ttl_s=` | the control plane knows its own promotion cadence and you do not |
 | floor | `MIN_TTL_S = 30.0` s, beats both | a misconfigured `ttl_s=1` across a fleet is a denial of service aimed at our own control plane |
 | jitter | ±10%, drawn **once** at construction | a fleet of replicas that boots together shares a TTL and would re-poll in lockstep, delivering a synchronized spike every TTL |
