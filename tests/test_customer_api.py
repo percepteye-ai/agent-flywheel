@@ -321,8 +321,8 @@ def test_refusal_codes_are_the_control_planes():
 
 
 def test_the_declared_contract_is_the_control_planes():
-    """``CUSTOMER_CONTRACT_VERSION`` is the one Mission Control's source
-    declares (``mission_control/api/customer_contract.py``). Read from the
+    """``CUSTOMER_CONTRACT_VERSION`` is the one the control plane's source
+    declares (its package's ``api/customer_contract.py``). Read from the
     source, not ``docs/openapi.json``, which is generated and can lag it.
     When ``PERCEPTEYE_CONTROL_PLANE_CHECKOUT`` names its checkout (a
     release, ``docs/RELEASING.md``) the two must be equal; a variable that is
@@ -337,8 +337,11 @@ def test_the_declared_contract_is_the_control_planes():
     checkout = os.environ.get("PERCEPTEYE_CONTROL_PLANE_CHECKOUT")
     if not checkout:
         return
-    source = (Path(checkout) / "mission_control" / "api"
-              / "customer_contract.py").read_text(encoding="utf-8")
+    # Found by its place under the package, which this public repository
+    # does not name.
+    found = sorted(Path(checkout).glob("*/api/customer_contract.py"))
+    assert len(found) == 1, f"no single customer contract under {checkout}"
+    source = found[0].read_text(encoding="utf-8")
     declared = re.search(
         r'^CUSTOMER_CONTRACT_VERSION(?:: *Final)? *= *"([^"]+)"', source, re.M)
     assert declared is not None, "the control plane declares no version"

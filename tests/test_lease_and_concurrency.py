@@ -367,8 +367,7 @@ def test_a_5xx_is_not_replayed_on_a_non_replayable_route():
 
 def test_a_claim_that_may_have_landed_is_resent_under_its_own_key():
     """The control plane answers a claim resent under the same
-    Idempotency-Key with the batch it already leased (MissionControl
-    ``RolloutRepository.claim``). So a read timeout -- the claim may have
+    Idempotency-Key with the batch it already leased. So a read timeout -- the claim may have
     leased work -- is retried, under the SAME key, and the batch reaches
     this worker instead of sitting unheld until its leases lapse. Guards the
     CALL SITE: the client can retry, and claim must ask it to."""
