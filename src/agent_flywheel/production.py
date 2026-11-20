@@ -1814,6 +1814,14 @@ class Attachment:
             except OSError:
                 return 0.0
 
+        # A TURN STILL RUNNING IS NEVER A CANDIDATE. The automatic prune runs
+        # inside ``turn()``, before the caller's body: with
+        # ``retention_turns=0``, or more turns in flight than it keeps, the
+        # turn about to run was itself the oldest-surviving victim, and its
+        # directory was deleted under the code writing to it.
+        open_turns = self._open_turns()
+        entries = [e for e in entries if e.name not in open_turns]
+
         # Newest first, so "keep_last" is a slice rather than a sort per turn.
         entries.sort(key=mtime, reverse=True)
 
@@ -1856,6 +1864,7 @@ class Attachment:
 
         removed = 0
         unsent = 0
+        gone: set[str] = set()
         pending = self._uploaded_ids() if self.may_upload else None
         for e in dict.fromkeys(doomed):
             # NOT "absent from the index" -- that is half the question. A turn
@@ -1867,41 +1876,41 @@ class Attachment:
             # a tool and passes neither ``input_text`` nor an answer -- both
             # documented optional -- which is a steady drip of a warning whose
             # two remedies are both wrong.
-            if (pending is not None and e.name not in pending
-                    and self._holds_a_record(e)):
-                unsent += 1
+            held = (pending is not None and e.name not in pending
+                    and self._holds_a_record(e))
             # Release any handle we still hold on it first, or on a platform
             # that refuses to unlink an open file this would silently no-op.
             _release(str(e))
             try:
                 shutil.rmtree(e)
-                removed += 1
             except OSError:
+                # Still on disk, so not lost: counted only once it is gone.
                 continue
+            removed += 1
+            gone.add(e.name)
+            if held:
+                unsent += 1
         if unsent:
             # SAID OUT LOUD, once per prune that does it. Retention winning
             # over an unsent turn is a legitimate outcome -- the customer
             # asked for a bounded directory and we are honouring it -- but it
             # is data the control plane will never see, and an operator who
-            # is not told will look for those turns upstream.
-            warnings.warn(
+            # is not told will look for those turns upstream. Through
+            # ``_warn``: under ``-W error`` a warning is a raise, and this runs
+            # inside a customer's ``with px.turn()``.
+            self._warn(
                 f"agent-flywheel: retention deleted {unsent} captured turn(s) "
                 f"that had not been uploaded -- including any still waiting "
                 f"on an answer, which the periodic flush holds back. They are "
                 f"gone. Raise retention_turns, or check why uploads are not "
                 f"succeeding (Attachment.upload_refusal says if consent is "
-                f"the reason).",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-        if removed:
+                f"the reason).")
+        if gone:
             # The upload index describes this tree, so it is bounded by this
             # tree. Left alone it would grow for the life of the process while
             # the directory it describes stays capped -- which is the opposite
             # of what a retention setting is for.
-            self._forget_uploaded({
-                e.name for e in entries if e not in set(doomed)
-            })
+            self._forget_uploaded(gone)
         return removed
 
     #: Where upload state is kept: ONE FILE at the trajectory root, holding the
@@ -1950,20 +1959,43 @@ class Attachment:
             # deduped server-side, so this costs bandwidth, never correctness.
             pass
 
-    def _forget_uploaded(self, keep: set[str]) -> None:
-        """Drop ids whose turn directory no longer exists.
+    def _forget_uploaded(self, gone: set[str]) -> None:
+        """Drop the ids of turn directories ``prune`` just removed.
 
         Called from ``prune``. Without it the index grows for the life of the
         process while the tree it describes stays bounded -- an unbounded file
         is not an acceptable price for retention that exists to bound things.
+
+        UNDER ``_flush_lock``, re-read there, and replaced whole. It used to
+        rewrite the file in place from a snapshot taken without the lock: an
+        id a flush appended meanwhile was erased (that turn was sent again),
+        a turn whose removal failed lost its marker, and a crash mid-write left
+        a truncated index. Only ids whose directory is gone are dropped, and
+        the new index is written to a file of its own and renamed over the old
+        one. NOT WAITED FOR: ``prune`` runs on the request path, and a flush
+        holding the lock may be on the network -- the ids are dropped by the
+        next prune instead.
         """
+        if not gone or not self._flush_lock.acquire(blocking=False):
+            return
         try:
-            path = Path(self.trajectory_root) / self._UPLOADED_INDEX
-            current = self._uploaded_ids() & keep
-            path.write_text("".join(t + "\n" for t in sorted(current)),
-                            encoding="utf-8")
-        except OSError:
-            pass
+            index = Path(self.trajectory_root) / self._UPLOADED_INDEX
+            kept = sorted(self._uploaded_ids() - gone)
+            tmp = index.with_name(
+                f"{index.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+            try:
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    fh.write("".join(t + "\n" for t in kept))
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp, index)
+            except OSError:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+        finally:
+            self._flush_lock.release()
 
     def _holds_a_record(self, d: Path) -> bool:
         """Whether this turn directory holds anything an upload could carry.
