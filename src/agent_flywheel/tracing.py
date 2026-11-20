@@ -99,16 +99,21 @@ def _tracer() -> Any:
     global _TRACER, _RESOLVED
     if _RESOLVED:
         return _TRACER
-    _RESOLVED = True
     try:
         from opentelemetry import trace  # type: ignore
 
         # get_tracer ONLY. No SDK import, no provider construction, no
         # set_tracer_provider -- see the module docstring.
-        _TRACER = trace.get_tracer("agent-flywheel")
+        tracer = trace.get_tracer("agent-flywheel")
     except Exception:
-        _TRACER = None
-    return _TRACER
+        tracer = None
+    # PUBLISHED IN THIS ORDER: the tracer, THEN the flag. The flag used to be
+    # set first, so a second thread asking while the first was still
+    # resolving read "resolved" and the None beside it, and dropped its span.
+    # Two threads that both resolve get the same answer; that costs nothing.
+    _TRACER = tracer
+    _RESOLVED = True
+    return tracer
 
 
 def tracing_available() -> bool:
@@ -294,12 +299,33 @@ def record_turn_span(
             # rather than events because the ingest side normalises attributes
             # into `raw_attributes` verbatim, and an event body does not
             # survive that path.
+            #
+            # PLAIN TEXT, NOT THE CONVENTION'S MESSAGE ARRAYS, deliberately.
+            # Each turn is two HALF-spans -- the question when the turn opens,
+            # the answer whenever ``record_answer`` arrives -- and Mission
+            # Control's reader (``agent_protocol.genai_traces``) reads this
+            # SDK's plain text as exactly that: the answer's prompt is the
+            # transcript before it, so a conversation is rebuilt across its
+            # turns. The same half-spans as spec arrays are read as ordinary
+            # model calls instead: the answer half is refused for recording no
+            # prompt (``content_capture_off``), and each turn becomes its own
+            # conversation segment. Verified against that reader; the arrays
+            # wait for a reader that knows they are half-spans.
+            #
+            # Every Flywheel key in the text is redacted first
+            # (``_http.redact_keys``, the rule every body this SDK sends
+            # keeps): a user who pasted one, or an answer that echoed one,
+            # must not carry it into the customer's telemetry.
+            from ._http import redact_keys
+
             if input_text:
                 span.set_attribute(
-                    "gen_ai.input.messages", str(input_text)[:_MAX_TURN_CHARS])
+                    "gen_ai.input.messages",
+                    redact_keys(str(input_text))[:_MAX_TURN_CHARS])
             if output_text:
                 span.set_attribute(
-                    "gen_ai.output.messages", str(output_text)[:_MAX_TURN_CHARS])
+                    "gen_ai.output.messages",
+                    redact_keys(str(output_text))[:_MAX_TURN_CHARS])
             if rollout_id:
                 span.set_attribute("percepteye.rollout.id", str(rollout_id))
             if turn_id:

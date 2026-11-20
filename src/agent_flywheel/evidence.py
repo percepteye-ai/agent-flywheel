@@ -1,4 +1,4 @@
-"""Identity evidence: what a write produced, extracted and the body discarded.
+"""Identity evidence: which entity a write produced, extracted from its body.
 
 A tool outcome says whether a call worked. It cannot say whether the change
 SURVIVED -- a create that returns 201 and then silently fails to persist looks
@@ -14,8 +14,12 @@ it. The distinction is the entire point:
 * The identity is a handful of opaque strings. It is what a read-back needs and
   it is nearly all of what it needs.
 
-So identity is resolved HERE, at the moment of capture, and the body is free to
-be dropped. Extract, then discard.
+So identity is resolved HERE, at the moment of capture, so that nothing
+downstream has to read the body to find it. This module does NOT discard the
+body, and nothing else does either: ``record_tool_call`` keeps it verbatim as
+the call's ``output`` beside the extracted ``entity_ids``, and it travels with
+the turn. Extracting the identity makes a read-back independent of the body;
+it does not make the trajectory body-free.
 
 WHY THIS DOES NOT GUESS. The fields are high-entropy identifiers only. A
 created resource routinely echoes a human ``name`` ("Story 1") or a small
