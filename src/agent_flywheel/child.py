@@ -16,6 +16,7 @@ writes is a file, which the parent merges.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from typing import Any
 
@@ -81,5 +82,24 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _exit_now(code: int) -> None:
+    """Leave the moment the result is written, whatever the agent left running.
+
+    A normal exit waits for every non-daemon thread, and an agent that timed
+    out is still running on one (Python cannot stop a thread). The result
+    line -- with the policy calls counted so far -- was already on stdout,
+    but the process stayed alive until the parent killed it at its own
+    timeout and discarded the output as a kill (τ³ 4c4ce5f1: the policy's
+    own timeouts held out as ``llm_calls_unobserved``). The result is the
+    whole of this process's job, so once it is flushed nothing remains.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    os._exit(code)
+
+
 if __name__ == "__main__":  # pragma: no cover - process entry point
-    raise SystemExit(main())
+    _exit_now(main())
