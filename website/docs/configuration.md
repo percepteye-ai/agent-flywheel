@@ -228,9 +228,9 @@ A rule is one prose sentence about how your agent should work — the conditiona
 **Your agent must sample through an OpenAI-compatible client**, because the per-rollout gateway speaks that API. Routing only wins over the *environment*: a client constructed with an explicit `base_url` in your own code beats all of it, silently, and lands at a live third party.
 
 ??? note "The provider variables removed from every child"
-    Setting `OPENAI_BASE_URL` does nothing for an agent built on Gemini, Azure OpenAI or Bedrock — those clients read their own names, sail past the gateway, and produce a trajectory that cannot back an on-policy objective while looking exactly like one that can. `serve()` warns at startup when it finds any of these set; an agent that finds no provider configured raises at construction, in front of the person who configured it, which is the outcome we want.
+    Setting `OPENAI_BASE_URL` does nothing for an agent built on Gemini, Azure OpenAI or Bedrock — those clients read their own names, sail past the gateway, and produce a trajectory that cannot back an on-policy objective while looking exactly like one that can. `serve()` warns at startup when it finds any of these set; an agent that finds no provider configured raises at construction, in front of the person who configured it, which is the outcome we want. An adapter's own environment overlay cannot put any of them back.
 
-    `AZURE_OPENAI_ENDPOINT` · `AZURE_OPENAI_API_KEY` · `AZURE_OPENAI_AD_TOKEN` · `OPENAI_API_TYPE` · `OPENAI_API_VERSION` · `GOOGLE_API_KEY` · `GEMINI_API_KEY` · `GOOGLE_GENAI_USE_VERTEXAI` · `NVIDIA_API_KEY` · `NVIDIA_NIM_API_KEY` · `AWS_BEARER_TOKEN_BEDROCK` · `GROQ_API_KEY` · `MISTRAL_API_KEY` · `TOGETHER_API_KEY` · `OPENROUTER_API_KEY` · `FIREWORKS_API_KEY` · `DEEPSEEK_API_KEY` · `PERPLEXITY_API_KEY` · `COHERE_API_KEY` · `XAI_API_KEY`
+    `AZURE_OPENAI_ENDPOINT` · `AZURE_OPENAI_API_KEY` · `AZURE_OPENAI_AD_TOKEN` · `OPENAI_API_TYPE` · `OPENAI_API_VERSION` · `GOOGLE_API_KEY` · `GEMINI_API_KEY` · `GOOGLE_GENAI_USE_VERTEXAI` · `NVIDIA_API_KEY` · `NVIDIA_NIM_API_KEY` · `AWS_BEARER_TOKEN_BEDROCK` · `CLAUDE_CODE_USE_BEDROCK` · `CLAUDE_CODE_USE_VERTEX` · `ANTHROPIC_AUTH_TOKEN` · `GROQ_API_KEY` · `MISTRAL_API_KEY` · `TOGETHER_API_KEY` · `OPENROUTER_API_KEY` · `FIREWORKS_API_KEY` · `DEEPSEEK_API_KEY` · `PERPLEXITY_API_KEY` · `COHERE_API_KEY` · `XAI_API_KEY`
 
     Deliberately **not** `AWS_ACCESS_KEY_ID` — that is the same credential a customer's agent uses for S3, and taking it would break agents that never touch a model through it. The list names what we know; it is not a proof of completeness. The control plane's reported-vs-served call count is the check that actually decides.
 
@@ -241,7 +241,7 @@ fw.serve(["dsh", "--profile", "headless", fw.TASK], agent_id="dsh-agent",
          input_shape="text", endpoint_env=("DEEPSEEK_BASE_URL", "DEEPSEEK_API_KEY"))
 ```
 
-This is additive — the defaults stay set, because an agent may read a mixture.
+This is additive — the defaults stay set, because an agent may read a mixture. A name in the `PERCEPTEYE_*` namespace is refused at startup: those are the rollout's own variables and the endpoint pair would overwrite them.
 
 ### Timeouts
 

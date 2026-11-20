@@ -63,7 +63,7 @@ from .execution_identity import (
     normalize_volatile_command_values,
 )
 from .introspection import _MAX_PROMPT_CHARS, DiscoveredAgent
-from .isolation import build_child_env, is_environment_overlay
+from .isolation import build_child_env, check_endpoint_env, is_environment_overlay
 from .outcomes import TOOL_CALLS_FILENAME, Trajectory, _RolloutScope, hosted_base_for
 from .transport import AttachTransport, sleep_ms
 
@@ -973,6 +973,7 @@ class RolloutRunner:
         #: name. Declared, never detected — see execution_identity.
         volatile_command_values: Sequence[str] | None = None,
     ) -> None:
+        check_endpoint_env(endpoint_env)
         if isolation not in ("subprocess", "inprocess"):
             raise ConfigurationError(
                 f"isolation must be 'subprocess' or 'inprocess', got {isolation!r}"
