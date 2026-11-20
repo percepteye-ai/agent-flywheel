@@ -1699,11 +1699,16 @@ class Attachment:
                 "refusal of the record cannot be told from one of the batch, "
                 "so it stays on disk and is sent again with the next.")
             return
+        # Turns are the customer's copy and never expire; the queued
+        # reports do, after a week.
+        kept = ("they stay on disk and are sent again on a later flush"
+                if kind is _TURNS else
+                "they stay on disk, are sent again on a later flush, and are "
+                "dropped only after a week undelivered")
         self._warn(
             "agent-flywheel: the control plane refused whole batches of "
             f"{kind.many} ({cause}), which is about the batch, not a "
-            "record in it; they stay on disk, are sent again on a later "
-            "flush, and are dropped only after a week undelivered.")
+            f"record in it; {kept}.")
 
     @staticmethod
     def _warn(message: str) -> None:

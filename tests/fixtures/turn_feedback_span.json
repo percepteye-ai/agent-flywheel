@@ -65,6 +65,12 @@
                   }
                 },
                 {
+                  "key": "percepteye.conversation.id",
+                  "value": {
+                    "stringValue": "c1"
+                  }
+                },
+                {
                   "key": "percepteye.turn.id",
                   "value": {
                     "stringValue": "turn-7"

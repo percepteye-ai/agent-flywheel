@@ -150,3 +150,21 @@ def test_the_answer_span_names_its_conversation(monkeypatch, tmp_path):
     chats = [s for s in exporter.get_finished_spans() if s.name == "chat"]
     assert [s.attributes.get("percepteye.conversation.id")
             for s in chats] == ["c-9", "c-9"]
+
+
+def test_a_whole_batch_refusal_of_turns_keeps_them_and_says_so_truly(
+        monkeypatch, tmp_path):
+    """Both halves refused alike: the batch, not a record. Kept, and said
+    without the outcomes' week -- turns never expire."""
+    tr = _Intake(lambda ids: TransportError(
+        "POST /turns -> HTTP 422: unknown field", status_code=422))
+    with _with_turns(monkeypatch, tmp_path, tr, 6) as px:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            counts = px.flush()
+        assert (counts["sent"], counts["failed"]) == (0, 6)
+        assert "dropped" not in counts
+        said = [str(w.message) for w in caught if "whole batches" in str(w.message)]
+        assert said and "week" not in said[0]
+        monkeypatch.setattr(tr, "refuse", lambda ids: None)
+        assert px.flush()["sent"] == 6

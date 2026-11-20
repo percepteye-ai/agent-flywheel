@@ -302,9 +302,9 @@ def record_turn_span(
             #
             # PLAIN TEXT, NOT THE CONVENTION'S MESSAGE ARRAYS, deliberately.
             # Each turn is two HALF-spans -- the question when the turn opens,
-            # the answer whenever ``record_answer`` arrives -- and Mission
-            # Control's reader (``agent_protocol.genai_traces``) reads this
-            # SDK's plain text as exactly that: the answer's prompt is the
+            # the answer whenever ``record_answer`` arrives -- and the control
+            # plane's trace reader reads this SDK's plain text as exactly
+            # that: the answer's prompt is the
             # transcript before it, so a conversation is rebuilt across its
             # turns. The same half-spans as spec arrays are read as ordinary
             # model calls instead: the answer half is refused for recording no

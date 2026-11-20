@@ -151,11 +151,15 @@ def test_a_blip_does_not_overwrite_a_specific_refusal(monkeypatch, tmp_path):
 
 
 def test_late_consent_asks_the_same_predicate(monkeypatch, tmp_path):
-    """``_recheck_capture`` is the second consumer of the same question.
+    """``_recheck_capture`` is the second consumer of the same question: a
+    truthy-but-not-true answer does not turn capture on, and a real yes does.
 
-    It only ever turns capture ON, so the assertion is that a truthy-but-not-
-    true answer does not turn it on -- and that a real yes does.
+    Built directly, with a control plane to ask: ``attach(register=False)``
+    -- which this used -- now makes no outbound connection at all, so it has
+    nothing to re-read.
     """
+    from agent_flywheel.production import Attachment
+
     monkeypatch.setattr(
         "agent_flywheel._http.ControlPlaneClient.close",
         lambda self: None)
@@ -170,11 +174,13 @@ def test_late_consent_asks_the_same_predicate(monkeypatch, tmp_path):
         monkeypatch.setattr(
             "agent_flywheel.transport.AttachTransport",
             lambda client, agent_id, _p=payload: _Cap(_p))
-        px = fw.attach(agent_id="support", trajectory_root=str(tmp_path),
-                       register=False, control_plane_url="https://cp.invalid",
-                       api_key="pefw_x")
+        px = Attachment("support", trajectory_root=str(tmp_path), policy={},
+                        unbinds=[], adapters_bound=(),
+                        control_plane_url="https://cp.invalid",
+                        api_key="pefw_x")
         try:
             px._recheck_capture()
             assert px.may_upload is expected, payload
         finally:
+            monkeypatch.setattr(px, "_flush_locked", lambda **kw: {})
             px.close()
