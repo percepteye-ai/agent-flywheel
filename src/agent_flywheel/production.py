@@ -2562,8 +2562,11 @@ def attach(
     your data in a directory you named, and a library that silently deleted it
     would be worse than one that grows -- but it is a decision, so make it.
 
-    ``register=False`` skips the control-plane call entirely, for a process
-    that should make no outbound connection at all.
+    ``register=False`` is for a process that should make no outbound
+    connection at all, ever: no registration, and no later consent read,
+    upload, outcome or feedback either. Turns are captured locally, and
+    :meth:`Attachment.report_outcome` and
+    :meth:`Attachment.report_turn_feedback` queue nothing.
 
     ``execution_entrypoint`` optionally names the exact Python agent this
     attachment observes. Together with ``attested_execution_components`` it
@@ -2934,8 +2937,13 @@ def attach(
         unbinds=unbinds,
         adapters_bound=bound,
         retention_turns=retention_turns,
-        control_plane_url=url,
-        api_key=key,
+        # register=False is "no outbound connection at all", for the life of
+        # the attachment and not only at startup: every network path returns
+        # early on a missing URL or key, so withholding them here is what
+        # keeps a later flush, the consent re-read, an outcome or feedback
+        # from contacting the control plane this caller opted out of.
+        control_plane_url=url if register else None,
+        api_key=key if register else None,
         may_upload=may_upload,
         upload_refusal=upload_refusal,
         consent_refused=consent_refused,
