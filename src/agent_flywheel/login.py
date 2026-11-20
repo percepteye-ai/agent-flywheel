@@ -19,7 +19,9 @@ missing-key message it always has.
 """
 from __future__ import annotations
 
+import ipaddress
 import os
+import re
 import sys
 import time
 import webbrowser
@@ -61,6 +63,22 @@ _SLOW_DOWN_STEP_S = 5
 #: A poll that cannot reach the control plane is retried until the code
 #: expires; this caps the wait between those retries.
 _MAX_RETRY_WAIT_S = 30
+
+#: ANSI escape sequences (CSI, OSC, and two-character ESC forms) and every
+#: other C0/C1 control character. A string the control plane sends is printed
+#: to the person's terminal; a server (or anything between) must not be able
+#: to move the cursor, rewrite the code shown, set the window title, or plant
+#: a hyperlink there.
+_TERMINAL_CONTROL = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]"          # CSI ... final byte
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?"  # OSC ... BEL or ST
+    r"|\x1b[@-_]"                       # other two-character escapes
+    r"|[\x00-\x1f\x7f-\x9f]"            # any control character left
+)
+
+#: The hosts an ``http`` login link may point at whatever the control plane's
+#: own scheme: the person's own machine.
+_LOOPBACK_NAMES = ("localhost",)
 
 #: Set to any of these and a process is a CI job, so nobody is there to answer.
 _CI_VARS = (
@@ -107,12 +125,67 @@ def _can_open_browser(environ: Mapping[str, str]) -> bool:
     return True
 
 
+def _set(value: str | None) -> bool:
+    """A boolean environment variable, by the rule every one here follows:
+    unset or empty is off, ``0``/``false``/``no``/``off`` (any case) is off,
+    anything else is on."""
+    value = (value or "").strip().lower()
+    return bool(value) and value not in ("0", "false", "no", "off")
+
+
 def _ci(environ: Mapping[str, str]) -> bool:
-    for name in _CI_VARS:
-        value = (environ.get(name) or "").strip().lower()
-        if value and value not in ("0", "false", "no", "off"):
-            return True
-    return False
+    return any(_set(environ.get(name)) for name in _CI_VARS)
+
+
+def printable(text: object) -> str:
+    """``text`` with every terminal control sequence and control character
+    removed: what is safe to print of a string the control plane sent."""
+    return _TERMINAL_CONTROL.sub("", str(text))
+
+
+def _loopback(host: str) -> bool:
+    if host.lower() in _LOOPBACK_NAMES:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def link_refusal(link: str, control_plane_url: str) -> str | None:
+    """Why the login link the control plane sent must not be opened, or
+    ``None`` when it may.
+
+    The SCHEME is checked, not the origin: the control plane builds the link
+    from its public dashboard address, which need not be the API's host, so
+    an origin match would refuse real logins. What a browser hand-off must
+    never get is a scheme that opens something other than a web page
+    (``file:``, ``smb:``, an app's own handler): ``https`` always; ``http``
+    only when the control plane is itself spoken to over ``http`` or the link
+    is to this machine. Any whitespace or control character is refused
+    outright -- no real link carries one, and a handler may split on it.
+    """
+    if any(ch.isspace() or not ch.isprintable() for ch in link):
+        return "it contains whitespace or a control character"
+    try:
+        parts = urlsplit(link)
+        host = parts.hostname or ""
+    except ValueError:
+        return "it is not a URL"
+    scheme = parts.scheme.lower()
+    if scheme not in ("https", "http"):
+        return f"its scheme {scheme or '(none)'!r} is not a web page (https)"
+    if not host:
+        return "it names no host"
+    if scheme == "http" and not (
+        urlsplit(control_plane_url.strip()).scheme.lower() == "http"
+        or _loopback(host)
+    ):
+        return (
+            "it is plain http to another machine while the control plane is "
+            "spoken to over https"
+        )
+    return None
 
 
 def interactive_terminal(
@@ -126,10 +199,11 @@ def interactive_terminal(
     Both ends must be a terminal: the question is written to stderr and the
     answer read from stdin, so a pipe on either means nobody sees or answers
     it. And never in CI, which often allocates a TTY, nor when
-    ``PERCEPTEYE_NO_PROMPT`` is set.
+    ``PERCEPTEYE_NO_PROMPT`` is on (any value but empty, ``0``, ``false``,
+    ``no`` or ``off``).
     """
     env = os.environ if environ is None else environ
-    if (env.get(ENV_NO_PROMPT) or "").strip() or _ci(env):
+    if _set(env.get(ENV_NO_PROMPT)) or _ci(env):
         return False
     stdin = sys.stdin if stdin is None else stdin
     stderr = sys.stderr if stderr is None else stderr
@@ -140,6 +214,8 @@ def interactive_terminal(
 
 
 def _oauth_error(resp: Any) -> tuple[str, str]:
+    """The response's OAuth ``error`` and its description, both made safe to
+    print: every message built from them reaches the person's terminal."""
     try:
         body = resp.json()
     except ValueError:
@@ -147,9 +223,51 @@ def _oauth_error(resp: Any) -> tuple[str, str]:
     if not isinstance(body, dict):
         body = {}
     return (
-        str(body.get("error") or f"http_{resp.status_code}"),
-        str(body.get("error_description") or resp.text[:200] or ""),
+        printable(body.get("error") or f"http_{resp.status_code}"),
+        printable(body.get("error_description") or resp.text[:200] or ""),
     )
+
+
+def _json_object(resp: Any, what: str) -> dict[str, Any]:
+    try:
+        body = resp.json()
+    except ValueError as exc:
+        raise LoginError(f"the control plane's {what} was not JSON") from exc
+    if not isinstance(body, dict):
+        raise LoginError(f"the control plane's {what} was not a JSON object")
+    return body
+
+
+def _text(body: Mapping[str, Any], name: str, what: str, *, required: bool) -> str | None:
+    """A string field of a response, or :class:`LoginError` naming it."""
+    value = body.get(name)
+    if value is None and not required:
+        return None
+    if not isinstance(value, str) or not value:
+        raise LoginError(
+            f"the control plane's {what} has no usable {name!r} "
+            f"(got {printable(repr(value))[:80]})"
+        )
+    return value
+
+
+def _seconds(body: Mapping[str, Any], name: str, what: str) -> int | None:
+    """A whole number of seconds from a response, ``None`` when absent, or
+    :class:`LoginError` for anything that is not a positive number."""
+    value = body.get(name)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
+        raise LoginError(
+            f"the control plane's {what} has an unusable {name!r} "
+            f"(got {printable(repr(value))[:80]})"
+        )
+    try:
+        return int(value)
+    except (OverflowError, ValueError) as exc:  # inf, nan
+        raise LoginError(
+            f"the control plane's {what} has an unusable {name!r} ({value!r})"
+        ) from exc
 
 
 def _unsupported(control_plane_url: str, detail: str) -> LoginError:
@@ -158,8 +276,8 @@ def _unsupported(control_plane_url: str, detail: str) -> LoginError:
     signup = getattr(_cp, "SIGN_UP_URL", "https://launch.percepteye.ai/signup")
     return LoginError(
         f"the control plane at {control_plane_url} does not offer device "
-        f"login for this SDK ({detail}). Create a key in the dashboard "
-        f"instead ({signup}) and set PERCEPTEYE_API_KEY."
+        f"login for this SDK ({printable(detail)}). Create a key in the "
+        f"dashboard instead ({signup}) and set PERCEPTEYE_API_KEY."
     )
 
 
@@ -179,8 +297,13 @@ def device_login(
 
     Writes what the person needs to do to ``out`` (stderr by default) and
     returns the stored credential. Raises :class:`LoginError` naming why when
-    no key came back (denied, expired, the control plane refused), and lets
-    ``KeyboardInterrupt`` through so Ctrl-C cancels.
+    no key came back (denied, expired, the control plane refused or answered
+    something malformed, a key for a different agent, the file could not be
+    written), and lets ``KeyboardInterrupt`` through so Ctrl-C cancels.
+
+    Every string the control plane sent is printed with its terminal control
+    characters removed, and the link is opened only if :func:`link_refusal`
+    allows it; a refused link is printed with the reason and not opened.
     """
     import httpx
 
@@ -218,20 +341,27 @@ def device_login(
             if error in ("invalid_client", "invalid_scope") or resp.status_code == 404:
                 raise _unsupported(url, description or error)
             raise LoginError(f"the control plane refused the login: {description or error}")
-        started = resp.json()
-        device_code = str(started["device_code"])
-        user_code = str(started["user_code"])
-        link = str(started.get("verification_uri_complete") or started["verification_uri"])
-        interval = max(1, int(started.get("interval") or 5))
-        expires_in = max(1, int(started.get("expires_in") or 600))
+        started = _json_object(resp, "device code answer")
+        device_code = str(_text(started, "device_code", "device code answer", required=True))
+        user_code = printable(
+            _text(started, "user_code", "device code answer", required=True),
+        )
+        link = str(
+            _text(started, "verification_uri_complete", "device code answer", required=False)
+            or _text(started, "verification_uri", "device code answer", required=True)
+        )
+        interval = max(1, _seconds(started, "interval", "device code answer") or 5)
+        expires_in = _seconds(started, "expires_in", "device code answer") or 600
         deadline = clock() + expires_in
 
         say(f"To connect {agent_id} to PerceptEye, approve this code in your browser:")
         say()
         say(f"    {user_code}")
         say()
+        refused = link_refusal(link, url)
+        shown = printable(link)
         opened = False
-        if open_browser and (
+        if refused is None and open_browser and (
             browser is not None
             or _can_open_browser(os.environ if environ is None else environ)
         ):
@@ -239,19 +369,30 @@ def device_login(
                 opened = bool((browser or webbrowser.open)(link))
             except Exception:
                 opened = False
-        if opened:
-            say(f"Opened {link}")
+        if refused is not None:
+            say(f"The control plane sent a login link this SDK will not open "
+                f"({refused}): {shown}")
+        elif opened:
+            say(f"Opened {shown}")
         else:
-            say(f"Open {link}")
+            say(f"Open {shown}")
         say("Sign up or sign in there, check the code matches, and click Approve.")
         say(f"Waiting for approval (the code expires in {expires_in // 60} min; "
             "Ctrl-C to cancel)...")
 
+        def expired() -> LoginError:
+            return LoginError("the code expired before it was approved; run login again")
+
         wait = interval
         while True:
-            sleep(wait)
+            # Never sleep past the code's life: a long ``slow_down`` or retry
+            # wait would otherwise hold the person past an expiry already due.
+            remaining = deadline - clock()
+            if remaining <= 0:
+                raise expired()
+            sleep(min(wait, remaining))
             if clock() >= deadline:
-                raise LoginError("the code expired before it was approved; run login again")
+                raise expired()
             try:
                 polled = http.post(f"{base}/token", headers=headers, data={
                     "grant_type": GRANT_TYPE, "device_code": device_code,
@@ -263,7 +404,7 @@ def device_login(
                 wait = min(_MAX_RETRY_WAIT_S, wait * 2)
                 continue
             if polled.status_code == 200:
-                token = polled.json()
+                token = _json_object(polled, "token answer")
                 break
             error, description = _oauth_error(polled)
             if error == "authorization_pending":
@@ -274,13 +415,19 @@ def device_login(
                     body = polled.json()
                 except ValueError:
                     body = {}
-                interval = int((body or {}).get("interval") or interval + _SLOW_DOWN_STEP_S)
+                given = body.get("interval") if isinstance(body, dict) else None
+                if isinstance(given, bool) or not isinstance(given, (int, float)):
+                    given = None
+                try:
+                    interval = max(1, int(given or interval + _SLOW_DOWN_STEP_S))
+                except (OverflowError, ValueError):
+                    interval += _SLOW_DOWN_STEP_S
                 wait = interval
                 continue
             if error == "access_denied":
                 raise LoginError("the login was denied in the browser; no key was issued")
             if error == "expired_token":
-                raise LoginError("the code expired before it was approved; run login again")
+                raise expired()
             if polled.status_code >= 500 or polled.status_code == 429:
                 wait = min(_MAX_RETRY_WAIT_S, max(interval, wait * 2))
                 continue
@@ -289,27 +436,48 @@ def device_login(
         if owns_client:
             http.close()
 
-    key = str(token.get("access_token") or "")
-    if not key:
+    what = "token answer"
+    key = token.get("access_token")
+    if not isinstance(key, str) or not key.strip():
         raise LoginError("the control plane approved the login but sent no key")
+    granted_to = _text(token, "agent_id", what, required=False)
+    if granted_to is not None and granted_to != agent_id:
+        # Stored under the agent the server NAMED, it would silently replace
+        # another agent's key; under the one asked for, it would be a key that
+        # opens a different agent. Neither: refuse it.
+        raise LoginError(
+            f"the control plane issued a key for agent {printable(granted_to)!r}, "
+            f"not the {agent_id!r} this login asked for; nothing was stored"
+        )
+    expires = _seconds(token, "expires_in", what)
     now = datetime.now(timezone.utc).replace(microsecond=0)
-    expires = token.get("expires_in")
+    try:
+        expires_at = (
+            (now + timedelta(seconds=expires)).isoformat().replace("+00:00", "Z")
+            if expires is not None else None
+        )
+    except OverflowError as exc:
+        raise LoginError(
+            f"the control plane's {what} has an unusable 'expires_in' ({expires})"
+        ) from exc
     cred = StoredCredential(
         control_plane_url=url,
-        agent_id=str(token.get("agent_id") or agent_id),
+        agent_id=agent_id,
         api_key=key,
-        org_id=token.get("org_id"),
-        org_name=token.get("org_name"),
-        key_id=token.get("flywheel_key_id"),
+        org_id=_text(token, "org_id", what, required=False),
+        org_name=_text(token, "org_name", what, required=False),
+        key_id=_text(token, "flywheel_key_id", what, required=False),
         created_at=now.isoformat().replace("+00:00", "Z"),
-        expires_at=(
-            (now + timedelta(seconds=int(expires))).isoformat().replace("+00:00", "Z")
-            if isinstance(expires, (int, float)) else None
-        ),
+        expires_at=expires_at,
         client=USER_AGENT,
     )
-    path = save_stored(cred, environ)
-    where = f" in {cred.org_name}" if cred.org_name else ""
+    try:
+        path = save_stored(cred, environ)
+    except LoginError:
+        raise
+    except (ConfigurationError, OSError) as exc:
+        raise LoginError(f"the key was issued but could not be stored: {exc}") from exc
+    where = f" in {printable(cred.org_name)}" if cred.org_name else ""
     say(f"Approved: a key for {cred.agent_id}{where}, saved to {path}.")
     return cred
 
