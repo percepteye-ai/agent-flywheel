@@ -2188,7 +2188,7 @@ class Attachment:
 
         THE ONE PLACE ``may_upload`` turns False after startup, for every
         way the no arrives: the intake's 403 on turns or outcomes, and an
-        ANSWERED refusal on the capture read (:meth:`_recheck_capture`). The
+        ANSWERED refusal on a capture read (:meth:`_take_capture_verdict`). The
         read used to record the refusal and leave ``may_upload`` True, so the
         turn upload that follows it in the same flush sent end users' text
         to a control plane that had just said not to.
@@ -2232,19 +2232,16 @@ class Attachment:
         introspection as ``disabled`` -- so polling for permission would have
         repeatedly disabled the agent's own description.
 
-        AN ANSWER TURNS CAPTURE EITHER WAY; A BLIP NEVER REVOKES. A yes goes
-        through :meth:`_grant_upload`. An ANSWERED no goes through
+        AN ANSWER TURNS CAPTURE EITHER WAY; A BLIP NEVER REVOKES. The answer
+        lands at :meth:`_take_capture_verdict`, the seam the startup
+        registration's answer lands at too: a yes goes through
+        :meth:`_grant_upload`; an ANSWERED no goes through
         :meth:`_refuse_upload`, the seam the intake's 403 goes through, so
         ``may_upload`` and the model-content tier are False before this flush
-        sends anything. A control plane that cannot answer returns ``{}``
-        (``answered`` False), and reading that as a revocation would stop a
-        consenting customer's uploads on a network blip, so it changes
-        nothing.
-
-        THE NO THAT ENDS THE WAITING. Outcomes reported while the answer was
-        unknown were kept for this answer; an answered no means nothing will
-        ever send them, so they are deleted (:meth:`_purge_unanswered_outcomes`),
-        exactly as :meth:`report_outcome` keeps none after a no.
+        sends anything, and the outcomes that waited on the answer are
+        deleted, exactly as :meth:`report_outcome` keeps none after a no. A
+        control plane that cannot answer returns ``{}`` (``answered`` False),
+        which changes nothing.
         """
         if not self._cp_url or not self._api_key or self._past_deadline():
             return
@@ -2253,29 +2250,8 @@ class Attachment:
             from .transport import AttachTransport
 
             client = self._control_plane()
-            verdict = capture_verdict(
-                AttachTransport(client, self.agent_id).capture_current(self.agent_id))
-            if verdict.may_upload:
-                self._grant_upload()
-                # The second tier is read off the same answer, both ways: a
-                # grant turns model-content recording on from the next turn and
-                # a refusal keeps it off with the server's current sentence.
-                self.may_capture_model_content = verdict.may_capture_model_content
-                self.model_content_refusal = (
-                    None if self.may_capture_model_content
-                    else verdict.model_content_reason)
-            elif verdict.answered:
-                # Keep the reason current even while the answer stays no: an
-                # operator who fixes consent but not the key's scope should see
-                # the second sentence, not the first one from startup.
-                #
-                # ONLY WHEN IT ANSWERED. A poll that came back with no capture
-                # block is a blip, and overwriting a specific refusal with the
-                # generic one would lose the sentence the operator needs.
-                was_unknown = not self.may_upload and not self._consent_refused
-                self._refuse_upload(verdict.reason or "")
-                if was_unknown:
-                    self._purge_unanswered_outcomes()
+            self._take_capture_verdict(capture_verdict(
+                AttachTransport(client, self.agent_id).capture_current(self.agent_id)))
         except Exception:
             # A capture bug costs the observation, never the turn.
             pass
@@ -2285,6 +2261,44 @@ class Attachment:
                     client.close()
                 except Exception:
                     pass
+
+    def _take_capture_verdict(self, verdict: CaptureVerdict) -> None:
+        """THE ONE SEAM a capture verdict lands at, whichever read delivered
+        it: the registration :func:`attach` makes at startup, or the re-read
+        in :meth:`_recheck_capture`.
+
+        A yes goes through :meth:`_grant_upload`. An ANSWERED no goes through
+        :meth:`_refuse_upload` and, when the answer had been unknown until
+        now, deletes the outcomes that waited on it
+        (:meth:`_purge_unanswered_outcomes`). That second step used to run on
+        the re-read alone, so a process that learned its no AT STARTUP never
+        purged what an earlier process had queued while the control plane was
+        unreachable -- and those outcomes uploaded if consent was granted
+        later. Outcomes kept after THIS process's intake 403 are not unknown
+        ones (``_consent_refused`` is already True) and stay.
+
+        An unanswered verdict changes nothing: reading a blip as a revocation
+        would stop a consenting customer's uploads, and overwriting a specific
+        refusal with the generic sentence would lose the one the operator
+        needs.
+        """
+        if verdict.may_upload:
+            self._grant_upload()
+            # The second tier is read off the same answer, both ways: a grant
+            # turns model-content recording on from the next turn and a
+            # refusal keeps it off with the server's current sentence.
+            self.may_capture_model_content = verdict.may_capture_model_content
+            self.model_content_refusal = (
+                None if self.may_capture_model_content
+                else verdict.model_content_reason)
+        elif verdict.answered:
+            # Keep the reason current even while the answer stays no: an
+            # operator who fixes consent but not the key's scope should see
+            # the second sentence, not the first one from startup.
+            was_unknown = not self.may_upload and not self._consent_refused
+            self._refuse_upload(verdict.reason or "")
+            if was_unknown:
+                self._purge_unanswered_outcomes()
 
     def _purge_unanswered_outcomes(self) -> None:
         """Delete the outcomes that waited on the consent answer, now that it
@@ -2924,10 +2938,9 @@ def attach(
         api_key, agent_id=agent_id, control_plane_url=url,
     )
     key = _resolved_key.value if _resolved_key else None
-    may_upload = False
-    #: Only an ANSWERED no (see ``Attachment._consent_refused``).
-    consent_refused = False
-    may_capture_model_content = False
+    #: What the registration said, landed on the Attachment through
+    #: ``Attachment._take_capture_verdict`` -- the seam the re-read uses.
+    startup_verdict: CaptureVerdict | None = None
     model_content_refusal: str | None = None
     # NAMED, not None. `upload_refusal` is documented as "the sentence
     # explaining a False", and the ways to get here without ever asking the
@@ -3036,12 +3049,9 @@ def attach(
                 # `bool(cap.get("turns"))` while the late-consent path three
                 # hundred lines up asked `is True`, so the same registration
                 # payload could grant consent here and refuse it there.
-                verdict = capture_verdict(reg)
-                may_upload = verdict.may_upload
-                upload_refusal = verdict.reason
-                consent_refused = verdict.answered and not verdict.may_upload
-                may_capture_model_content = verdict.may_capture_model_content
-                model_content_refusal = verdict.model_content_reason
+                startup_verdict = capture_verdict(reg)
+                upload_refusal = startup_verdict.reason
+                model_content_refusal = startup_verdict.model_content_reason
             except Exception as exc:
                 # A REFUSED registration must not cost the last mile.
                 #
@@ -3113,18 +3123,17 @@ def attach(
         # from contacting the control plane this caller opted out of.
         control_plane_url=url if register else None,
         api_key=key if register else None,
-        may_upload=may_upload,
         upload_refusal=upload_refusal,
-        consent_refused=consent_refused,
         agent_fingerprint=agent_fingerprint,
-        may_capture_model_content=may_capture_model_content,
         model_content_refusal=model_content_refusal,
         rulebook_refusal=rulebook_refusal,
     )
-    if may_upload:
-        # Through the same seam late consent goes through, so the hook is
-        # registered by exactly one rule: "may_upload just became True".
-        px._grant_upload()
+    if startup_verdict is not None:
+        # Through the seam the re-read goes through, so a yes registers the
+        # exit hook by exactly one rule ("may_upload just became True") and an
+        # answered no deletes the outcomes an earlier process kept waiting on
+        # it, whichever read delivered the answer.
+        px._take_capture_verdict(startup_verdict)
     if declare_through is not None:
         transport, owned = declare_through
         px._declare_rulebook(transport, rulebook_request, owned)

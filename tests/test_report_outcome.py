@@ -334,6 +334,32 @@ def test_an_explicit_no_learned_later_makes_reporting_a_no_op_again(
     assert [o["outcome_id"] for o in tr.outcomes] == [episode]
 
 
+def test_an_answered_no_at_startup_deletes_what_an_earlier_process_kept(
+    monkeypatch, tmp_path, quiet,
+):
+    """An earlier process kept outcomes while the control plane could not
+    answer; this one's REGISTRATION answers no. That no lands at the seam the
+    re-read's no lands at, so the waiting outcomes are deleted -- once only
+    the re-read purged them, and these uploaded the day consent was granted.
+    An outcome naming only an episode never waited on consent and stays."""
+    unreachable = _Unanswered(outcomes_raise=TransportError("connection reset"))
+    with _attached(monkeypatch, tmp_path, unreachable) as px:
+        px.report_outcome("resolved", turn_id="t1")
+        episode = px.report_outcome("resolved", episode_id="rl_ep1")
+    assert len(_pending(tmp_path)) == 2
+    tr = _Outcomes(capture=False, reason="opt-in per agent")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with _attached(monkeypatch, tmp_path, tr) as px:
+            assert px.may_upload is False
+            assert px.upload_refusal == "opt-in per agent"
+            assert _pending(tmp_path) == [
+                production._outcome_file(tmp_path, episode)]
+    assert all(o["outcome_id"] == episode for o in tr.outcomes)
+    assert any("1 reported outcome(s)" in str(w.message)
+               and "opt-in per agent" in str(w.message) for w in caught)
+
+
 @pytest.mark.parametrize("answer", [
     (401, {"detail": "invalid key"}),
     (403, {"detail": "this key may not read capture"}),
