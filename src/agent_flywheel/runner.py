@@ -1614,6 +1614,15 @@ class RolloutRunner:
                         pass
             raise
         self._detach_proc(_attempt_key(rollout))
+        if self._lease_lost(_attempt_key(rollout)):
+            # Killed by the heartbeat thread, as the Python path already says:
+            # the -9 it exits with is the lease, not the agent, so this is not
+            # ``agent_exit_nonzero`` (the policy's own failure). What the
+            # command did before the kill stays attached as evidence.
+            prior = "; ".join(filter(None, (out.exclusion_reason, out.exclusion_detail)))
+            out.exclusion_reason = "credential_expired"
+            out.exclusion_detail = "lease lost while the rollout was running" + (
+                f" (the process then reported: {prior[:1500]})" if prior else "")
 
         if snapshot is None:
             _bind_execution_fingerprint(out, self.execution_sha256)
@@ -1841,10 +1850,21 @@ class RolloutRunner:
 
     # ── leases ─────────────────────────────────────────────────────────────
     def _attach_proc(self, key: str, proc: subprocess.Popen[str]) -> None:
+        """Register the child the heartbeat thread may have to kill.
+
+        Under the same lock the heartbeat thread marks ``lease_lost`` under,
+        and a lease ALREADY lost kills the child here: the loop's kill only
+        reaches a ``proc`` it can see, so a child spawned just after the beat
+        that lost the lease used to run its whole budget unkilled.
+        """
         with self._inflight_lock:
             entry = self._inflight.get(key)
+            lost = False
             if entry is not None:
                 entry.proc = proc
+                lost = entry.lease_lost
+        if lost:
+            _kill_tree(proc)
 
     def _detach_proc(self, key: str) -> None:
         with self._inflight_lock:
@@ -1922,10 +1942,13 @@ class RolloutRunner:
                     self.transport.heartbeat(entry.rollout)
                 except LeaseLost:
                     # The server has already taken it back. Stop the work now
-                    # rather than let it run to completion for nothing.
-                    entry.lease_lost = True
+                    # rather than let it run to completion for nothing. Marked
+                    # and read under the lock ``_attach_proc`` holds, so a
+                    # child is either seen here or killed there.
+                    with self._inflight_lock:
+                        entry.lease_lost = True
+                        proc = entry.proc
                     self._emit("lease_lost", {"rollout_id": entry.rollout.rollout_id})
-                    proc = entry.proc
                     if proc is not None and proc.poll() is None:
                         # The GROUP, not the one process. A command agent is a
                         # shell that spawns freely, so killing only the process
