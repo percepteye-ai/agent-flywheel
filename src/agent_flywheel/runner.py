@@ -399,6 +399,10 @@ TEARDOWN_DRAIN_S = 5.0
 #: is unchanged.
 DEFAULT_ROLLOUT_TIMEOUT_S: float | None = None
 
+#: Largest task handed to a command agent in ``PERCEPTEYE_TURN_INPUT``. Below
+#: Linux's per-string exec limit (MAX_ARG_STRLEN, 128 KiB) with room to spare.
+MAX_TURN_INPUT_ENV_BYTES = 100 * 1024
+
 #: The share of the child's window ONE blocking harness call may take. Half
 #: would mean a single wedged provider call can eat the episode and still look
 #: like an agent doing slow work; below half there is room to come back and say
@@ -727,7 +731,8 @@ def run_rollout_as_command(
     """Run the customer's agent as a process and read what it left behind.
 
     ``turn_input`` reaches it two ways by default, because CLIs differ and
-    guessing wrongly is silent: on stdin, and as PERCEPTEYE_TURN_INPUT. A CLI
+    guessing wrongly is silent: on stdin, and as PERCEPTEYE_TURN_INPUT (unless
+    it is over ``MAX_TURN_INPUT_ENV_BYTES``, too big for the environment). A CLI
     that takes the task as a positional argument gets a third: put ``fw.TASK``
     in the argv and it is substituted there, and stdin is then left empty so
     the task is not delivered twice. For an ordinary command, final text is
@@ -1575,7 +1580,13 @@ class RolloutRunner:
         assert self._command is not None
         snapshot = self.execution_snapshot
         child: ExecutionChild | None = None
-        extra: dict[str, str | None] = {"PERCEPTEYE_TURN_INPUT": rollout.turn_input}
+        extra: dict[str, str | None] = {}
+        # Not when it is too big to be an environment variable: Linux refuses
+        # to exec with any single string over 128 KiB (E2BIG), so a long task
+        # failed the launch outright. The task still arrives on stdin (or in
+        # argv, where TASK says so).
+        if len(rollout.turn_input.encode("utf-8")) <= MAX_TURN_INPUT_ENV_BYTES:
+            extra["PERCEPTEYE_TURN_INPUT"] = rollout.turn_input
         if snapshot is not None:
             try:
                 child = snapshot.prepare_child(rollout.rollout_id)
@@ -2788,6 +2799,14 @@ class RolloutRunner:
         """Deliver ONE spooled outcome. Returns 1 if it landed, else 0."""
         record = _read_spool(path)
         if record is None:
+            if _foreign_schema(path) is not None:
+                # Written by an SDK with a DIFFERENT outbox shape -- a newer
+                # one, sharing this directory. Left exactly where it is, for
+                # that SDK to deliver; this one cannot read it and must not
+                # retire it as unreadable. Looked at again rarely.
+                with self._outbox_lock:
+                    self._retry_due[path.name] = time.time() + _OUTBOX_RETRY_MAX_S
+                return 0
             _move_aside(path, "unreadable")
             return 0
         rollout_id = str(record.get("rollout_id") or "")
@@ -3171,6 +3190,19 @@ def _read_spool(path: Path) -> dict[str, Any] | None:
     return record
 
 
+def _foreign_schema(path: Path) -> str | None:
+    """The ``schema`` a spool file declares, when it declares one that is not
+    ours; ``None`` for our own, or for a file that declares nothing readable."""
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    schema = record.get("schema") if isinstance(record, dict) else None
+    if isinstance(schema, str) and schema and schema != _OUTBOX_SCHEMA:
+        return schema
+    return None
+
+
 def _move_aside(path: Path, why: str) -> Path:
     """Stop retrying a file, without deleting the work it holds.
 
@@ -3199,6 +3231,12 @@ def _move_aside(path: Path, why: str) -> Path:
     try:
         os.replace(path, target)
     except OSError:
+        # Release the reservation: an empty retired-looking file with no
+        # record in it is a false statement to the operator reading the dir.
+        try:
+            os.unlink(target)
+        except OSError:
+            pass
         return path
     return target
 

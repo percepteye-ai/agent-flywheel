@@ -16,10 +16,10 @@ A `list` or `tuple` first argument means the agent is a **process**, not an obje
 | channel | when | notes |
 |:--|:--|:--|
 | **stdin** | always, unless `fw.TASK` is in the argv | written, then closed |
-| **`PERCEPTEYE_TURN_INPUT`** | always | inert unless the CLI reads it |
+| **`PERCEPTEYE_TURN_INPUT`** | unless the task is over 100 KiB (too big for one environment variable) | inert unless the CLI reads it |
 | **an argv position** | only where `fw.TASK` appears | every occurrence is substituted |
 
-The first two are sent together because CLIs differ and guessing wrongly is silent. `fw.TASK` makes the choice a declaration: with the sentinel in the argv, **stdin gets the empty string** so an agent that reads both does not act on the same instruction twice. `PERCEPTEYE_TURN_INPUT` stays set either way.
+The first two are sent together because CLIs differ and guessing wrongly is silent. `fw.TASK` makes the choice a declaration: with the sentinel in the argv, **stdin gets the empty string** so an agent that reads both does not act on the same instruction twice. `PERCEPTEYE_TURN_INPUT` stays set either way, as long as the task fits in one environment variable.
 
 `fw.TASK` is a **sentinel object, not the string `"{task}"`**. A literal argument that happens to contain the placeholder text survives verbatim, and an unsubstituted sentinel surfaces as a type error rather than as an agent receiving four characters and doing something confident with them.
 
