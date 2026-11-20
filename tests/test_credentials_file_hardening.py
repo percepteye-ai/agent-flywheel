@@ -73,6 +73,72 @@ def test_a_concurrent_save_never_loses_the_other_key(home, monkeypatch):
     assert agents == ["a", "b", "seed"], agents
 
 
+def _stale_lock(home):
+    """A lock a dead writer left, older than the takeover age."""
+    creds._private_dir(home)
+    lock = home / creds.LOCK_FILENAME
+    lock.write_text("99999 0 deadbeef\n")
+    old = os.path.getmtime(lock) - creds.LOCK_STALE_S - 60
+    os.utime(lock, (old, old))
+    return lock
+
+
+def test_a_stale_takeover_never_removes_a_fresh_lock_taken_meanwhile(
+    home, monkeypatch,
+):
+    """Between judging a lock stale and renaming it aside, another writer
+    takes the stale lock over and creates a FRESH one. The rename then moves
+    the fresh lock: it must be put back, and this writer must keep waiting,
+    not take the lock while the other writer believes it holds it. Mutation:
+    remove whatever was moved aside unchecked -> this writer writes, red."""
+    lock = _stale_lock(home)
+    real_rename = os.rename
+    fresh = "4242 1 c0ffee\n"
+
+    def rename(src, dst, *a, **kw):
+        if str(src) == str(lock) and lock.read_text() != fresh:
+            # Another writer wins the takeover first and holds a fresh lock.
+            lock.unlink()
+            lock.write_text(fresh)
+        return real_rename(src, dst, *a, **kw)
+
+    monkeypatch.setattr(os, "rename", rename)
+    monkeypatch.setattr(creds, "LOCK_WAIT_S", 0.3)
+    with pytest.raises(ConfigurationError, match="another process"):
+        creds.save_stored(_cred("a"))
+    assert lock.read_text() == fresh, "the other writer's fresh lock was removed"
+    assert not list(home.glob(creds.LOCK_FILENAME + ".stale-*")), "left aside"
+
+
+def test_a_writer_releases_only_a_lock_that_still_holds_its_nonce(
+    home, monkeypatch,
+):
+    """A writer whose lock was taken over (it outlived the stale age) must not
+    remove the next holder's lock on its way out. Mutation: unlink the lock
+    unchecked at release -> the next holder's lock is gone, red."""
+    lock = home / creds.LOCK_FILENAME
+    theirs = "4242 1 c0ffee\n"
+    real_read = creds._read
+
+    def read(path):
+        # While this writer holds the lock, another one takes it over.
+        lock.unlink()
+        lock.write_text(theirs)
+        return real_read(path)
+
+    monkeypatch.setattr(creds, "_read", read)
+    creds.save_stored(_cred("a"))
+    assert lock.read_text() == theirs
+
+
+def test_a_stale_lock_is_still_taken_over(home):
+    lock = _stale_lock(home)
+    creds.save_stored(_cred("a"))
+    assert [c.agent_id for c in creds.load_stored()] == ["a"]
+    assert not lock.exists()
+    assert not list(home.glob(creds.LOCK_FILENAME + ".stale-*")), "left aside"
+
+
 def test_the_directory_holding_keys_is_tightened_to_0700(home):
     home.mkdir(parents=True, mode=0o755)
     os.chmod(home, 0o755)  # as the goose recorder used to leave it

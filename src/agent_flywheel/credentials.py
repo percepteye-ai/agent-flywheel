@@ -78,9 +78,11 @@ ENV_HOME = "PERCEPTEYE_HOME"
 CREDENTIALS_FILENAME = "credentials.json"
 #: The lock every read-modify-write of the file holds, by ONE protocol both
 #: SDKs implement (the Node SDK's ``src/credentials.js``): created exclusively
-#: (``O_EXCL``), holding the writer's pid and the time it was taken, removed
-#: when the write is done, and taken over once it is older than
-#: :data:`LOCK_STALE_S` -- a process killed mid-write leaves one behind.
+#: (``O_EXCL``), holding the writer's pid, the time it was taken and a nonce,
+#: removed when the write is done by the writer whose nonce it still holds,
+#: and taken over once it is older than :data:`LOCK_STALE_S` -- a process
+#: killed mid-write leaves one behind -- by removing only the lock judged
+#: stale (:func:`_take_over_stale`).
 #: An ``flock`` would not do: Node has none, so a Python and a Node login at
 #: once each held a lock the other never asked about, and one key was lost.
 LOCK_FILENAME = CREDENTIALS_FILENAME + ".lock"
@@ -379,19 +381,62 @@ def _private_dir(directory: Path) -> None:
         pass
 
 
+def _lock_id(path: Path) -> tuple[str, int] | None:
+    """What the lock at ``path`` holds and which file it is (its contents and
+    inode), or None when there is none to read. Never raises."""
+    try:
+        with open(path, "rb") as fh:
+            ino = os.fstat(fh.fileno()).st_ino
+            return fh.read().decode("utf-8", "replace"), ino
+    except OSError:
+        return None
+
+
+def _take_over_stale(lock: Path, judged: tuple[str, int]) -> None:
+    """Remove the stale lock ``judged`` (its contents and inode, as read when
+    it was judged stale) -- and ONLY that one.
+
+    Moved aside first: only one rename of a name succeeds, so two writers
+    taking the same stale lock over cannot both win. But between the judging
+    and the rename the stale lock may have been taken over and REPLACED by a
+    fresh one another writer now holds, and a rename of the name moves THAT
+    one aside. So what was moved is compared with what was judged; a fresh
+    lock moved by mistake is put back (a link, which never replaces a lock
+    created meanwhile -- that one is then the lock, and the moved writer finds
+    its nonce gone when it releases) and this writer waits again. Never
+    raises."""
+    aside = lock.with_name(f"{LOCK_FILENAME}.stale-{uuid.uuid4().hex}")
+    try:
+        os.rename(lock, aside)
+    except OSError:
+        return  # lost the race to another writer
+    if _lock_id(aside) != judged:
+        try:
+            os.link(aside, lock)
+        except OSError:
+            pass  # a lock was created meanwhile: it is the lock now
+    try:
+        os.unlink(aside)
+    except OSError:
+        pass
+
+
 @contextlib.contextmanager
 def _locked(path: Path) -> Iterator[None]:
     """Hold the lock on ``path``'s store for a read-modify-write.
 
-    :data:`LOCK_FILENAME` beside the file, created with ``O_EXCL`` -- the
-    protocol the Node SDK implements too, so the two exclude each other, on
-    every platform. One older than :data:`LOCK_STALE_S` is moved aside (only
-    one rename of a name succeeds, so two writers taking it over at once
-    cannot both win) and removed. Waits at most :data:`LOCK_WAIT_S`, then
-    refuses with :class:`ConfigurationError` naming the lock.
+    :data:`LOCK_FILENAME` beside the file, created with ``O_EXCL`` and holding
+    ``"<pid> <ms> <nonce>"`` -- the protocol the Node SDK implements too, so
+    the two exclude each other, on every platform. One older than
+    :data:`LOCK_STALE_S` is taken over by :func:`_take_over_stale`, which
+    removes only the lock it judged stale. Released only while it still holds
+    this writer's nonce, so a writer whose lock was taken over never removes
+    the next holder's. Waits at most :data:`LOCK_WAIT_S`, then refuses with
+    :class:`ConfigurationError` naming the lock.
     """
     _private_dir(path.parent)
     lock = path.parent / LOCK_FILENAME
+    mine = f"{os.getpid()} {int(time.time() * 1000)} {uuid.uuid4().hex}\n"
     give_up = time.monotonic() + LOCK_WAIT_S
     while True:
         try:
@@ -402,21 +447,17 @@ def _locked(path: Path) -> Iterator[None]:
             raise ConfigurationError(f"cannot lock {path} ({lock}): {exc}") from exc
         else:
             try:
-                os.write(fd, f"{os.getpid()} {int(time.time() * 1000)}\n".encode())
+                os.write(fd, mine.encode())
             finally:
                 os.close(fd)
             break
+        judged = _lock_id(lock)
         try:
             age = time.time() - lock.stat().st_mtime
         except FileNotFoundError:
             continue  # just released
-        if age > LOCK_STALE_S:
-            aside = lock.with_name(f"{LOCK_FILENAME}.stale-{uuid.uuid4().hex[:8]}")
-            try:
-                os.rename(lock, aside)
-                os.unlink(aside)
-            except OSError:
-                pass  # lost the race to another writer
+        if judged is not None and age > LOCK_STALE_S:
+            _take_over_stale(lock, judged)
             continue
         if time.monotonic() >= give_up:
             raise ConfigurationError(
@@ -426,10 +467,12 @@ def _locked(path: Path) -> Iterator[None]:
     try:
         yield
     finally:
-        try:
-            os.unlink(lock)
-        except OSError:
-            pass
+        held = _lock_id(lock)
+        if held is not None and held[0] == mine:
+            try:
+                os.unlink(lock)
+            except OSError:
+                pass
 
 
 def _write(path: Path, entries: list[dict[str, Any]]) -> None:
