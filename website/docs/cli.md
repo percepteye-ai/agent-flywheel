@@ -101,7 +101,7 @@ Either side missing leaves the argv untouched, which is exactly the pre-gate beh
 
 ## Timeouts kill the process group
 
-`rollout_timeout_s` (default `900.0`) is capped by the rollout's own remaining budget less a 10s margin, held back so artifacts and the report can still be delivered against a live lease. On expiry the whole **process group** is killed with `SIGKILL`.
+The agent's budget is the rollout's own remaining budget less a delivery reserve (at least 10s) and a 5s teardown, held back so artifacts and the report can still be delivered against a live lease; `rollout_timeout_s` (default `None`) can only lower it. On expiry the whole **process group** is killed with `SIGKILL`.
 
 The group, not the process, and that is load-bearing. A real CLI agent spawns freely — a shell, a compiler, a test runner — and killing only the process we launched leaves those children alive holding the stdout pipe open, so `communicate()` blocks and the timeout never returns. Measured: a 1.5s budget against `sh -c 'sleep 120'` took the full 120s. The child is spawned with `start_new_session=True` on POSIX, so a spawning agent leaves nothing behind. Windows has no process groups; only the launched process is killed.
 

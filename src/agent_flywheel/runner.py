@@ -2994,10 +2994,11 @@ class RolloutRunner:
     def _emit(self, kind: str, payload: dict[str, Any]) -> None:
         """Hand one event to the customer's callback, and survive it.
 
-        Guarded, because this is called from three different threads and one of
-        them cannot afford to die. ``lease_lost`` and ``heartbeat_failed`` are
-        emitted from inside the heartbeat thread's own exception handlers, so a
-        callback that raised there exited the for, the while, and the thread --
+        Guarded, because this is called from several threads and the heartbeat
+        machinery cannot afford to die. ``lease_lost`` and ``heartbeat_failed``
+        are emitted from inside a beat's own exception handlers -- once on the
+        single heartbeat thread, where a callback that raised there exited the
+        for, the while, and the thread --
         after which NO in-flight lease was renewed again, every subsequent
         rollout collected a 410 at report time, and the exception surfaced only
         through the thread excepthook. An observability hook that can silently

@@ -83,7 +83,7 @@ The switch is read at startup, so flipping it does not stop a loop that is mid-f
 | you try | what happens |
 |:--|:--|
 | **`SIGTERM`** | the process ends. **Nothing in this package catches SIGINT or SIGTERM.** In-flight rollouts are orphaned rather than abandoned, and the control plane reclaims them by lease expiry — up to 30 minutes — rather than by an `abandon` call. |
-| **Ctrl-C** | not instant. The worker pool is exited with `wait=True`, so in-flight rollouts drain first, for up to `rollout_timeout_s` (default 900s). |
+| **Ctrl-C** | not instant. The worker pool is exited with `wait=True`, so in-flight rollouts drain first, for up to their episode budget (or `rollout_timeout_s`, if set lower). |
 | **Revoking the API key** | does not stop it. A 401 is terminal per request, but the loop catches it, emits `claim_failed`, sleeps 5s and continues — indefinitely. |
 | **The control plane** | cannot stop it either. The claim response carries only `rollouts` and `poll_after_ms`; there is no pause or drain field. The strongest server-side levers are an empty queue and a longer backoff, and both leave you polling. |
 
@@ -110,7 +110,7 @@ fw.serve(..., on_event=lambda kind, ev: print(kind, ev))
 | `report_failed` | the work happened, delivering it did not | `rollout_id`, `error` |
 | `artifact_failed` | collecting the rollout's artifacts failed; the rollout is still reported, excluded from training | `rollout_id`, `name` (always `"*"`), `error` |
 | `lease_lost` | the lease lapsed or was taken back | `rollout_id` |
-| `heartbeat_failed` | a renewal could not be delivered; two more beats remain | `rollout_id`, `error` |
+| `heartbeat_failed` | a renewal could not be delivered; the next beat comes sooner, against what is left of the lease | `rollout_id`, `error` |
 | `serve_failed` | the SDK itself failed while running a rollout; it is still reported | `rollout_id`, `error` |
 | `abandon_failed` | abandoning a crashed rollout could not be delivered | `rollout_id`, `error` |
 | `episode_plan` | how a rollout's budget was split | `rollout_id`, `budget_s`, `child_s`, `teardown_s`, `delivery_s` |
@@ -125,7 +125,7 @@ fw.serve(..., on_event=lambda kind, ev: print(kind, ev))
 
 **`claim_empty` is the one worth wiring first.** Without a callback a flywheel is silent, and an empty queue and a broken claim route look identical — `claim_empty` versus `claim_failed` is what tells them apart. This is the answer to "how do I know it's working."
 
-**It runs on three different threads, synchronously.** The serving thread emits `claim_*`; a pool worker emits the per-rollout kinds; the heartbeat thread emits `lease_lost` and `heartbeat_failed`. A slow callback slows that thread, and the heartbeat thread is renewing every in-flight lease. `lease_lost` can arrive from either the heartbeat thread or a pool worker, depending on which noticed first.
+**It runs on three different threads, synchronously.** The serving thread emits `claim_*`; a pool worker emits the per-rollout kinds; the heartbeat pool emits `lease_lost` and `heartbeat_failed`. A slow callback slows that thread, and a slow heartbeat callback delays that lease's next beat. `lease_lost` can arrive from either the heartbeat thread or a pool worker, depending on which noticed first.
 
 **Exceptions it raises are swallowed** and not re-emitted. An observability hook must not be able to change what it observes: a callback that raised inside the heartbeat thread's own handler used to exit the loop and the thread, after which no in-flight lease was renewed again and every subsequent rollout collected a 410 at report time. Keep it cheap and non-blocking.
 
@@ -143,7 +143,7 @@ fw.serve(..., on_event=lambda kind, ev: print(kind, ev))
 | `artifacts_dir` | `None` | falls back to `./.percepteye-artifacts`, created if absent |
 | `isolation` | `"subprocess"` | or `"inprocess"`; any other value raises |
 | `concurrency` | `1` | rollouts in flight. A single claim asks for at most 16 whatever you set |
-| `rollout_timeout_s` | `900.0` | the local ceiling on one rollout |
+| `rollout_timeout_s` | `None` | an optional local ceiling on one rollout, below the control plane's episode budget |
 | `gate_flag` | `None` | how *this* binary spells its completion-gate option, e.g. `"--autonomous-gate"` |
 | `endpoint_env` | `None` | `(url_var, key_var)` this agent reads its endpoint from, when they are not the OpenAI/Anthropic names |
 | `execution_snapshot` | `None` | generic adapter lifecycle: opaque exact components plus prepare/attest/release for each isolated child |

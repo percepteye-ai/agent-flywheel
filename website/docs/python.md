@@ -253,7 +253,7 @@ fw.serve(
 | `max_rollouts` | `None` | stop after this many tasks **complete**, then return. A crash and a graded pass both count |
 | `artifacts_dir` | `./.percepteye-artifacts` | created if absent; each claimed rollout gets `_percepteye/<rollout_id>.<lease digest>/` beneath it, deleted once the result is reported |
 | `concurrency` | `1` | tasks in flight, under the default subprocess isolation |
-| `rollout_timeout_s` | `900.0` | per-task wall clock; subprocess isolation is the only mode with a real timeout |
+| `rollout_timeout_s` | `None` | optional per-task ceiling below the control plane's episode budget (which always bounds the task); subprocess isolation is the only mode with a real timeout |
 
 **`max_rollouts` is the only clean exit `serve()` has.** Nothing in this package installs a SIGINT or SIGTERM handler, so without it the loop runs until the process is killed. See [Stopping a running flywheel](configuration.md#stopping-a-running-flywheel).
 
