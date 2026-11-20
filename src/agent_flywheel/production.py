@@ -90,6 +90,7 @@ from .declaration import Describe
 from .entrypoint import InputShape
 from .errors import (
     ConfigurationError,
+    ContractViolation,
     InvalidFeedback,
     InvalidOutcome,
     TransportError,
@@ -535,6 +536,9 @@ _FEEDBACK = _ReportKind(
     "per-turn feedback reports", "per-turn feedback report(s)",
     "a feedback report", "feedback", "feedback_id",
     _TURN_FEEDBACK_BATCH_MAX_ITEMS, "report_turn_feedback")
+_TURNS = _ReportKind(
+    "captured turns", "captured turn(s)", "a turn", "turns", "turn_id",
+    _PRODUCTION_TURN_BATCH_MAX_ITEMS, "report_turns")
 
 
 def _reply_records(reply: Any, kind: _ReportKind) -> list[Mapping[str, Any]]:
@@ -688,6 +692,12 @@ class Attachment:
         self._retention_turns = retention_turns
         self._turns_since_prune = 0
         self._turns_since_flush = 0
+        #: Turns whose ``with px.turn()`` scope is open in this process, by
+        #: id (a count, since an id may be reused). Neither uploaded nor
+        #: pruned while open: their tool calls are still being written, so an
+        #: upload would send a truncated turn, and a prune would delete the
+        #: directory under the code running in it.
+        self._active_turns: dict[str, int] = {}
         self._lock = threading.Lock()
         #: SEPARATE FROM ``_lock`` on purpose. ``_lock`` guards the turn
         #: counters and is taken on the request path; an upload holding it
@@ -894,6 +904,42 @@ class Attachment:
             _production_turn_identifier(turn_id)
             or f"t_{uuid.uuid4().hex[:16]}"
         )
+        # ONE counter block for both cadences, because they are the same
+        # question -- "is periodic maintenance due?" -- asked twice. They were
+        # split while only pruning existed and the flush counter was added
+        # beside it; two lock acquisitions per turn on the request path for one
+        # answer is the kind of duplication that drifts.
+        #
+        # The turn is OPEN from here, before anything of it is on disk, so no
+        # flush or prune on another thread sees a directory it is still
+        # writing.
+        with self._lock:
+            self._active_turns[tid] = self._active_turns.get(tid, 0) + 1
+            self._turns_since_prune += 1
+            self._turns_since_flush += 1
+            prune_due = (self._retention_turns is not None
+                         and self._turns_since_prune >= _PRUNE_EVERY)
+            if prune_due:
+                self._turns_since_prune = 0
+            flush_due = self._turns_since_flush >= _FLUSH_EVERY
+            if flush_due:
+                self._turns_since_flush = 0
+        try:
+            yield from self._open_turn(
+                tid, conversation_id, task_id, input_text,
+                prune_due=prune_due, flush_due=flush_due)
+        finally:
+            with self._lock:
+                left = self._active_turns.get(tid, 0) - 1
+                if left > 0:
+                    self._active_turns[tid] = left
+                else:
+                    self._active_turns.pop(tid, None)
+
+    def _open_turn(self, tid: str, conversation_id: str | None,
+                   task_id: str | None, input_text: str | None, *,
+                   prune_due: bool, flush_due: bool) -> Iterator[str]:
+        """The body of :meth:`turn`, between its open and its close."""
         effective_conversation_id = _production_identifier(conversation_id)
         path = Path(self.trajectory_root) / tid
         validated_task_id = _normalize_task_id(task_id)
@@ -920,21 +966,6 @@ class Attachment:
                              conversation_id=effective_conversation_id or "",
                              task_id=effective_task_id or "",
                              execution_sha256=self._execution_sha256 or "")
-        # ONE counter block for both cadences, because they are the same
-        # question -- "is periodic maintenance due?" -- asked twice. They were
-        # split while only pruning existed and the flush counter was added
-        # beside it; two lock acquisitions per turn on the request path for one
-        # answer is the kind of duplication that drifts.
-        with self._lock:
-            self._turns_since_prune += 1
-            self._turns_since_flush += 1
-            prune_due = (self._retention_turns is not None
-                         and self._turns_since_prune >= _PRUNE_EVERY)
-            if prune_due:
-                self._turns_since_prune = 0
-            flush_due = self._turns_since_flush >= _FLUSH_EVERY
-            if flush_due:
-                self._turns_since_flush = 0
         if prune_due:
             self.prune(keep_last=self._retention_turns)
         if flush_due:
@@ -949,6 +980,11 @@ class Attachment:
                            execution_sha256=self._execution_sha256,
                            model_content=self.may_capture_model_content):
             yield tid
+
+    def _open_turns(self) -> set[str]:
+        """The ids of the turns whose scope is open in this process."""
+        with self._lock:
+            return set(self._active_turns)
 
     def record_answer(self, turn_id: str, text: str) -> bool:
         """Record what the agent finally answered for one turn.
@@ -978,6 +1014,9 @@ class Attachment:
         )
         return record_turn_text(
             path, "answer", text, turn_id=safe_turn_id,
+            # The turn's own, as its question's record and span carry it:
+            # without it the answer's span named no conversation.
+            conversation_id=read_conversation_id(path) or "",
             task_id=read_task_id(path) or "",
             execution_sha256=execution_sha256 or "",
         )
@@ -1431,15 +1470,29 @@ class Attachment:
         *,
         on_refusal: Any,
         on_absent: Any = None,
+        batch_size: int | None = None,
+        forget: Any = None,
+        on_reply: Any = None,
+        stop_on_blip: bool = False,
     ) -> tuple[int, int, int]:
-        """Send the reports waiting on disk -- outcomes or per-turn feedback,
-        ``kind`` says which -- and return ``(sent, failed, dropped)``: the
-        ones the control plane recorded, the ones still on disk for a later
-        flush (each counted once), the ones it refused. Caller holds
-        ``_flush_lock``. Never raises.
+        """Send the reports waiting on disk -- outcomes, per-turn feedback or
+        captured turns, ``kind`` says which -- and return ``(sent, failed,
+        dropped)``: the ones the control plane recorded, the ones still on
+        disk for a later flush (each counted once), the ones it refused.
+        Caller holds ``_flush_lock``. Never raises.
 
-        ONE SENDER FOR BOTH ROUTES. Feedback had its own, which read every
-        final 4xx as "the route is not there" and deleted the queue for it.
+        ONE SENDER FOR EVERY ROUTE. Feedback had its own, which read every
+        final 4xx as "the route is not there" and deleted the queue for it;
+        turns had their own, which had no split at all, so one turn a proxy
+        refused for its size (413) or the intake refused as a batch held back
+        every healthy turn beside it on every flush.
+
+        What a TURN differs in is passed: ``forget`` is what is done with a
+        batch that will not be sent again (default: delete its files; a turn
+        directory is the customer's copy and is marked uploaded instead),
+        ``on_reply`` reads an acknowledged batch's reply, ``batch_size``
+        overrides ``kind.batch_max``, and ``stop_on_blip`` ends the flush at
+        the first blip, where the next batch would wait out the same outage.
 
         THE TURNS' RULES: a batch the control plane acknowledged is deleted;
         a 403 is its decision, so sending stops (``on_refusal`` is told its
@@ -1473,6 +1526,13 @@ class Attachment:
         record that draws a 413 standing alone is too large on its own, and
         is dropped with a warning naming the 413 and its size.
 
+        A BATCH OF ONE THAT WAS NEVER SPLIT has nothing beside it to compare
+        with, so a refusal of it cannot be told from a refusal of the batch:
+        it is kept for a later flush, where it travels with others, and said
+        once. (Every ``report_outcome`` flushes; reading that refusal as the
+        record's dropped each outcome a control plane on another contract
+        minor refused whole.)
+
         Splitting is bounded per flush (:data:`_OUTCOME_SPLIT_MAX_REQUESTS`);
         what the bound leaves unsent stays for the next flush.
 
@@ -1482,7 +1542,7 @@ class Attachment:
         route is ABSENT (:func:`_route_absent`): then everything waiting is
         dropped, counted as dropped, and ``on_absent`` is told the words.
         """
-        size = kind.batch_max
+        size = batch_size or kind.batch_max
         Batch = list[tuple[Path, dict[str, Any]]]
         # Every GROUP still to send, in order: a batch on its own, or the two
         # halves of one refused batch, which are tried together. A refused
@@ -1499,6 +1559,9 @@ class Attachment:
             return sum(len(b) for group in queue for b in group)
 
         def _forget(batch: Batch) -> None:
+            if forget is not None:
+                forget(batch)
+                return
             for path, _wire in batch:
                 try:
                     path.unlink()
@@ -1551,6 +1614,11 @@ class Attachment:
                             stop = True
                             break
                         status = getattr(exc, "status_code", None)
+                        if isinstance(exc, ContractViolation):
+                            # Refused before it left, by the transport's own
+                            # check of the records: about them, never a blip
+                            # that a retry of the same bytes could clear.
+                            status = 422
                         if on_absent is not None and _route_absent(status):
                             gone = batch + beside + [
                                 r for g in queue for b in g for r in b]
@@ -1579,7 +1647,7 @@ class Attachment:
                             stop = True
                             break
                         failed += len(batch)
-                        if self._deadline is not None:
+                        if stop_on_blip or self._deadline is not None:
                             # close()'s last flush: a blip ends it. The next
                             # batch would wait out the same outage.
                             failed += untried + _left()
@@ -1588,6 +1656,8 @@ class Attachment:
                             break
                         continue
                     _forget(batch)
+                    if on_reply is not None:
+                        on_reply(reply)
                     named = _refused_by_name(reply, kind)[:len(batch)]
                     by_name.extend(named)
                     noteless.extend(_notes_not_stored(reply, kind))
@@ -1601,6 +1671,12 @@ class Attachment:
                     queue.clear()
                     self._warn_whole_batch_refusal(kind, refused[0][1][1])
                     break
+                if (not halves and refused and len(refused[0][0]) == 1
+                        and not _outcome_refused_for_size(refused[0][1][0])):
+                    failed += 1
+                    self._warn_whole_batch_refusal(
+                        kind, refused[0][1][1], alone=True)
+                    continue
                 split: list[list[Batch]] = []
                 for batch, (status, cause) in refused:
                     if len(batch) == 1:
@@ -1639,13 +1715,22 @@ class Attachment:
                 f"{kind.counted} without the note: {', '.join(noteless)}")
         return sent, failed, len(dropped) + len(by_name) + absent
 
-    def _warn_whole_batch_refusal(self, kind: _ReportKind, cause: str) -> None:
+    def _warn_whole_batch_refusal(self, kind: _ReportKind, cause: str,
+                                  *, alone: bool = False) -> None:
         """Say ONCE per kind and cause that the control plane refuses whole
         batches: it holds for every flush until one side is upgraded, and a
-        warning per flush would be a week of the same line."""
+        warning per flush would be a week of the same line. ``alone``: the
+        batch held one record, so which of the two it refused is unknown."""
         if self._batch_refusal_said.get(kind.many) == cause:
             return
         self._batch_refusal_said[kind.many] = cause
+        if alone:
+            self._warn(
+                f"agent-flywheel: the control plane refused a batch of one "
+                f"of the {kind.many} ({cause}); with nothing beside it, a "
+                "refusal of the record cannot be told from one of the batch, "
+                "so it stays on disk and is sent again with the next.")
+            return
         self._warn(
             "agent-flywheel: the control plane refused whole batches of "
             f"{kind.many} ({cause}), which is about the batch, not a "
@@ -2366,6 +2451,7 @@ class Attachment:
             return {"sent": 0, "skipped": 0, "failed": 0}
 
         already = self._uploaded_ids()
+        open_turns = self._open_turns()
         pending: list[tuple[Path, dict[str, Any]]] = []
         try:
             entries = sorted(root.iterdir(), key=lambda p: p.name)
@@ -2373,6 +2459,14 @@ class Attachment:
             return {"sent": 0, "skipped": 0, "failed": 0}
         for d in entries:
             if not d.is_dir() or d.name in already:
+                continue
+            if d.name in open_turns:
+                # STILL RUNNING. Its calls are still being written, so even
+                # close()'s send-everything flush would ship it truncated --
+                # and the intake keys a turn on its id, so the complete turn
+                # would then read as a conflicting replay. The next flush, or
+                # the next process, sends it whole.
+                skipped += 1
                 continue
             # PER DIRECTORY. The scan used to sit outside the try below, so a
             # truncated trajectory -- which this package documents as the
@@ -2393,70 +2487,52 @@ class Attachment:
             pending.append((d, wire))
 
         if not pending:
-            return {"sent": 0, "skipped": skipped, "failed": 0}
+            # The unreadable ones are still counted: a flush where every
+            # turn failed to render is not a flush with nothing to do.
+            return {"sent": 0, "skipped": skipped, "failed": failed}
 
-        client = None
-        try:
-            from .transport import AttachTransport
+        requested_batch_size = (
+            batch_size
+            if isinstance(batch_size, int) and not isinstance(batch_size, bool)
+            else 1
+        )
+        wire_batch_size = min(
+            max(1, requested_batch_size), _PRODUCTION_TURN_BATCH_MAX_ITEMS)
 
-            client = self._control_plane()
-            tr = AttachTransport(client, self.agent_id)
-            requested_batch_size = (
-                batch_size
-                if isinstance(batch_size, int) and not isinstance(batch_size, bool)
-                else 1
-            )
-            wire_batch_size = min(
-                max(1, requested_batch_size),
-                _PRODUCTION_TURN_BATCH_MAX_ITEMS,
-            )
-            for i in range(0, len(pending), wire_batch_size):
-                chunk = pending[i:i + wire_batch_size]
-                if self._past_deadline():
-                    # close()'s budget is spent: the rest stay on disk.
-                    failed += len(pending) - i
-                    break
-                try:
-                    reply = tr.report_turns(self.agent_id, [w for _, w in chunk])
-                except Exception as exc:
-                    refusal = _capture_refusal(exc)
-                    if refusal is not None:
-                        # NOT A TRANSPORT FAILURE, and treating it as one is
-                        # what made this loop re-POST the same end-user message
-                        # bodies to a control plane that had been told not to
-                        # accept them, every cadence, for the life of the
-                        # process. Stop, say why in the words the intake used,
-                        # and leave the turns on disk. `_recheck_capture` picks
-                        # consent back up if it is re-granted.
-                        self._refuse_upload(refusal)
-                        refused = True
-                        failed += len(pending) - sent
-                        break
-                    # Unacknowledged. Leave every marker unwritten so the next
-                    # flush retries it: the intake dedupes on turn_id, so a
-                    # retry of a batch that DID land is answered as a
-                    # duplicate rather than stored twice.
-                    #
-                    # AND STOP. A transport failure or a 5xx that outlasted
-                    # the client's retries is an outage, and the next chunk
-                    # would wait it out again -- up to the client's whole
-                    # envelope per chunk, which inside close() held a
-                    # customer's process open for minutes. Every unsent turn
-                    # is counted once.
-                    failed += len(pending) - i
-                    break
-                self._mark_uploaded([d.name for d, _ in chunk])
-                sent += len(chunk)
-                self._note_model_content_refusal(reply)
-        except Exception:
-            failed += len(pending) - sent
-        finally:
-            if client is not None:
-                try:
-                    client.close()
-                except Exception:
-                    pass
-        counts = {"sent": sent, "skipped": skipped, "failed": failed}
+        def _refused(reason: str) -> None:
+            # NOT A TRANSPORT FAILURE, and treating it as one is what made
+            # this loop re-POST the same end-user message bodies to a control
+            # plane that had been told not to accept them, every cadence, for
+            # the life of the process. Stop, say why in the words the intake
+            # used, and leave the turns on disk. `_recheck_capture` picks
+            # consent back up if it is re-granted.
+            nonlocal refused
+            refused = True
+            self._refuse_upload(reason)
+
+        # THE OUTCOMES' SENDER (:meth:`_send_reports`), so a turn refused by
+        # the intake as a record (a 4xx about it, a 413 from a proxy for its
+        # size) is isolated and the healthy turns beside it are sent, where
+        # one such turn used to hold back its whole batch on every flush. A
+        # turn that will not be sent again -- acknowledged, or refused
+        # standing alone -- is MARKED UPLOADED, never deleted: the directory
+        # is the customer's copy. A transport failure or a 5xx that outlasted
+        # the client's retries ends the flush: the intake dedupes on turn_id,
+        # so the next flush retries those turns, and the next batch would
+        # only wait out the same outage.
+        sent, sender_failed, dropped = self._send_reports(
+            pending, _TURNS,
+            on_refusal=_refused,
+            batch_size=wire_batch_size,
+            forget=lambda batch: self._mark_uploaded(
+                [d.name for d, _ in batch]),
+            on_reply=self._note_model_content_refusal,
+            stop_on_blip=True,
+        )
+        counts = {"sent": sent, "skipped": skipped,
+                  "failed": failed + sender_failed}
+        if dropped:
+            counts["dropped"] = dropped
         if refused:
             counts["not_permitted"] = 1
         return counts
