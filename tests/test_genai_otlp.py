@@ -263,3 +263,23 @@ def test_the_requested_format_is_response_format_else_responses_text_format():
                     {"response_format": {}}, {"text": {"format": "json"}},
                     {"response_format": object}):
         assert requested_output_format(request) is None
+
+
+def test_a_non_finite_number_is_written_as_null_never_as_invalid_json():
+    """``json.dumps`` writes NaN and Infinity by default, which no JSON parser
+    reads: one tool returning a NaN made the recorded line, and the trace
+    rendered from it, unreadable at the intake. Written ``null``, as the Node
+    SDK's ``JSON.stringify`` writes it."""
+    import json as _json
+
+    from agent_flywheel.genai_otlp import content_json, operation_record
+
+    value = {"score": float("nan"), "up": [float("inf"), 1.5],
+             "down": (float("-inf"),)}
+    for line in (content_json(value), operation_record({"result": value})):
+        parsed = _json.loads(line, parse_constant=lambda c: (_ for _ in ()).throw(
+            ValueError(c)))
+        assert "NaN" not in line and "Infinity" not in line
+    assert _json.loads(content_json(value)) == {
+        "score": None, "up": [None, 1.5], "down": [None]}
+    assert parsed["record"] == "operation"
