@@ -391,9 +391,15 @@ class AttachTransport:
         running agent's instructions.
         """
         try:
-            return self._c.request("GET", "/prompt/current") or {}
+            return self.prompt_current_or_raise()
         except Exception:  # see docstring
             return {}
+
+    def prompt_current_or_raise(self) -> dict[str, Any]:
+        """The same read, with a failure left to the caller -- for
+        :class:`~agent_flywheel.policy.PolicySource`, whose health must say
+        when the prompt it was told to read could not be."""
+        return self._c.request("GET", "/prompt/current") or {}
 
     def claim(self, max_rollouts: int) -> tuple[list[RolloutRequest], int]:
         claim_body: dict[str, Any] = {

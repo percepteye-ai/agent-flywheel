@@ -2841,7 +2841,7 @@ def attach(
     # The empty strings are load-bearing, not placeholders. bind_selected
     # forwards them to each adapter's bind(), and both built-ins treat "no
     # endpoint" as "do not touch routing": LangChainAdapter._route returns at
-    # once when self.llm is None, and the ADK adapter never reads the URL. So
+    # once when llm_url is empty, and the ADK adapter never reads the URL. So
     # this installs observation and cannot re-point a single production call.
     unbinds: list[Any] = []
     bound: tuple[str, ...] = ()
