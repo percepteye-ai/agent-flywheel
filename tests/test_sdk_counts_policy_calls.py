@@ -27,12 +27,12 @@ class _Gateway(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"{}")
 
-    def do_POST(self) -> None:  # noqa: N802
+    def do_POST(self) -> None:
         n = int(self.headers.get("Content-Length") or 0)
         self.rfile.read(n)
         self._reply(500 if self.path.endswith("/fail") else 200)
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         self._reply(200)
 
     def log_message(self, *a: object) -> None:

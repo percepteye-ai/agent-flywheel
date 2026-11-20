@@ -67,7 +67,7 @@ TURN_FEEDBACK_ID_ATTRIBUTE = "percepteye.turn.feedback.id"
 #: feedback reported after them LINKS to them (:func:`record_turn_feedback_span`).
 #: Bounded: the oldest turns are forgotten first, and feedback on one of them
 #: still names its turn by ``percepteye.turn.id``.
-_TURN_SPANS: "OrderedDict[str, list[Any]]" = OrderedDict()
+_TURN_SPANS: OrderedDict[str, list[Any]] = OrderedDict()
 _TURN_SPANS_MAX = 1024
 #: Spans one turn records (its question and its answer, each its own span).
 _TURN_SPANS_PER_TURN = 8
@@ -80,7 +80,7 @@ def _remember_turn_span(turn_id: str, span: Any) -> None:
         context = span.get_span_context()
         with _TURN_SPANS_LOCK:
             kept = _TURN_SPANS.pop(turn_id, [])
-            kept = (kept + [context])[-_TURN_SPANS_PER_TURN:]
+            kept = [*kept, context][-_TURN_SPANS_PER_TURN:]
             _TURN_SPANS[turn_id] = kept
             while len(_TURN_SPANS) > _TURN_SPANS_MAX:
                 _TURN_SPANS.popitem(last=False)

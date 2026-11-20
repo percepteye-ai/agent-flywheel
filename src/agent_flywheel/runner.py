@@ -20,7 +20,6 @@ import concurrent.futures as _cf
 import contextvars
 import hashlib
 import json
-import math
 import os
 import shutil
 import signal

@@ -62,7 +62,10 @@ Issues = "https://github.com/percepteye-ai/agent-flywheel/issues"
 # it importable in the test environment rather than only in pip's isolated
 # build env. Build-time and test-time only; the one-runtime-dependency
 # invariant is about [project.dependencies] and is untouched.
-dev = ["pytest>=7.4", "pytest-asyncio>=0.23", "jsonschema>=4.22",
+# `requests` is here because the policy-call counter patches both HTTP
+# clients an agent may use, and its test drives a real `requests` session;
+# without it CI failed at collection, which is how origin/main went red.
+dev = ["pytest>=7.4", "pytest-asyncio>=0.23", "jsonschema>=4.22", "requests>=2.31",
        "ruff==0.16.2", "mypy>=1.8",
        "hatchling>=1.24"]
 # Frameworks the built-in adapters bind to. NOT runtime dependencies -- no

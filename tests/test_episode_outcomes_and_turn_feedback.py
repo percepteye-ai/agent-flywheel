@@ -49,7 +49,6 @@ from .test_report_outcome import (
     _pending,
     _Unanswered,
     _validator,
-    quiet,  # noqa: F401  (a fixture)
 )
 
 EPISODE = "run-7:rollout-0003"
@@ -504,7 +503,7 @@ def test_one_refused_feedback_report_never_holds_back_the_rest(
 
     with warnings.catch_warnings(record=True) as caught, _over_http(
         monkeypatch, tmp_path, {**GRANTED, "POST /turn-feedback": route},
-    ) as (px, seen):
+    ) as (px, _seen):
         warnings.simplefilter("always")
         for index, feedback_id in enumerate(ids):
             px.report_turn_feedback(

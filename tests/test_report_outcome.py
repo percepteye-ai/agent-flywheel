@@ -76,16 +76,6 @@ class _Outcomes(_Transport):
         return [o for batch in self.outcome_batches for o in batch]
 
 
-@pytest.fixture
-def quiet(monkeypatch):
-    """No background thread: each test flushes when it means to. Returns the
-    list of times a flush was asked for."""
-    asked: list[int] = []
-    monkeypatch.setattr(
-        fw.Attachment, "_flush_soon", lambda self: asked.append(1))
-    return asked
-
-
 def _pending(root) -> list[Path]:
     return sorted(
         p for p in Path(root).iterdir() if p.name.startswith(".outcome."))

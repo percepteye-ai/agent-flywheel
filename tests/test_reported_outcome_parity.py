@@ -30,7 +30,10 @@ import json
 import pytest
 
 from agent_flywheel.contract import (
-    ContractViolation, RolloutOutput, production_outcome, seeds_to_wire,
+    ContractViolation,
+    RolloutOutput,
+    production_outcome,
+    seeds_to_wire,
     turn_feedback,
 )
 from agent_flywheel.runner import OUTCOME_FILENAME, _attach_reported_outcome
@@ -176,7 +179,7 @@ OCCURRED_AT: dict[str, object] = {
     "a leap second": "2026-11-10T23:59:60Z",
     "an offset of a day": "2026-11-10T09:00:00+24:00",
     "year zero": "0000-01-01T00:00:00Z",
-    "other digits": "２０２６-11-10T09:00:00Z",
+    "other digits": "\uff12\uff10\uff12\uff16-11-10T09:00:00Z",
     "a trailing newline": "2026-11-10T09:00:00Z\n",
     "epoch seconds": 1794301200,
     "an empty string": "",
