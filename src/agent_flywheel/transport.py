@@ -444,8 +444,11 @@ class AttachTransport:
         }
         if progress:
             payload["progress"] = progress
+        # One path segment, whatever the id holds. The integrator reconciles
+        # this to the py-wire stream's contract._path_segment after merge.
+        rid = quote(str(rollout.rollout_id), safe="")
         body = self._c.request(
-            "POST", f"/rollouts/{rollout.rollout_id}/heartbeat", json_body=payload,
+            "POST", f"/rollouts/{rid}/heartbeat", json_body=payload,
             timeout=self.HEARTBEAT_ATTEMPT_S,
             deadline=time.time() + self.HEARTBEAT_BUDGET_S,
         )

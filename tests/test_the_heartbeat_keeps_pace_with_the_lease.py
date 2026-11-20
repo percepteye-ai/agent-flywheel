@@ -101,3 +101,9 @@ def test_one_slow_beat_does_not_starve_the_other_leases():
         t.join(5)
     assert "rl_fast" in beaten and beaten["rl_fast"] - started < 4.0, (
         "a slow beat for one lease held up the beat for another")
+
+
+def test_the_heartbeat_path_carries_the_id_as_one_segment():
+    client = _Client()
+    AttachTransport(client, agent_id="a").heartbeat(_req("../admin"))
+    assert client.calls[-1][1] == "/rollouts/..%2Fadmin/heartbeat"
