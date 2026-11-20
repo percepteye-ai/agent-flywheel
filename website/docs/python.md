@@ -251,7 +251,7 @@ fw.serve(
 | argument | default | what it does |
 |:--|:--|:--|
 | `max_rollouts` | `None` | stop after this many tasks **complete**, then return. A crash and a graded pass both count |
-| `artifacts_dir` | `./.percepteye-artifacts` | created if absent; each task gets `_percepteye/<rollout_id>/` beneath it, deleted once the result is reported |
+| `artifacts_dir` | `./.percepteye-artifacts` | created if absent; each claimed rollout gets `_percepteye/<rollout_id>.<lease digest>/` beneath it, deleted once the result is reported |
 | `concurrency` | `1` | tasks in flight, under the default subprocess isolation |
 | `rollout_timeout_s` | `900.0` | per-task wall clock; subprocess isolation is the only mode with a real timeout |
 

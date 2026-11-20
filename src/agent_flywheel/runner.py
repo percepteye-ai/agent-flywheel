@@ -1231,7 +1231,8 @@ class RolloutRunner:
         self._adapters = adapters
         self._on_event = on_event
         self._stop = False
-        #: Rollouts currently being served, by id. Read by the heartbeat thread.
+        #: Rollouts currently being served, by ATTEMPT (``_attempt_key``), not
+        #: by id. Read by the heartbeat thread.
         self._inflight: dict[str, _InFlight] = {}
         self._inflight_lock = threading.Lock()
         self._beat_stop = threading.Event()
@@ -1250,7 +1251,7 @@ class RolloutRunner:
         #: loop's thread while worker threads are spooling their own results.
         self._outbox_lock = threading.Lock()
         #: Lease tokens for rollouts whose result this process is still holding,
-        #: by rollout id. IN MEMORY ON PURPOSE: the token is a bearer credential
+        #: by attempt key. IN MEMORY ON PURPOSE: the token is a bearer credential
         #: and the outbox is a directory the customer's untrusted agent can read
         #: (see ``_spool_write``). Dropped the moment the outcome settles.
         self._lease_tokens: dict[str, str] = {}
@@ -1392,7 +1393,7 @@ class RolloutRunner:
             rollout_timeout_s=self.rollout_timeout_s,
             envelope_s=self._delivery_envelope_s(),
         )
-        self._record_plan(rollout.rollout_id, plan)
+        self._record_plan(_attempt_key(rollout), plan)
         self._emit("episode_plan", {
             "rollout_id": rollout.rollout_id,
             "budget_s": round(budget, 3),
@@ -1402,7 +1403,7 @@ class RolloutRunner:
         })
         self._warn_if_call_ceiling_is_inert(plan)
         timeout_s = plan.child_s
-        trajectory_dir = self._trajectory_dir(rollout.rollout_id)
+        trajectory_dir = self._trajectory_dir(_attempt_key(rollout))
         Path(trajectory_dir).mkdir(parents=True, exist_ok=True)
 
         if self._command is not None:
@@ -1430,16 +1431,16 @@ class RolloutRunner:
             return float(declared)
         return REPORT_MARGIN_S
 
-    def _record_plan(self, rollout_id: str, plan: EpisodePlan) -> None:
+    def _record_plan(self, key: str, plan: EpisodePlan) -> None:
         with self._inflight_lock:
-            entry = self._inflight.get(rollout_id)
+            entry = self._inflight.get(key)
             if entry is not None:
                 entry.plan = plan
 
-    def _delivery_budget_for(self, rollout_id: str) -> float:
-        """What ``run_one`` held back for delivering THIS rollout's result."""
+    def _delivery_budget_for(self, key: str) -> float:
+        """What ``run_one`` held back for delivering THIS attempt's result."""
         with self._inflight_lock:
-            entry = self._inflight.get(rollout_id)
+            entry = self._inflight.get(key)
             plan = entry.plan if entry is not None else None
         return plan.delivery_s if plan is not None else self._delivery_envelope_s()
 
@@ -1572,7 +1573,7 @@ class RolloutRunner:
                 # The command path's Popen, registered for the FIRST time. Every
                 # BYOH agent this product serves is a command, and the heartbeat
                 # thread's lease-lost kill only ever reached Python entrypoints.
-                proc_sink=lambda p: self._attach_proc(rollout.rollout_id, p),
+                proc_sink=lambda p: self._attach_proc(_attempt_key(rollout), p),
                 env=build_child_env(
                     rollout_id=rollout.rollout_id, llm_url=rollout.llm_url,
                     api_key=rollout.api_key, trajectory_dir=trajectory_dir,
@@ -1589,7 +1590,7 @@ class RolloutRunner:
                 cwd=str(trajectory_dir),
             )
         except BaseException:
-            self._detach_proc(rollout.rollout_id)
+            self._detach_proc(_attempt_key(rollout))
             # Popen and pre-result failures retain their existing exception
             # semantics, but must not strand an active private copy. There is
             # no result to train, so a failed post-attestation cannot create a
@@ -1605,7 +1606,7 @@ class RolloutRunner:
                     except Exception:
                         pass
             raise
-        self._detach_proc(rollout.rollout_id)
+        self._detach_proc(_attempt_key(rollout))
 
         if snapshot is None:
             _bind_execution_fingerprint(out, self.execution_sha256)
@@ -1688,8 +1689,9 @@ class RolloutRunner:
         )
         return out
 
-    def _trajectory_dir(self, rollout_id: str) -> str:
-        return str(Path(self.artifacts_dir) / "_percepteye" / rollout_id)
+    def _trajectory_dir(self, key: str) -> str:
+        """Where one claimed attempt runs: ``_percepteye/<attempt key>``."""
+        return str(Path(self.artifacts_dir) / "_percepteye" / key)
 
     def _run_in_subprocess(
         self, rollout: RolloutRequest, *, trajectory_dir: str, timeout_s: float,
@@ -1744,14 +1746,14 @@ class RolloutRunner:
             # and the lesson was never carried across.
             start_new_session=(os.name != "nt"),
         )
-        self._attach_proc(rollout.rollout_id, proc)
+        self._attach_proc(_attempt_key(rollout), proc)
         try:
             stdout, stderr, timed_out, drained = _run_child_to_result(
                 proc, json.dumps(payload), timeout_s=timeout_s + 15.0,
                 grace_s=teardown_s,
             )
         finally:
-            self._detach_proc(rollout.rollout_id)
+            self._detach_proc(_attempt_key(rollout))
 
         # EVERY exit attaches the trajectory: the tool calls the agent made
         # before it timed out, crashed or lost its lease are the evidence of
@@ -1774,7 +1776,7 @@ class RolloutRunner:
                        f"group still held the pipes")
                 ),
             ))
-        if self._lease_lost(rollout.rollout_id):
+        if self._lease_lost(_attempt_key(rollout)):
             # Killed by the heartbeat thread. Not the agent's failure, and not
             # ours to hand back: the lease is already gone, so there is nothing
             # left to abandon.
@@ -1804,21 +1806,21 @@ class RolloutRunner:
         return _finalise(out)
 
     # ── leases ─────────────────────────────────────────────────────────────
-    def _attach_proc(self, rollout_id: str, proc: subprocess.Popen[str]) -> None:
+    def _attach_proc(self, key: str, proc: subprocess.Popen[str]) -> None:
         with self._inflight_lock:
-            entry = self._inflight.get(rollout_id)
+            entry = self._inflight.get(key)
             if entry is not None:
                 entry.proc = proc
 
-    def _detach_proc(self, rollout_id: str) -> None:
+    def _detach_proc(self, key: str) -> None:
         with self._inflight_lock:
-            entry = self._inflight.get(rollout_id)
+            entry = self._inflight.get(key)
             if entry is not None:
                 entry.proc = None
 
-    def _lease_lost(self, rollout_id: str) -> bool:
+    def _lease_lost(self, key: str) -> bool:
         with self._inflight_lock:
-            entry = self._inflight.get(rollout_id)
+            entry = self._inflight.get(key)
             return bool(entry and entry.lease_lost)
 
     def _beat_interval_for(self, rollout: RolloutRequest) -> float:
@@ -2052,7 +2054,7 @@ class RolloutRunner:
                     with self._inflight_lock:
                         for r in rollouts:
                             _interval = self._beat_interval_for(r)
-                            self._inflight[r.rollout_id] = _InFlight(
+                            self._inflight[_attempt_key(r)] = _InFlight(
                                 r, _interval, now + _interval
                             )
                     # _serve_one really does not raise now — it has the
@@ -2088,6 +2090,9 @@ class RolloutRunner:
         lease. A comment is not a mechanism; this is.
         """
         self._emit("rollout_start", {"rollout_id": rollout.rollout_id})
+        key = _attempt_key(rollout)
+        with self._inflight_lock:
+            mine = self._inflight.get(key)
         delivered = False
         try:
             delivered = self._serve_one_inner(rollout)
@@ -2108,7 +2113,7 @@ class RolloutRunner:
                         exclusion_reason="flywheel_crash",
                         exclusion_detail=f"{type(exc).__name__}: {exc}",
                     ),
-                    lease_lost=self._lease_lost(rollout.rollout_id),
+                    lease_lost=self._lease_lost(key),
                 )
                 return delivered
             except Exception:
@@ -2120,8 +2125,12 @@ class RolloutRunner:
                 )
                 return False
         finally:
+            # ITS OWN entry only, compared by identity: the key already
+            # separates attempts, and this also holds for a server that issues
+            # no lease token, where two attempts share the bare id.
             with self._inflight_lock:
-                self._inflight.pop(rollout.rollout_id, None)
+                if self._inflight.get(key) is mine:
+                    self._inflight.pop(key, None)
             # DELIVERED, not "no longer in the retry set". The trajectory is
             # the only local copy of this rollout's evidence -- the artifacts
             # too big or too binary to travel inside the report exist nowhere
@@ -2131,7 +2140,7 @@ class RolloutRunner:
             # permanently refused rollout kept its result and lost the evidence
             # behind it, in the one case an operator has to reconstruct by hand.
             if delivered:
-                self._purge_trajectory(rollout.rollout_id)
+                self._purge_trajectory(key)
 
     def _serve_one_inner(self, rollout: RolloutRequest) -> bool:
         try:
@@ -2161,8 +2170,8 @@ class RolloutRunner:
                     exclusion_reason="flywheel_crash",
                     exclusion_detail=detail,
                 )
-        lease_lost = self._lease_lost(rollout.rollout_id)
-        deadline = time.time() + self._delivery_budget_for(rollout.rollout_id)
+        lease_lost = self._lease_lost(_attempt_key(rollout))
+        deadline = time.time() + self._delivery_budget_for(_attempt_key(rollout))
         try:
             # Evidence FIRST, whatever the outcome. An agent that exhausted its
             # turn or time budget still wrote files, and for a coding/REPL agent
@@ -2261,8 +2270,9 @@ class RolloutRunner:
         is the safe direction. That costs an ordinary rollout nothing, because
         a result that DOES land is removed from the outbox on the spot.
         """
+        key = _attempt_key(rollout)
         if deadline is None:
-            deadline = time.time() + self._delivery_budget_for(rollout.rollout_id)
+            deadline = time.time() + self._delivery_budget_for(key)
         # IN MEMORY, NEVER ON DISK. The lease token is a bearer credential --
         # it authorises reporting and abandoning this rollout -- and the outbox
         # lives under ``artifacts_dir``, one level up from the working
@@ -2277,10 +2287,13 @@ class RolloutRunner:
         # memory loses nothing that was real and ends the disclosure.
         if rollout.lease_token:
             with self._outbox_lock:
-                self._lease_tokens[rollout.rollout_id] = rollout.lease_token
+                self._lease_tokens[key] = rollout.lease_token
         record = {
             "schema": _OUTBOX_SCHEMA,
             "rollout_id": rollout.rollout_id,
+            # Which claim this result belongs to (a digest of its lease, never
+            # the token) -- see ``_attempt_key``.
+            "attempt_key": key,
             "deadline_ts": float(rollout.deadline_ts),
             "lease_lost": bool(lease_lost),
             "first_seen_ts": time.time(),
@@ -2288,7 +2301,7 @@ class RolloutRunner:
             "last_error": None,
             "result": _wire_payload(out),
         }
-        path = self._spool_path(rollout.rollout_id)
+        path = self._spool_path(key)
         try:
             self._spool_write(path, record)
         except OSError as exc:
@@ -2313,6 +2326,7 @@ class RolloutRunner:
         cannot take a route the first attempt did not.
         """
         rollout_id = str(record.get("rollout_id") or "")
+        key = _record_key(record)
         try:
             # REBUILT BEFORE ANYTHING ELSE, and inside the try. ``_read_spool``
             # checks the envelope -- schema, rollout id, result-is-a-dict -- and
@@ -2325,7 +2339,7 @@ class RolloutRunner:
             # settled record, not a fatal one.
             deadline_ts = float(record.get("deadline_ts") or 0.0)
             rollout = _spooled_rollout(
-                record, lease_token=self._remembered_lease_token(rollout_id)
+                record, lease_token=self._remembered_lease_token(key)
             )
             out = _output_from_wire(dict(record.get("result") or {}))
         except Exception as exc:
@@ -2408,7 +2422,7 @@ class RolloutRunner:
                 f"the control plane refused rollout {rollout_id}'s result: "
                 f"{exc}. The row is lost and will be swept, but the result "
                 f"itself is kept at {kept} and this rollout's evidence at "
-                f"{self._trajectory_dir(rollout_id)}.",
+                f"{self._trajectory_dir(key)}.",
                 RuntimeWarning, stacklevel=2,
             )
             return False
@@ -2445,7 +2459,7 @@ class RolloutRunner:
                         f"Resending the same result cannot change that, so it "
                         f"will not be retried. The result is kept at {kept} "
                         f"and this rollout's evidence at "
-                        f"{self._trajectory_dir(rollout_id)}."
+                        f"{self._trajectory_dir(key)}."
                         if retire else
                         f"The result is held in {kept} and will be resent once "
                         f"the cause is fixed."
@@ -2508,8 +2522,9 @@ class RolloutRunner:
         slug = _fs_slug(agent) if isinstance(agent, str) and agent else "agent"
         return Path(self.artifacts_dir) / "_percepteye" / "_outbox" / slug
 
-    def _spool_path(self, rollout_id: str) -> Path:
-        return self._outbox_dir() / f"{_fs_slug(rollout_id)}.json"
+    def _spool_path(self, key: str) -> Path:
+        """One file per claimed ATTEMPT (see ``_attempt_key``)."""
+        return self._outbox_dir() / f"{_fs_slug(key)}.json"
 
     def _spool_write(self, path: Path, record: Mapping[str, Any]) -> None:
         """Write atomically: a half-written result is worse than none.
@@ -2517,7 +2532,7 @@ class RolloutRunner:
         NO BEARER CREDENTIAL REACHES THIS FILE, which is the part that had to
         be a mechanism rather than a file mode. The outbox sits under
         ``artifacts_dir`` at ``_percepteye/_outbox/<agent>/``, and the child is
-        handed ``artifacts_dir/_percepteye/<rollout_id>`` as its cwd -- so this
+        handed ``artifacts_dir/_percepteye/<attempt key>`` as its cwd -- so this
         directory is ``../_outbox`` from a shell the customer's UNTRUSTED agent
         controls, running as this same uid. A lease token written here was
         readable by the agent it fences out, and travelled into any bundle that
@@ -2548,7 +2563,7 @@ class RolloutRunner:
                 pass
             os.replace(tmp, path)
 
-    def _remembered_lease_token(self, rollout_id: str) -> str | None:
+    def _remembered_lease_token(self, key: str) -> str | None:
         """This process's copy of a rollout's lease token, if it still has one.
 
         ``None`` for anything spooled by an EARLIER process, which is correct
@@ -2558,7 +2573,7 @@ class RolloutRunner:
         the refusal is recorded honestly.
         """
         with self._outbox_lock:
-            return self._lease_tokens.get(rollout_id)
+            return self._lease_tokens.get(key)
 
     def _settle(
         self, path: Path, record: Mapping[str, Any], *,
@@ -2579,10 +2594,10 @@ class RolloutRunner:
         Returns where the record lives now (the original path when a rename was
         not possible, so a warning quoting it still points at something real).
         """
-        rollout_id = str(record.get("rollout_id") or "")
+        key = _record_key(record)
         if delivered:
             with self._outbox_lock:
-                self._lease_tokens.pop(rollout_id, None)
+                self._lease_tokens.pop(key, None)
                 try:
                     path.unlink()
                 except OSError:  # FileNotFoundError included: already gone
@@ -2597,7 +2612,7 @@ class RolloutRunner:
         with self._outbox_lock:
             # The rollout is over for this SDK either way, and holding its
             # capability past that is exactly the exposure this file avoids.
-            self._lease_tokens.pop(rollout_id, None)
+            self._lease_tokens.pop(key, None)
         return _move_aside(path, retire)
 
     def _drain_outbox(self) -> int:
@@ -2646,7 +2661,11 @@ class RolloutRunner:
             return 0
         rollout_id = str(record.get("rollout_id") or "")
         with self._inflight_lock:
-            if rollout_id in self._inflight:
+            # ANY attempt of this rollout still running, not only the one that
+            # spooled this record: a result from an earlier attempt landing
+            # while a later one runs would race the live holder.
+            if any(e.rollout.rollout_id == rollout_id
+                   for e in self._inflight.values()):
                 return 0
         age = time.time() - float(record.get("first_seen_ts") or 0.0)
         if age > _OUTBOX_MAX_AGE_S:
@@ -2670,7 +2689,7 @@ class RolloutRunner:
             # predicate for a result the control plane accepted and a result it
             # refused forever, and the refused one is precisely where the local
             # evidence is the last copy there is.
-            self._purge_trajectory(rollout_id)
+            self._purge_trajectory(_record_key(record))
         return delivered
 
     def _collect_artifacts(
@@ -2701,7 +2720,7 @@ class RolloutRunner:
         # about through PERCEPTEYE_TRAJECTORY_DIR and can therefore actually write
         # to. ``rollout.artifacts_dir`` is the SERVER's name for this rollout's
         # storage ("rollouts/rl_x") and is not a path on this machine.
-        root = Path(self._trajectory_dir(rollout.rollout_id))
+        root = Path(self._trajectory_dir(_attempt_key(rollout)))
         if not root.is_dir():
             return
         inline_budget = MAX_INLINE_TOTAL_BYTES
@@ -2763,14 +2782,14 @@ class RolloutRunner:
             else:
                 out.artifacts[name] = digest
 
-    def _purge_trajectory(self, rollout_id: str) -> None:
+    def _purge_trajectory(self, key: str) -> None:
         """Drop this rollout's trajectory directory once it is no longer needed.
 
         One directory per rollout accumulated for the life of the process, so a
         flywheel serving continuously grew its artifacts tree without bound.
         """
         try:
-            shutil.rmtree(Path(self._trajectory_dir(rollout_id)), ignore_errors=True)
+            shutil.rmtree(Path(self._trajectory_dir(key)), ignore_errors=True)
         except OSError:  # pragma: no cover - best effort, never fails a rollout
             pass
 
@@ -2808,6 +2827,36 @@ def _fs_slug(value: str) -> str:
     """A filename that cannot escape the outbox directory."""
     safe = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in value)
     return (safe.strip("._") or "unnamed")[:120]
+
+
+def _attempt_key(rollout: RolloutRequest) -> str:
+    """The key for ONE claim of a rollout: its id plus a digest of its lease.
+
+    NOT the bare rollout id. A lapsed lease re-queues the SAME id with a new
+    lease token, so this process can claim an id it is still running (Mission
+    Control, 2026-11-20: 5 of 80). Keyed by id, attempt 1's ``finally`` popped
+    attempt 2's in-flight entry -- ending its heartbeats -- and rmtree'd the
+    trajectory directory attempt 2 was running in, and the two shared one
+    spool file and one remembered lease token. Every per-attempt map, file and
+    directory is keyed by this instead.
+
+    A digest, never the token: the key names a directory the agent runs in
+    and a file under the artifacts tree, and the token is a bearer credential.
+    A rollout claimed without a token (an older server) falls back to its id.
+    """
+    token = rollout.lease_token
+    if not token:
+        return rollout.rollout_id
+    digest = hashlib.sha256(str(token).encode("utf-8")).hexdigest()[:12]
+    return f"{rollout.rollout_id}.{digest}"
+
+
+def _record_key(record: Mapping[str, Any]) -> str:
+    """The attempt key a spooled record was written under (its id, for a
+    record spooled before attempts were keyed)."""
+    key = record.get("attempt_key")
+    return str(key) if isinstance(key, str) and key else str(
+        record.get("rollout_id") or "")
 
 
 _EVIDENCE_PARTS = (
