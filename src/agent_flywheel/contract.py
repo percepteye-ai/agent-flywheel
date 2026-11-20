@@ -16,6 +16,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from typing import Any, Literal
+from urllib.parse import quote
 
 #: The one vocabulary a refusal names a value's type in, shared with
 #: ``describe=`` and with the Node SDK's ``jsonType`` -- ``got null``, never
@@ -59,17 +60,47 @@ _PRODUCTION_TURN_BATCH_MAX_ITEMS = 64
 #: Leading/trailing whitespace and C0/C1 controls are forbidden; internal
 #: spacing and non-ASCII customer identifiers otherwise remain opaque.
 #: These strings are asserted verbatim against the published JSON Schema.
+#:
+#: ONE ANSWER IN EVERY REGEX ENGINE THAT READS THEM -- Python's ``re``, the
+#: Node SDK's and a JSON Schema validator's ECMA-262. So no ``.``: ECMA's does
+#: not match U+2028/U+2029 and Python's does, which let ``"a\u2028 "`` and
+#: ``"a\u2028/b"`` through in JavaScript while Python refused them;
+#: ``[\s\S]`` is "any character" in both. And no ``\s``: ECMA's includes
+#: U+FEFF and Python's does not, so the whitespace an id may not start or end
+#: with is spelled out as ECMA's set (:data:`_EDGE_WHITESPACE`).
+_EDGE_WHITESPACE = (
+    r"[\t-\r \u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]"
+)
 _PRODUCTION_IDENTIFIER_PATTERN = (
-    r"^(?!\s)(?!.*\s$)[^\u0000-\u001F\u007F-\u009F]+$"
+    rf"^(?!{_EDGE_WHITESPACE})(?![\s\S]*{_EDGE_WHITESPACE}$)"
+    r"[^\u0000-\u001F\u007F-\u009F]+$"
 )
 _PRODUCTION_TURN_IDENTIFIER_PATTERN = (
-    r"^(?!\.{1,2}$)(?!\s)(?!.*\s$)(?!.*[\\/])"
-    r"[^\u0000-\u001F\u007F-\u009F]+$"
+    rf"^(?!\.{{1,2}}$)(?!{_EDGE_WHITESPACE})(?![\s\S]*{_EDGE_WHITESPACE}$)"
+    r"(?![\s\S]*[\\/])[^\u0000-\u001F\u007F-\u009F]+$"
 )
 _PRODUCTION_AGENT_IDENTIFIER_PATTERN = _PRODUCTION_TURN_IDENTIFIER_PATTERN
 _PRODUCTION_IDENTIFIER_RE = re.compile(_PRODUCTION_IDENTIFIER_PATTERN)
 _PRODUCTION_TURN_IDENTIFIER_RE = re.compile(
     _PRODUCTION_TURN_IDENTIFIER_PATTERN
+)
+#: The schema's ``task_id`` pattern: as much of :func:`_task_identifier`'s
+#: rule as an ECMA-262 pattern can say in every engine. No ASCII space at
+#: either edge, and none of the characters ``str.isprintable`` refuses that a
+#: BMP range can name -- C0/C1 controls, every separator but the space
+#: (U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029, U+202F, U+205F, U+3000),
+#: the format characters (U+00AD, U+0600-U+0605, U+061C, U+06DD, U+070F,
+#: U+180E, U+200B-U+200F, U+202A-U+202E, U+2060-U+206F, U+FEFF,
+#: U+FFF9-U+FFFB), U+0378/U+0379 (unassigned) and the private-use block
+#: U+E000-U+F8FF. What it cannot name (another unassigned code point, an
+#: astral format or private-use character) the predicate still refuses; the
+#: schema's description says so. Every character it refuses is one the
+#: predicate refuses, so a value the SDK sends always matches it.
+_TASK_IDENTIFIER_PATTERN = (
+    r"^(?! )(?![\s\S]* $)"
+    r"[^\u0000-\u001F\u007F-\u00A0\u00AD\u0378\u0379\u0600-\u0605\u061C"
+    r"\u06DD\u070F\u1680\u180E\u2000-\u200F\u2028-\u202F\u205F-\u206F"
+    r"\u3000\uE000-\uF8FF\uFEFF\uFFF9-\uFFFB]+$"
 )
 
 
@@ -116,6 +147,73 @@ def _production_turn_identifier(value: Any) -> str | None:
 def _production_agent_identifier(value: Any) -> str | None:
     """Return an exact wire id safe as the agent URL path segment."""
     return _production_turn_identifier(value)
+
+
+#: The longest id this package puts in a URL path segment.
+_PATH_SEGMENT_MAX_CHARS = 256
+
+
+def _path_segment(value: Any, what: str) -> str:
+    """``value`` as ONE percent-encoded URL path segment, or
+    :class:`ContractViolation` naming why it cannot be one.
+
+    THE ONE GATE for every id this package puts in a request path -- a
+    rollout id (and :meth:`RolloutRequest.from_wire`, where one arrives), an
+    agent id, a hill climb's run id. Refused: a non-string, an empty string,
+    ``.`` and ``..`` (a client or proxy that normalises the path moves the
+    request to a different route), a ``/`` or ``\\`` (a second segment), a
+    control character, a lone surrogate (no UTF-8 spelling), more than
+    :data:`_PATH_SEGMENT_MAX_CHARS` characters. Anything else is kept and
+    quoted with no safe characters, so ``?``, ``#`` and ``%`` stay inside
+    the segment. Deliberately not ``[A-Za-z0-9_-]``: ids from other planes
+    and tests use other characters, and the rule is what makes a path unsafe,
+    not what a platform id happens to look like.
+    """
+    if not isinstance(value, str):
+        raise ContractViolation(
+            f"{what} must be a string, got {_json_type(value)}")
+    if not value:
+        raise ContractViolation(f"{what} must not be empty")
+    if value in (".", ".."):
+        raise ContractViolation(
+            f"{what} {value!r} is a dot segment, not an id")
+    if "/" in value or "\\" in value:
+        raise ContractViolation(
+            f"{what} must not contain a path separator, got {value!r}")
+    if any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in value):
+        raise ContractViolation(
+            f"{what} must not contain a control character, got {value!r}")
+    if not _well_formed_text(value):
+        raise ContractViolation(f"{what} must be well-formed Unicode text")
+    if len(value) > _PATH_SEGMENT_MAX_CHARS:
+        raise ContractViolation(
+            f"{what} must be at most {_PATH_SEGMENT_MAX_CHARS} characters, "
+            f"got {len(value)}")
+    return quote(value, safe="")
+
+
+def _task_identifier(value: Any) -> str | None:
+    """Return ``value`` when it is a task id the control plane accepts, else
+    None.
+
+    THE CONTROL PLANE'S PREDICATE, MIRRORED EXACTLY (Mission Control's
+    ``is_canonical_task_id``): a non-empty string of at most 255 characters,
+    equal to its own ``strip()``, every character ``str.isprintable()``. That
+    refuses what the shared identifier grammar lets through and the intake
+    does not -- U+200B, U+2028, U+00AD, U+FEFF, U+00A0, unassigned and
+    private-use code points -- each of which 422'd the WHOLE turn batch it
+    rode in. The Node SDK applies the same rule; :data:`_TASK_IDENTIFIER_PATTERN`
+    is as much of it as the schema can carry.
+    """
+    if (
+        isinstance(value, str)
+        and value
+        and len(value) <= _PRODUCTION_IDENTIFIER_MAX_CHARS
+        and value == value.strip()
+        and value.isprintable()
+    ):
+        return value
+    return None
 
 
 #: THE closed vocabulary of ``Attachment.report_outcome``: how a production
@@ -404,8 +502,13 @@ ExclusionReason = Literal[
 ]
 
 _VALID_OUTCOMES = ("ok", "failed", "unknown")
-_STATUS_KEYS = ("status_code", "status", "http_status", "code", "statusCode")
-_HTTP_IN_TEXT = re.compile(r"\bHTTP\s*\d{3}\b", re.I)
+#: Compared lowercased, so ``Status``, ``STATUS_CODE`` and ``statusCode``
+#: are all found: a body's own spelling is the server's choice, not ours.
+_STATUS_KEYS = frozenset(
+    ("status_code", "status", "http_status", "code", "statuscode"))
+#: ``HTTP 200``, and the status line's own spelling: ``HTTP/1.1 200``,
+#: ``HTTP/2 200``.
+_HTTP_IN_TEXT = re.compile(r"\bHTTP(?:/\d(?:\.\d)?)?\s*\d{3}\b", re.I)
 
 
 def _scrub_status(output: Any) -> Any:
@@ -417,6 +520,12 @@ def _scrub_status(output: Any) -> Any:
     treat an unobserved call as a landed one. Absence of evidence must not be
     recoverable as evidence of success through a side channel.
 
+    EVERY STRING IS READ THE SAME WAY, wherever it sits: one that parses as a
+    JSON object or array is scrubbed as that body and written back as JSON
+    -- a dict's ``{"body": "{\"status_code\": 200}"}`` included, which used
+    to keep its status -- and any other has its ``HTTP 200`` /
+    ``HTTP/1.1 200`` removed. Status keys are matched case-insensitively.
+
     The human-readable content is preserved -- the trajectory still reads the
     same to a judge, it simply carries no status the scorer can mistake for an
     outcome.
@@ -425,14 +534,14 @@ def _scrub_status(output: Any) -> Any:
         try:
             body = json.loads(output)
         except Exception:
-            return _HTTP_IN_TEXT.sub("", output)
-        scrubbed = _scrub_status(body)
-        return json.dumps(scrubbed) if not isinstance(scrubbed, str) else scrubbed
+            body = None
+        if isinstance(body, (dict, list)):
+            return json.dumps(_scrub_status(body))
+        return _HTTP_IN_TEXT.sub("", output)
     if isinstance(output, dict):
-        out = {k: v for k, v in output.items() if k not in _STATUS_KEYS}
         return {
-            k: (_HTTP_IN_TEXT.sub("", v).strip() if isinstance(v, str) else _scrub_status(v))
-            for k, v in out.items()
+            k: _scrub_status(v) for k, v in output.items()
+            if str(k).lower() not in _STATUS_KEYS
         }
     if isinstance(output, list):
         return [_scrub_status(v) for v in output]
@@ -532,6 +641,20 @@ class ToolCallOutcome:
                         f"ToolCallOutcome.entity_ids[{k!r}] must be a "
                         f"non-empty string, got {v!r}"
                     )
+            # Stored, and so sent, under the field's canonical name: the
+            # check above read ``"ID"`` as ``id``, and the schema's key enum
+            # is lowercase, so ``"ID"`` passed here and failed there. Two
+            # spellings of one field are two claims about it: refused.
+            normalized: dict[str, str] = {}
+            for k, v in self.entity_ids.items():
+                name = str(k).strip().lower()
+                if name in normalized:
+                    raise ContractViolation(
+                        f"ToolCallOutcome.entity_ids names the identity field "
+                        f"{name!r} twice ({k!r} and another spelling)"
+                    )
+                normalized[name] = v
+            object.__setattr__(self, "entity_ids", normalized)
 
         if self.outcome == "unknown":
             # Enforced, not requested. An unknown outcome carrying a 2xx is the
@@ -589,6 +712,15 @@ class RolloutRequest:
 
     @classmethod
     def from_wire(cls, d: dict[str, Any]) -> RolloutRequest:
+        """One claimed rollout as the wire carries it, or
+        :class:`ContractViolation` naming the field at fault -- never another
+        exception type, and nothing coerced: a ``None`` was ``"None"`` and
+        ``true`` was a deadline of ``1.0``. ``rollout_id`` must be one URL
+        path segment (:func:`_path_segment`): it is put in this rollout's
+        request paths and in its directory on disk."""
+        if not isinstance(d, Mapping):
+            raise ContractViolation(
+                f"a rollout must be a JSON object, got {_json_type(d)}")
         missing = [
             k
             for k in ("rollout_id", "turn_input", "llm_url", "api_key",
@@ -603,19 +735,44 @@ class RolloutRequest:
                 "removed: configuration reaches the agent through subprocess "
                 "env at spawn, never by mutating a running process."
             )
+        _path_segment(d["rollout_id"], "RolloutRequest.rollout_id")
+        for name in ("turn_input", "llm_url", "api_key", "artifacts_dir"):
+            if not isinstance(d[name], str):
+                raise ContractViolation(
+                    f"RolloutRequest.{name} must be a string, got "
+                    f"{_json_type(d[name])}")
+        deadline_ts = finite_number(d["deadline_ts"])
+        if deadline_ts is None:
+            raise ContractViolation(
+                "RolloutRequest.deadline_ts must be a finite number, got "
+                f"{_json_type(d['deadline_ts'])}")
+        lease_expires_ts = None
+        if d.get("lease_expires_ts") is not None:
+            lease_expires_ts = finite_number(d["lease_expires_ts"])
+            if lease_expires_ts is None:
+                raise ContractViolation(
+                    "RolloutRequest.lease_expires_ts must be a finite number "
+                    f"or null, got {_json_type(d['lease_expires_ts'])}")
+        lease_token = d.get("lease_token")
+        if lease_token is not None and not isinstance(lease_token, str):
+            raise ContractViolation(
+                "RolloutRequest.lease_token must be a string or null, got "
+                f"{_json_type(lease_token)}")
+        metadata = d.get("metadata")
+        if metadata is not None and not isinstance(metadata, Mapping):
+            raise ContractViolation(
+                "RolloutRequest.metadata must be an object or null, got "
+                f"{_json_type(metadata)}")
         return cls(
-            rollout_id=str(d["rollout_id"]),
-            turn_input=str(d["turn_input"]),
-            llm_url=str(d["llm_url"]),
-            api_key=str(d["api_key"]),
-            artifacts_dir=str(d["artifacts_dir"]),
-            deadline_ts=float(d["deadline_ts"]),
-            lease_expires_ts=(
-                float(d["lease_expires_ts"])
-                if d.get("lease_expires_ts") is not None else None
-            ),
-            lease_token=d.get("lease_token"),
-            metadata=dict(d.get("metadata") or {}),
+            rollout_id=d["rollout_id"],
+            turn_input=d["turn_input"],
+            llm_url=d["llm_url"],
+            api_key=d["api_key"],
+            artifacts_dir=d["artifacts_dir"],
+            deadline_ts=deadline_ts,
+            lease_expires_ts=lease_expires_ts,
+            lease_token=lease_token,
+            metadata=dict(metadata or {}),
         )
 
     def seconds_remaining(self, now: float) -> float:
@@ -856,6 +1013,14 @@ class RolloutOutput:
         ):
             raise ContractViolation(
                 "llm_call_count must be a nonnegative integer or None"
+            )
+        # A bool is not a reward and NaN/infinity are not JSON: the first
+        # trained as 1.0/0.0, the second was refused by the control plane as
+        # the whole report.
+        if self.reward is not None and finite_number(self.reward) is None:
+            raise ContractViolation(
+                f"reward must be a finite number or None, got "
+                f"{self.reward!r}"
             )
         d: dict[str, Any] = {
             "final_text": self.final_text,

@@ -314,9 +314,9 @@ def _client(handler, **kw) -> ControlPlaneClient:
 
 
 def test_an_ambiguous_failure_is_not_replayed_when_the_route_is_not_replayable():
-    """The control plane does not honour Idempotency-Key on claim, so a resend
-    after a READ timeout -- where the server may already have leased a batch --
-    leases a second one that nobody holds."""
+    """On a route with a side effect and no replay protection, a resend after
+    a READ timeout -- where the server may already have acted -- acts twice.
+    (Claim is NOT such a route: see the claim tests below.)"""
     attempts = {"n": 0}
 
     def handler(request):
@@ -325,7 +325,7 @@ def test_an_ambiguous_failure_is_not_replayed_when_the_route_is_not_replayable()
 
     with pytest.raises(TransportError):
         _client(handler).request(
-            "POST", "/rollouts/claim", json_body={}, retry_if_ambiguous=False
+            "POST", "/side-effect", json_body={}, retry_if_ambiguous=False
         )
 
     assert attempts["n"] == 1, "resent a claim that may have been processed"
@@ -342,14 +342,15 @@ def test_a_failure_that_never_reached_the_server_is_still_retried():
 
     with pytest.raises(TransportError):
         _client(handler, max_attempts=3).request(
-            "POST", "/rollouts/claim", json_body={}, retry_if_ambiguous=False
+            "POST", "/side-effect", json_body={}, retry_if_ambiguous=False
         )
 
     assert attempts["n"] == 3
 
 
 def test_a_5xx_is_not_replayed_on_a_non_replayable_route():
-    """The server may well have committed the lease before failing to answer."""
+    """The server may well have committed its side effect before failing to
+    answer."""
     attempts = {"n": 0}
 
     def handler(request):
@@ -358,28 +359,52 @@ def test_a_5xx_is_not_replayed_on_a_non_replayable_route():
 
     with pytest.raises(TransportError, match="503"):
         _client(handler).request(
-            "POST", "/rollouts/claim", json_body={}, retry_if_ambiguous=False
+            "POST", "/side-effect", json_body={}, retry_if_ambiguous=False
         )
 
     assert attempts["n"] == 1
 
 
-def test_the_claim_call_site_actually_asks_for_the_narrow_retry():
-    """Guards the CALL SITE, not just the capability. The client can support
-    narrow retries and claim can still forget to ask for them."""
+def test_a_claim_that_may_have_landed_is_resent_under_its_own_key():
+    """The control plane answers a claim resent under the same
+    Idempotency-Key with the batch it already leased. So a read timeout -- the claim may have
+    leased work -- is retried, under the SAME key, and the batch reaches
+    this worker instead of sitting unheld until its leases lapse. Guards the
+    CALL SITE: the client can retry, and claim must ask it to."""
     from agent_flywheel.transport import AttachTransport
 
-    attempts = {"n": 0}
+    keys: list[str] = []
 
     def handler(request):
-        attempts["n"] += 1
-        raise httpx.ReadTimeout("timed out reading", request=request)
+        keys.append(request.headers.get("Idempotency-Key"))
+        if len(keys) == 1:
+            raise httpx.ReadTimeout("timed out reading", request=request)
+        return httpx.Response(200, json={"rollouts": [{
+            "rollout_id": "rl_1", "turn_input": "x", "llm_url": "http://g",
+            "api_key": "k", "artifacts_dir": "rollouts/rl_1",
+            "deadline_ts": 1.0, "lease_token": "lt"}], "poll_after_ms": 1000})
 
     tr = AttachTransport(_client(handler), "agent-1")
-    with pytest.raises(TransportError):
-        tr.claim(4)
+    rollouts, _ = tr.claim(4)
 
-    assert attempts["n"] == 1, "claim replayed a request that may have leased work"
+    assert [r.rollout_id for r in rollouts] == ["rl_1"]
+    assert len(keys) == 2 and keys[0] and keys[0] == keys[1], keys
+
+
+def test_each_claim_has_a_key_of_its_own():
+    """A NEW claim must never replay the last one's batch."""
+    from agent_flywheel.transport import AttachTransport
+
+    keys: list[str] = []
+
+    def handler(request):
+        keys.append(request.headers.get("Idempotency-Key"))
+        return httpx.Response(200, json={"rollouts": [], "poll_after_ms": 1})
+
+    tr = AttachTransport(_client(handler), "agent-1")
+    tr.claim(1)
+    tr.claim(1)
+    assert len(set(keys)) == 2
 
 
 def test_a_429_is_still_retried_because_nothing_was_leased():
@@ -392,7 +417,7 @@ def test_a_429_is_still_retried_because_nothing_was_leased():
         return httpx.Response(200, json={"rollouts": [], "poll_after_ms": 1000})
 
     body = _client(handler).request(
-        "POST", "/rollouts/claim", json_body={}, retry_if_ambiguous=False
+        "POST", "/side-effect", json_body={}, retry_if_ambiguous=False
     )
 
     assert attempts["n"] == 3

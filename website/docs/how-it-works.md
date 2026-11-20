@@ -178,7 +178,7 @@ POST /rollouts/claim
 
 An empty queue answers **200 with an empty list and a server-chosen `poll_after_ms`** — never a bare 204, which carries no backoff information and leaves the client to invent a fixed sleep.
 
-**A claim is not replayable.** The control plane does not honor `Idempotency-Key` on this route, so resending one that may already have been processed would lease a *second* batch while the first is held by nobody. Only a failure that provably never reached the server (`ConnectError`, `ConnectTimeout`) is retried.
+**A claim is safely replayable.** Each claim carries its own `Idempotency-Key`, kept across the client's retries, and the control plane answers a resend under that key with the batch it already leased rather than leasing a second one. So a failure after the request may have landed (a read timeout, a dropped connection, a 5xx) is retried like any other, and the batch reaches the worker instead of sitting unheld until its leases lapse.
 
 Two events separate the two ways a claim can return nothing. Without an `on_event` callback they are indistinguishable, and that is the answer to "how do I know it's working":
 

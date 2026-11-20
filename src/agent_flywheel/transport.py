@@ -37,6 +37,7 @@ from .contract import (
     RolloutRequest,
     RulebookReceipt,
     RulebookRequest,
+    _path_segment,
     _production_agent_identifier,
     _production_identifier,
     _production_turn_identifier,
@@ -317,8 +318,10 @@ class AttachTransport:
         if not isinstance(request, RulebookRequest):
             request = RulebookRequest(request)
         body = request.to_wire()
-        agent = quote(self.agent_id, safe="-._~")
         try:
+            # Inside the try: an agent id that cannot be a path segment is
+            # named as why there is no receipt, like any other cause.
+            agent = _path_segment(self.agent_id, "agent_id")
             reply = self._c.request(
                 "POST",
                 f"/agents/{agent}/rulebook",
@@ -405,14 +408,19 @@ class AttachTransport:
             "POST",
             "/rollouts/claim",
             json_body=claim_body,
+            # ONE key per claim, kept across the client's retries (``_http``
+            # sets the header once, before its attempt loop).
             idempotency_key=str(uuid.uuid4()),
             timeout=(self.wait_ms / 1000.0) + 10.0,
-            # Claiming is NOT replayable. The control plane does not honour
-            # Idempotency-Key on this route, so resending a claim that may
-            # already have been processed leases a SECOND batch while the first
-            # is held by nobody -- those rollouts then sit until their leases
-            # lapse. Only a failure that never reached the server is retried.
-            retry_if_ambiguous=False,
+            # Claiming IS replayable under that key. The control plane keys a
+            # claim on Idempotency-Key and answers a resend with the batch it
+            # already leased (``RolloutRepository.claim``), re-issuing the
+            # inference credential, rather than leasing a second batch. So a
+            # failure after the request may have landed -- a read timeout, a
+            # dropped connection, a 502 -- is retried like any other, and the
+            # first batch reaches this worker instead of sitting unheld until
+            # its leases lapse.
+            retry_if_ambiguous=True,
         )
         raw = body.get("rollouts") or []
         poll_after = int(body.get("poll_after_ms") or 1000)
@@ -442,7 +450,8 @@ class AttachTransport:
         )
         return self._c.request(
             "POST",
-            f"/rollouts/{rollout.rollout_id}/result",
+            f"/rollouts/{_path_segment(rollout.rollout_id, 'rollout_id')}"
+            "/result",
             json_body=output.to_wire(),
             # The server keys on (rollout_id, attempt); an identical replay is
             # acknowledged as a duplicate rather than double-counted.
@@ -489,7 +498,7 @@ class AttachTransport:
             return {}
         try:
             body = self._c.request(
-                "GET", f"/agents/{quote(agent_id, safe='')}/capture")
+                "GET", f"/agents/{_path_segment(agent_id, 'agent_id')}/capture")
         except TransportError as exc:
             status = exc.status_code
             if status in CAPTURE_READ_REFUSALS:
@@ -545,9 +554,11 @@ class AttachTransport:
                 raise ContractViolation(
                     f"production turn {index} has an invalid conversation_id"
                 )
+            # An explicit ``"task_id": None`` is refused too: the wire says
+            # "no task id" by omitting the key, and the intake refuses a null.
             if (
                 "task_id" in turn
-                and _normalize_task_id(turn.get("task_id")) != turn.get("task_id")
+                and _normalize_task_id(turn["task_id"]) is None
             ):
                 raise ContractViolation(
                     f"production turn {index} has an invalid task_id"
@@ -648,7 +659,8 @@ class AttachTransport:
         """
         self._c.request(
             "POST",
-            f"/rollouts/{rollout.rollout_id}/abandon",
+            f"/rollouts/{_path_segment(rollout.rollout_id, 'rollout_id')}"
+            "/abandon",
             json_body={
                 "lease_token": rollout.lease_token,
                 "reason": reason,

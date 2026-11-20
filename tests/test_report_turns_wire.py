@@ -30,6 +30,7 @@ from agent_flywheel.contract import (
     _PRODUCTION_IDENTIFIER_PATTERN,
     _PRODUCTION_TURN_BATCH_MAX_ITEMS,
     _PRODUCTION_TURN_IDENTIFIER_PATTERN,
+    _TASK_IDENTIFIER_PATTERN,
 )
 from agent_flywheel.errors import ContractViolation
 from agent_flywheel.transport import AttachTransport
@@ -110,7 +111,7 @@ def test_the_published_schema_declares_the_exact_turn_upload_shape():
         _PRODUCTION_TURN_IDENTIFIER_PATTERN
     )
     assert turn["properties"]["task_id"]["pattern"] == (
-        _PRODUCTION_IDENTIFIER_PATTERN
+        _TASK_IDENTIFIER_PATTERN
     )
     assert turn["properties"]["conversation_id"]["pattern"] == (
         _PRODUCTION_IDENTIFIER_PATTERN

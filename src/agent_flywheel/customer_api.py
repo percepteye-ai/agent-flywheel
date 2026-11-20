@@ -1,4 +1,4 @@
-"""Reads of the customer-automation API (customer contract 1.51.0).
+"""Reads of the customer-automation API (customer contract 1.54.0).
 
 The rest of this package speaks the agent contract (``flywheel/1``) under
 ``/api/flywheel/v1`` with an agent's ``pefw_`` key. The runs list, training
@@ -32,11 +32,12 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from typing import Any
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
 from ._version import __version__
+from .contract import _path_segment
 from .control_plane import resolve_control_plane_url
 from .errors import ConfigurationError
 
@@ -56,7 +57,7 @@ __all__ = [
 ]
 
 #: The customer contract this client was written against.
-CUSTOMER_CONTRACT_VERSION = "1.51.0"
+CUSTOMER_CONTRACT_VERSION = "1.54.0"
 _MAJOR = CUSTOMER_CONTRACT_VERSION.split(".", 1)[0]
 
 #: Where the customer-automation key is read from when none is passed.
@@ -125,7 +126,14 @@ CYBER_REFUSAL_CODES = (
 #: evidence); a pool that cannot train the objective (1.46.0); a chosen model
 #: that cannot be trained (1.49.0); a base model named by no usable id, a
 #: destination that cannot train the algorithm, a checkpoint another
-#: organization's runs produced (1.51.0, raised before it published them).
+#: organization's runs produced (1.51.0, raised before it published them); a
+#: hill climb started from a model the organization already trained that it
+#: cannot start from (``hillclimb_start_invalid``, 422) or whose merge into
+#: the base failed (``base_merge_failed``, 502, the platform's) (1.52.0); a
+#: ruling on the reward plan's Decision -- what decides whether a training
+#: attempt succeeded -- by anyone but an org admin
+#: (``authority_ruling_requires_org_admin``, 403; the Decision keeps
+#: waiting) (1.54.0).
 TRAINING_REFUSAL_CODES = (
     "opsd_prompts_exceed_host",
     "opsd_recipe_tokenizer_hub_unavailable",
@@ -140,6 +148,9 @@ TRAINING_REFUSAL_CODES = (
     "base_model_unresolvable",
     "destination_algorithm_unsupported",
     "provider_checkpoint_not_owned",
+    "hillclimb_start_invalid",
+    "base_merge_failed",
+    "authority_ruling_requires_org_admin",
 )
 #: Why a round with your agent is refused before anything is spent (1.51.0;
 #: Mission Control raised each before it published them): its "Allow practice
@@ -318,7 +329,12 @@ class CustomerApiClient:
         trains (``base_model``, 1.43.0), its trainer (``algorithm``, 1.46.0)
         and the run it belongs to (``owner_run_id``, 1.47.0; ``None`` for a run
         the customer started): one row per run the customer started, the rest
-        folded under it. A server older than those versions omits the fields.
+        folded under it. 1.53.0 adds ``latest_activity_at``,
+        ``latest_status`` and ``attempts`` (the runs a top-level run
+        continued through), ``best_measured`` (the best held-out measurement
+        across them, with its baseline) and ``measured`` (the run's own
+        newest held-out result), each ``None`` where it does not apply. A
+        server older than those versions omits the fields.
         Paging past the server's depth is refused ``run_page_too_deep``: use
         ``started_before``."""
         return self._get("/runs", _params(
@@ -394,5 +410,9 @@ class CustomerApiClient:
         (1.45.0) are unpaired, ungated arms. Each is ``None`` (``checkpoints``
         ``[]``) on a run that did not choose cyber, and absent on an older
         server. A run that is not a hill climb of this organization is
-        refused 404 ``hillclimb_not_found``."""
-        return self._get(f"/hillclimbs/{quote(str(run_id), safe='')}/security", {})
+        refused 404 ``hillclimb_not_found``. A ``run_id`` that cannot be one
+        URL path segment (``..``, a ``/``, a control character, not a
+        string) raises :class:`~agent_flywheel.errors.ContractViolation`
+        before anything is sent."""
+        return self._get(
+            f"/hillclimbs/{_path_segment(run_id, 'run_id')}/security", {})
