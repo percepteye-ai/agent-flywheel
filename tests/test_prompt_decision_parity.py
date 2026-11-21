@@ -146,6 +146,39 @@ CASES: dict[str, object] = {
         "text": "t", "status": "approved", "sha256": f" {_SHA}",
         "model_prompt_checksum": f"{_SHA} ",
     },
+    # ── the tool descriptions approved with the text (contract B) ────────
+    # Set only when the decision APPLIES, in name order, and whole or not
+    # at all: a malformed overlay is none, the agent's own descriptions
+    # stand, and the text still applies.
+    "approved with tool descriptions": {
+        "text": "t", "status": "approved", "tool_descriptions": {
+            "refund": "Refund only after lookup.", "lookup": "Look it up."},
+    },
+    "tool descriptions on a refused bundle are not handed out": {
+        "text": "t", "status": "draft",
+        "tool_descriptions": {"lookup": "Look it up."},
+    },
+    "tool descriptions that are not an object": {
+        "text": "t", "status": "approved", "tool_descriptions": ["lookup"],
+    },
+    "an empty tool-description overlay": {
+        "text": "t", "status": "approved", "tool_descriptions": {},
+    },
+    "one blank description voids the overlay": {
+        "text": "t", "status": "approved",
+        "tool_descriptions": {"lookup": "Look it up.", "refund": "  "},
+    },
+    "a non-string description voids the overlay": {
+        "text": "t", "status": "approved",
+        "tool_descriptions": {"lookup": 7},
+    },
+    "a description over the bound voids the overlay": {
+        "text": "t", "status": "approved",
+        "tool_descriptions": {"lookup": "x" * 8193},
+    },
+    "tool descriptions are null": {
+        "text": "t", "status": "approved", "tool_descriptions": None,
+    },
 }
 
 
@@ -232,7 +265,8 @@ from agent_flywheel.prompt import (  # noqa: E402
     refreshed_prompt,
 )
 
-_APPLIED = {"apply": True, "text": "OLD", "checksum": _SHA, "reason": ""}
+_APPLIED = {"apply": True, "text": "OLD", "checksum": _SHA, "reason": "",
+            "tool_descriptions": None}
 _PENDING = dataclasses.asdict(PENDING_PROMPT)
 _NEW = {"text": "NEW", "status": "approved", "sha256": _OTHER,
         "model_prompt_checksum": _OTHER, "generation": "g2"}
@@ -341,3 +375,16 @@ def test_the_refresh_table_reaches_every_outcome():
                and not o["decision"]["apply"] and o["decision"]["text"] is None
                and o["generation"] == "w1"
                for o in outs.values())
+
+
+def test_the_tool_description_table_is_not_vacuous(node_answers):
+    """Mutation: drop ``tool_descriptions`` from the applying answer on
+    either side -- red here or in the field-for-field comparison."""
+    applied = node_answers["approved with tool descriptions"]
+    assert applied["apply"] is True
+    assert applied["tool_descriptions"] == {
+        "lookup": "Look it up.", "refund": "Refund only after lookup."}
+    assert list(applied["tool_descriptions"]) == ["lookup", "refund"]
+    for name in ("tool descriptions on a refused bundle are not handed out",
+                 "one blank description voids the overlay"):
+        assert node_answers[name]["tool_descriptions"] is None

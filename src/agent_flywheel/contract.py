@@ -409,13 +409,25 @@ def turn_feedback(wire: Any) -> dict[str, Any]:
     """One per-turn feedback report exactly as the wire carries it, or
     :class:`InvalidFeedback` naming what is wrong.
 
+    It names ONE turn: an episode's ``episode_id`` and ``turn_index``, or a
+    production turn's ``turn_id`` (then ``{feedback_id, turn_id, signal,
+    occurred_at}``, :func:`turn_feedback_on_a_span`'s rules).
+
     THE one validator, as :func:`production_outcome` is for outcomes:
     ``Attachment.report_turn_feedback`` builds its record through it and
     ``AttachTransport.report_turn_feedback`` passes every report through it
     again before a batch leaves. The Node SDK's ``turnFeedback`` applies the
     same rules with the same messages.
     """
-    signal = _feedback_head(wire, _FEEDBACK_WIRE_KEYS)
+    signal = _feedback_head(wire, _FEEDBACK_WIRE_KEYS + ("turn_id",))
+    if wire.get("turn_id") is not None:
+        # A PRODUCTION TURN, named by its own id in place of an episode and
+        # a position (design 2026-11-21, contract A).
+        if wire.get("episode_id") is not None \
+                or wire.get("turn_index") is not None:
+            raise InvalidFeedback(_NAMES_ONE_TURN)
+        return turn_feedback_on_a_span(
+            {k: wire[k] for k in _SPAN_FEEDBACK_KEYS if k in wire})
     if _production_identifier(wire.get("episode_id")) is None:
         raise InvalidFeedback("episode_id is not a valid identifier")
     turn_index = _json_whole_number(wire.get("turn_index"))
@@ -434,9 +446,14 @@ def turn_feedback(wire: Any) -> dict[str, Any]:
 
 
 #: What feedback on a PRODUCTION TURN carries: the turn's own id in place of
-#: an episode and a position. It is not sent to ``POST /turn-feedback``
-#: (whose turns are an episode's); it is an event on that turn's trace.
+#: an episode and a position. Sent to ``POST /turn-feedback`` (which takes
+#: either), and recorded as an event on that turn's trace.
 _SPAN_FEEDBACK_KEYS = ("feedback_id", "turn_id", "signal", "occurred_at")
+
+#: A report that names its turn both ways.
+_NAMES_ONE_TURN = (
+    "feedback names one turn: a production turn's turn_id, or an episode's "
+    "episode_id and turn_index, not both")
 
 
 def turn_feedback_on_a_span(wire: Any) -> dict[str, Any]:

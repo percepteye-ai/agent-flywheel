@@ -841,7 +841,8 @@ class Attachment:
     def turn(self, *, turn_id: str | None = None,
              conversation_id: str | None = None,
              task_id: str | None = None,
-             input_text: str | None = None) -> Iterator[str]:
+             input_text: str | None = None,
+             prompt: Any = None) -> Iterator[str]:
         """Scope one user turn. Tool calls inside it land in its own trajectory.
 
         Yields the turn id, which the caller should keep: it is the join key
@@ -883,6 +884,14 @@ class Attachment:
         (:mod:`agent_flywheel.genai_otlp`). Observe-only: no call, response or
         result is changed. Without the grant nothing of it is recorded at all.
 
+        ``prompt`` is the :class:`~agent_flywheel.PromptDecision` this turn
+        runs with (``PolicySource.current().prompt``, or
+        :func:`~agent_flywheel.prompt_decision`'s answer). When it applies and
+        carries approved tool descriptions, the adapters apply them to the
+        tool definitions sent inside this scope (ADK by itself; LangChain
+        through :func:`~agent_flywheel.prompt.apply_tool_descriptions`, since
+        its callbacks cannot change a request). Omitted, nothing changes.
+
         ``task_id`` is an optional opaque correlation supplied by the caller.
         The SDK persists and forwards it but never interprets it: it is not a
         success label, a policy identity, a hint, or permission to train.  A
@@ -917,11 +926,17 @@ class Attachment:
             flush_due = self._turns_since_flush >= _FLUSH_EVERY
             if flush_due:
                 self._turns_since_flush = 0
+        from .prompt import _TURN_TOOL_DESCRIPTIONS
+
+        overlay = (getattr(prompt, "tool_descriptions", None)
+                   if getattr(prompt, "apply", False) is True else None)
+        overlay_token = _TURN_TOOL_DESCRIPTIONS.set(overlay or None)
         try:
             yield from self._open_turn(
                 tid, conversation_id, task_id, input_text,
                 prune_due=prune_due, flush_due=flush_due)
         finally:
+            _TURN_TOOL_DESCRIPTIONS.reset(overlay_token)
             with self._lock:
                 left = self._active_turns.get(tid, 0) - 1
                 if left > 0:
@@ -1167,15 +1182,16 @@ class Attachment:
         the calling thread; kept across a blip for at most a week.
 
         A PRODUCTION TURN (``turn_id=``, the id :meth:`turn` yielded, in
-        place of ``episode_id`` and ``turn_index``) has no episode for that
-        route to join. Its feedback goes where its turn went: an event on the
-        turn's trace, through your TracerProvider
-        (``tracing.record_turn_feedback_span``: a span linked to the turn's,
-        carrying ``percepteye.turn.feedback`` at ``occurred_at``), which an
-        OTLP export to the control plane delivers with the turn. It returns
-        the feedback's id once that span is recorded, and ``None`` when
-        nothing records it (no OpenTelemetry, no provider): nothing is queued
-        for it, because no route takes it.
+        place of ``episode_id`` and ``turn_index``) is uploaded the same way,
+        over this SDK's own transport, naming the turn by its id: the
+        control plane joins it to the turn (which need not be uploaded yet),
+        and its prompt optimizer reads it as a weak label on that turn. It
+        is also an event on the turn's trace, through your TracerProvider
+        when there is one (``tracing.record_turn_feedback_span``: a span
+        linked to the turn's, carrying ``percepteye.turn.feedback`` at
+        ``occurred_at``), for an agent whose turns reach the control plane
+        over OTLP. It returns the feedback's id once it is queued or that
+        span is recorded, and ``None`` when neither happened.
 
         Raises :class:`~agent_flywheel.errors.InvalidFeedback` -- before
         anything is stored -- for a word outside the vocabulary (the message
@@ -1183,24 +1199,34 @@ class Attachment:
         the wire cannot carry, or a turn named both ways. Nothing else here
         raises, and no answer of the control plane ever reaches the caller.
         """
+        recorded = False
         if turn_id is not None:
-            return self._report_turn_feedback_on_its_span(
+            wire = self._report_turn_feedback_on_its_span(
                 signal, turn_id=turn_id, named_an_episode=(
                     episode_id is not None or turn_index is not None),
                 occurred_at=occurred_at, feedback_id=feedback_id)
-        wire = turn_feedback({
-            "feedback_id": (
-                f"f_{uuid.uuid4().hex}" if feedback_id is None
-                else feedback_id
-            ),
-            "episode_id": episode_id,
-            "turn_index": turn_index,
-            "signal": signal,
-            "occurred_at": _rfc3339(occurred_at, InvalidFeedback),
-        })
+            recorded = wire.pop("_span_recorded")
+            wire = turn_feedback(wire)
+        else:
+            wire = turn_feedback({
+                "feedback_id": (
+                    f"f_{uuid.uuid4().hex}" if feedback_id is None
+                    else feedback_id
+                ),
+                "episode_id": episode_id,
+                "turn_index": turn_index,
+                "signal": signal,
+                "occurred_at": _rfc3339(occurred_at, InvalidFeedback),
+            })
+        queued = self._queue_turn_feedback(wire)
+        return str(wire["feedback_id"]) if queued or recorded else None
+
+    def _queue_turn_feedback(self, wire: dict[str, Any]) -> bool:
+        """Write one validated report to the upload queue; whether it was.
+        Nothing is queued with no control plane, or once it refused."""
         if self._turn_feedback_refused or not (
                 self._cp_url and self._api_key):
-            return None
+            return False
         path = _feedback_file(self.trajectory_root, wire["feedback_id"])
         partial = path.with_name(path.name + ".tmp")
         try:
@@ -1210,18 +1236,18 @@ class Attachment:
             os.replace(partial, path)
         except OSError:
             # Capture costs the observation, never the caller.
-            return None
+            return False
         self._flush_soon()
-        return str(wire["feedback_id"])
+        return True
 
     def _report_turn_feedback_on_its_span(
         self, signal: str, *, turn_id: str, named_an_episode: bool,
         occurred_at: datetime | str | None, feedback_id: str | None,
-    ) -> str | None:
-        """:meth:`report_turn_feedback` for a production turn: validated by
-        ``contract.turn_feedback_on_a_span``, emitted by
-        ``tracing.record_turn_feedback_span``. The id once recorded, else
-        ``None``."""
+    ) -> dict[str, Any]:
+        """:meth:`report_turn_feedback`'s span for a production turn:
+        validated by ``contract.turn_feedback_on_a_span``, emitted by
+        ``tracing.record_turn_feedback_span``. The validated report, with
+        ``_span_recorded`` saying whether the span was."""
         if named_an_episode:
             raise InvalidFeedback(
                 "feedback names one turn: a production turn's turn_id, or an "
@@ -1241,7 +1267,7 @@ class Attachment:
             turn_id=wire["turn_id"], signal=wire["signal"],
             occurred_at_unix_nano=rfc3339_unix_nanos(wire["occurred_at"]),
             feedback_id=wire["feedback_id"])
-        return str(wire["feedback_id"]) if recorded else None
+        return {**wire, "_span_recorded": bool(recorded)}
 
     def _flush_feedback(self) -> dict[str, int]:
         """Upload the per-turn feedback waiting on disk. Caller holds

@@ -120,6 +120,7 @@ from .production import Attachment, CaptureVerdict, attach, capture_verdict
 from .prompt import (
     SERVABLE_PROMPT_STATUSES,
     PromptDecision,
+    apply_tool_descriptions,
     prompt_decision,
 )
 from .runner import DEFAULT_ROLLOUT_TIMEOUT_S, RolloutRunner
@@ -131,6 +132,7 @@ from .transport import (
     declare_rulebook_in_background,
     declared_rulebook,
 )
+from .wrappers import wrap_anthropic, wrap_gemini, wrap_openai
 
 #: This package's logger. It has no handler and never installs one -- it
 #: emits into whatever logging the customer's process already configured,
@@ -182,6 +184,7 @@ __all__ = [
     "TransportError",
     "__version__",
     "apply_current_policy",
+    "apply_tool_descriptions",
     "attach",
     "capture_verdict",
     "current_capture",
@@ -201,6 +204,9 @@ __all__ = [
     "resolve_entrypoint",
     "resolve_mode",
     "serve",
+    "wrap_anthropic",
+    "wrap_gemini",
+    "wrap_openai",
 ]
 
 #: Every environment variable this package reads. Two of them select

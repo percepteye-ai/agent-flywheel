@@ -1,9 +1,10 @@
 """What a user did with a PRODUCTION turn, on that turn's trace.
 
-A production turn has no episode for ``POST /turn-feedback`` to join, so
-``report_turn_feedback(signal, turn_id=)`` puts the feedback where the turn
-went: the customer's TracerProvider, which an OTLP export delivers to the
-control plane's intake with the turn. The turn's span has ended by then, so
+``report_turn_feedback(signal, turn_id=)`` uploads the feedback over the
+SDK's own transport (``POST /turn-feedback`` takes a production turn by its
+``turn_id``) AND puts it where an OTLP-exported turn went: the customer's
+TracerProvider, which an OTLP export delivers to the control plane's intake
+with the turn. The turn's span has ended by then, so
 the event rides a span of its own, linked to the turn's.
 
 ``tests/fixtures/turn_feedback_span.json`` is that export, byte for byte the
@@ -180,19 +181,53 @@ def test_a_rollouts_turn_is_not_linked(spans):
     assert not spans.get_finished_spans()[-1].links
 
 
-def test_nothing_records_it_without_a_tracer(monkeypatch, tmp_path):
+class _FeedbackRoute(_Transport):
+    """The turn fake, plus ``POST /turn-feedback``."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.feedback: list[dict] = []
+
+    def report_turn_feedback(self, agent_id, feedback):
+        self.feedback.extend(dict(f) for f in feedback)
+        return {"agent_id": agent_id, "feedback": [
+            {"feedback_id": f["feedback_id"], "accepted": True,
+             "duplicate": False, "turn_id": f["turn_id"]} for f in feedback]}
+
+
+def test_without_a_tracer_it_is_still_uploaded(monkeypatch, tmp_path):
+    """No OpenTelemetry provider: the span is not recorded, and the
+    feedback still reaches the control plane over this SDK's transport.
+    Mutation: return before queueing a production turn's feedback -- red."""
     import agent_flywheel.tracing as mod
 
     monkeypatch.setattr(mod, "_TRACER", None)
     monkeypatch.setattr(mod, "_RESOLVED", True)
-    assert _a_turn_and_its_feedback(monkeypatch, tmp_path) is None
+    tr = _FeedbackRoute()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _turn(px, TURN, ask="where is my order?", answer="It ships tomorrow.")
+        got = px.report_turn_feedback(
+            "corrected", turn_id=TURN, occurred_at=AT, feedback_id="fb-1")
+        px.flush()
+    assert got == "fb-1"
+    assert tr.feedback == [{"feedback_id": "fb-1", "turn_id": TURN,
+                            "signal": "corrected", "occurred_at": AT}]
 
 
-def test_no_episode_route_is_asked_for_a_production_turn(
+def test_a_production_turns_feedback_is_uploaded_and_on_its_trace(
     monkeypatch, tmp_path, spans,
 ):
-    _a_turn_and_its_feedback(monkeypatch, tmp_path)
-    assert not list(tmp_path.glob(".feedback.*")), "nothing queued for the route"
+    """Both, once each: the route by ``turn_id`` (design 2026-11-21,
+    contract A) and the span for an OTLP export."""
+    tr = _FeedbackRoute()
+    with _attached(monkeypatch, tmp_path, tr) as px:
+        _turn(px, TURN, ask="where is my order?", answer="It ships tomorrow.")
+        got = px.report_turn_feedback("corrected", turn_id=TURN, occurred_at=AT)
+        px.flush()
+    assert [f["feedback_id"] for f in tr.feedback] == [got]
+    assert "episode_id" not in tr.feedback[0]
+    assert [s for s in spans.get_finished_spans()
+            if s.name == "percepteye.turn.feedback"]
 
 
 @pytest.mark.parametrize("kwargs, words", [

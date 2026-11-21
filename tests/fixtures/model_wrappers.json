@@ -1,0 +1,1048 @@
+{
+  "_doc": "Model-client wrappers (wrap_openai / wrap_anthropic / wrap_gemini): one provider request and response (or its streamed chunks) and the model-boundary chat operation BOTH SDKs record for it, span id aside, clocks 1 and 2. Byte-identical in both SDKs.",
+  "cases": [
+    {
+      "name": "openai chat: a tool loop's second call",
+      "api": "openai_chat",
+      "request": {
+        "model": "gpt-4o-mini",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are Acme's order agent."
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Where is 4417?"
+              },
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "data:image/png;base64,iVBORw0KGgo="
+                }
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "c1",
+                "type": "function",
+                "function": {
+                  "name": "lookup_order",
+                  "arguments": "{\"id\": \"4417\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": "{\"status\":\"shipped\"}"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "lookup_order",
+              "description": "Find an order.",
+              "parameters": {
+                "type": "object"
+              }
+            }
+          }
+        ],
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "response": {
+        "model": "gpt-4o-mini-2024-07-18",
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "It shipped."
+            }
+          }
+        ]
+      },
+      "expected": {
+        "operation": "chat",
+        "start_time_unix_nano": "1",
+        "end_time_unix_nano": "2",
+        "provider_name": "openai",
+        "request_model": "gpt-4o-mini",
+        "system_instructions": [
+          {
+            "type": "text",
+            "content": "You are Acme's order agent."
+          }
+        ],
+        "input_messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Where is 4417?"
+              },
+              {
+                "type": "blob",
+                "modality": "image",
+                "mime_type": "image/png",
+                "content": "iVBORw0KGgo="
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "tool_call",
+                "id": "c1",
+                "name": "lookup_order",
+                "arguments": {
+                  "id": "4417"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "parts": [
+              {
+                "type": "tool_call_response",
+                "id": "c1",
+                "response": "{\"status\":\"shipped\"}"
+              }
+            ]
+          }
+        ],
+        "tool_definitions": [
+          {
+            "type": "function",
+            "name": "lookup_order",
+            "description": "Find an order.",
+            "parameters": {
+              "type": "object"
+            }
+          }
+        ],
+        "response_format": {
+          "type": "json_object"
+        },
+        "output_messages": [
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "text",
+                "content": "It shipped."
+              }
+            ],
+            "finish_reason": "stop"
+          }
+        ],
+        "finish_reasons": [
+          "stop"
+        ],
+        "response_model": "gpt-4o-mini-2024-07-18"
+      }
+    },
+    {
+      "name": "openai chat: streamed tool call",
+      "api": "openai_chat",
+      "request": {
+        "model": "gpt-4o-mini",
+        "stream": true,
+        "messages": [
+          {
+            "role": "user",
+            "content": "Where is 4417?"
+          }
+        ]
+      },
+      "stream": [
+        {
+          "model": "gpt-4o-mini-2024-07-18",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "role": "assistant",
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "c1",
+                    "function": {
+                      "name": "lookup_order",
+                      "arguments": "{\"id\""
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "model": "gpt-4o-mini-2024-07-18",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "function": {
+                      "arguments": ": \"4417\"}"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "model": "gpt-4o-mini-2024-07-18",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "tool_calls"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "operation": "chat",
+        "start_time_unix_nano": "1",
+        "end_time_unix_nano": "2",
+        "provider_name": "openai",
+        "request_model": "gpt-4o-mini",
+        "input_messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Where is 4417?"
+              }
+            ]
+          }
+        ],
+        "output_messages": [
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "tool_call",
+                "id": "c1",
+                "name": "lookup_order",
+                "arguments": {
+                  "id": "4417"
+                }
+              }
+            ],
+            "finish_reason": "tool_call"
+          }
+        ],
+        "finish_reasons": [
+          "tool_calls"
+        ],
+        "response_model": "gpt-4o-mini-2024-07-18"
+      }
+    },
+    {
+      "name": "openai responses: function call output in, text out",
+      "api": "openai_responses",
+      "request": {
+        "model": "gpt-5",
+        "instructions": "Be brief.",
+        "input": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "Where is 4417?"
+              }
+            ]
+          },
+          {
+            "type": "function_call",
+            "call_id": "c1",
+            "name": "lookup_order",
+            "arguments": "{\"id\":\"4417\"}"
+          },
+          {
+            "type": "function_call_output",
+            "call_id": "c1",
+            "output": "shipped"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "name": "lookup_order",
+            "description": "Find an order.",
+            "parameters": {
+              "type": "object"
+            },
+            "strict": true
+          }
+        ],
+        "text": {
+          "format": {
+            "type": "json_schema",
+            "name": "a",
+            "schema": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "response": {
+        "model": "gpt-5-2025-08-07",
+        "status": "completed",
+        "output": [
+          {
+            "type": "reasoning",
+            "summary": [
+              {
+                "type": "summary_text",
+                "text": "Looked it up."
+              }
+            ]
+          },
+          {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "Shipped."
+              }
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "operation": "chat",
+        "start_time_unix_nano": "1",
+        "end_time_unix_nano": "2",
+        "provider_name": "openai",
+        "request_model": "gpt-5",
+        "system_instructions": [
+          {
+            "type": "text",
+            "content": "Be brief."
+          }
+        ],
+        "input_messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Where is 4417?"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "tool_call",
+                "id": "c1",
+                "name": "lookup_order",
+                "arguments": {
+                  "id": "4417"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "parts": [
+              {
+                "type": "tool_call_response",
+                "id": "c1",
+                "response": "shipped"
+              }
+            ]
+          }
+        ],
+        "tool_definitions": [
+          {
+            "type": "function",
+            "name": "lookup_order",
+            "description": "Find an order.",
+            "parameters": {
+              "type": "object"
+            }
+          }
+        ],
+        "response_format": {
+          "type": "json_schema",
+          "name": "a",
+          "schema": {
+            "type": "object"
+          }
+        },
+        "output_messages": [
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "reasoning",
+                "content": "Looked it up."
+              },
+              {
+                "type": "text",
+                "content": "Shipped."
+              }
+            ],
+            "finish_reason": "stop"
+          }
+        ],
+        "response_model": "gpt-5-2025-08-07"
+      }
+    },
+    {
+      "name": "openai responses: streamed",
+      "api": "openai_responses",
+      "request": {
+        "model": "gpt-5",
+        "input": "Hi"
+      },
+      "stream": [
+        {
+          "type": "response.created",
+          "response": {
+            "model": "gpt-5-2025-08-07",
+            "output": []
+          }
+        },
+        {
+          "type": "response.output_text.delta",
+          "delta": "Hello"
+        },
+        {
+          "type": "response.completed",
+          "response": {
+            "model": "gpt-5-2025-08-07",
+            "output": [
+              {
+                "type": "function_call",
+                "call_id": "c9",
+                "name": "greet",
+                "arguments": "{}"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": {
+        "operation": "chat",
+        "start_time_unix_nano": "1",
+        "end_time_unix_nano": "2",
+        "provider_name": "openai",
+        "request_model": "gpt-5",
+        "input_messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Hi"
+              }
+            ]
+          }
+        ],
+        "output_messages": [
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "tool_call",
+                "id": "c9",
+                "name": "greet",
+                "arguments": {}
+              }
+            ],
+            "finish_reason": "tool_call"
+          }
+        ],
+        "response_model": "gpt-5-2025-08-07"
+      }
+    },
+    {
+      "name": "anthropic: tool result and image in, tool use out",
+      "api": "anthropic",
+      "request": {
+        "model": "claude-sonnet-4-5",
+        "system": "You are Acme's order agent.",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Where is 4417?"
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "iVBORw0KGgo="
+                }
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "Look it up.",
+                "signature": "s"
+              },
+              {
+                "type": "tool_use",
+                "id": "tu1",
+                "name": "lookup_order",
+                "input": {
+                  "id": "4417"
+                }
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "tu1",
+                "content": "shipped"
+              }
+            ]
+          }
+        ],
+        "tools": [
+          {
+            "name": "lookup_order",
+            "description": "Find an order.",
+            "input_schema": {
+              "type": "object"
+            }
+          }
+        ]
+      },
+      "response": {
+        "model": "claude-sonnet-4-5-20250929",
+        "stop_reason": "tool_use",
+        "content": [
+          {
+            "type": "text",
+            "text": "Checking again."
+          },
+          {
+            "type": "tool_use",
+            "id": "tu2",
+            "name": "lookup_order",
+            "input": {
+              "id": "4418"
+            }
+          }
+        ]
+      },
+      "expected": {
+        "operation": "chat",
+        "start_time_unix_nano": "1",
+        "end_time_unix_nano": "2",
+        "provider_name": "anthropic",
+        "request_model": "claude-sonnet-4-5",
+        "system_instructions": [
+          {
+            "type": "text",
+            "content": "You are Acme's order agent."
+          }
+        ],
+        "input_messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Where is 4417?"
+              },
+              {
+                "type": "blob",
+                "modality": "image",
+                "mime_type": "image/png",
+                "content": "iVBORw0KGgo="
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "reasoning",
+                "content": "Look it up."
+              },
+              {
+                "type": "tool_call",
+                "id": "tu1",
+                "name": "lookup_order",
+                "arguments": {
+                  "id": "4417"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "parts": [
+              {
+                "type": "tool_call_response",
+                "id": "tu1",
+                "response": "shipped"
+              }
+            ]
+          }
+        ],
+        "tool_definitions": [
+          {
+            "type": "function",
+            "name": "lookup_order",
+            "description": "Find an order.",
+            "parameters": {
+              "type": "object"
+            }
+          }
+        ],
+        "output_messages": [
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Checking again."
+              },
+              {
+                "type": "tool_call",
+                "id": "tu2",
+                "name": "lookup_order",
+                "arguments": {
+                  "id": "4418"
+                }
+              }
+            ],
+            "finish_reason": "tool_call"
+          }
+        ],
+        "finish_reasons": [
+          "tool_use"
+        ],
+        "response_model": "claude-sonnet-4-5-20250929"
+      }
+    },
+    {
+      "name": "anthropic: streamed",
+      "api": "anthropic",
+      "request": {
+        "model": "claude-sonnet-4-5",
+        "stream": true,
+        "messages": [
+          {
+            "role": "user",
+            "content": "Hi"
+          }
+        ]
+      },
+      "stream": [
+        {
+          "type": "message_start",
+          "message": {
+            "model": "claude-sonnet-4-5-20250929",
+            "content": []
+          }
+        },
+        {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "text",
+            "text": ""
+          }
+        },
+        {
+          "type": "content_block_delta",
+          "index": 0,
+          "delta": {
+            "type": "text_delta",
+            "text": "Hel"
+          }
+        },
+        {
+          "type": "content_block_delta",
+          "index": 0,
+          "delta": {
+            "type": "text_delta",
+            "text": "lo"
+          }
+        },
+        {
+          "type": "content_block_start",
+          "index": 1,
+          "content_block": {
+            "type": "tool_use",
+            "id": "tu1",
+            "name": "greet",
+            "input": {}
+          }
+        },
+        {
+          "type": "content_block_delta",
+          "index": 1,
+          "delta": {
+            "type": "input_json_delta",
+            "partial_json": "{\"to\":"
+          }
+        },
+        {
+          "type": "content_block_delta",
+          "index": 1,
+          "delta": {
+            "type": "input_json_delta",
+            "partial_json": "\"you\"}"
+          }
+        },
+        {
+          "type": "message_delta",
+          "delta": {
+            "stop_reason": "tool_use"
+          }
+        }
+      ],
+      "expected": {
+        "operation": "chat",
+        "start_time_unix_nano": "1",
+        "end_time_unix_nano": "2",
+        "provider_name": "anthropic",
+        "request_model": "claude-sonnet-4-5",
+        "input_messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Hi"
+              }
+            ]
+          }
+        ],
+        "output_messages": [
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Hello"
+              },
+              {
+                "type": "tool_call",
+                "id": "tu1",
+                "name": "greet",
+                "arguments": {
+                  "to": "you"
+                }
+              }
+            ],
+            "finish_reason": "tool_call"
+          }
+        ],
+        "finish_reasons": [
+          "tool_use"
+        ],
+        "response_model": "claude-sonnet-4-5-20250929"
+      }
+    },
+    {
+      "name": "gemini: function response in, function call out",
+      "api": "gemini",
+      "request": {
+        "model": "gemini-2.5-flash",
+        "contents": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Where is 4417?"
+              },
+              {
+                "inline_data": {
+                  "mime_type": "image/png",
+                  "data": "iVBORw0KGgo="
+                }
+              }
+            ]
+          },
+          {
+            "role": "model",
+            "parts": [
+              {
+                "function_call": {
+                  "id": "f1",
+                  "name": "lookup_order",
+                  "args": {
+                    "id": "4417"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "parts": [
+              {
+                "function_response": {
+                  "id": "f1",
+                  "name": "lookup_order",
+                  "response": {
+                    "status": "shipped"
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "config": {
+          "system_instruction": "You are Acme's order agent.",
+          "tools": [
+            {
+              "function_declarations": [
+                {
+                  "name": "lookup_order",
+                  "description": "Find an order.",
+                  "parameters": {
+                    "type": "OBJECT"
+                  }
+                }
+              ]
+            }
+          ],
+          "response_mime_type": "application/json"
+        }
+      },
+      "response": {
+        "model_version": "gemini-2.5-flash-001",
+        "candidates": [
+          {
+            "finish_reason": "STOP",
+            "content": {
+              "role": "model",
+              "parts": [
+                {
+                  "text": "Thinking",
+                  "thought": true
+                },
+                {
+                  "text": "It shipped."
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "expected": {
+        "operation": "chat",
+        "start_time_unix_nano": "1",
+        "end_time_unix_nano": "2",
+        "provider_name": "gcp.gemini",
+        "request_model": "gemini-2.5-flash",
+        "system_instructions": [
+          {
+            "type": "text",
+            "content": "You are Acme's order agent."
+          }
+        ],
+        "input_messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Where is 4417?"
+              },
+              {
+                "type": "blob",
+                "modality": "image",
+                "mime_type": "image/png",
+                "content": "iVBORw0KGgo="
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "tool_call",
+                "id": "f1",
+                "name": "lookup_order",
+                "arguments": {
+                  "id": "4417"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "parts": [
+              {
+                "type": "tool_call_response",
+                "id": "f1",
+                "response": {
+                  "status": "shipped"
+                }
+              }
+            ]
+          }
+        ],
+        "tool_definitions": [
+          {
+            "type": "function",
+            "name": "lookup_order",
+            "description": "Find an order.",
+            "parameters": {
+              "type": "OBJECT"
+            }
+          }
+        ],
+        "response_format": {
+          "response_mime_type": "application/json"
+        },
+        "output_messages": [
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "reasoning",
+                "content": "Thinking"
+              },
+              {
+                "type": "text",
+                "content": "It shipped."
+              }
+            ],
+            "finish_reason": "stop"
+          }
+        ],
+        "finish_reasons": [
+          "STOP"
+        ],
+        "response_model": "gemini-2.5-flash-001"
+      }
+    },
+    {
+      "name": "gemini: camelCase, plain string contents, streamed",
+      "api": "gemini",
+      "request": {
+        "model": "gemini-2.5-flash",
+        "contents": "Hi",
+        "config": {
+          "systemInstruction": {
+            "parts": [
+              {
+                "text": "Be brief."
+              }
+            ]
+          }
+        }
+      },
+      "stream": [
+        {
+          "modelVersion": "gemini-2.5-flash-001",
+          "candidates": [
+            {
+              "content": {
+                "role": "model",
+                "parts": [
+                  {
+                    "text": "Hel"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "modelVersion": "gemini-2.5-flash-001",
+          "candidates": [
+            {
+              "finishReason": "STOP",
+              "content": {
+                "role": "model",
+                "parts": [
+                  {
+                    "text": "lo"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "operation": "chat",
+        "start_time_unix_nano": "1",
+        "end_time_unix_nano": "2",
+        "provider_name": "gcp.gemini",
+        "request_model": "gemini-2.5-flash",
+        "system_instructions": [
+          {
+            "type": "text",
+            "content": "Be brief."
+          }
+        ],
+        "input_messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Hi"
+              }
+            ]
+          }
+        ],
+        "output_messages": [
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Hello"
+              }
+            ],
+            "finish_reason": "stop"
+          }
+        ],
+        "finish_reasons": [
+          "STOP"
+        ],
+        "response_model": "gemini-2.5-flash-001"
+      }
+    }
+  ]
+}

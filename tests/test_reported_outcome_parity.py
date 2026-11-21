@@ -210,12 +210,13 @@ import {
 } from './src/wire.js';
 let raw = '';
 for await (const chunk of process.stdin) raw += chunk;
-const { files, seeds, outcomes, feedback, checks, texts } = JSON.parse(raw);
+const { files, seeds, outcomes, feedback, checks, texts, turns } = JSON.parse(raw);
 const answer = (fn) => {
   try { return { ok: fn() }; } catch (err) { return { refused: err.message }; }
 };
 const out = {
   files: {}, seeds: {}, outcomes: {}, feedback: {}, checks: {}, texts: {},
+  turns: {},
 };
 const dir = mkdtempSync(join(tmpdir(), 'outcome-parity-'));
 try {
@@ -234,6 +235,9 @@ for (const [name, wire] of Object.entries(outcomes)) {
 }
 for (const [name, wire] of Object.entries(feedback)) {
   out.feedback[name] = answer(() => turnFeedback(wire));
+}
+for (const [name, wire] of Object.entries(turns)) {
+  out.turns[name] = answer(() => turnFeedback(wire));
 }
 for (const [name, [kind, wire]] of Object.entries(texts)) {
   out.texts[name] = answer(() => (
@@ -278,6 +282,25 @@ TEXTS: dict[str, tuple[str, dict]] = {
     **{f"an emoji in feedback's {field}": ("feedback", {
         **_FEEDBACK, **_AT, field: _PAIRED}) for field in (
             "feedback_id", "episode_id")},
+    "a lone surrogate in feedback's turn_id": ("feedback", {
+        "feedback_id": "f-1", "signal": "accepted", **_AT, "turn_id": _LONE}),
+    "an emoji in feedback's turn_id": ("feedback", {
+        "feedback_id": "f-1", "signal": "accepted", **_AT, "turn_id": _PAIRED}),
+}
+
+#: Feedback on a PRODUCTION TURN (design 2026-11-21, contract A): the turn
+#: named by ``turn_id`` in place of an episode and a position, never both.
+_ON_TURN = {"feedback_id": "f-1", "signal": "corrected", "turn_id": "t-1", **_AT}
+TURNS: dict[str, dict] = {
+    "a production turn": _ON_TURN,
+    "a null turn_id is an episode's report": {
+        **_FEEDBACK, **_AT, "turn_id": None},
+    "a turn_id beside an episode": {**_ON_TURN, "episode_id": "e-1"},
+    "a turn_id beside a turn index": {**_ON_TURN, "turn_index": 0},
+    "a turn_id that is not an identifier": {**_ON_TURN, "turn_id": "../x"},
+    "a turn_id that is a number": {**_ON_TURN, "turn_id": 7},
+    "a turn's report with no time": {
+        k: v for k, v in _ON_TURN.items() if k != "occurred_at"},
 }
 
 
@@ -288,7 +311,8 @@ def node() -> dict[str, dict]:
     sdk, binary = require_node_sdk()
     return json.loads(run_node(sdk, binary, _NODE, stdin=json.dumps({
         "files": OUTCOME_FILES, "seeds": SEEDS, "outcomes": OUTCOMES,
-        "feedback": FEEDBACK, "checks": CHECKS, "texts": TEXTS})))
+        "feedback": FEEDBACK, "checks": CHECKS, "texts": TEXTS,
+        "turns": TURNS})))
 
 
 def _python_reads(text: str, tmp_path) -> dict:
@@ -475,3 +499,18 @@ def test_both_sdks_refuse_the_same_text(node, name):
     assert node["texts"][name] == python, (
         f"{name}: Node {node['texts'][name]!r}, Python {python!r}")
     assert ("refused" in python) == name.startswith("a lone surrogate"), name
+
+
+@pytest.mark.parametrize("name", sorted(TURNS))
+def test_both_sdks_take_the_same_feedback_on_a_production_turn(node, name):
+    python = _answer(turn_feedback, TURNS[name])
+    assert node["turns"][name] == python, (
+        f"{name}: Node {node['turns'][name]!r}, Python {python!r}")
+
+
+def test_a_production_turns_feedback_is_taken_and_a_turn_named_twice_is_not():
+    assert _answer(turn_feedback, TURNS["a production turn"]) == {"ok": {
+        "feedback_id": "f-1", "turn_id": "t-1", "signal": "corrected",
+        "occurred_at": "2026-11-10T09:00:00Z"}}
+    for name in ("a turn_id beside an episode", "a turn_id beside a turn index"):
+        assert "not both" in _answer(turn_feedback, TURNS[name])["refused"]

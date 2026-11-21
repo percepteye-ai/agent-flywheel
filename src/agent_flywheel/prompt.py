@@ -124,6 +124,37 @@ class PromptDecision:
     checksum: str | None
     #: Why not, in a sentence an operator can act on. Empty when applying.
     reason: str
+    #: The tool descriptions approved WITH the text, ``{tool_name:
+    #: description}`` -- set only when ``apply`` is true and the bundle ships
+    #: a well-formed overlay; ``None`` otherwise (design 2026-11-21, contract
+    #: B). The adapters apply it to the tool definitions they send for a turn
+    #: scoped with this decision (``attach().turn(prompt=decision)``).
+    tool_descriptions: dict[str, str] | None = None
+
+
+#: Bounds on a served overlay, the control plane's own
+#: (``api/prompt_deliveries.tool_descriptions_of``).
+_TOOL_DESCRIPTIONS_MAX = 256
+_TOOL_DESCRIPTION_MAX_CHARS = 8192
+
+
+def tool_descriptions_of(value: Any) -> dict[str, str] | None:
+    """A served tool-description overlay, or ``None``. FAIL-OPEN and WHOLE
+    OR NOTHING, word for word the Node SDK's ``toolDescriptionsOf``: absent,
+    not an object, empty, over the bounds, or any entry that is not a
+    non-empty name to a non-empty description, and there is no overlay --
+    the agent's own descriptions stand."""
+    if not isinstance(value, Mapping) or not value \
+            or len(value) > _TOOL_DESCRIPTIONS_MAX:
+        return None
+    out: dict[str, str] = {}
+    for name, description in value.items():
+        if not (isinstance(name, str) and name.strip()
+                and isinstance(description, str) and description.strip()
+                and len(description) <= _TOOL_DESCRIPTION_MAX_CHARS):
+            return None
+        out[name] = description
+    return dict(sorted(out.items()))
 
 
 def prompt_decision(prompt: Mapping[str, Any] | None) -> PromptDecision:
@@ -204,7 +235,9 @@ def prompt_decision(prompt: Mapping[str, Any] | None) -> PromptDecision:
     # The text as it was served, NOT the trimmed copy the emptiness check was
     # made on. Leading whitespace in an approved system prompt is part of what
     # was certified, and this side does not get to edit it.
-    return PromptDecision(apply=True, text=text, checksum=checksum, reason="")
+    return PromptDecision(
+        apply=True, text=text, checksum=checksum, reason="",
+        tool_descriptions=tool_descriptions_of(p.get("tool_descriptions")))
 
 
 #: Why nothing is applied once a person withdrew the approved prompt. Word for
@@ -290,3 +323,58 @@ def refreshed_prompt(
             return (prompt_decision(answer),
                     _str(answer.get("generation")) or served)
     return held, held_gen
+
+
+# ── the overlay a turn runs with ──────────────────────────────────────────
+
+from contextvars import ContextVar  # noqa: E402
+
+#: The tool descriptions the CURRENT turn applies, set by
+#: ``attach().turn(prompt=decision)`` for an applying decision.
+_TURN_TOOL_DESCRIPTIONS: ContextVar[dict[str, str] | None] = ContextVar(
+    "percepteye_turn_tool_descriptions", default=None)
+
+
+def current_tool_descriptions() -> dict[str, str] | None:
+    """The approved tool descriptions the current turn applies, or ``None``.
+    What the adapters ask before they send tool definitions."""
+    return _TURN_TOOL_DESCRIPTIONS.get()
+
+
+def apply_tool_descriptions(tools: Any) -> Any:
+    """``tools`` with the current turn's approved descriptions applied, as
+    COPIES; the originals are never changed. Outside such a turn, or for a
+    tool the overlay does not name, the tool is returned as it is.
+
+    For a framework whose callbacks cannot change the request (LangChain):
+    ``model.bind_tools(apply_tool_descriptions(tools))`` inside the turn.
+    Takes LangChain tools (``model_copy``), dicts (an OpenAI ``function`` or
+    a flat definition) and anything with a ``description`` attribute."""
+    overlay = current_tool_descriptions()
+    if not overlay or not isinstance(tools, (list, tuple)):
+        return tools
+    return type(tools)(_described(tool, overlay) for tool in tools)
+
+
+def _described(tool: Any, overlay: Mapping[str, str]) -> Any:
+    if isinstance(tool, Mapping):
+        fn = tool.get("function")
+        if tool.get("type") == "function" and isinstance(fn, Mapping) \
+                and fn.get("name") in overlay:
+            return {**tool, "function": {**fn, "description": overlay[fn["name"]]}}
+        if tool.get("name") in overlay:
+            return {**tool, "description": overlay[tool["name"]]}
+        return tool
+    name = getattr(tool, "name", None)
+    if not isinstance(name, str) or name not in overlay:
+        return tool
+    try:
+        if hasattr(tool, "model_copy"):
+            return tool.model_copy(update={"description": overlay[name]})
+        import copy
+
+        clone = copy.copy(tool)
+        clone.description = overlay[name]
+        return clone
+    except Exception:
+        return tool

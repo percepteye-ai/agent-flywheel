@@ -611,11 +611,22 @@ def test_schema_and_code_agree_on_the_feedback_wire():
     assert batch["properties"]["feedback"]["maxItems"] == (
         _TURN_FEEDBACK_BATCH_MAX_ITEMS)
     assert feedback["additionalProperties"] is False
-    assert set(feedback["required"]) == set(feedback["properties"])
-    # One episode id, spelled one way on both wires.
+    # Every field is required but the TURN, which is named exactly one way
+    # (design 2026-11-21, contract A): an episode's, or a production turn's.
+    joins = {"episode_id", "turn_index", "turn_id"}
+    assert set(feedback["required"]) == set(feedback["properties"]) - joins
+    assert feedback["oneOf"] == [
+        {"required": ["episode_id", "turn_index"],
+         "not": {"required": ["turn_id"]}},
+        {"required": ["turn_id"], "not": {"anyOf": [
+            {"required": ["episode_id"]}, {"required": ["turn_index"]}]}},
+    ]
+    # One episode id and one turn id, each spelled one way on both wires.
     for name in ("pattern", "minLength", "maxLength", "type"):
         assert feedback["properties"]["episode_id"][name] == (
             outcome["properties"]["episode_id"][name])
+        assert feedback["properties"]["turn_id"][name] == (
+            outcome["properties"]["turn_id"][name])
     assert {"required": ["episode_id"]} in outcome["anyOf"]
 
 
@@ -625,12 +636,20 @@ EPISODE_OUTCOME = {"outcome_id": "o1", "outcome": "resolved",
                    "episode_id": EPISODE, "occurred_at": AT}
 
 #: Wires both validators, and both SDKs, must judge alike, word for word.
+ON_A_TURN = {"feedback_id": "f2", "turn_id": "turn-7", "signal": "corrected",
+             "occurred_at": AT}
 _FEEDBACK_CASES = [
     FEEDBACK,
     {**FEEDBACK, "turn_index": 0, "signal": "abandoned",
      "episode_id": "é \U0001f4e6",
      "occurred_at": "2026-11-17T09:00:00.250+05:30"},
     {**FEEDBACK, "turn_index": 100000},
+    # A production turn, by its turn_id (design 2026-11-21, contract A).
+    ON_A_TURN,
+    {**ON_A_TURN, "episode_id": EPISODE},
+    {**ON_A_TURN, "turn_index": 0},
+    {**ON_A_TURN, "turn_id": "a/b"},
+    {k: v for k, v in ON_A_TURN.items() if k != "occurred_at"},
     {**FEEDBACK, "signal": "liked"},
     {**FEEDBACK, "signal": 7},
     {**FEEDBACK, "signal": "resolved"},
@@ -651,7 +670,7 @@ _FEEDBACK_CASES = [
     ["not", "an", "object"],
     None,
 ]
-_FEEDBACK_ACCEPTED = 3
+_FEEDBACK_ACCEPTED = 4
 
 _EPISODE_OUTCOME_CASES = [
     EPISODE_OUTCOME,

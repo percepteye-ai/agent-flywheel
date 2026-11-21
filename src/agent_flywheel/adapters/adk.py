@@ -116,6 +116,17 @@ def _build_plugin_cls() -> type:
         # after_model_callback REPLACES the response; a value from
         # on_model_error_callback swallows the error.
         async def before_model_callback(self, *, callback_context, llm_request):
+            # THE ONE CHANGE this plugin makes to a request, and only inside a
+            # turn scoped with an APPLYING prompt decision that ships tool
+            # descriptions (design 2026-11-21, contract B): the approved
+            # descriptions replace the declarations' own, in place, before the
+            # model is called. Still returns None: a value would replace the
+            # model's response.
+            try:
+                if _binds:
+                    _apply_tool_descriptions(llm_request)
+            except Exception:
+                pass
             try:
                 if _binds and model_capture_active():
                     key = _model_key(callback_context)
@@ -456,6 +467,26 @@ def _system(config: Any) -> list[dict[str, Any]]:
             if part is not None:
                 out.append(part)
     return out
+
+
+def _apply_tool_descriptions(llm_request: Any) -> int:
+    """Set each function declaration's description from the current turn's
+    approved overlay (:func:`~agent_flywheel.prompt.current_tool_descriptions`);
+    how many were set. A tool the overlay does not name keeps its own."""
+    from ..prompt import current_tool_descriptions
+
+    overlay = current_tool_descriptions()
+    if not overlay:
+        return 0
+    config = getattr(llm_request, "config", None)
+    applied = 0
+    for tool in getattr(config, "tools", None) or []:
+        for decl in getattr(tool, "function_declarations", None) or []:
+            name = getattr(decl, "name", None)
+            if isinstance(name, str) and name in overlay:
+                decl.description = overlay[name]
+                applied += 1
+    return applied
 
 
 def _tools(config: Any) -> list[dict[str, Any]] | None:

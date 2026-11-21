@@ -5,6 +5,57 @@ What changed in `agent-flywheel`, by release. The Node SDK,
 ships the same version number in the same release. Commit hashes are this
 repository's.
 
+## 0.6.0
+
+Trace-first prompt optimization (design 2026-11-21): Mission Control improves
+an agent's prompt from its traces alone -- no GPU, no logprobs, closed models
+included. This release gives it the whole trace, the user's feedback on each
+turn, and a way to ship tool-description edits with an approved prompt. Both
+SDKs, same behaviour.
+
+### Added
+
+- **One-line model-client wrappers.** Python `wrap_openai`, `wrap_anthropic`,
+  `wrap_gemini`; Node `wrapOpenAI`, `wrapAnthropic`, `wrapGemini`. Each patches
+  the client in place and returns it: OpenAI Chat Completions and Responses,
+  Anthropic Messages, Gemini `generate_content` (and its stream and `aio`
+  twins), streamed or not. Inside a production turn whose agent may upload
+  model content, every call records one `chat` operation on the turn's model
+  boundary -- what it was sent and what it answered. They observe only: the
+  request is passed on as given, the response (Node: the same promise, and the
+  same stream object) comes back as received. The shared
+  `model_wrappers.json` fixture holds both SDKs to the same operation, byte for
+  byte.
+- **Feedback on a production turn reaches Mission Control.**
+  `report_turn_feedback(signal, turn_id=...)` / `reportTurnFeedback(signal,
+  {turnId})` now uploads over the SDK's own transport (`POST /turn-feedback`
+  takes a production turn by its `turn_id`), as well as recording the event
+  on the turn's trace for an OTLP export. It returns the id once queued or
+  recorded. The published `TurnFeedback` schema names the turn exactly one way:
+  `episode_id` and `turn_index`, or `turn_id`.
+- **Tool descriptions approved with the prompt.** `/prompt/current` may serve
+  `tool_descriptions` (`{tool_name: description}`) beside the text.
+  `prompt_decision()` / `promptDecision` expose them as `tool_descriptions`,
+  only when the decision applies, whole or not at all (an absent or malformed
+  overlay is none). A turn applies them: Python `attach().turn(prompt=decision)`
+  scopes them, the ADK adapter applies them to the declarations it sends, and
+  `apply_tool_descriptions(tools)` copies LangChain tools with them; Node's
+  `fw.turn()` hands `t.toolDescriptions` / `t.toolDescription(name, yours)`,
+  the AI SDK middleware applies them (`transformParams`), and
+  `applyToolDescriptions(tools)` from `/langchain` copies LangChain.js tools.
+
+### Fixed
+
+- **Node: a turn's whole multi-step trace is captured.** `fw.turn()` with the
+  AI SDK middleware or the LangChain.js callbacks recorded ONE chat call per
+  turn -- the first model input against the final answer, with no tool call
+  and no tool result. Every model call (input, output, tool calls) and every
+  tool execution is now recorded as it happens, as the Python adapters do.
+- **Node: a rewritten prompt no longer loses the run.** OpenClaw's model
+  boundary was dropped whenever the prompt the model saw was not the stored
+  user text with a prefix; the prompt is now found by its place after the
+  run's history, and a message steered in mid-run is still refused.
+
 ## 0.5.0
 
 ### Added
