@@ -45,8 +45,8 @@ import enum
 import functools
 import inspect
 import json
-from collections.abc import Mapping
-from typing import Any, Callable
+from collections.abc import Callable, Mapping
+from typing import Any
 
 from .adapters._media import data_url_part, media_part
 from .genai_otlp import new_span_id, now_unix_nano, requested_output_format
@@ -856,7 +856,7 @@ def _patch_stream_helper(messages: Any) -> None:
             return manager
 
     setattr(observed, _MARK, True)
-    setattr(messages, "stream", observed)
+    messages.stream = observed
 
 
 def wrap_anthropic(client: Any) -> Any:

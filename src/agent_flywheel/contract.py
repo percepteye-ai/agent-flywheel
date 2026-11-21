@@ -419,7 +419,7 @@ def turn_feedback(wire: Any) -> dict[str, Any]:
     again before a batch leaves. The Node SDK's ``turnFeedback`` applies the
     same rules with the same messages.
     """
-    signal = _feedback_head(wire, _FEEDBACK_WIRE_KEYS + ("turn_id",))
+    signal = _feedback_head(wire, (*_FEEDBACK_WIRE_KEYS, "turn_id"))
     if wire.get("turn_id") is not None:
         # A PRODUCTION TURN, named by its own id in place of an episode and
         # a position (design 2026-11-21, contract A).
