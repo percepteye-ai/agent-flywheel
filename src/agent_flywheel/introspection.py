@@ -45,6 +45,9 @@ _MAX_DEPTH = 4
 
 #: Cap on prompt bytes we ship. A system prompt is the customer's IP and can
 #: also be enormous; the workflow generator needs its shape, not a novel.
+#: Applied by :func:`introspect` AFTER the full observation is hashed into
+#: ``exact_observation_sha256``, so two prompts sharing their first 20,000
+#: characters stay two executions.
 _MAX_PROMPT_CHARS = 20_000
 
 
@@ -178,13 +181,24 @@ def _safe(fn, *a: Any, **kw: Any) -> Any:
 
 
 def _text(value: Any) -> str | None:
-    """A prompt as a string, or None. ADK's ``instruction`` may be a CALLABLE
-    (resolved per-invocation from state), and calling it here would run
-    customer code at registration with no invocation context -- so a callable
-    instruction is reported as not-observed rather than invoked."""
+    """A prompt as a string, WHOLE, or None. ADK's ``instruction`` may be a
+    CALLABLE (resolved per-invocation from state), and calling it here would
+    run customer code at registration with no invocation context -- so a
+    callable instruction is reported as not-observed rather than invoked.
+    The wire cap is applied once, by :func:`introspect`."""
     if isinstance(value, str):
-        return value[:_MAX_PROMPT_CHARS] if value else None
+        return value or None
     return None
+
+
+def _listed(value: Any) -> list[Any] | None:
+    """An iterable surface (``tools``, ``sub_agents``) read ONCE into a list.
+
+    A generator here used to be consumed by the probe's ``any(...)`` test and
+    then iterated again, empty -- an agent reported with no tools."""
+    if value is None or isinstance(value, (str, bytes, dict)):
+        return None
+    return _safe(list, value)
 
 
 def _probe_adk(obj: Any, depth: int) -> DiscoveredAgent | None:
@@ -209,7 +223,7 @@ def _probe_adk(obj: Any, depth: int) -> DiscoveredAgent | None:
         incomplete.append("system_prompt")
 
     tools = None
-    raw_tools = getattr(obj, "tools", None)
+    raw_tools = _listed(getattr(obj, "tools", None))
     if raw_tools is not None:
         tools = []
         for t in raw_tools:
@@ -222,7 +236,7 @@ def _probe_adk(obj: Any, depth: int) -> DiscoveredAgent | None:
     model = _safe(_adk_model, obj)
 
     subs: list[DiscoveredAgent] = []
-    raw_sub_agents = getattr(obj, "sub_agents", None) or []
+    raw_sub_agents = _listed(getattr(obj, "sub_agents", None)) or []
     if depth < _MAX_DEPTH:
         for child in raw_sub_agents:
             got = _introspect_obj(child, depth + 1)
@@ -318,6 +332,7 @@ def _probe_langchain(obj: Any, depth: int) -> DiscoveredAgent | None:
     raw = getattr(obj, "tools", None)
     if raw is None:
         raw = _safe(lambda: obj.get_tools())
+    raw = _listed(raw)
     if raw is None:
         return None
     if not any(isinstance(t, BaseTool) for t in raw):
@@ -353,15 +368,34 @@ def _langchain_tool(t: Any) -> ToolDefinition | None:
     if not name:
         return None
     args = _safe(lambda: t.args)
-    schema = (
+    schema: dict[str, Any] = (
         {"type": "object", "properties": args} if isinstance(args, dict) else {}
     )
+    if schema:
+        # ``args`` is only the properties. Which of them are REQUIRED, and the
+        # ``$defs`` a nested model's ``$ref`` points into, live beside them in
+        # the tool's own JSON Schema; without them every argument read as
+        # optional and a nested argument's ``$ref`` dangled.
+        full = _safe(_langchain_json_schema, t)
+        if isinstance(full, dict):
+            for key in ("required", "$defs"):
+                if full.get(key):
+                    schema[key] = full[key]
     return ToolDefinition(
         name=str(name),
         description=str(getattr(t, "description", "") or ""),
         input_schema=schema,
         original_format="langchain",
     )
+
+
+def _langchain_json_schema(t: Any) -> dict[str, Any] | None:
+    """The JSON Schema ``t.args`` is the ``properties`` of: a dict
+    ``args_schema`` as given, else the input model's own schema."""
+    declared = getattr(t, "args_schema", None)
+    if isinstance(declared, dict):
+        return declared
+    return t.get_input_schema().model_json_schema()
 
 
 def _langchain_model(obj: Any) -> ModelConfig | None:
@@ -616,4 +650,34 @@ def introspect(entrypoint_obj: Any) -> DiscoveredAgent | None:
     # instance and the runner resolved one of its methods. The agent is the
     # instance, not the method.
     obj = getattr(entrypoint_obj, "__self__", entrypoint_obj)
-    return _introspect_obj(obj, 0)
+    got = _introspect_obj(obj, 0)
+    return None if got is None else _projected(got)
+
+
+def _projected(agent: DiscoveredAgent) -> DiscoveredAgent:
+    """The wire projection of a WHOLE observation, carrying its digest.
+
+    The probes keep every prompt whole; this hashes each node's complete
+    observation (its ``to_wire`` with the full prompts of it and every
+    descendant) into ``exact_observation_sha256``, and only then cuts each
+    prompt to the wire cap. Without the digest a prompt at the cap could
+    never anchor an execution identity -- the cut prefix is ambiguous -- so
+    an agent with a long prompt was never given one. When nothing is cut the
+    digest is the one the projected wire itself hashes to.
+    """
+    from .errors import ConfigurationError
+    from .execution_identity import canonical_observation_sha256
+
+    try:
+        exact: str | None = canonical_observation_sha256(agent.to_wire())
+    except ConfigurationError:
+        # Discovery stays advisory: a value that cannot be hashed canonically
+        # cannot support exact identity, and the description still registers.
+        exact = None
+    prompt = agent.system_prompt
+    return dataclasses.replace(
+        agent,
+        system_prompt=prompt[:_MAX_PROMPT_CHARS] if prompt is not None else None,
+        sub_agents=[_projected(child) for child in agent.sub_agents],
+        exact_observation_sha256=exact,
+    )

@@ -85,7 +85,7 @@ The one thread this package does start is `attach()`'s turn upload, and it is no
 
 | rule | value | why |
 |:--|:--|:--|
-| default TTL | `ttl_s=300.0` | |
+| default TTL | `ttl_s=300.0` | must be a finite number of seconds > 0; anything else raises `ConfigurationError` |
 | server hint | the body's `ttl_s` beats your `ttl_s=` | the control plane knows its own promotion cadence and you do not |
 | floor | `MIN_TTL_S = 30.0` s, beats both | a misconfigured `ttl_s=1` across a fleet is a denial of service aimed at our own control plane |
 | jitter | ±10%, drawn **once** at construction | a fleet of replicas that boots together shares a TTL and would re-poll in lockstep, delivering a synchronized spike every TTL |
@@ -194,6 +194,8 @@ With `register=True` the call makes exactly two outbound requests, once, at star
 |:--|:--|
 | `.turn(turn_id=None, conversation_id=None, task_id=None, input_text=None)` | context manager; yields the turn id |
 | `.record_answer(turn_id, text)` | what the agent finally answered; callable **after** the scope closes |
+| `.report_outcome(outcome, turn_id=None, conversation_id=None, value=None, note=None, occurred_at=None, outcome_id=None, episode_id=None)` | how the turn, the conversation or the episode (`episode_id=`, the id a served episode's request carries; alone it needs no capture consent) turned out: `resolved`, `escalated`, `reopened`, `abandoned`, `thumbs_up` or `thumbs_down`. Returns the outcome's id, or `None` (a no-op) once the control plane says capture is not enabled (kept, and asked again, while that answer is unknown); raises `InvalidOutcome` for anything else |
+| `.report_turn_feedback(signal, *, episode_id=None, turn_index=None, occurred_at=None, feedback_id=None, turn_id=None)` | what the user did with one turn of an episode the platform ran (`episode_id`, `turn_index`), or with one production turn (`turn_id`, the id `turn()` yielded: an event on that turn's trace, see below): `accepted`, `corrected`, `repeated`, `escalated` or `abandoned`. `turn_index` counts from 0. Needs no capture consent. Returns the feedback's id, or `None` with no control plane or once the control plane has refused this key feedback (a 403; what is waiting stays on disk) or has no route for it (a 404 or 405; what was waiting is dropped) — each said once, nothing raises; raises `InvalidFeedback` for anything else |
 | `.read(turn_id)` | that turn's `list[ToolCallOutcome]`, or `None` if nothing was recorded |
 | `.read_turn(turn_id)` | the `task` / `answer` text recorded for that turn, or `None` |
 | `.flush(include_unanswered=False, batch_size=64)` | uploads now; larger requested batches are split at the contract's 64-turn limit |

@@ -59,7 +59,7 @@ Hand-written means drift is possible, so the suite asserts agreement. Three test
 
 ## What an agent may assert, and what it cannot
 
-`RolloutOutput` is a closed dataclass and the schema sets `additionalProperties: false`. The permitted vocabulary is stated positively — eleven keys, and that is the complete set.
+`RolloutOutput` is a closed dataclass and the schema sets `additionalProperties: false`. The permitted vocabulary is stated positively — fifteen keys, and that is the complete set.
 
 | field | type | default | on the wire |
 |:--|:--|:--|:--|
@@ -73,9 +73,15 @@ Hand-written means drift is possible, so the suite asserts agreement. Three test
 | `reward` | `float \| None` | `None` | only when set; **advisory only** |
 | `success` | `bool \| None` | `None` | only when set |
 | `agent_fingerprint` | `dict \| None` | `None` | only when set |
+| `checks` | `list[dict] \| None` | `None` | only when a non-empty list; the first 200 rows (an empty list states nothing; anything else is refused) |
+| `checks_dropped` | `int` | `0` | only when positive: how many checks the episode ran that this report does not carry |
+| `termination` | `dict \| None` | `None` | only when set; `{class, detail}` |
+| `seeds` | `dict \| None` | `None` | only when set; `{environment, sampling}` |
 | `exclusion_reason` + `exclusion_detail` | see below | `None` | emitted as one nested `exclusion` object |
 
 The last row is the one place the Python shape and the wire shape differ on purpose: two flat fields in the dataclass, one nested block on the wire.
+
+**A report never loses its outcome to its evidence.** `checks`, `termination` and `seeds` are what the agent's own environment says of the episode. More than 200 checks is not an error: the first 200 are sent and `checks_dropped` says how many were not. A part the wire cannot carry (a status outside the vocabulary, a seed that is neither a short string nor an integer a JSON number holds exactly) is left out with a warning and the rest of the report is sent; when it is the checks that were left out, `checks_dropped` counts all of them, so the stored episode says its checks are missing rather than that it ran none. A seed is a string of 1 to 128 characters or an integer of at most 2^53 − 1 in magnitude; `7.0` is the integer 7. The Node SDK applies the same rules.
 
 **Anything derived from the inference wire is absent by construction, not by filtering.** The SDK is semi-trusted. An agent cannot assert a field it has no way to know, so the type simply has nowhere to put it:
 
@@ -136,7 +142,7 @@ One unit of work, handed to the agent by the control plane.
 
 **`deadline_ts` and `lease_expires_ts` are separate numbers for separate jobs.** The deadline bounds the work and does not move. The lease is liveness, and a heartbeat renews it. `seconds_remaining(now)` reads the deadline only, and moves for exactly one reason: time passing.
 
-The lease expiry is read **once, at claim**, and paces heartbeats at a third of the remaining grant for the life of the rollout — measured from what the server *granted*, not what the client requested. A server that clamps the request and does not report the clamp is exactly how a heartbeat ends up slower than the lease it exists to keep alive; when the field is absent the client falls back to the lease it asked for, which is wrong in precisely that case.
+The lease expiry is read **once, at claim**, and paces heartbeats at a third of the shorter of the remaining grant and the per-beat extension — measured from what the server *granted*, not what the client requested; each beat's answered `lease_expires_ts` then schedules the next. A server that clamps the request and does not report the clamp is exactly how a heartbeat ends up slower than the lease it exists to keep alive; when the field is absent the client falls back to the lease it asked for, which is wrong in precisely that case.
 
 ??? note "There is deliberately no `environment` key"
     A previous SDK wrote server-supplied values into the running process's `os.environ`. It was both dangerous and useless — the LLM client had already read its `base_url` at construction. The only configuration channel into an agent is subprocess environment at spawn: configuration crosses into a fresh child, never into a running parent.

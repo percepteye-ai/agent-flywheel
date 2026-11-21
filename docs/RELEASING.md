@@ -28,7 +28,13 @@ Follow this in order; each step links to the detail. When something fails,
 
 1. **Settle what the release depends on.** If it relies on a control-plane
    change, that change must be deployed first: an SDK that talks to an older
-   Mission Control misbehaves. If the dashboard's install line pins the new
+   Mission Control misbehaves. **Run the Mission Control gate
+   ([§1a](#1a-the-mission-control-gate)) against the Mission Control the
+   release targets, in both repositories, and do not tag until both print
+   `ok`.** 0.5.0 is why: both SDKs declare customer contract 1.54.0 and upload
+   to `POST /api/flywheel/v1/outcomes`; tagged before that route was
+   deployed, every reported outcome would have been refused for a week and
+   then dropped. If the dashboard's install line pins the new
    version (`pip install "agent-flywheel>=X.Y.Z"`), the release is urgent the
    moment that deploy lands: until then the page's first command fails.
 2. **Bump both versions, one number for both.** Python: `_version.py`,
@@ -41,8 +47,10 @@ Follow this in order; each step links to the detail. When something fails,
    skipping: `N passed, 0 skipped`. Name the control plane's checkout through
    `PERCEPTEYE_CONTROL_PLANE_CHECKOUT` too, so the shared `/policy/current`
    fixtures are compared with its copy byte for byte (unnamed, only their
-   digests are checked). CI cannot vouch for this part yet
-   ([§5](#5-when-a-publish-fails): `NODE_SDK_DEPLOY_KEY`).
+   digests are checked). CI runs the parity tests too, against the Node
+   repository's `main` (public, checked out with no credential); only the
+   byte-for-byte fixture comparison is local, because CI does not check out
+   the control plane.
 4. **Merge the Node PR first, then the Python one.** The Python parity tests
    import the Node repository's `main`.
 5. **Rehearse npm's authentication before tagging.** In the Node repository,
@@ -50,8 +58,9 @@ Follow this in order; each step links to the detail. When something fails,
    `npm verbose oidc` line is the verdict: `Successfully retrieved and set
    token` means a tag will publish; anything else is a
    [§5](#5-when-a-publish-fails) row. The rehearsal uploads nothing.
-6. **Tag both** `vX.Y.Z` on `main` and push the tags. Each tag publishes as
-   soon as its build passes; no reviewer gates it yet.
+6. **Tag both** `vX.Y.Z` on `main` and push the tags. Each tag runs its
+   repository's whole CI suite on the tagged commit, then the build, then
+   waits for a required reviewer to approve the `pypi` / `npm` job.
 7. **Watch both runs to the end,** and verify each registry itself, not the
    green check: [§2](#2-python-release-pypi) step 6 and
    [§3](#3-node-release-npm) step 6. If npm refused and nothing uploaded,
@@ -105,6 +114,77 @@ SVG was edited by hand instead of through its renderer.
 **Merge order.** When figures or the schema changed, merge the Node PR first:
 this repository's `test-full` job checks out the Node repository's `main`.
 
+## 1a. The Mission Control gate
+
+Before tagging, confirm the Mission Control the release targets serves what
+this release calls. Name its origin in `CP`: the SDK's default is
+`https://launch.percepteye.ai` (`DEFAULT_CONTROL_PLANE_URL` in
+`src/agent_flywheel/control_plane.py`, without its `/api/flywheel/v1`); a
+release that targets another deployment names that one. The gate checks two
+facts and exits non-zero naming the one that failed:
+
+- `GET $CP/api/v2/contract` (anonymous) publishes `info.version` at least the
+  `CUSTOMER_CONTRACT_VERSION` the SDK declares, in the same major;
+- `POST $CP/api/flywheel/v1/outcomes`, sent with no key and an empty body, is
+  answered BY THE ROUTE (401, 403 or 422). A 404 or 405 means the route is not
+  deployed, and any other answer (a page served for an unknown path) is no
+  evidence it is. That route is on the Flywheel API, whose OpenAPI is not
+  served, which is why it is probed.
+
+**Python** (from this repository's root):
+
+```bash
+CP=https://launch.percepteye.ai .venv/bin/python - <<'EOF'
+import json, os, urllib.error, urllib.request
+
+from agent_flywheel.customer_api import CUSTOMER_CONTRACT_VERSION as declared
+
+cp = os.environ["CP"].rstrip("/")
+served = json.load(urllib.request.urlopen(f"{cp}/api/v2/contract"))["info"]["version"]
+v = lambda s: tuple(int(x) for x in s.split("."))  # noqa: E731
+assert v(served)[0] == v(declared)[0] and v(served) >= v(declared), (
+    f"{cp} serves customer contract {served}; this SDK declares {declared}")
+req = urllib.request.Request(
+    f"{cp}/api/flywheel/v1/outcomes", data=b"{}", method="POST",
+    headers={"content-type": "application/json"})
+try:
+    status = urllib.request.urlopen(req).status
+except urllib.error.HTTPError as exc:
+    status = exc.code
+# An unauthenticated empty POST is refused BY THE ROUTE (401/403/422); a
+# 404/405 -- or anything else, such as a page answered for an unknown path --
+# is no evidence the route exists.
+assert status in (401, 403, 422), (
+    f"{cp} did not answer POST /api/flywheel/v1/outcomes as a route "
+    f"(HTTP {status})")
+print(f"ok: {cp} serves customer contract {served} and POST /outcomes")
+EOF
+```
+
+**Node** (from the Node repository's root):
+
+```bash
+CP=https://launch.percepteye.ai node --input-type=module -e '
+import { CUSTOMER_CONTRACT_VERSION as declared } from "./src/customer-api.js";
+const cp = process.env.CP.replace(/\/+$/, "");
+const v = (s) => s.split(".").map(Number);
+const served = (await (await fetch(`${cp}/api/v2/contract`)).json()).info.version;
+const [s, d] = [v(served), v(declared)];
+const atLeast = s[0] === d[0] && (s[1] > d[1] || (s[1] === d[1] && s[2] >= d[2]));
+if (!atLeast) throw new Error(`${cp} serves customer contract ${served}; this SDK declares ${declared}`);
+const { status } = await fetch(`${cp}/api/flywheel/v1/outcomes`, {
+  method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+if (![401, 403, 422].includes(status)) {
+  throw new Error(`${cp} did not answer POST /api/flywheel/v1/outcomes as a route (HTTP ${status})`);
+}
+console.log(`ok: ${cp} serves customer contract ${served} and POST /outcomes`);
+'
+```
+
+A release that calls a new Flywheel route adds that route to both probes in
+the same change. There is no pre-tag script to hang this on: the release
+workflows run after the tag is pushed, which is too late for it.
+
 ## 2. Python release (PyPI)
 
 1. **Bump the version** in `src/agent_flywheel/_version.py`, `pyproject.toml`
@@ -123,8 +203,12 @@ this repository's `test-full` job checks out the Node repository's `main`.
    git tag -a vX.Y.Z -m "agent-flywheel X.Y.Z" && git push origin vX.Y.Z
    ```
 
-5. **Watch it.** The `release` workflow builds, runs `twine check --strict`, and
-   publishes:
+5. **Watch it, and approve it.** The `release` workflow first runs the whole
+   CI suite (`ci.yml`, called as a reusable workflow) on the tagged commit,
+   then builds, checks the tag against `pyproject.toml`, runs `twine check
+   --strict`, and waits at the `pypi` job for a required reviewer to approve
+   it (Actions → the run → Review deployments). Nothing publishes unless CI
+   passed on that commit:
 
    ```bash
    gh run watch "$(gh run list --workflow workflow.yml --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status
@@ -148,10 +232,14 @@ this repository's `test-full` job checks out the Node repository's `main`.
   0.1.0 run came from `release.yml`, and the token exchange failed with
   `invalid-publisher` before anything uploaded. Rename the file only together
   with the publisher.
-- **A tag publishes immediately.** The `pypi` environment has no required
-  reviewer, and cannot have one yet: on the GitHub Team plan, required
-  reviewers only work on public repositories. Add one on the day the
-  repository goes public ([§4d](#4d-also-on-the-day)).
+- **A tag publishes only after CI, the build and a reviewer.** `workflow.yml`
+  calls `ci.yml` and the build `needs:` it, so a red suite publishes nothing;
+  the `pypi` environment has a required reviewer (checked 2026-11-20). A
+  manual run with `target=pypi` must be started on the tag (the "Use workflow
+  from" picker): the tag-matches-version check runs for it too, and refuses a
+  branch. Every third-party action in both workflows is pinned to a full
+  commit SHA, with its release in a trailing comment; bump the SHA and the
+  comment together.
 - **PyPI is append-only.** A version or filename can never be reused, even
   after deletion, and a release's description can never be edited. A README
   fix reaches PyPI only as a new version: 0.1.1 was published for exactly that.
@@ -257,10 +345,9 @@ so rehearse before the next one anyway.
      saving, rehearse (step 2) and read the `oidc` line.
    - **"Require two-factor authentication and disallow tokens",** so no
      long-lived token can publish.
-   - **No required reviewer on the GitHub `npm` environment yet.** On the
-     Team plan, required reviewers only work on public repositories, so until
-     the repository goes public ([§4d](#4d-also-on-the-day)), a `v*` tag
-     publishes as soon as CI passes.
+   - **A required reviewer on the GitHub `npm` environment** (checked
+     2026-11-20): a `v*` tag publishes once CI passes and a reviewer
+     approves the job.
 5. **Every release after that** is a merge, then a tag, in the Node repository:
 
    ```bash
@@ -349,9 +436,10 @@ paths remain in old commits and a few PR descriptions; the machine address
 remains only in the read-only `refs/pull/10/head`), both repositories flipped
 public, then the Python README's figures and in-repository links made absolute
 with `tests/test_readme_renders_on_github.py` flipped to enforce it, the
-deploy key dropped from `ci.yml`, and 0.3.0 released. The `ci` badge was not
-restored: the `ci` workflows are disabled on GitHub (2026-09-25). What follows
-is the checklist as it was written.
+deploy key dropped from `ci.yml`, and 0.3.0 released. The `ci` workflows,
+disabled on 2026-09-25, are active again in both repositories and the `ci`
+badge is back (checked 2026-11-20). What follows is the checklist as it was
+written; [§4d](#4d-also-on-the-day) says what is still open.
 
 **Why.** Both READMEs point at their figures by relative path
 (`docs/assets/*.gif`) and link to files in the repository the same way. GitHub
@@ -390,7 +478,10 @@ repository's CI checks the Node one out.
   head ref and cached views of the old commits.
 - **Planning notes:** decide on `docs/plan-*.md` and
   `docs/nemoclaw-sandbox.md`. They are tracked, so they go public with
-  everything else, and they stay in history either way.
+  everything else, and they stay in history either way. *(2026-11-20:
+  `docs/plan-*.md` and `.claude/` were removed from the tree and are
+  gitignored; they remain in history, and purging that is an owner /
+  GitHub Support call.)*
 - **Old branches:** review `byoh-fixes` and `research-tiers-2026-08`, or delete
   them first.
 
@@ -439,10 +530,13 @@ gh repo edit percepteye-ai/agent-flywheel-node --visibility public --accept-visi
 ### 4d. Also on the day
 
 - **Protect `main`** in both repositories: require a PR and the checks that
-  pass today. Neither has branch protection now.
+  pass today. *Done* (checked 2026-11-20): `main` is protected in both, with
+  the CI jobs as required checks. **Still open, an owner action:**
+  `enforce_admins` is off in both, so an administrator can push past the
+  required checks -- which is how red commits have reached `main`. Turn on
+  "Do not allow bypassing the above settings" (Settings → Branches → `main`).
 - **Add a required reviewer** to the `pypi` environment here and the `npm`
-  environment in the Node repository. On the Team plan that only works once a
-  repository is public. Until then, a `v*` tag publishes as soon as CI passes.
+  environment in the Node repository. *Done* (checked 2026-11-20).
 - **Actions costs change.** Standard GitHub-hosted runners are free for public
   repositories, so the minutes and spending-limit block no longer applies to
   them. Under Settings → Actions, require approval for workflows from

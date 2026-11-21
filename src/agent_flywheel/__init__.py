@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal
@@ -54,6 +55,8 @@ from . import declaration as _declaration
 from ._version import __version__
 from .contract import (
     CONTRACT_VERSION,
+    PRODUCTION_OUTCOMES,
+    TURN_FEEDBACK_SIGNALS,
     ExclusionReason,
     Outcome,
     RolloutOutput,
@@ -75,6 +78,8 @@ from .errors import (
     ContractViolation,
     EntrypointError,
     FlywheelError,
+    InvalidFeedback,
+    InvalidOutcome,
     LeaseLost,
     ModeNotAvailable,
     RoutingNotInstallable,
@@ -139,8 +144,10 @@ _log = logging.getLogger(__name__)
 __all__ = [
     "ARCHIVE_REF_PREFIXES",
     "CONTRACT_VERSION",
+    "PRODUCTION_OUTCOMES",
     "SERVABLE_PROMPT_STATUSES",
     "TASK",
+    "TURN_FEEDBACK_SIGNALS",
     "AttachTransport",
     "Attachment",
     "CaptureScope",
@@ -156,6 +163,8 @@ __all__ = [
     "FlywheelError",
     "FlywheelTransport",
     "InputShape",
+    "InvalidFeedback",
+    "InvalidOutcome",
     "LeaseLost",
     "ModeNotAvailable",
     "Outcome",
@@ -181,8 +190,8 @@ __all__ = [
     "current_prompt",
     "current_rollout_id",
     "current_task_id",
-    "hosted_model_url",
     "endpoint_kwargs",
+    "hosted_model_url",
     "introspect_agent",
     "is_archive_ref",
     "is_withdrawn",
@@ -309,6 +318,49 @@ def current_mode() -> str:
     wherever it is first read rather than only at startup.
     """
     return resolve_mode()
+
+
+#: Words that make a flag or a ``NAME=`` assignment a secret's: a flag whose
+#: name, split on ``-`` and ``_``, contains one of these has its value
+#: replaced in the registered entrypoint. Whole words, so ``--max-tokens``
+#: is not ``--token``.
+_SECRET_WORDS = frozenset({
+    "token", "key", "apikey", "password", "passwd", "pwd", "secret",
+    "auth", "credential", "credentials", "bearer",
+})
+_REDACTED_ARG = "[REDACTED]"
+
+
+def _secret_name(name: str) -> bool:
+    words = re.split(r"[-_]+", name.lstrip("-").lower())
+    return any(w in _SECRET_WORDS for w in words)
+
+
+def _registered_argv(command: Sequence[Any]) -> list[str]:
+    """A command entrypoint's argv as it is REGISTERED: every word a string,
+    every minted key (``pefw_``, ``mck_``) redacted by its shape
+    (:func:`~agent_flywheel._http.redact_keys`), and the value of every
+    secret-named flag (``--api-key X``, ``--token=X``) or assignment
+    (``API_KEY=X``) replaced. The argv the runner EXECUTES is untouched."""
+    from ._http import redact_keys
+
+    out: list[str] = []
+    hide_next = False
+    for raw in command:
+        arg = str(redact_keys(str(raw)))
+        if hide_next:
+            out.append(_REDACTED_ARG)
+            hide_next = False
+            continue
+        name, eq, _value = arg.partition("=")
+        if eq and _secret_name(name):
+            out.append(f"{name}={_REDACTED_ARG}")
+        elif arg.startswith("-") and _secret_name(arg):
+            out.append(arg)
+            hide_next = True
+        else:
+            out.append(arg)
+    return out
 
 
 def _env_true(name: str, *, default: bool) -> bool:
@@ -838,7 +890,7 @@ def _describe_via_host(
         )
         return described
 
-    if declared is None:
+    if declared is None or not declared.describes:
         consequence = (
             "This agent will register as introspection_state=unreadable, no "
             "workflows will be generated for it, and every phase downstream of "
@@ -1056,7 +1108,13 @@ def serve(
             anchors an execution identity -- it is your word, not an
             observation. ``introspect=False`` with ``describe=`` is a
             contradiction and raises; ``PERCEPTEYE_INTROSPECT=0`` wins over
-            it, with a warning.
+            it, with a warning. Optionally ``api_spec``: the absolute
+            http(s) URL where the agent's API spec is published, in any
+            format the control plane reads. Sent as a reference beside the
+            description (never the document) and recorded as the spec of
+            the Product that declares this agent, so its tools are matched to
+            the operations they call; it is not part of the description and
+            withholds no execution identity.
         rules: the workflow rules of the Product this agent belongs to, one
             prose rule per string, sent once at startup, after registration,
             to ``POST /agents/{agent_id}/rulebook``. The control plane files
@@ -1267,7 +1325,10 @@ def serve(
         # raised TypeError here — the same class of bug the line above records
         # having shipped once, where reading .name off a command entrypoint
         # failed every non-Python agent at registration.
-        else " ".join(str(a) for a in (getattr(runner, "_command", None) or []))
+        # SCRUBBED (_registered_argv): an argv routinely carries a secret
+        # (``--api-key sk-...``), and this label is stored and shown by the
+        # control plane.
+        else " ".join(_registered_argv(getattr(runner, "_command", None) or []))
         or "command"
     )
 
@@ -1282,8 +1343,10 @@ def serve(
         "sdk": f"agent-flywheel-python/{__version__}",
         "contract_version": CONTRACT_VERSION,
         "reports_tool_calls": bool(reports_tool_calls),
-        "isolation": isolation,
-        "concurrency": concurrency,
+        # What the runner WILL do, not what was asked: a command entrypoint
+        # always runs as its own process, whatever ``isolation`` said.
+        "isolation": runner.isolation,
+        "concurrency": runner.concurrency,
         "input_shape": input_shape,
         "entrypoint": entrypoint_label,
     }
@@ -1338,6 +1401,10 @@ def serve(
         described = _declaration.apply(declared, reflected=described,
                                        agent_name=agent_id)
         payload["discovered_agent"] = described.to_wire() if described else None
+        # Where the agent's API spec is published, when describe= says: a
+        # reference beside the description, never part of it (declaration.py).
+        if declared is not None:
+            payload.update(declared.registration_fields())
 
     # The rollout fingerprint is authored here, after discovery, from the same
     # framework-neutral facts registration sends plus exact pre-projection
@@ -1349,7 +1416,9 @@ def serve(
     # about their agent, not an observation of what runs.
     runner.configure_execution_identity(
         described,
-        discovery_enabled=discovery_enabled and declared is None,
+        # ``api_spec`` alone describes nothing, so it withholds nothing.
+        discovery_enabled=discovery_enabled and not (
+            declared is not None and declared.describes),
         sdk=payload["sdk"],
         contract_version=CONTRACT_VERSION,
     )

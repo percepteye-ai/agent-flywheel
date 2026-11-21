@@ -376,6 +376,7 @@ def _adk_turn(px, request, response, tool=None):
 
     class _Ctx:
         invocation_id, agent_name = "inv-1", "support"
+        _callback_info = None  # ADK >= 2.15 dispatch scopes this
         function_call_id = "fc-live"
 
     class _Tool:
@@ -547,6 +548,7 @@ def test_adk_reads_the_request_the_model_was_sent_not_an_early_copy(
 
             class _Ctx:
                 invocation_id, agent_name = "inv-2", "support"
+                _callback_info = None  # ADK >= 2.15 dispatch scopes this
 
             pm = PluginManager()
 
@@ -578,6 +580,7 @@ def test_an_adk_client_call_id_is_not_put_on_the_tool_span(monkeypatch, tmp_path
 
     class _Ctx:
         invocation_id, agent_name = "inv-3", "support"
+        _callback_info = None  # ADK >= 2.15 dispatch scopes this
         function_call_id = "adk-6f0c"
 
     class _Tool:
@@ -867,6 +870,7 @@ def test_adk_records_the_final_response_not_each_streamed_chunk(
 
     class _Ctx:
         invocation_id, agent_name = "inv-4", "support"
+        _callback_info = None  # ADK >= 2.15 dispatch scopes this
 
     tr = _Transport()
     with _attached(monkeypatch, tmp_path, tr) as px:

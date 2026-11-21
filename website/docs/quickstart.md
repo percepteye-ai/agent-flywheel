@@ -133,7 +133,7 @@ rollout_reported {'rollout_id': 'r-1', 'grade': None, 'duplicate': False, 'exclu
 claim_empty {'poll_after_ms': 500}
 ```
 
-`on_event` is `Callable[[str, dict], None]`, called **synchronously on whichever thread produced the event** — the serving thread for `claim_*`, a pool worker for the per-rollout kinds, the heartbeat thread for `lease_lost` and `heartbeat_failed`. Exceptions it raises are swallowed: an observability hook must not be able to change what it observes. Keep it cheap. The full vocabulary is in [configuration](configuration.md).
+`on_event` is `Callable[[str, dict], None]`, called **synchronously on whichever thread produced the event** — the serving thread for `claim_*`, a pool worker for the per-rollout kinds, a heartbeat worker for `lease_lost` and `heartbeat_failed`. Exceptions it raises are swallowed: an observability hook must not be able to change what it observes. Keep it cheap. The full vocabulary is in [configuration](configuration.md).
 
 Two lines `serve()` prints on its own, both to stdout:
 

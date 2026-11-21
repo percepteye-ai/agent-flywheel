@@ -34,7 +34,7 @@ px.record_answer(turn_id, reply)          # after the scope closes: the answer e
 | `execution_entrypoint` | `None` | the live Python agent/import spec to describe for exact execution identity |
 | `execution_input_shape` · `execution_method` | `"text"` · `None` | the declared call surface of `execution_entrypoint` |
 | `attested_execution_components` | `None` | opaque exact adapter evidence for implementation/state discovery cannot observe |
-| `describe` | `None` | the agent's own `system_prompt` / `tools` / `model` — without `execution_entrypoint`, the whole description this registration sends ([`describe=`](how-it-works.md#an-agent-nothing-can-read-describe)) |
+| `describe` | `None` | the agent's own `system_prompt` / `tools` / `model` — without `execution_entrypoint`, the whole description this registration sends — and, optionally, `api_spec`, the URL of its API spec ([`describe=`](how-it-works.md#an-agent-nothing-can-read-describe)) |
 | `rules` | `None` | the Product's workflow rules, declared once after the registration, exactly as for [`serve()`](configuration.md#a-products-workflow-rules-rules); `None` sends nothing, `[]` retracts |
 
 With `register=True` the call makes exactly two outbound requests, once, at startup: `POST /agents` then `GET /policy/current` — and a third, `POST /agents/{agent_id}/rulebook`, only when `rules=` is given, sent in the background after the policy read: `attach()` returns without waiting for its answer. It registers as `mode: "production"` — `serve()` sends `"rollout"`, and a training donor versus a production reader is the one distinction a `mode` on a registration exists to draw. `register=False` skips every one of them, for a process that should make no outbound connection at all.
@@ -47,6 +47,8 @@ With `register=True` the call makes exactly two outbound requests, once, at star
 |:--|:--|
 | `.turn(turn_id=None, conversation_id=None, task_id=None, input_text=None)` | context manager; yields the turn id |
 | `.record_answer(turn_id, text)` | what the agent finally answered; callable **after** the scope closes |
+| `.report_outcome(outcome, turn_id=None, conversation_id=None, value=None, note=None, occurred_at=None, outcome_id=None, episode_id=None)` | how the turn, the conversation or the episode (`episode_id=`, the id a served episode's request carries; alone it needs no capture consent) turned out: `resolved`, `escalated`, `reopened`, `abandoned`, `thumbs_up` or `thumbs_down`. Returns the outcome's id, or `None` (a no-op) once the control plane says capture is not enabled (kept, and asked again, while that answer is unknown); raises `InvalidOutcome` for anything else |
+| `.report_turn_feedback(signal, *, episode_id=None, turn_index=None, occurred_at=None, feedback_id=None, turn_id=None)` | what the user did with one turn of an episode the platform ran (`episode_id`, `turn_index`), or with one production turn (`turn_id`, the id `turn()` yielded: an event on that turn's trace, see below): `accepted`, `corrected`, `repeated`, `escalated` or `abandoned`. `turn_index` counts from 0. Needs no capture consent. Returns the feedback's id, or `None` with no control plane or once the control plane has refused this key feedback (a 403; what is waiting stays on disk) or has no route for it (a 404 or 405; what was waiting is dropped) — each said once, nothing raises; raises `InvalidFeedback` for anything else |
 | `.read(turn_id)` | that turn's `list[ToolCallOutcome]`, or `None` if nothing was recorded |
 | `.read_turn(turn_id)` | the `task` / `answer` text recorded for that turn, or `None` |
 | `.flush(include_unanswered=False, batch_size=64)` | uploads now, asking for the permissions again first; larger requested batches are split at the contract's 64-turn limit |
@@ -69,7 +71,7 @@ With `register=True` the call makes exactly two outbound requests, once, at star
 
 **The turn's text is yours to pass.** `input_text=` records what the user asked and `record_answer()` records what the agent finally said. They are your end user's message and the answer your code returned, facts only your own code holds, which no adapter can tell apart from the rest of a model call. They are separate calls because the answer does not exist yet when the turn opens. A turn with no recorded answer is held back by the 32-turn upload and leaves only at `close()` or exit, and the control plane keeps it but does not learn from it.
 
-**`task_id=` is correlation evidence, not authority.** Pass the opaque id of your case, job, ticket, or work item when a later process needs to join this turn to that exact task. The SDK writes it beside the trajectory, adds it to the optional `task_id` field in `POST /turns`, and emits `percepteye.task.id` on the turn's OTel spans. It never parses the id, creates hints, judges the trace, or treats the turn as trainable. Empty, non-string, C0/C1-control-bearing, whitespace-padded, over-255-character, or conflicting values stay absent.
+**`task_id=` is correlation evidence, not authority.** Pass the opaque id of your case, job, ticket, or work item when a later process needs to join this turn to that exact task. The SDK writes it beside the trajectory, adds it to the optional `task_id` field in `POST /turns`, and emits `percepteye.task.id` on the turn's OTel spans. It never parses the id, creates hints, judges the trace, or treats the turn as trainable. Empty, non-string, whitespace-padded, over-255-character, or conflicting values stay absent, as does any value with a character Python's `str.isprintable()` refuses (a control, format, separator other than the space, unassigned or private-use character, such as U+200B or U+00A0): the control plane refuses those, and would refuse the whole batch around one.
 
 **Nothing in `turn()` can fail the turn.** If the directory cannot be created, capture is skipped and the body still runs.
 
@@ -154,14 +156,14 @@ if snap.changed:                  # rebuild ONLY on an actual change
 | `base_url` · `api_key` · `model` | `str` | what to run; empty when nothing is deployed or the control plane has never answered |
 | `changed` | `bool` | `True` on the **one** snapshot that first reports a change; consumed by whoever observes it, so build one client per handle |
 | `stale_for_s` | `float` | `0.0` while refreshes succeed; seconds **past the TTL** while they fail. The number to alert on |
-| `last_refresh_ok` | `bool` | `False` after a failed attempt — the snapshot still stands |
+| `last_refresh_ok` | `bool` | `False` after a failed attempt, including a newly served system prompt that could not be read — the snapshot still stands |
 | `serving_generation` | `str` | moves when *anything* about what to run moves, the prompt included; a fleet cycles a replica when it differs |
 
 `bool(snap)` is truthy only when there is something to act on, and `snap.as_kwargs()` returns the same shape as `apply_current_policy()`. `on_change=` fires on promotion and rollback alike, never on a failed refresh. `PolicySource` is a context manager, and `close()` is idempotent.
 
 | rule | value | why |
 |:--|:--|:--|
-| default TTL | `ttl_s=300.0` | |
+| default TTL | `ttl_s=300.0` | must be a finite number of seconds > 0; anything else raises `ConfigurationError` |
 | server hint | the body's `ttl_s` beats your `ttl_s=` | the control plane knows its own promotion cadence |
 | floor | `MIN_TTL_S = 30.0` s, beats both | a misconfigured `ttl_s=1` across a fleet would flood the control plane |
 | jitter | ±10%, drawn once per handle | replicas that boot together would otherwise refresh in lockstep |
@@ -249,9 +251,9 @@ fw.serve(
 | argument | default | what it does |
 |:--|:--|:--|
 | `max_rollouts` | `None` | stop after this many tasks **complete**, then return. A crash and a graded pass both count |
-| `artifacts_dir` | `./.percepteye-artifacts` | created if absent; each task gets `_percepteye/<rollout_id>/` beneath it, deleted once the result is reported |
+| `artifacts_dir` | `./.percepteye-artifacts` | created if absent; each claimed rollout gets `_percepteye/<rollout_id>.<lease digest>/` beneath it, deleted once the result is reported |
 | `concurrency` | `1` | tasks in flight, under the default subprocess isolation |
-| `rollout_timeout_s` | `900.0` | per-task wall clock; subprocess isolation is the only mode with a real timeout |
+| `rollout_timeout_s` | `None` | optional per-task ceiling below the control plane's episode budget (which always bounds the task); subprocess isolation is the only mode with a real timeout |
 
 **`max_rollouts` is the only clean exit `serve()` has.** Nothing in this package installs a SIGINT or SIGTERM handler, so without it the loop runs until the process is killed. See [Stopping a running flywheel](configuration.md#stopping-a-running-flywheel).
 
@@ -287,7 +289,7 @@ Every event is in [Configuration](configuration.md#watching-a-flywheel-on_event)
 - **Spooled before the first send.** The result is written to a durable outbox under your `artifacts_dir` *before* it is POSTed, so a process killed mid-request still delivers. The next process over the same directory drains it, and **that drain runs before the next claim**, so a held result is never starved by new work.
 - **A permanent refusal is retired, never deleted.** If the control plane refuses in a way redelivery cannot fix, the reason is written into the record and the file is renamed out of the retry set, with the task's trajectory kept beside it. Retired names are uniquified, so a second refusal cannot overwrite the first. After three such refusals in a row, `serve()` stops claiming. A result still undeliverable after seven days is kept and no longer retried.
 - **Your agent's turn is bounded well inside the task.** `serve()` derives a per-call ceiling from the task budget and leaves a delivery reserve, so a provider that accepts a connection and never answers costs one timeout instead of the whole task.
-- **No bearer credential is written to disk.** The lease token is held only in memory.
+- **`serve()` writes no bearer credential to disk.** The lease token is held only in memory. (The goose hook, which has no long-lived process to hold it, keeps the lease of the one rollout it claimed in a `claim.json` only you can read — 0600, in a 0700 directory — until it reports.)
 
 `outcome_spooled` and `outcome_undeliverable` name a result that is being held or has been retired.
 
@@ -433,7 +435,7 @@ On a practice task whose text is `"count to three"`, the reported trajectory is:
 
 **`unknown`, not `ok`.** The tool returned a string and nothing observed whether the call succeeded. `Tool.invoke({"q": ...})` with a plain dict has no tool-call id to attach, so LangChain returns raw content rather than a `ToolMessage` — and raw content from a tool that worked is byte-identical to raw content from a tool that caught its own exception and returned prose. Calling that `ok` is the single most consequential lie a capture can tell, so the adapter does not.
 
-That is the honest floor zero instrumentation buys you, and it is enforced by [`tests/test_zero_instrumentation.py`](https://github.com/percepteye-ai/agent-flywheel/blob/main/tests/test_zero_instrumentation.py) inside the 1535-test suite. Drive the same tool through a model-issued tool call and the same adapter reports `"outcome": "ok"` with the model's `tool_call_id` attached, because then there is a `ToolMessage` with a real `status`.
+That is the honest floor zero instrumentation buys you, and it is enforced by [`tests/test_zero_instrumentation.py`](https://github.com/percepteye-ai/agent-flywheel/blob/main/tests/test_zero_instrumentation.py) inside the 2354-test suite. Drive the same tool through a model-issued tool call and the same adapter reports `"outcome": "ok"` with the model's `tool_call_id` attached, because then there is a `ToolMessage` with a real `status`.
 
 One call where you *do* know the answer gets you the rest:
 
@@ -447,7 +449,7 @@ record_tool_call("charge_card", {"amount": 4200}, outcome="ok", status_code=201)
 
 ??? note "Routing a chat model you constructed yourself"
 
-    `LangChainAdapter(llm=...)` re-points a chat model at the per-task gateway and reads the value back to check it took. It exists because `ChatOpenAI(base_url=...)` in your own code beats every environment variable: the task completes, the completions go to a live third party, and nothing distinguishes it from a clean run. A client whose endpoint is fixed at construction raises `RoutingNotInstallable(reason="HardcodedBaseUrl")`.
+    `LangChainAdapter(llm=...)` re-points a chat model at the per-task gateway: it rewrites the model's endpoint and key, rebuilds the provider client the model sends through, reads the base URL back off that client to check it took, and puts everything back when the task ends. It exists because `ChatOpenAI(base_url=...)` in your own code beats every environment variable: the task completes, the completions go to a live third party, and nothing distinguishes it from a clean run. A model whose client cannot be rebuilt (it still sends to its original URL) raises `RoutingNotInstallable(reason="HardcodedBaseUrl")`.
 
     This is reachable only by passing an adapter **instance**, which means `isolation="inprocess"` — the subprocess payload is JSON, and an adapter object cannot cross it. `adapters=["langchain"]` constructs the adapter with `llm=None`, which touches routing not at all. The ordinary arrangement is the default one: the child's environment routes, because the agent is constructed inside a child that already has those variables set. Build your model inside the factory and it is handled for you.
 

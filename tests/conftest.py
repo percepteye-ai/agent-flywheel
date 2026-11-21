@@ -154,3 +154,16 @@ def _never_the_production_control_plane(monkeypatch):
             "this test sent requests to the production control plane "
             f"({', '.join(sorted(set(attempted)))}); set "
             "PERCEPTEYE_CONTROL_PLANE_URL or a mock transport instead")
+
+
+@pytest.fixture
+def quiet(monkeypatch):
+    """No background thread: each test flushes when it means to. Returns the
+    list of times a flush was asked for. Shared by the outcome and
+    turn-feedback suites, which is why it lives here and is not imported."""
+    import agent_flywheel as fw
+
+    asked: list[int] = []
+    monkeypatch.setattr(
+        fw.Attachment, "_flush_soon", lambda self: asked.append(1))
+    return asked

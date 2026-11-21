@@ -32,7 +32,7 @@ import warnings
 from agent_flywheel import RolloutRequest
 from agent_flywheel.contract import RolloutOutput, ToolCallOutcome
 from agent_flywheel.errors import LeaseLost, TransportError
-from agent_flywheel.runner import RolloutRunner, _output_from_wire
+from agent_flywheel.runner import RolloutRunner, _attempt_key, _output_from_wire
 
 # ── the world ──────────────────────────────────────────────────────────────
 
@@ -332,6 +332,10 @@ def test_a_payload_the_wire_cannot_carry_does_not_strand_the_other_leases(tmp_pa
                 name="grep", arguments={"q": "x"}, status_code=None,
                 outcome="ok",
             )]
+            out.checks = [{"id": "balance_restored", "status": "measured",
+                           "value": 1.0}]
+            out.termination = {"class": "completed"}
+            out.seeds = {"environment": 7}
         return out
     runner.run_one = poisoned
 
@@ -354,7 +358,7 @@ def test_a_payload_the_wire_cannot_carry_does_not_strand_the_other_leases(tmp_pa
     # and reward that WERE captured are gone with no trace that they existed.
     detail = bad["exclusion"]["detail"]
     assert "dropped by the salvage" in detail, detail
-    for lost in ("tool_calls", "reward"):
+    for lost in ("tool_calls", "reward", "checks", "termination", "seeds"):
         assert lost in detail.split("dropped by the salvage:")[1], (
             f"{lost} was populated, was discarded, and is not named: {detail}"
         )
@@ -492,7 +496,7 @@ def test_a_sealed_rollout_the_control_plane_refuses_forever_keeps_everything(
     assert "done" in kept["result"]["final_text"]
     assert kept["result"]["artifacts"]["answer.txt"]["content"] == "solved\n"
 
-    trajectory = tmp_path / "_percepteye" / "rl_1"
+    trajectory = tmp_path / "_percepteye" / _attempt_key(_req(tmp_path))
     assert (trajectory / "answer.txt").read_text() == "solved\n", (
         "the evidence was purged behind a result that can never be delivered"
     )
@@ -537,7 +541,8 @@ def test_the_drain_keeps_the_evidence_of_what_it_could_not_deliver_either(
         f"the drain destroyed the result: "
         f"{sorted(p.name for p in _outbox(tmp_path).iterdir())}"
     )
-    assert (tmp_path / "_percepteye" / "rl_1" / "answer.txt").read_text() == "solved\n", (
+    answer = tmp_path / "_percepteye" / _attempt_key(_req(tmp_path)) / "answer.txt"
+    assert answer.read_text() == "solved\n", (
         "the drain purged the evidence behind a result it could not deliver"
     )
 
@@ -615,7 +620,7 @@ def test_the_trajectory_is_kept_while_its_outcome_is_undelivered(tmp_path):
         runner.serve_forever(max_rollouts=1)
 
     assert tr.reported == []
-    assert (tmp_path / "_percepteye" / "rl_1").is_dir(), (
+    assert (tmp_path / "_percepteye" / _attempt_key(_req(tmp_path))).is_dir(), (
         "the evidence was deleted while the result was still undelivered"
     )
 
@@ -623,7 +628,7 @@ def test_the_trajectory_is_kept_while_its_outcome_is_undelivered(tmp_path):
     alive = ScriptedTransport([])
     _runner(tmp_path, alive, ["sh", _script(tmp_path, "echo x\n")]).serve_forever()
     assert alive.reported == ["rl_1"]
-    assert not (tmp_path / "_percepteye" / "rl_1").exists()
+    assert not (tmp_path / "_percepteye" / _attempt_key(_req(tmp_path))).exists()
 
 
 def test_a_crash_the_control_plane_never_heard_about_is_still_delivered(tmp_path):
@@ -740,3 +745,122 @@ def test_a_second_refusal_never_overwrites_the_first_retired_record(tmp_path):
     assert survived == ["first", "second", "third"], (
         f"a later refusal destroyed an earlier retired record: {survived}"
     )
+
+
+def test_one_malformed_evidence_part_does_not_cost_the_episode_its_outcome():
+    """The checks, the termination and the seeds are statements ABOUT an
+    outcome. A check row the wire refuses (a NaN value here) used to send the
+    whole result down the salvage: reward, tool calls and artifacts dropped
+    and the episode excluded as a crash. The part that cannot be carried is
+    dropped and named; everything else, including the evidence parts that ARE
+    well formed, is sent."""
+    import pytest
+
+    from agent_flywheel.runner import _wire_payload
+
+    out = RolloutOutput(
+        final_text="done", reward=0.75, success=True,
+        tool_calls=[ToolCallOutcome(
+            name="grep", arguments={"q": "x"}, status_code=None, outcome="ok")],
+        checks=[{"id": "balance_restored", "status": "measured",
+                 "value": float("nan")}],
+        termination={"class": "completed"},
+        seeds={"environment": 7},
+    )
+    with pytest.warns(RuntimeWarning, match="checks"):
+        wire = _wire_payload(out)
+    assert "exclusion" not in wire, wire
+    assert wire["reward"] == 0.75 and wire["success"] is True
+    assert wire["tool_calls"] and wire["tool_calls"][0]["name"] == "grep"
+    assert "checks" not in wire
+    assert wire["termination"] == {"class": "completed"}
+    assert wire["seeds"] == {"environment": 7}
+    assert out.checks, "the caller's object was mutated"
+    # ...AND THE STORED EPISODE SAYS SO. A warning reaches the process that
+    # ran the agent and nobody who reads the episode: without the count, an
+    # episode whose checks could not be sent reads as one that ran none.
+    assert wire["checks_dropped"] == 1
+
+
+def test_an_unsendable_termination_or_seed_claims_no_missing_checks():
+    """``checks_dropped`` counts checks. A report that lost another part
+    still carries every check it ran."""
+    import pytest
+
+    from agent_flywheel.runner import _wire_payload
+
+    out = RolloutOutput(
+        final_text="done", checks=[{"id": "a", "status": "measured"}],
+        termination={"class": "gave_up"})
+    with pytest.warns(RuntimeWarning, match="termination"):
+        wire = _wire_payload(out)
+    assert wire["checks"] == [{"id": "a", "status": "measured"}]
+    assert "termination" not in wire and "checks_dropped" not in wire
+
+
+def test_a_report_that_carries_the_first_checks_says_so_out_loud():
+    """Over the limit is not a refusal: the first rows go, the count goes
+    with them, and the process that stated too many is told once per
+    report."""
+    import pytest
+
+    from agent_flywheel.contract import MAX_REPORTED_CHECKS
+    from agent_flywheel.runner import _wire_payload
+
+    out = RolloutOutput(final_text="done", reward=1.0, checks=[
+        {"id": str(i), "status": "measured"}
+        for i in range(MAX_REPORTED_CHECKS + 2)])
+    with pytest.warns(RuntimeWarning, match="says 2 were not") as caught:
+        wire = _wire_payload(out)
+    assert len(caught) == 1
+    assert len(wire["checks"]) == MAX_REPORTED_CHECKS
+    assert wire["checks_dropped"] == 2 and wire["reward"] == 1.0
+    assert "exclusion" not in wire
+    # The count survives the spool and the child process, which both carry
+    # the wire form and rebuild the output from it.
+    assert _output_from_wire(wire).to_wire() == wire
+
+
+def test_the_salvage_says_the_checks_it_could_not_carry():
+    """When something besides the evidence is unsendable the report is
+    rebuilt from the two always-sendable fields, and it carries no check."""
+    import warnings as _warnings
+
+    from agent_flywheel.runner import _wire_payload
+
+    out = RolloutOutput(
+        final_text="done", llm_call_count=-1,
+        checks=[{"id": "a", "status": "measured"},
+                {"id": "b", "status": "error"}])
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore")
+        wire = _wire_payload(out)
+    assert wire["exclusion"]["reason"] == "flywheel_crash"
+    assert "checks" not in wire and wire["checks_dropped"] == 2
+
+
+def test_the_child_process_reports_through_the_same_seam(
+        tmp_path, monkeypatch, capsys):
+    """The isolated child wrote ``out.to_wire()`` bare, so the same malformed
+    evidence row killed the child and the parent recorded a crash."""
+    import io
+
+    from agent_flywheel import child, runner
+
+    out = RolloutOutput(
+        final_text="done", reward=0.5,
+        checks=[{"id": "c", "status": "measured", "value": float("inf")}])
+    monkeypatch.setattr(runner, "build_agent", lambda spec: object())
+    monkeypatch.setattr(child, "resolve_entrypoint", lambda *a, **k: object())
+    monkeypatch.setattr(runner, "run_rollout_in_process", lambda *a, **k: out)
+    monkeypatch.setattr(child.RolloutRequest, "from_wire",
+                        classmethod(lambda cls, d: _req(tmp_path)))
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({
+        "spec": "m:a", "rollout": {}, "trajectory_dir": str(tmp_path),
+        "timeout_s": 5})))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert child.main() == 0
+    wire = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert wire["reward"] == 0.5 and "exclusion" not in wire
+    assert "checks" not in wire

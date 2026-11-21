@@ -163,6 +163,25 @@ def _fits(line: str) -> bool:
     return len(line.encode("utf-8")) <= _MAX_RECORD_BYTES
 
 
+def _fit_text(record: dict) -> str:
+    """A record without arguments (a turn) within the single-write cap: its
+    ``text`` shortened, saying how long it was, until the line fits."""
+    line = json.dumps(record)
+    text = record.get("text")
+    if _fits(line) or not isinstance(text, str):
+        return line
+    keep = len(text)
+    while keep > 0:
+        # Scale by how far over the cap the line is, and always shrink.
+        keep = min(keep - 1, keep * _MAX_RECORD_BYTES // len(line.encode("utf-8")))
+        keep = max(keep, 0)
+        record["text"] = text[:keep] + f"…[truncated, {len(text)} chars total]"
+        line = json.dumps(record)
+        if _fits(line):
+            return line
+    return line
+
+
 def _fit(record: dict) -> str:
     """Serialise one record within the single-write cap.
 
@@ -173,7 +192,14 @@ def _fit(record: dict) -> str:
     never from a body this file had already shortened. Arguments are clipped
     only after the bodies have given way, because retry detection keys on
     name + arguments.
+
+    A TURN record (task, answer) has no arguments and no bodies, only
+    ``text``, cut at ``_MAX_OUTPUT_CHARS`` characters -- which JSON escapes
+    to up to six bytes each, so non-ASCII text over ~1.2k characters does not
+    fit. Its text is shortened, visibly, until the line does.
     """
+    if "arguments" not in record:
+        return _fit_text(record)
     raw = {k: record[k] for k in ("output", "error") if k in record}
     if raw:
         bound = _body_bound().bounded
@@ -381,7 +407,11 @@ def _contributing():
     try:
         from agent_flywheel._http import ControlPlaneClient
         from agent_flywheel.control_plane import resolve_control_plane_url
-        from agent_flywheel.install_hooks import claim_refusal
+        from agent_flywheel.install_hooks import (
+            claim_refusal,
+            goose_agent_id,
+            goose_api_key,
+        )
         from agent_flywheel.transport import AttachTransport
     except Exception:
         return None
@@ -393,11 +423,15 @@ def _contributing():
     # PERCEPTEYE_CONTROL_PLANE_URL while the SDKs default it, so the recorder
     # and the SDK in one process could disagree about where the control plane
     # is. Imported here, on the once-per-session path, never per tool call.
+    # The key by the same rule: PERCEPTEYE_API_KEY, else the one
+    # `agent-flywheel login` stored for this agent (``goose_api_key``) -- the
+    # rule claim_refusal just passed on, so the two cannot disagree.
     url = resolve_control_plane_url()
-    key = os.environ.get("PERCEPTEYE_API_KEY")
-    agent = os.environ.get("PERCEPTEYE_AGENT_ID") or "goose"
+    key = goose_api_key()
+    if key is None:
+        return None
     client = ControlPlaneClient(base_url=url, api_key=key)
-    return AttachTransport(client, agent_id=agent), client
+    return AttachTransport(client, agent_id=goose_agent_id()), client
 
 
 def _reconcile():
@@ -448,14 +482,43 @@ def _claim(event, base):
             with open(os.path.join(work, TASK_FILENAME), "w",
                       encoding="utf-8") as fh:
                 fh.write(r.turn_input)
-        os.makedirs(base, exist_ok=True)
-        with open(os.path.join(base, CLAIM_FILENAME), "w",
-                  encoding="utf-8") as fh:
+        # The claim carries the lease token, a bearer credential for this
+        # rollout: it is created 0600, in a directory only its owner can
+        # enter, and never exists readable by anyone else even for a moment.
+        _private_dirs(base)
+        path = os.path.join(base, CLAIM_FILENAME)
+        try:
+            os.unlink(path)  # a stale one may have been created wider
+        except FileNotFoundError:
+            pass
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump({"rollout_id": r.rollout_id, "task": r.turn_input,
                        "lease_token": r.lease_token,
                        "deadline_ts": r.deadline_ts, "llm_url": r.llm_url}, fh)
     finally:
         client.close()
+
+
+def _private_dirs(path):
+    """Create ``path`` and every missing parent 0700, and tighten ``path``
+    itself to 0700: it (and ``$PERCEPTEYE_HOME`` above it, which also holds
+    ``credentials.json``) is this user's alone."""
+    missing = []
+    head = os.path.abspath(path)
+    while head and not os.path.isdir(head):
+        missing.append(head)
+        parent = os.path.dirname(head)
+        if parent == head:
+            break
+        head = parent
+    for d in reversed(missing):
+        try:
+            os.mkdir(d, 0o700)
+        except FileExistsError:
+            pass
+    if os.name != "nt":
+        os.chmod(path, 0o700)
 
 
 def _report(event, base):
@@ -549,7 +612,8 @@ def main() -> int:
         if record is None:
             return 0
         filename = record.pop("_file", TOOL_CALLS_FILENAME)
-        os.makedirs(base, exist_ok=True)
+        if not os.path.isdir(base):
+            _private_dirs(base)
         data = (_fit(record) + "\n").encode("utf-8")
         # One unbuffered O_APPEND write, not a buffered file object. Under
         # O_APPEND the kernel makes the seek-and-write atomic per syscall, so

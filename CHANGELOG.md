@@ -5,6 +5,222 @@ What changed in `agent-flywheel`, by release. The Node SDK,
 ships the same version number in the same release. Commit hashes are this
 repository's.
 
+## 0.5.0
+
+### Added
+
+- **A customer can report how a turn or a conversation actually turned out.**
+  Python: `Attachment.report_outcome(outcome, turn_id=, conversation_id=,
+  value=, note=, occurred_at=, outcome_id=)`. Node: `reportOutcome(outcome,
+  {turnId, conversationId, value, note, occurredAt, outcomeId})` on the capture
+  handle `register()` returns. Both SDKs, same behaviour:
+  - **Vocabulary.** `outcome` is one of `resolved`, `escalated`, `reopened`,
+    `abandoned`, `thumbs_up`, `thumbs_down` (`PRODUCTION_OUTCOMES`), naming a
+    turn, a conversation, or both. Anything outside it, or a value the wire
+    cannot carry, raises `InvalidOutcome` at the call, capture on or off:
+    `occurred_at` must be a time that exists (not `2026-02-30`, not `T24:00`,
+    ASCII digits) and `value` a finite number the wire's float holds.
+    `note` is at most 1,000 characters. Each report is recorded; none replaces
+    another.
+  - **Idempotency.** `outcome_id` / `outcomeId` is the report's idempotency
+    key: omitted, one is minted; pass your own stable id to collapse your own
+    retries of the same report.
+  - **Offline queue.** Each outcome waits as one file in the capture directory
+    (`.outcome.<digest>.json`), is uploaded off the caller's thread with the
+    turns' flush, and is retried across restarts until Mission Control
+    acknowledges it, for at most a week (the week runs out on every flush,
+    whatever consent says). A 4xx about the records (400, 409, 413, 422 ...)
+    is final for them: the batch is split until the refused records stand
+    alone, the rest are sent at once, and each refused record is dropped
+    with a warning naming the control plane's cause, so one bad record never
+    holds back the good ones beside it. When both halves of a split are
+    refused alike (same status, same words) the refusal was of the batch --
+    a control plane on another contract minor, a proxy -- so the outcomes
+    stay for a later flush and the cause is said once. A 413 is about the
+    body's size, never the batch, so it is split on until the parts fit; a
+    record too large even alone is dropped with a warning naming the 413 and
+    its size. Splitting is bounded at 32 requests a flush.
+  - **Consent.** It is sent on exactly the terms a turn is: a no-op (returns
+    `None` / `null`, keeps nothing) once Mission Control has said production
+    capture is not enabled for the agent, and a 403 from the intake stops
+    outcomes as it stops turns. Reported while that answer is still unknown
+    (the registration that asks failed on a blip), the outcome is kept, and
+    reporting it starts the flush that asks again; at most 1,000 of the
+    outcomes that wait on that answer are kept while it is unknown, oldest
+    dropped first with a warning that says the control plane has not answered
+    (an outcome naming only an episode does not wait on it, and is never
+    counted or dropped by this bound). A 401, 403 or
+    404 on the verdict read, or an answer with no verdict in it, is an
+    answer: no.
+
+- **An outcome can name the episode it is the outcome of, and one turn of an
+  episode can be given feedback.** Both SDKs, same wire, same refusal text.
+  - **Episode join.** `report_outcome(..., episode_id=)` /
+    `reportOutcome(outcome, {episodeId})`. The episode id is the one the
+    platform gives the agent with each served episode
+    (`current_rollout_id()` / `currentRolloutId(ctx)` on what the Node
+    plugin's `register()` returns, asked with the host context of the session
+    running the episode). An outcome names a
+    turn, a conversation, an episode, or any of them together; published as
+    `episode_id` on `ProductionOutcome`. Mission Control keeps it beside that
+    episode's evidence as a weak reading.
+  - **Per-turn feedback.** Python: `Attachment.report_turn_feedback(signal,
+    *, episode_id, turn_index, occurred_at=, feedback_id=)`. Node:
+    `reportTurnFeedback(signal, {episodeId, turnIndex, occurredAt,
+    feedbackId})` on the capture handle. `signal` is one of `accepted`,
+    `corrected`, `repeated`, `escalated`, `abandoned`
+    (`TURN_FEEDBACK_SIGNALS`); anything else raises `InvalidFeedback` naming
+    the five. `turn_index` is a whole number from 0 to 100000. Sent to
+    `POST /turn-feedback` in batches of at most 64 (`TurnFeedback`,
+    `TurnFeedbackBatch` in the published schema); `feedback_id` is the
+    idempotency key. Queued one file each (`.feedback.<digest>.json`), sent
+    off the caller's thread, retried across restarts for at most a week, at
+    most 1,000 waiting.
+  - **Consent.** Neither is end users' production traffic: an outcome naming
+    only an episode, and all feedback, are sent without production capture
+    being enabled. An outcome that also names a turn or a conversation is
+    sent on the turn's terms, as before.
+  - **Older control planes.** One that predates `episode_id` ignores the
+    field. One that refuses an episode-only outcome for want of capture
+    consent (403) is said once; those outcomes stay on disk and no more are
+    queued by that process. One without `/turn-feedback` (a 404 or 405) is
+    said once; waiting feedback is dropped and `report_turn_feedback` returns
+    `None` for the rest of the process. A 403 (a key without the scope) is
+    also said once and stops sending, but keeps what is waiting on disk; a
+    401 or 410 keeps it for a later flush. A report refused alone -- in a
+    4xx, or by name inside a 200 -- is dropped alone, named once in the
+    control plane's own word, and the rest of its batch is sent. A control
+    plane whose episode intake is switched off answers 503 with a
+    Retry-After: the request is retried as the header says, and what is
+    waiting stays for a later flush. Nothing raises into the agent's loop.
+  - **Feedback on a production turn.** `report_turn_feedback(signal,
+    turn_id=)` / `reportTurnFeedback(signal, {turnId})` names a production
+    turn in place of an episode's. It is an event on that turn's trace,
+    through the customer's TracerProvider: a span `percepteye.turn.feedback`
+    of its own trace, linked to the turn's spans (an ended span takes no
+    event) and carrying `percepteye.turn.id`, with the event
+    `percepteye.turn.feedback` at `occurred_at` (to the nanosecond), its
+    `percepteye.turn.feedback.signal` and `percepteye.turn.feedback.id`.
+    Nothing is queued for `POST /turn-feedback`, which takes an episode's
+    turns only; the id is returned once the span is recorded, `None` /
+    `null` when nothing records it. Same vocabulary and refusals; naming a
+    turn both ways is refused. `tests/fixtures/turn_feedback_span.json` is
+    the export, byte-equal in both SDKs.
+  - **Text the wire can carry.** An id (outcome, turn, conversation, episode,
+    feedback) or a note holding a lone surrogate is refused at the call
+    (`InvalidOutcome` / `InvalidFeedback`; a turn id is not used), as the
+    control plane's parser refuses it at the wire.
+
+- **The customer-API client speaks customer contract 1.54.0** (it declared
+  1.31.0 while Mission Control published 1.50.0). Both SDKs, same surface:
+  - `training_eligibility(training_location=)` / `trainingEligibility({
+    trainingLocation })` asks what a run could train on `platform_pool` or
+    `platform_gpu` (1.50.0); the answer's `training_locations` names the place
+    it is for and, on our GPUs, how many hosts are free.
+  - `CustomerRefusal.detail` is the refusal's own evidence (`waiting_on`,
+    `host_prompt_fit`, a diverged train's `learning_rate`, `cause`,
+    `chosen_model`), `None` / `null` when it carries none.
+  - The refusal codes 1.32.0 through 1.49.0 published, exported by group:
+    `ATTACK_REFUSAL_CODES` adds `attack_unmeasured_undisclosed`;
+    `PROMPT_RUN_REFUSAL_CODES` adds `prompt_objective_unprepared`,
+    `prompt_evolution_refused` and `prompt_model_unreachable` (1.40.0's three
+    codes for the platform's own prompt-optimization host are not carried: the
+    platform's fault, and a refusal by one still raises `CustomerRefusal` with
+    its code);
+    new `CYBER_REFUSAL_CODES` (why a cyber choice cannot apply) and
+    `TRAINING_REFUSAL_CODES` (why a train is refused or stopped).
+  - New `AGENT_REFUSAL_CODES` (1.51.0): why a round with your agent is refused
+    before anything is spent -- `practice_rollouts_not_enabled` (its **Allow
+    practice runs** switch is off), `practice_needs_a_training_process` (no
+    `serve()` process runs it with `PERCEPTEYE_AGENT_MODE=training`),
+    `model_content_capture_not_enabled`, `flywheel_no_task_source`,
+    `flywheel_product_undeclared` and `invalid_flywheel_spec`; and
+    `TRAINING_REFUSAL_CODES` adds `base_model_unresolvable`,
+    `destination_algorithm_unsupported` and `provider_checkpoint_not_owned`
+    (403). Mission Control refused with each before its contract listed them;
+    1.51.0 publishes them, all the customer's to fix (422 unless stated).
+    `RUN_LIST_REFUSAL_CODES` adds `launch_input_requires_platform_operator`
+    (403, new in 1.51.0): a hill climb request naming an input only a
+    platform operator may set (the experiment-only `environment_task_grader`,
+    which left the `POST /hillclimbs` request's schema; neither SDK ever
+    sent it), and `code_sandbox_not_configured` (503, not retryable) and
+    `code_sandbox_unreachable` (503, retryable), both the platform's (new in
+    1.51.0): a launch of a coding agent whose own code runs on the platform,
+    refused before any run exists when the deployment has no isolated
+    sandbox for that code or its sandbox is not answering. The other
+    fourteen codes 1.51.0 added or published are not
+    carried: the operations that answer them (a Decision's answer, eval-set
+    comparisons and saves, observability sources, serving an artifact, a
+    champion's rollback) are ones neither SDK calls or documents, and a
+    refusal by one still raises `CustomerRefusal` with its code.
+  - `TRAINING_REFUSAL_CODES` adds 1.52.0's `hillclimb_start_invalid` (422)
+    and `base_merge_failed` (502, the platform's) -- a hill climb started from
+    a model the organization already trained -- and 1.54.0's
+    `authority_ruling_requires_org_admin` (403): a ruling on the reward plan's
+    Decision by anyone but an org admin. Each run `list_runs` / `listRuns`
+    returns carries 1.53.0's `latest_activity_at`, `latest_status`,
+    `attempts`, `best_measured` and `measured` (`None` / `null` where they do
+    not apply).
+  - Documented response fields: a run's `objective`, `security_mode`,
+    `base_model`, `benchmark_eval_set_id`, `algorithm` and `owner_run_id`;
+    eligibility's `flash_reinforce`, `opsd.trainable_models` and
+    `training_locations`; a hill climb's security `base`, `checkpoints`,
+    `external_benchmarks`, `benchmark_coverage` and `capability`.
+
+- **A rollout's report can say what the agent's own environment checked, how
+  the episode ended and which seeds it ran under.** Three optional parts on
+  the report, both SDKs, same words (`schema/flywheel-1.json`:
+  `ReportedCheck`, `ReportedTermination`, `ReportedSeeds`):
+  - `checks`: rows `{id, status, value, basis, required, establishes}`. A
+    report carries the first 200; stating more is not an error, and the
+    report says how many it left behind in `checks_dropped`. `status` is one of `measured`, `unavailable`, `error`,
+    `abstained`, `not_applicable` (`CHECK_STATUSES`); only a measured check
+    carries a `value`, so a check that could not run is never a zero.
+    `establishes` is one of `CHECK_ESTABLISHES`.
+  - `termination`: `{class, detail}`, the class one of `completed`,
+    `turn_limit`, `token_limit`, `time_limit`, `error`, `cancelled`
+    (`TERMINATION_CLASSES`). It is a statement: whether the ending was the
+    model's doing is decided by Mission Control from its own records.
+  - `seeds`: `{environment, sampling}`, each a string of 1 to 128 characters
+    or an integer a JSON number carries exactly (at most 2^53 − 1 in
+    magnitude; `7.0` is 7). One rule in both SDKs.
+
+  Python: `RolloutOutput(checks=, termination=, seeds=)`. Node: `checks`,
+  `termination` and `seeds` on the report object. Either: the same three keys
+  in `$PERCEPTEYE_TRAJECTORY_DIR/outcome.json`, which the Python runner reads
+  for a command agent and the Node plugin reads (and removes) when it drives a
+  rollout, by one set of rules -- `reward` and `success` included, `NaN` and
+  `Infinity` read as null. A malformed part raises `ContractViolation` /
+  `ContractError` naming the row and field when converted directly; in
+  `outcome.json`, and in a report about to be sent, it is left out alone with
+  a warning and the outcome is still reported. When the part left out is the
+  checks, `checks_dropped` counts them, so the stored episode says they are
+  missing. A Mission Control that predates these keys ignores them.
+
+### Changed
+
+- **Eligibility's `security` is documented as it is served since 1.44.0:**
+  `default` is `off` (cyber is a choice) and `measurement_funding` is
+  `run_quote`. The client's docs said `platform`; the client never rewrote the
+  value.
+- **`LeaseLost.status_code` is 410** (it was `None`), as the Node SDK's
+  `statusCode` has always been, so a caller reading the status of a 410 sees
+  it -- the outcome upload reads a 410 as a refusal of the route, keeping the
+  outcomes, not as a blip that tries every batch.
+
+### Requires
+
+- **Every customer-API read works against Mission Control 1.30.0 or newer**,
+  as before. `training_location` / `trainingLocation` needs 1.50.0: an older
+  server ignores the query and answers for the organization's own setting, so
+  the client raises `CustomerContractTooOld` (a `ConfigurationError`) rather
+  than return an answer for a place you did not ask about.
+- **Mission Control must serve `POST /api/flywheel/v1/outcomes`.** Against an
+  older server the upload answers 404, a refusal of the route and not of the
+  records: the outcomes stay queued, the flush says so, and they are retried
+  for up to a week, then dropped with a warning (`N reported outcome(s) could
+  not be delivered for a week and were dropped.`).
+
 ## 0.4.0
 
 ### Changed

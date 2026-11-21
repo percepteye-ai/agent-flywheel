@@ -48,7 +48,7 @@ That is the kill switch, and it is the only one: it returns from `register` befo
     Production mode captures every served turn to disk **with `PERCEPTEYE_TRAJECTORY_DIR` unset** — the user's message, the tool calls, and the agent's answer. Nothing leaves the machine without both a key and the control plane's per-agent consent, but it is on disk either way. An operator leaving the plugin installed "because it does nothing without the variable" is accumulating their end users' messages. `PERCEPTEYE_CAPTURE=0` is what makes an install record nothing, and `retentionTurns` in the plugin's config bounds how many turns stay on disk, as `retention_turns=` does for `attach()`.
 
 !!! note
-    `fw.serve()` sets `PERCEPTEYE_TRAJECTORY_DIR` for the child it spawns, already pointed at that rollout's directory — see [CLI harnesses](cli.md). Setting it by hand is for a run you are driving yourself.
+    `fw.serve()` sets `PERCEPTEYE_TRAJECTORY_DIR` for the child it spawns, already pointed at that rollout's directory — see [CLI harnesses](cli.md). Setting it by hand is for a run you are driving yourself. When the plugin drives a rollout it also reads the `outcome.json` the agent's own environment wrote into that directory, exactly as the Python runner does — see [State the episode's grade in a file](cli.md).
 
 ## Observe only, structurally
 
@@ -170,6 +170,7 @@ OpenClaw's `llm_input` carries no tool list, so on its own the plugin registers 
 - **Same rules, same wire record, same refusals** — for anything JSON carries, except an integer beyond 2⁵³ inside a schema, which JavaScript holds rounded. `src/declaration.js` is a rule-for-rule port of `declaration.py`. Where the two languages part by default (whitespace, coercion, number types, sort order), the rule is Python's or one both keep: a tool's name and description must be strings, `max_tokens` a whole number from 1 to 2⁵³ − 1, `temperature` finite, and refusals name JSON types. `tests/test_describe_parity.py`, in this repository, runs both over one table: every accepted declaration must produce the identical record, alone and merged over the plugin's observation, and every refused one must refuse with the same sentence.
 - **What you declare wins** over the observation where given. The training registration merges it over the startup observation; the production registration sends it instead of `null`.
 - **It anchors no execution identity**, on the registration, a rollout report or a production turn. With an `executionSnapshot` configured, a startup warning says the identity is withheld.
+- **`api_spec`** — the URL of the agent's API spec — is read by the same rule as Python's and sent beside the description on either registration; it describes nothing, so it withholds no identity.
 - **Three differences, each forced by the host:**
     - A bad declaration: the Python SDK refuses to start, but a throw from an OpenClaw plugin's `register()` fails the plugin load and takes local capture down with it. So the plugin drops it with a warning naming the same cause, and registers only what it observed. For the same reason the config schema accepts any `describe` value, so OpenClaw never refuses the plugin over one.
     - `introspect: false` together with `describe`: Python's `serve(introspect=False, describe=...)` refuses the contradiction; the plugin warns and sends nothing.

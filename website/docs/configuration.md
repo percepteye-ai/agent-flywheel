@@ -83,7 +83,7 @@ The switch is read at startup, so flipping it does not stop a loop that is mid-f
 | you try | what happens |
 |:--|:--|
 | **`SIGTERM`** | the process ends. **Nothing in this package catches SIGINT or SIGTERM.** In-flight rollouts are orphaned rather than abandoned, and the control plane reclaims them by lease expiry — up to 30 minutes — rather than by an `abandon` call. |
-| **Ctrl-C** | not instant. The worker pool is exited with `wait=True`, so in-flight rollouts drain first, for up to `rollout_timeout_s` (default 900s). |
+| **Ctrl-C** | not instant. The worker pool is exited with `wait=True`, so in-flight rollouts drain first, for up to their episode budget (or `rollout_timeout_s`, if set lower). |
 | **Revoking the API key** | does not stop it. A 401 is terminal per request, but the loop catches it, emits `claim_failed`, sleeps 5s and continues — indefinitely. |
 | **The control plane** | cannot stop it either. The claim response carries only `rollouts` and `poll_after_ms`; there is no pause or drain field. The strongest server-side levers are an empty queue and a longer backoff, and both leave you polling. |
 
@@ -110,7 +110,7 @@ fw.serve(..., on_event=lambda kind, ev: print(kind, ev))
 | `report_failed` | the work happened, delivering it did not | `rollout_id`, `error` |
 | `artifact_failed` | collecting the rollout's artifacts failed; the rollout is still reported, excluded from training | `rollout_id`, `name` (always `"*"`), `error` |
 | `lease_lost` | the lease lapsed or was taken back | `rollout_id` |
-| `heartbeat_failed` | a renewal could not be delivered; two more beats remain | `rollout_id`, `error` |
+| `heartbeat_failed` | a renewal could not be delivered; the next beat comes sooner, against what is left of the lease | `rollout_id`, `error` |
 | `serve_failed` | the SDK itself failed while running a rollout; it is still reported | `rollout_id`, `error` |
 | `abandon_failed` | abandoning a crashed rollout could not be delivered | `rollout_id`, `error` |
 | `episode_plan` | how a rollout's budget was split | `rollout_id`, `budget_s`, `child_s`, `teardown_s`, `delivery_s` |
@@ -125,7 +125,7 @@ fw.serve(..., on_event=lambda kind, ev: print(kind, ev))
 
 **`claim_empty` is the one worth wiring first.** Without a callback a flywheel is silent, and an empty queue and a broken claim route look identical — `claim_empty` versus `claim_failed` is what tells them apart. This is the answer to "how do I know it's working."
 
-**It runs on three different threads, synchronously.** The serving thread emits `claim_*`; a pool worker emits the per-rollout kinds; the heartbeat thread emits `lease_lost` and `heartbeat_failed`. A slow callback slows that thread, and the heartbeat thread is renewing every in-flight lease. `lease_lost` can arrive from either the heartbeat thread or a pool worker, depending on which noticed first.
+**It runs on three different threads, synchronously.** The serving thread emits `claim_*`; a pool worker emits the per-rollout kinds; the heartbeat pool emits `lease_lost` and `heartbeat_failed`. A slow callback slows that thread, and a slow heartbeat callback delays that lease's next beat. `lease_lost` can arrive from either the heartbeat thread or a pool worker, depending on which noticed first.
 
 **Exceptions it raises are swallowed** and not re-emitted. An observability hook must not be able to change what it observes: a callback that raised inside the heartbeat thread's own handler used to exit the loop and the thread, after which no in-flight lease was renewed again and every subsequent rollout collected a 410 at report time. Keep it cheap and non-blocking.
 
@@ -143,7 +143,7 @@ fw.serve(..., on_event=lambda kind, ev: print(kind, ev))
 | `artifacts_dir` | `None` | falls back to `./.percepteye-artifacts`, created if absent |
 | `isolation` | `"subprocess"` | or `"inprocess"`; any other value raises |
 | `concurrency` | `1` | rollouts in flight. A single claim asks for at most 16 whatever you set |
-| `rollout_timeout_s` | `900.0` | the local ceiling on one rollout |
+| `rollout_timeout_s` | `None` | an optional local ceiling on one rollout, below the control plane's episode budget |
 | `gate_flag` | `None` | how *this* binary spells its completion-gate option, e.g. `"--autonomous-gate"` |
 | `endpoint_env` | `None` | `(url_var, key_var)` this agent reads its endpoint from, when they are not the OpenAI/Anthropic names |
 | `execution_snapshot` | `None` | generic adapter lifecycle: opaque exact components plus prepare/attest/release for each isolated child |
@@ -228,9 +228,9 @@ A rule is one prose sentence about how your agent should work — the conditiona
 **Your agent must sample through an OpenAI-compatible client**, because the per-rollout gateway speaks that API. Routing only wins over the *environment*: a client constructed with an explicit `base_url` in your own code beats all of it, silently, and lands at a live third party.
 
 ??? note "The provider variables removed from every child"
-    Setting `OPENAI_BASE_URL` does nothing for an agent built on Gemini, Azure OpenAI or Bedrock — those clients read their own names, sail past the gateway, and produce a trajectory that cannot back an on-policy objective while looking exactly like one that can. `serve()` warns at startup when it finds any of these set; an agent that finds no provider configured raises at construction, in front of the person who configured it, which is the outcome we want.
+    Setting `OPENAI_BASE_URL` does nothing for an agent built on Gemini, Azure OpenAI or Bedrock — those clients read their own names, sail past the gateway, and produce a trajectory that cannot back an on-policy objective while looking exactly like one that can. `serve()` warns at startup when it finds any of these set; an agent that finds no provider configured raises at construction, in front of the person who configured it, which is the outcome we want. An adapter's own environment overlay cannot put any of them back.
 
-    `AZURE_OPENAI_ENDPOINT` · `AZURE_OPENAI_API_KEY` · `AZURE_OPENAI_AD_TOKEN` · `OPENAI_API_TYPE` · `OPENAI_API_VERSION` · `GOOGLE_API_KEY` · `GEMINI_API_KEY` · `GOOGLE_GENAI_USE_VERTEXAI` · `NVIDIA_API_KEY` · `NVIDIA_NIM_API_KEY` · `AWS_BEARER_TOKEN_BEDROCK` · `GROQ_API_KEY` · `MISTRAL_API_KEY` · `TOGETHER_API_KEY` · `OPENROUTER_API_KEY` · `FIREWORKS_API_KEY` · `DEEPSEEK_API_KEY` · `PERPLEXITY_API_KEY` · `COHERE_API_KEY` · `XAI_API_KEY`
+    `AZURE_OPENAI_ENDPOINT` · `AZURE_OPENAI_API_KEY` · `AZURE_OPENAI_AD_TOKEN` · `OPENAI_API_TYPE` · `OPENAI_API_VERSION` · `GOOGLE_API_KEY` · `GEMINI_API_KEY` · `GOOGLE_GENAI_USE_VERTEXAI` · `NVIDIA_API_KEY` · `NVIDIA_NIM_API_KEY` · `AWS_BEARER_TOKEN_BEDROCK` · `CLAUDE_CODE_USE_BEDROCK` · `CLAUDE_CODE_USE_VERTEX` · `ANTHROPIC_AUTH_TOKEN` · `GROQ_API_KEY` · `MISTRAL_API_KEY` · `TOGETHER_API_KEY` · `OPENROUTER_API_KEY` · `FIREWORKS_API_KEY` · `DEEPSEEK_API_KEY` · `PERPLEXITY_API_KEY` · `COHERE_API_KEY` · `XAI_API_KEY`
 
     Deliberately **not** `AWS_ACCESS_KEY_ID` — that is the same credential a customer's agent uses for S3, and taking it would break agents that never touch a model through it. The list names what we know; it is not a proof of completeness. The control plane's reported-vs-served call count is the check that actually decides.
 
@@ -241,19 +241,20 @@ fw.serve(["dsh", "--profile", "headless", fw.TASK], agent_id="dsh-agent",
          input_shape="text", endpoint_env=("DEEPSEEK_BASE_URL", "DEEPSEEK_API_KEY"))
 ```
 
-This is additive — the defaults stay set, because an agent may read a mixture.
+This is additive — the defaults stay set, because an agent may read a mixture. A name in the `PERCEPTEYE_*` namespace is refused at startup: those are the rollout's own variables and the endpoint pair would overwrite them.
 
 ### Timeouts
 
 | bound | value |
 |:--|:--|
-| `rollout_timeout_s` | `900.0` by default |
-| the agent's actual budget | `min(rollout_timeout_s, server deadline − 10s)` |
-| subprocess hard kill | `budget + 15s` on the child, then `SIGKILL` |
-| heartbeat interval | a third of the **granted** lease, floor 1s |
+| `rollout_timeout_s` | `None` by default — the control plane's episode budget is the bound; set it only to cap below that |
+| the agent's actual budget | server deadline − the delivery reserve (at least 10s, sized from the transport's retry envelope, at most a quarter of the episode) − 5s teardown, capped by `rollout_timeout_s` |
+| subprocess hard kill | `budget + 15s` on the child, then `SIGKILL` of its process group |
+| heartbeat interval | a third of the shorter of the **granted** lease and the per-beat extension (10 minutes at most), floor 1s; each beat is then scheduled from the expiry the control plane answered |
+| one heartbeat | 10s in all, at most 5s per attempt; beats for different leases run in parallel |
 | lease reclaimed by the server | up to 30 minutes after the last beat |
 
-The agent is stopped 10s short of the server deadline so there is time to collect artifacts and land the report while the lease is still good. A rollout whose deadline has already passed when claimed is handed straight back as `deadline_exceeded` rather than run.
+The agent is stopped short of the server deadline so there is time to collect artifacts and land the report while the lease is still good. A rollout whose deadline has already passed when claimed is handed straight back as `deadline_exceeded` rather than run.
 
 A rollout that arrives past its deadline, a lost lease, a crash and a blown budget all come back as **typed exclusions**, so a substrate fault is never scored as a bad decision by your agent: `flywheel_crash` · `substrate_unavailable` · `credential_expired` · `deadline_exceeded` · `entrypoint_error` · `agent_exit_nonzero` · `cancelled` · `capacity`.
 
@@ -336,7 +337,7 @@ Symlinks are **never** followed — one dropped in the agent's own directory wou
 | `PERCEPTEYE_NO_PROMPT` | Set to anything to stop `serve()` offering to create a key in a terminal. It never offers in CI, or when stdin or stderr is not a terminal. |
 | `PERCEPTEYE_INTROSPECT` | Set to `0`, `false`, `no` or `off` to disable agent discovery. |
 | `PERCEPTEYE_ROLLOUT_ID` | *Set by us* for the child. Read it to tag your own logs. |
-| `PERCEPTEYE_TRAJECTORY_DIR` | *Set by us* for the child — already this rollout's directory. Append to `$PERCEPTEYE_TRAJECTORY_DIR/tool_calls.jsonl`; any other file you leave there is collected as an artifact. Also the variable the Node plugins read. |
+| `PERCEPTEYE_TRAJECTORY_DIR` | *Set by us* for the child — already this rollout's directory. Append to `$PERCEPTEYE_TRAJECTORY_DIR/tool_calls.jsonl`, and state the episode's own grade in `outcome.json` beside it ([CLI harnesses](cli.md#3-state-the-episodes-grade-in-a-file)); any other file you leave there is collected as an artifact. Also the variable the Node plugins read. |
 | `PERCEPTEYE_TURN_INPUT` | *Set by us* for a command entrypoint. The task, also on stdin. |
 
 Only `PERCEPTEYE_AGENT_MODE` and `PERCEPTEYE_INTROSPECT` change behavior. The optional Prime example also reads its own documented route settings in `examples/prime_agent`; those are example inputs, not SDK child-environment policy. `PERCEPTEYE_INTROSPECT` and `introspect=` are ANDed — either one off disables discovery — and **only a deliberate value disables it**: a typo leaves it on rather than silently switching capture off while you believe it is running.

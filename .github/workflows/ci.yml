@@ -4,6 +4,18 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release workflow (workflow.yml) calls THIS file, so nothing is
+  # published that this suite has not passed on the same commit -- one
+  # definition of "CI passed", not a second copy of these jobs.
+  workflow_call:
+
+# Read-only token: no job here writes to the repository.
+permissions:
+  contents: read
+
+# Every third-party action is pinned to a full commit SHA (the release it is
+# named in the trailing comment): a tag can be moved to other code, a SHA
+# cannot.
 
 jobs:
   test:
@@ -18,8 +30,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         python: ["3.10", "3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: ${{ matrix.python }}
       - run: pip install -e ".[dev]"
@@ -45,11 +57,11 @@ jobs:
       matrix:
         python: ["3.10", "3.13"]   # the ends of the supported range
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: ${{ matrix.python }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24"
       # THE CROSS-SDK PARITY TEST NEEDS THE NODE SDK, and "everything present"
@@ -60,9 +72,27 @@ jobs:
       # goes unchecked. Node is installed here for the same reason: that test
       # runs the Node SDK's own transport. Both repositories are public
       # (2026-10-20), so the checkout needs no credential.
-      - uses: actions/checkout@v4
+      # THE NODE SDK THIS CHANGE SHIPS WITH. The two SDKs land in unison, on
+      # same-named branches; checking out the Node SDK's main for a Python
+      # branch whose Node half is not merged yet made every cross-language test
+      # red for a reason unrelated to the change. The same-named branch when
+      # the Node repo has one, main otherwise. The ref arrives through env, so
+      # a branch name is data to the shell, never script.
+      - id: node-ref
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          if git ls-remote --exit-code --heads \
+              https://github.com/percepteye-ai/agent-flywheel-node.git \
+              "refs/heads/$BRANCH" >/dev/null 2>&1; then
+            echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: percepteye-ai/agent-flywheel-node
+          ref: ${{ steps.node-ref.outputs.ref }}
           path: agent-flywheel-node
           persist-credentials: false
       - run: pip install -e ".[dev,adapters-test,otel,otel-test]"
@@ -162,8 +192,8 @@ jobs:
     # customer's deployment.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       - run: pip install .
@@ -183,8 +213,8 @@ jobs:
     # customer's logs and disclose something they cannot act on.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
@@ -211,11 +241,11 @@ jobs:
       matrix:
         node: ["22", "24"]   # the ends of OpenClaw's supported engine range
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ matrix.node }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       # The Node SDK is its own repo now (percepteye-ai/agent-flywheel-node).
@@ -231,9 +261,27 @@ jobs:
       # -- a NAMED path that is not there is an error there, not a skip.
       # `persist-credentials: false`: nothing after the checkout needs to
       # reach that repository.
-      - uses: actions/checkout@v4
+      # THE NODE SDK THIS CHANGE SHIPS WITH. The two SDKs land in unison, on
+      # same-named branches; checking out the Node SDK's main for a Python
+      # branch whose Node half is not merged yet made every cross-language test
+      # red for a reason unrelated to the change. The same-named branch when
+      # the Node repo has one, main otherwise. The ref arrives through env, so
+      # a branch name is data to the shell, never script.
+      - id: node-ref
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          if git ls-remote --exit-code --heads \
+              https://github.com/percepteye-ai/agent-flywheel-node.git \
+              "refs/heads/$BRANCH" >/dev/null 2>&1; then
+            echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: percepteye-ai/agent-flywheel-node
+          ref: ${{ steps.node-ref.outputs.ref }}
           path: agent-flywheel-node
           persist-credentials: false
       - name: what the plugins write is what the Python SDK reads

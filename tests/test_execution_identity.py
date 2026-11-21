@@ -507,3 +507,20 @@ def test_reserved_component_name_and_cross_language_canonical_vector():
         canonical_observation_sha256({"unsafe": 9_007_199_254_740_992})
     with pytest.raises(ConfigurationError, match="invalid Unicode"):
         canonical_observation_sha256({"bad": "\ud800"})
+
+
+def test_a_reference_cycle_is_a_configuration_error_not_a_recursion_crash():
+    looped: dict = {"name": "a"}
+    looped["self"] = looped
+    with pytest.raises(ConfigurationError, match=r"cycle at \$\.self"):
+        canonical_observation_sha256(looped)
+    items: list = [1]
+    items.append(items)
+    with pytest.raises(ConfigurationError, match="cycle"):
+        canonical_observation_sha256({"items": items})
+    # A container shared by siblings is not a cycle.
+    shared = {"type": "string"}
+    assert canonical_observation_sha256({"a": shared, "b": shared}) == (
+        canonical_observation_sha256({"a": {"type": "string"},
+                                      "b": {"type": "string"}})
+    )

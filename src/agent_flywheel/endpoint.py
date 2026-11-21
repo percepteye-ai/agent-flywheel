@@ -51,11 +51,15 @@ than a state someone has to remember to repair.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any
+
+from .errors import ConfigurationError
 
 #: The config key we occupy. See the module docstring for why this one.
 GOOSE_ENDPOINT_KEY = "OPENAI_BASE_URL"
@@ -90,21 +94,56 @@ def goose_config_path() -> Path:
     return base / ".config" / "goose" / "config.yaml"
 
 
-def _unquote(raw: str) -> str:
-    """The scalar value of one YAML line's right-hand side.
+#: A trailing comment: ``#`` preceded by a space or a tab (YAML's rule -- a
+#: ``#`` glued to the value, as in a URL fragment, is part of it).
+_COMMENT = re.compile(r"[ \t]#")
+
+#: The plain scalars YAML reads as null.
+_NULLS = ("", "~", "null", "Null", "NULL")
+
+
+def _unquote(raw: str) -> str | None:
+    """The scalar value of one YAML line's right-hand side; ``None`` for null.
 
     Handles the three shapes a URL is ever written in — bare, single-quoted,
-    double-quoted — and strips a trailing ``# comment`` only from the BARE
-    form, because a ``#`` inside quotes is part of the value.
+    double-quoted. A quoted value ends at its closing quote, and anything after
+    it (a ``# comment``) is not part of it; a ``#`` INSIDE quotes is. A bare
+    value ends at the first space- or tab-preceded ``#``. ``~`` and ``null``
+    bare are YAML's null: no value, not the string.
     """
     s = raw.strip()
-    if len(s) >= 2 and s[0] in "\"'" and s[-1] == s[0]:
-        return s[1:-1]
-    return s.split(" #", 1)[0].strip()
+    if s[:1] == '"':
+        # Find the closing quote, skipping backslash escapes.
+        i = 1
+        while i < len(s):
+            if s[i] == "\\":
+                i += 2
+                continue
+            if s[i] == '"':
+                token = s[: i + 1]
+                try:
+                    return str(json.loads(token))
+                except ValueError:
+                    return token[1:-1]
+            i += 1
+    elif s[:1] == "'":
+        # A single-quoted scalar escapes a quote by doubling it.
+        i = 1
+        while i < len(s):
+            if s[i] == "'":
+                if s[i + 1: i + 2] == "'":
+                    i += 2
+                    continue
+                return s[1:i].replace("''", "'")
+            i += 1
+    # Bare (or an unclosed quote, read as written).
+    bare = _COMMENT.split(" " + s, maxsplit=1)[0].strip()
+    return None if bare in _NULLS else bare
 
 
 def read_scalar(text: str, key: str) -> str | None:
-    """The value of top-level ``key``, or ``None`` if it is absent or empty."""
+    """The value of top-level ``key``, or ``None`` if it is absent, empty or
+    null."""
     for line in text.splitlines():
         m = _KEY_LINE.match(line)
         if m and m.group(1) == key:
@@ -125,7 +164,19 @@ def set_scalar(text: str, key: str, value: str | None) -> str:
     happen to work today — but an empty key left in the file reads to a human as
     "PerceptEye set this to nothing", and to the next reader of the config as
     ours to keep updating. Absence is the honest record of "we are not here".
+
+    The value is written as a JSON string, which is a valid YAML double-quoted
+    scalar: a quote or backslash in it is escaped, never a way out of the
+    line. A value holding a line break or any other control character is
+    refused (:class:`ConfigurationError`) -- no URL holds one, and it is the
+    one way to write a second key.
     """
+    if value is not None and any(ord(c) < 0x20 or c == "\x7f" for c in value):
+        raise ConfigurationError(
+            f"refusing to write {key}: its value {value!r} contains a line "
+            "break or control character"
+        )
+    line_for = f"{key}: {json.dumps(value)}" if value is not None else ""
     out, found = [], False
     for line in text.splitlines():
         m = _KEY_LINE.match(line)
@@ -135,11 +186,11 @@ def set_scalar(text: str, key: str, value: str | None) -> str:
             found = True
             if value is None:
                 continue          # drop the line entirely
-            out.append(f'{key}: "{value}"')
+            out.append(line_for)
             continue
         out.append(line)
     if not found and value is not None:
-        out.append(f'{key}: "{value}"')
+        out.append(line_for)
     body = "\n".join(out)
     return body + "\n" if body else ""
 
@@ -150,14 +201,30 @@ def write_config(path: Path, text: str) -> None:
     A hook process and the customer's own editor can both be holding this file.
     A truncate-then-write would give a concurrent reader an empty or half-written
     config — which for THIS file means goose starting with no provider. The
-    rename is atomic, so a reader sees the old bytes or the new ones.
+    rename is atomic, so a reader sees the old bytes or the new ones; the bytes
+    are fsynced first, so a crash cannot leave the rename pointing at an empty
+    file.
+
+    A SYMLINK IS WRITTEN THROUGH, not replaced: a config kept in a dotfiles
+    repo and linked into place stays linked, and the change lands in the file
+    the link names. The file's permission bits are kept (a new file is 0600).
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".percepteye-", suffix=".yaml")
+    target = Path(os.path.realpath(path)) if path.is_symlink() else path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        mode: int | None = stat.S_IMODE(os.stat(target).st_mode)
+    except FileNotFoundError:
+        mode = None
+    fd, tmp = tempfile.mkstemp(
+        dir=str(target.parent), prefix=".percepteye-", suffix=target.suffix or ".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
-        os.replace(tmp, path)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, target)
     except BaseException:
         # Leave no debris on a failure path; the config itself is untouched
         # because the rename is what would have changed it.
@@ -189,10 +256,16 @@ def overriding_env() -> str | None:
     return None
 
 
-def plan(mode: str, *, original: str | None,
+def plan(mode: str | None, *, original: str | None,
          training_url: str | None = None,
          has_key: bool | None = None) -> dict[str, Any]:
-    """What the config should say, and why. Pure — reads no files.
+    """What the config should say, and why. Reads no files.
+
+    ``mode`` goes through :func:`agent_flywheel.resolve_mode` -- the one
+    reading of a mode, aliases and all, raising
+    :class:`~agent_flywheel.errors.ConfigurationError` for one it does not
+    know -- and only ``"training"`` routes. A typo is never read as
+    training.
 
     ``original`` is the value the config carried BEFORE we first wrote to it,
     captured at install and carried in the stamp. It is the whole restore path:
@@ -207,15 +280,21 @@ def plan(mode: str, *, original: str | None,
     is not an edge, it is the default first run. ``training`` is the mode; the
     key is the CONSENT, and routing needs both.
     """
-    if mode == "production":
+    from . import resolve_mode
+
+    mode = resolve_mode(mode)
+    if mode != "training":
         return {"mode": mode, "value": original, "routed": False,
-                "reason": "production: the customer's own endpoint"}
-    keyed = has_key if has_key is not None else bool(
-        (os.environ.get("PERCEPTEYE_API_KEY") or "").strip())
-    if not keyed:
+                "reason": f"{mode}: the customer's own endpoint"}
+    if has_key is None:
+        from .install_hooks import goose_api_key
+
+        has_key = goose_api_key() is not None
+    if not has_key:
         return {"mode": mode, "value": original, "routed": False,
-                "reason": "training, but PERCEPTEYE_API_KEY is unset — "
-                          "recording locally; routing left unchanged"}
+                "reason": "training, but PERCEPTEYE_API_KEY is unset and no key "
+                          "is stored for the goose agent — recording locally; "
+                          "routing left unchanged"}
     url = training_url if training_url is not None else training_base_url()
     if not url:
         return {"mode": mode, "value": original, "routed": False,

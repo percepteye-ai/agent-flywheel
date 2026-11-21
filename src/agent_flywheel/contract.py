@@ -11,16 +11,18 @@ below exists because its absence produced fabricated training data.
 from __future__ import annotations
 
 import json
+import math
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from typing import Any, Literal
+from urllib.parse import quote
 
 #: The one vocabulary a refusal names a value's type in, shared with
 #: ``describe=`` and with the Node SDK's ``jsonType`` -- ``got null``, never
 #: ``got NoneType``: an operator configuring rules in JSON wrote no Python.
 from .declaration import _json_type, _json_whole_number
-from .errors import ContractViolation
+from .errors import ContractViolation, InvalidFeedback, InvalidOutcome
 
 #: Imported rather than restated so the contract validates against exactly
 #: the field set the extractor produces -- one definition, never a twin
@@ -29,7 +31,13 @@ from .evidence import IDENTITY_FIELDS as _IDENTITY_FIELDS
 from .execution_identity import is_lower_sha256
 
 __all__ = [
+    "CHECK_ESTABLISHES",
+    "CHECK_STATUSES",
     "CONTRACT_VERSION",
+    "MAX_REPORTED_CHECKS",
+    "PRODUCTION_OUTCOMES",
+    "TERMINATION_CLASSES",
+    "TURN_FEEDBACK_SIGNALS",
     "ExclusionReason",
     "Outcome",
     "RolloutOutput",
@@ -52,18 +60,62 @@ _PRODUCTION_TURN_BATCH_MAX_ITEMS = 64
 #: Leading/trailing whitespace and C0/C1 controls are forbidden; internal
 #: spacing and non-ASCII customer identifiers otherwise remain opaque.
 #: These strings are asserted verbatim against the published JSON Schema.
+#:
+#: ONE ANSWER IN EVERY REGEX ENGINE THAT READS THEM -- Python's ``re``, the
+#: Node SDK's and a JSON Schema validator's ECMA-262. So no ``.``: ECMA's does
+#: not match U+2028/U+2029 and Python's does, which let ``"a\u2028 "`` and
+#: ``"a\u2028/b"`` through in JavaScript while Python refused them;
+#: ``[\s\S]`` is "any character" in both. And no ``\s``: ECMA's includes
+#: U+FEFF and Python's does not, so the whitespace an id may not start or end
+#: with is spelled out as ECMA's set (:data:`_EDGE_WHITESPACE`).
+_EDGE_WHITESPACE = (
+    r"[\t-\r \u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]"
+)
 _PRODUCTION_IDENTIFIER_PATTERN = (
-    r"^(?!\s)(?!.*\s$)[^\u0000-\u001F\u007F-\u009F]+$"
+    rf"^(?!{_EDGE_WHITESPACE})(?![\s\S]*{_EDGE_WHITESPACE}$)"
+    r"[^\u0000-\u001F\u007F-\u009F]+$"
 )
 _PRODUCTION_TURN_IDENTIFIER_PATTERN = (
-    r"^(?!\.{1,2}$)(?!\s)(?!.*\s$)(?!.*[\\/])"
-    r"[^\u0000-\u001F\u007F-\u009F]+$"
+    rf"^(?!\.{{1,2}}$)(?!{_EDGE_WHITESPACE})(?![\s\S]*{_EDGE_WHITESPACE}$)"
+    r"(?![\s\S]*[\\/])[^\u0000-\u001F\u007F-\u009F]+$"
 )
 _PRODUCTION_AGENT_IDENTIFIER_PATTERN = _PRODUCTION_TURN_IDENTIFIER_PATTERN
 _PRODUCTION_IDENTIFIER_RE = re.compile(_PRODUCTION_IDENTIFIER_PATTERN)
 _PRODUCTION_TURN_IDENTIFIER_RE = re.compile(
     _PRODUCTION_TURN_IDENTIFIER_PATTERN
 )
+#: The schema's ``task_id`` pattern: as much of :func:`_task_identifier`'s
+#: rule as an ECMA-262 pattern can say in every engine. No ASCII space at
+#: either edge, and none of the characters ``str.isprintable`` refuses that a
+#: BMP range can name -- C0/C1 controls, every separator but the space
+#: (U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029, U+202F, U+205F, U+3000),
+#: the format characters (U+00AD, U+0600-U+0605, U+061C, U+06DD, U+070F,
+#: U+180E, U+200B-U+200F, U+202A-U+202E, U+2060-U+206F, U+FEFF,
+#: U+FFF9-U+FFFB), U+0378/U+0379 (unassigned) and the private-use block
+#: U+E000-U+F8FF. What it cannot name (another unassigned code point, an
+#: astral format or private-use character) the predicate still refuses; the
+#: schema's description says so. Every character it refuses is one the
+#: predicate refuses, so a value the SDK sends always matches it.
+_TASK_IDENTIFIER_PATTERN = (
+    r"^(?! )(?![\s\S]* $)"
+    r"[^\u0000-\u001F\u007F-\u00A0\u00AD\u0378\u0379\u0600-\u0605\u061C"
+    r"\u06DD\u070F\u1680\u180E\u2000-\u200F\u2028-\u202F\u205F-\u206F"
+    r"\u3000\uE000-\uF8FF\uFEFF\uFFF9-\uFFFB]+$"
+)
+
+
+def _well_formed_text(value: str) -> bool:
+    """Whether ``value`` is Unicode text a JSON parser takes: no LONE
+    SURROGATE. Python strings can hold one (``"\\ud800"``), and the wire
+    escapes it, but the control plane's parser refuses it -- a 422 for the
+    whole batch, then a record dropped by the split. Refused at the call
+    instead, so what is refused at the call and at the wire cannot differ.
+    The Node SDK's ``String.prototype.isWellFormed``."""
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _production_identifier(value: Any) -> str | None:
@@ -71,6 +123,7 @@ def _production_identifier(value: Any) -> str | None:
     if (
         not isinstance(value, str)
         or not value
+        or not _well_formed_text(value)
         or len(value) > _PRODUCTION_IDENTIFIER_MAX_CHARS
         or _PRODUCTION_IDENTIFIER_RE.fullmatch(value) is None
     ):
@@ -83,6 +136,7 @@ def _production_turn_identifier(value: Any) -> str | None:
     if (
         not isinstance(value, str)
         or not value
+        or not _well_formed_text(value)
         or len(value) > _PRODUCTION_IDENTIFIER_MAX_CHARS
         or _PRODUCTION_TURN_IDENTIFIER_RE.fullmatch(value) is None
     ):
@@ -93,6 +147,336 @@ def _production_turn_identifier(value: Any) -> str | None:
 def _production_agent_identifier(value: Any) -> str | None:
     """Return an exact wire id safe as the agent URL path segment."""
     return _production_turn_identifier(value)
+
+
+#: The longest id this package puts in a URL path segment.
+_PATH_SEGMENT_MAX_CHARS = 256
+
+
+def _path_segment(value: Any, what: str) -> str:
+    """``value`` as ONE percent-encoded URL path segment, or
+    :class:`ContractViolation` naming why it cannot be one.
+
+    THE ONE GATE for every id this package puts in a request path -- a
+    rollout id (and :meth:`RolloutRequest.from_wire`, where one arrives), an
+    agent id, a hill climb's run id. Refused: a non-string, an empty string,
+    ``.`` and ``..`` (a client or proxy that normalises the path moves the
+    request to a different route), a ``/`` or ``\\`` (a second segment), a
+    control character, a lone surrogate (no UTF-8 spelling), more than
+    :data:`_PATH_SEGMENT_MAX_CHARS` characters. Anything else is kept and
+    quoted with no safe characters, so ``?``, ``#`` and ``%`` stay inside
+    the segment. Deliberately not ``[A-Za-z0-9_-]``: ids from other planes
+    and tests use other characters, and the rule is what makes a path unsafe,
+    not what a platform id happens to look like.
+    """
+    if not isinstance(value, str):
+        raise ContractViolation(
+            f"{what} must be a string, got {_json_type(value)}")
+    if not value:
+        raise ContractViolation(f"{what} must not be empty")
+    if value in (".", ".."):
+        raise ContractViolation(
+            f"{what} {value!r} is a dot segment, not an id")
+    if "/" in value or "\\" in value:
+        raise ContractViolation(
+            f"{what} must not contain a path separator, got {value!r}")
+    if any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in value):
+        raise ContractViolation(
+            f"{what} must not contain a control character, got {value!r}")
+    if not _well_formed_text(value):
+        raise ContractViolation(f"{what} must be well-formed Unicode text")
+    if len(value) > _PATH_SEGMENT_MAX_CHARS:
+        raise ContractViolation(
+            f"{what} must be at most {_PATH_SEGMENT_MAX_CHARS} characters, "
+            f"got {len(value)}")
+    return quote(value, safe="")
+
+
+def _task_identifier(value: Any) -> str | None:
+    """Return ``value`` when it is a task id the control plane accepts, else
+    None.
+
+    THE CONTROL PLANE'S PREDICATE, MIRRORED EXACTLY (Mission Control's
+    ``is_canonical_task_id``): a non-empty string of at most 255 characters,
+    equal to its own ``strip()``, every character ``str.isprintable()``. That
+    refuses what the shared identifier grammar lets through and the intake
+    does not -- U+200B, U+2028, U+00AD, U+FEFF, U+00A0, unassigned and
+    private-use code points -- each of which 422'd the WHOLE turn batch it
+    rode in. The Node SDK applies the same rule; :data:`_TASK_IDENTIFIER_PATTERN`
+    is as much of it as the schema can carry.
+    """
+    if (
+        isinstance(value, str)
+        and value
+        and len(value) <= _PRODUCTION_IDENTIFIER_MAX_CHARS
+        and value == value.strip()
+        and value.isprintable()
+    ):
+        return value
+    return None
+
+
+#: THE closed vocabulary of ``Attachment.report_outcome``: how a production
+#: turn or conversation actually turned out. Asserted verbatim against
+#: ``schema/flywheel-1.json`` (``ProductionOutcome.outcome``), which the
+#: control plane's intake and the Node SDK carry too.
+PRODUCTION_OUTCOMES: tuple[str, ...] = (
+    "resolved", "escalated", "reopened", "abandoned",
+    "thumbs_up", "thumbs_down",
+)
+#: A note is a short remark, not a transcript (the schema's ``maxLength``,
+#: counted in code points).
+_PRODUCTION_OUTCOME_NOTE_MAX_CHARS = 1000
+_PRODUCTION_OUTCOME_BATCH_MAX_ITEMS = 64
+#: An RFC 3339 instant WITH its offset. A time with no offset is not an
+#: instant, and guessing the zone would move the outcome. ASCII digits only:
+#: Python's ``\d`` also matches other scripts' digits, which no server parses.
+_RFC3339_PATTERN = (
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?"
+    r"(Z|[+-][0-9]{2}:[0-9]{2})$"
+)
+_RFC3339_RE = re.compile(_RFC3339_PATTERN)
+_OCCURRED_AT_REFUSAL = (
+    "occurred_at must be an RFC 3339 time with its offset, such as "
+    "2026-11-10T09:00:00Z")
+
+
+def _is_rfc3339_instant(text: Any) -> bool:
+    """Whether ``text`` is an RFC 3339 instant that EXISTS: the pattern, and
+    then every field in its range -- a real calendar day (``2026-02-30`` is
+    not one), an hour of 0-23 (``T24:00`` is not one), no leap second, an
+    offset under a day. A shape alone let an impossible time reach the
+    control plane, which refused the whole batch around it. The Node SDK's
+    ``isRfc3339Instant`` applies the same arithmetic."""
+    if not isinstance(text, str) or _RFC3339_RE.fullmatch(text) is None:
+        return False
+    year, month, day = int(text[0:4]), int(text[5:7]), int(text[8:10])
+    hour, minute, second = int(text[11:13]), int(text[14:16]), int(text[17:19])
+    if not (1 <= year and 1 <= month <= 12):
+        return False
+    leap = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+    days = (31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+    if not (1 <= day <= days[month - 1] and hour <= 23 and minute <= 59
+            and second <= 59):
+        return False
+    if not text.endswith("Z"):
+        if int(text[-5:-3]) > 23 or int(text[-2:]) > 59:
+            return False
+    return True
+
+
+def _is_finite_wire_number(value: Any) -> bool:
+    """Whether ``value`` is a number the wire carries as a finite float: not a
+    bool, not NaN or an infinity, and not an int too large for a float (the
+    control plane reads ``value`` as one, and refused the batch around it)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False
+_OUTCOME_WIRE_KEYS = (
+    "outcome_id", "outcome", "turn_id", "conversation_id", "episode_id",
+    "value", "note", "occurred_at",
+)
+
+
+def production_outcome(wire: Any) -> dict[str, Any]:
+    """One reported outcome exactly as the wire carries it, or
+    :class:`InvalidOutcome` naming what is wrong.
+
+    THE one validator: ``Attachment.report_outcome`` builds its record
+    through it, and ``AttachTransport.report_outcomes`` passes every outcome
+    through it again before a batch leaves, so what is refused at the call
+    and what is refused at the wire cannot differ. The Node SDK's
+    ``productionOutcome`` applies the same rules with the same messages.
+
+    Absent optional fields are OMITTED, never null. Nothing is rewritten: an
+    id, a note or a time that does not fit is refused, not cleaned into a
+    different one.
+    """
+    if not isinstance(wire, dict):
+        raise InvalidOutcome(
+            f"an outcome must be an object, got {_json_type(wire)}")
+    unknown = sorted(set(wire) - set(_OUTCOME_WIRE_KEYS))
+    if unknown:
+        raise InvalidOutcome(
+            "an outcome has no field "
+            + json.dumps(unknown[0], ensure_ascii=False))
+    outcome = wire.get("outcome")
+    if not isinstance(outcome, str) or outcome not in PRODUCTION_OUTCOMES:
+        # The value as JSON spells it, so both SDKs print the same refusal.
+        got = (json.dumps(outcome, ensure_ascii=False)
+               if isinstance(outcome, str) else _json_type(outcome))
+        raise InvalidOutcome(
+            f"outcome must be one of {', '.join(PRODUCTION_OUTCOMES)}; "
+            f"got {got}")
+    if _production_turn_identifier(wire.get("outcome_id")) is None:
+        raise InvalidOutcome("outcome_id is not a valid identifier")
+    out: dict[str, Any] = {
+        "outcome_id": wire["outcome_id"], "outcome": outcome,
+    }
+    if wire.get("turn_id") is not None:
+        if _production_turn_identifier(wire["turn_id"]) is None:
+            raise InvalidOutcome("turn_id is not a valid turn identifier")
+        out["turn_id"] = wire["turn_id"]
+    if wire.get("conversation_id") is not None:
+        if _production_identifier(wire["conversation_id"]) is None:
+            raise InvalidOutcome(
+                "conversation_id is not a valid identifier")
+        out["conversation_id"] = wire["conversation_id"]
+    if wire.get("episode_id") is not None:
+        # The ``rollout_id`` the platform handed the agent with the episode.
+        if _production_identifier(wire["episode_id"]) is None:
+            raise InvalidOutcome("episode_id is not a valid identifier")
+        out["episode_id"] = wire["episode_id"]
+    if not {"turn_id", "conversation_id", "episode_id"} & set(out):
+        raise InvalidOutcome(
+            "an outcome names the turn_id, the conversation_id or the "
+            "episode_id it is the outcome of")
+    value = wire.get("value")
+    if value is not None:
+        if not _is_finite_wire_number(value):
+            raise InvalidOutcome("value must be a finite number")
+        out["value"] = value
+    note = wire.get("note")
+    if note is not None:
+        if (not isinstance(note, str) or not note
+                or len(note) > _PRODUCTION_OUTCOME_NOTE_MAX_CHARS):
+            raise InvalidOutcome(
+                "note must be a non-empty string of at most "
+                f"{_PRODUCTION_OUTCOME_NOTE_MAX_CHARS} characters")
+        if not _well_formed_text(note):
+            raise InvalidOutcome("note must be well-formed Unicode text")
+        out["note"] = note
+    occurred_at = wire.get("occurred_at")
+    if not _is_rfc3339_instant(occurred_at):
+        raise InvalidOutcome(_OCCURRED_AT_REFUSAL)
+    out["occurred_at"] = occurred_at
+    return out
+
+
+def names_only_an_episode(outcome: Mapping[str, Any]) -> bool:
+    """Whether a reported outcome names an episode and nothing else. Such an
+    outcome is about a platform-run episode, not the agent's end users'
+    traffic, so it is sent without the production-capture consent a turn's
+    or a conversation's outcome needs."""
+    return ("episode_id" in outcome and "turn_id" not in outcome
+            and "conversation_id" not in outcome)
+
+
+#: THE closed vocabulary of ``Attachment.report_turn_feedback``: what the
+#: user did with one turn. Asserted verbatim against
+#: ``schema/flywheel-1.json`` (``TurnFeedback.signal``), which the control
+#: plane's intake and the Node SDK carry too.
+TURN_FEEDBACK_SIGNALS: tuple[str, ...] = (
+    "accepted", "corrected", "repeated", "escalated", "abandoned",
+)
+#: A turn index is a position inside one episode (the schema's ``maximum``).
+_TURN_FEEDBACK_TURN_INDEX_MAX = 100000
+_TURN_FEEDBACK_BATCH_MAX_ITEMS = 64
+_FEEDBACK_WIRE_KEYS = (
+    "feedback_id", "episode_id", "turn_index", "signal", "occurred_at",
+)
+
+
+def _feedback_head(wire: Any, keys: tuple[str, ...]) -> str:
+    """The checks every per-turn feedback report shares, in their order --
+    an object, no field outside ``keys``, a ``signal`` from the vocabulary, a
+    ``feedback_id`` -- and the signal. :func:`turn_feedback` and
+    :func:`turn_feedback_on_a_span` add what names the turn."""
+    if not isinstance(wire, dict):
+        raise InvalidFeedback(
+            f"feedback must be an object, got {_json_type(wire)}")
+    unknown = sorted(set(wire) - set(keys))
+    if unknown:
+        raise InvalidFeedback(
+            "feedback has no field "
+            + json.dumps(unknown[0], ensure_ascii=False))
+    signal = wire.get("signal")
+    if not isinstance(signal, str) or signal not in TURN_FEEDBACK_SIGNALS:
+        got = (json.dumps(signal, ensure_ascii=False)
+               if isinstance(signal, str) else _json_type(signal))
+        raise InvalidFeedback(
+            f"signal must be one of {', '.join(TURN_FEEDBACK_SIGNALS)}; "
+            f"got {got}")
+    if _production_turn_identifier(wire.get("feedback_id")) is None:
+        raise InvalidFeedback("feedback_id is not a valid identifier")
+    return signal
+
+
+def turn_feedback(wire: Any) -> dict[str, Any]:
+    """One per-turn feedback report exactly as the wire carries it, or
+    :class:`InvalidFeedback` naming what is wrong.
+
+    THE one validator, as :func:`production_outcome` is for outcomes:
+    ``Attachment.report_turn_feedback`` builds its record through it and
+    ``AttachTransport.report_turn_feedback`` passes every report through it
+    again before a batch leaves. The Node SDK's ``turnFeedback`` applies the
+    same rules with the same messages.
+    """
+    signal = _feedback_head(wire, _FEEDBACK_WIRE_KEYS)
+    if _production_identifier(wire.get("episode_id")) is None:
+        raise InvalidFeedback("episode_id is not a valid identifier")
+    turn_index = _json_whole_number(wire.get("turn_index"))
+    if turn_index is None or not (
+            0 <= turn_index <= _TURN_FEEDBACK_TURN_INDEX_MAX):
+        raise InvalidFeedback(
+            "turn_index must be a whole number from 0 to "
+            f"{_TURN_FEEDBACK_TURN_INDEX_MAX}")
+    if not _is_rfc3339_instant(wire.get("occurred_at")):
+        raise InvalidFeedback(_OCCURRED_AT_REFUSAL)
+    return {
+        "feedback_id": wire["feedback_id"], "episode_id": wire["episode_id"],
+        "turn_index": turn_index, "signal": signal,
+        "occurred_at": wire["occurred_at"],
+    }
+
+
+#: What feedback on a PRODUCTION TURN carries: the turn's own id in place of
+#: an episode and a position. It is not sent to ``POST /turn-feedback``
+#: (whose turns are an episode's); it is an event on that turn's trace.
+_SPAN_FEEDBACK_KEYS = ("feedback_id", "turn_id", "signal", "occurred_at")
+
+
+def turn_feedback_on_a_span(wire: Any) -> dict[str, Any]:
+    """Per-turn feedback on a production turn, ``{feedback_id, turn_id,
+    signal, occurred_at}``, or :class:`InvalidFeedback` naming what is wrong:
+    :func:`turn_feedback`'s vocabulary, ids and time, with the turn named by
+    the ``turn_id`` its span carries (``percepteye.turn.id``). What
+    ``tracing.record_turn_feedback_span`` emits. The Node SDK's
+    ``turnFeedbackOnASpan`` applies the same rules with the same messages."""
+    signal = _feedback_head(wire, _SPAN_FEEDBACK_KEYS)
+    if _production_turn_identifier(wire.get("turn_id")) is None:
+        raise InvalidFeedback("turn_id is not a valid turn identifier")
+    if not _is_rfc3339_instant(wire.get("occurred_at")):
+        raise InvalidFeedback(_OCCURRED_AT_REFUSAL)
+    return {
+        "feedback_id": wire["feedback_id"], "turn_id": wire["turn_id"],
+        "signal": signal, "occurred_at": wire["occurred_at"],
+    }
+
+
+def rfc3339_unix_nanos(value: str) -> int:
+    """An RFC 3339 instant (one :func:`_is_rfc3339_instant` takes) as Unix
+    nanoseconds, exactly: the fraction's first nine digits, the offset
+    applied. What an OTel event's ``timeUnixNano`` carries. The Node SDK's
+    ``rfc3339UnixNanos``."""
+    import calendar
+
+    m = re.fullmatch(
+        r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})"
+        r"(?:\.([0-9]+))?(Z|([+-])([0-9]{2}):([0-9]{2}))", value)
+    if m is None:
+        raise InvalidFeedback(_OCCURRED_AT_REFUSAL)
+    year, month, day, hour, minute, second = (int(g) for g in m.groups()[:6])
+    seconds = calendar.timegm((year, month, day, hour, minute, second))
+    if m.group(8) != "Z":
+        offset = int(m.group(10)) * 3600 + int(m.group(11)) * 60
+        seconds -= offset if m.group(9) == "+" else -offset
+    fraction = int(((m.group(7) or "") + "000000000")[:9])
+    return seconds * 1_000_000_000 + fraction
+
 
 Outcome = Literal["ok", "failed", "unknown"]
 
@@ -118,8 +502,18 @@ ExclusionReason = Literal[
 ]
 
 _VALID_OUTCOMES = ("ok", "failed", "unknown")
-_STATUS_KEYS = ("status_code", "status", "http_status", "code", "statusCode")
-_HTTP_IN_TEXT = re.compile(r"\bHTTP\s*\d{3}\b", re.I)
+#: Compared lowercased, so ``Status``, ``STATUS_CODE`` and ``statusCode``
+#: are all found: a body's own spelling is the server's choice, not ours.
+_STATUS_KEYS = frozenset(
+    ("status_code", "status", "http_status", "code", "statuscode"))
+#: ``HTTP 200``, and the status line's own spelling: ``HTTP/1.1 200``,
+#: ``HTTP/2 200``. ASCII classes only (``[0-9]``, the six ASCII spaces,
+#: ``re.ASCII``'s ``\b``): the Node SDK's ``HTTP_IN_TEXT`` is this pattern
+#: character for character, and Python's ``\d``/``\s``/``\b`` read Unicode
+#: digits, spaces and word characters that ECMA-262's do not.
+_HTTP_IN_TEXT = re.compile(
+    r"\bHTTP(?:/[0-9](?:\.[0-9])?)?[\t\n\v\f\r ]*[0-9]{3}\b",
+    re.I | re.ASCII)
 
 
 def _scrub_status(output: Any) -> Any:
@@ -131,22 +525,39 @@ def _scrub_status(output: Any) -> Any:
     treat an unobserved call as a landed one. Absence of evidence must not be
     recoverable as evidence of success through a side channel.
 
+    EVERY STRING IS READ THE SAME WAY, wherever it sits: one that parses as a
+    JSON object or array is scrubbed as that body and written back as JSON
+    -- a dict's ``{"body": "{\"status_code\": 200}"}`` included, which used
+    to keep its status -- and any other has its ``HTTP 200`` /
+    ``HTTP/1.1 200`` removed. Status keys are matched case-insensitively.
+    A non-finite constant in the body (``NaN``) is written back null.
+
+    THE NODE SDK'S ``scrubStatus`` IS THIS RULE, and writes the body back in
+    ``json.dumps``'s spelling, so both send the same bytes -- except where
+    JavaScript's parser has already lost what this one keeps (a float's
+    ``12.0``, an integer past 2**53, the position of integer-like keys).
+    ``tests/test_status_scrub_and_wire_numbers.py`` drives both over one
+    table.
+
     The human-readable content is preserved -- the trajectory still reads the
     same to a judge, it simply carries no status the scorer can mistake for an
     outcome.
     """
     if isinstance(output, str):
         try:
-            body = json.loads(output)
+            # ``NaN``/``Infinity`` read as null, as the Node SDK reads them
+            # (``parseJsonWithConstants``): the body is still scrubbed, and
+            # written back as JSON a parser takes.
+            body = json.loads(output, parse_constant=lambda _c: None)
         except Exception:
-            return _HTTP_IN_TEXT.sub("", output)
-        scrubbed = _scrub_status(body)
-        return json.dumps(scrubbed) if not isinstance(scrubbed, str) else scrubbed
+            body = None
+        if isinstance(body, (dict, list)):
+            return json.dumps(_scrub_status(body))
+        return _HTTP_IN_TEXT.sub("", output)
     if isinstance(output, dict):
-        out = {k: v for k, v in output.items() if k not in _STATUS_KEYS}
         return {
-            k: (_HTTP_IN_TEXT.sub("", v).strip() if isinstance(v, str) else _scrub_status(v))
-            for k, v in out.items()
+            k: _scrub_status(v) for k, v in output.items()
+            if str(k).lower() not in _STATUS_KEYS
         }
     if isinstance(output, list):
         return [_scrub_status(v) for v in output]
@@ -246,6 +657,20 @@ class ToolCallOutcome:
                         f"ToolCallOutcome.entity_ids[{k!r}] must be a "
                         f"non-empty string, got {v!r}"
                     )
+            # Stored, and so sent, under the field's canonical name: the
+            # check above read ``"ID"`` as ``id``, and the schema's key enum
+            # is lowercase, so ``"ID"`` passed here and failed there. Two
+            # spellings of one field are two claims about it: refused.
+            normalized: dict[str, str] = {}
+            for k, v in self.entity_ids.items():
+                name = str(k).strip().lower()
+                if name in normalized:
+                    raise ContractViolation(
+                        f"ToolCallOutcome.entity_ids names the identity field "
+                        f"{name!r} twice ({k!r} and another spelling)"
+                    )
+                normalized[name] = v
+            object.__setattr__(self, "entity_ids", normalized)
 
         if self.outcome == "unknown":
             # Enforced, not requested. An unknown outcome carrying a 2xx is the
@@ -303,6 +728,15 @@ class RolloutRequest:
 
     @classmethod
     def from_wire(cls, d: dict[str, Any]) -> RolloutRequest:
+        """One claimed rollout as the wire carries it, or
+        :class:`ContractViolation` naming the field at fault -- never another
+        exception type, and nothing coerced: a ``None`` was ``"None"`` and
+        ``true`` was a deadline of ``1.0``. ``rollout_id`` must be one URL
+        path segment (:func:`_path_segment`): it is put in this rollout's
+        request paths and in its directory on disk."""
+        if not isinstance(d, Mapping):
+            raise ContractViolation(
+                f"a rollout must be a JSON object, got {_json_type(d)}")
         missing = [
             k
             for k in ("rollout_id", "turn_input", "llm_url", "api_key",
@@ -317,19 +751,44 @@ class RolloutRequest:
                 "removed: configuration reaches the agent through subprocess "
                 "env at spawn, never by mutating a running process."
             )
+        _path_segment(d["rollout_id"], "RolloutRequest.rollout_id")
+        for name in ("turn_input", "llm_url", "api_key", "artifacts_dir"):
+            if not isinstance(d[name], str):
+                raise ContractViolation(
+                    f"RolloutRequest.{name} must be a string, got "
+                    f"{_json_type(d[name])}")
+        deadline_ts = finite_number(d["deadline_ts"])
+        if deadline_ts is None:
+            raise ContractViolation(
+                "RolloutRequest.deadline_ts must be a finite number, got "
+                f"{_json_type(d['deadline_ts'])}")
+        lease_expires_ts = None
+        if d.get("lease_expires_ts") is not None:
+            lease_expires_ts = finite_number(d["lease_expires_ts"])
+            if lease_expires_ts is None:
+                raise ContractViolation(
+                    "RolloutRequest.lease_expires_ts must be a finite number "
+                    f"or null, got {_json_type(d['lease_expires_ts'])}")
+        lease_token = d.get("lease_token")
+        if lease_token is not None and not isinstance(lease_token, str):
+            raise ContractViolation(
+                "RolloutRequest.lease_token must be a string or null, got "
+                f"{_json_type(lease_token)}")
+        metadata = d.get("metadata")
+        if metadata is not None and not isinstance(metadata, Mapping):
+            raise ContractViolation(
+                "RolloutRequest.metadata must be an object or null, got "
+                f"{_json_type(metadata)}")
         return cls(
-            rollout_id=str(d["rollout_id"]),
-            turn_input=str(d["turn_input"]),
-            llm_url=str(d["llm_url"]),
-            api_key=str(d["api_key"]),
-            artifacts_dir=str(d["artifacts_dir"]),
-            deadline_ts=float(d["deadline_ts"]),
-            lease_expires_ts=(
-                float(d["lease_expires_ts"])
-                if d.get("lease_expires_ts") is not None else None
-            ),
-            lease_token=d.get("lease_token"),
-            metadata=dict(d.get("metadata") or {}),
+            rollout_id=d["rollout_id"],
+            turn_input=d["turn_input"],
+            llm_url=d["llm_url"],
+            api_key=d["api_key"],
+            artifacts_dir=d["artifacts_dir"],
+            deadline_ts=deadline_ts,
+            lease_expires_ts=lease_expires_ts,
+            lease_token=lease_token,
+            metadata=dict(metadata or {}),
         )
 
     def seconds_remaining(self, now: float) -> float:
@@ -345,6 +804,166 @@ class RolloutRequest:
         return max(0.0, self.deadline_ts - now)
 
 
+#: The state a reported check is in. Only ``measured`` carries a ``value``: a
+#: check that could not run is never a zero.
+CHECK_STATUSES = (
+    "measured", "unavailable", "error", "abstained", "not_applicable",
+)
+#: What a reported check proves.
+CHECK_ESTABLISHES = (
+    "action_taken", "state_reached", "output_matched",
+    "message_communicated", "call_returned_without_error",
+)
+#: How an episode ended. The agent states the class; who is answerable for it
+#: is decided by the platform, from its own records.
+TERMINATION_CLASSES = (
+    "completed", "turn_limit", "token_limit", "time_limit", "error",
+    "cancelled",
+)
+#: Most checks one report may carry.
+MAX_REPORTED_CHECKS = 200
+#: The largest integer seed: the largest a JSON number carries exactly in
+#: every language (JavaScript's ``Number.MAX_SAFE_INTEGER``).
+MAX_SAFE_SEED = 2**53 - 1
+_CHECK_KEYS = frozenset({"id", "status", "value", "basis", "required",
+                         "establishes"})
+
+
+def finite_number(value: Any) -> float | None:
+    """``value`` as a float when it is a finite number and not a bool, else
+    None. Never raises: an integer too large for a float is not finite."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _short_text(value: Any, limit: int, what: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > limit:
+        raise ContractViolation(
+            f"{what} must be a non-empty string of at most {limit} characters")
+    return value
+
+
+def checks_to_wire(checks: Any) -> list[dict[str, Any]]:
+    """The wire form of the checks an agent's own environment ran on an
+    episode: ``[{"id", "status", "value", "basis", "required",
+    "establishes"}]``, only ``id`` and ``status`` required. Raises
+    :class:`ContractViolation` naming the row and the field at fault.
+
+    AT MOST :data:`MAX_REPORTED_CHECKS` ROWS, THE FIRST ONES. A longer list
+    used to be refused whole, which cost the episode every check it ran for
+    stating one too many. The rows past the limit are not carried and not
+    read; :func:`checks_over_limit` counts them, and the report states the
+    count as ``checks_dropped`` (:meth:`RolloutOutput.to_wire`)."""
+    if not isinstance(checks, (list, tuple)):
+        raise ContractViolation("checks must be a list")
+    rows: list[dict[str, Any]] = []
+    for i, row in enumerate(checks[:MAX_REPORTED_CHECKS]):
+        where = f"checks[{i}]"
+        if not isinstance(row, Mapping):
+            raise ContractViolation(f"{where} must be an object")
+        extra = set(row) - _CHECK_KEYS
+        if extra:
+            raise ContractViolation(
+                f"{where} carries unknown key(s) {sorted(map(str, extra))}")
+        out: dict[str, Any] = {
+            "id": _short_text(row.get("id"), 200, f"{where}.id")}
+        status = row.get("status")
+        if status not in CHECK_STATUSES:
+            raise ContractViolation(
+                f"{where}.status must be one of {list(CHECK_STATUSES)}")
+        out["status"] = status
+        value = row.get("value")
+        if value is not None:
+            number = finite_number(value)
+            if number is None:
+                raise ContractViolation(
+                    f"{where}.value must be a finite number or None")
+            if status != "measured":
+                raise ContractViolation(
+                    f"{where}.value is stated but its status is {status!r}; "
+                    f"only a measured check has a value")
+            out["value"] = number
+        if row.get("basis") is not None:
+            out["basis"] = _short_text(row["basis"], 200, f"{where}.basis")
+        if row.get("required") is not None:
+            if not isinstance(row["required"], bool):
+                raise ContractViolation(f"{where}.required must be a bool")
+            out["required"] = row["required"]
+        if row.get("establishes") is not None:
+            if row["establishes"] not in CHECK_ESTABLISHES:
+                raise ContractViolation(
+                    f"{where}.establishes must be one of "
+                    f"{list(CHECK_ESTABLISHES)}")
+            out["establishes"] = row["establishes"]
+        rows.append(out)
+    return rows
+
+
+def checks_over_limit(checks: Any) -> int:
+    """How many of ``checks`` :func:`checks_to_wire` leaves behind: the rows
+    past :data:`MAX_REPORTED_CHECKS`. 0 for anything that is not a list."""
+    if not isinstance(checks, (list, tuple)):
+        return 0
+    return max(len(checks) - MAX_REPORTED_CHECKS, 0)
+
+
+def termination_to_wire(termination: Any) -> dict[str, Any]:
+    """The wire form of how the episode ended: ``{"class", "detail"}``."""
+    if not isinstance(termination, Mapping):
+        raise ContractViolation("termination must be an object")
+    extra = set(termination) - {"class", "detail"}
+    if extra:
+        raise ContractViolation(
+            f"termination carries unknown key(s) {sorted(map(str, extra))}")
+    if termination.get("class") not in TERMINATION_CLASSES:
+        raise ContractViolation(
+            f"termination.class must be one of {list(TERMINATION_CLASSES)}")
+    out: dict[str, Any] = {"class": termination["class"]}
+    if termination.get("detail") is not None:
+        out["detail"] = _short_text(
+            termination["detail"], 500, "termination.detail")
+    return out
+
+
+def seeds_to_wire(seeds: Any) -> dict[str, Any]:
+    """The wire form of the seeds the episode ran under:
+    ``{"environment", "sampling"}``, each an integer or a short string.
+
+    ONE RULE WITH THE NODE SDK's ``seedsToWire``, which reads the same
+    ``outcome.json``: a string is 1 to 128 characters; an integer is one a
+    JSON number carries exactly in every language (``|n| <= 2**53 - 1``), and
+    a float that is such an integer (``7.0``, which is how JavaScript and
+    many JSON writers spell 7) is that integer. A bool, a fraction, NaN and a
+    larger integer are refused. Python took any ``int`` and no ``float``, so
+    the two SDKs disagreed on ``7.0`` and on ``2**60``."""
+    if not isinstance(seeds, Mapping):
+        raise ContractViolation("seeds must be an object")
+    extra = set(seeds) - {"environment", "sampling"}
+    if extra:
+        raise ContractViolation(
+            f"seeds carries unknown key(s) {sorted(map(str, extra))}")
+    out: dict[str, Any] = {}
+    for key in ("environment", "sampling"):
+        value = seeds.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            out[key] = _short_text(value, 128, f"seeds.{key}")
+            continue
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or value != value or abs(value) > MAX_SAFE_SEED
+                or value != int(value)):
+            raise ContractViolation(
+                f"seeds.{key} must be an integer or a string")
+        out[key] = int(value)
+    return out
+
+
 #: Every key ``RolloutOutput.to_wire()`` may emit. Anything derived from the
 #: inference wire or from the rollout record is absent by construction: this is
 #: a closed dataclass, so an agent cannot assert a field it has no way to
@@ -353,7 +972,8 @@ class RolloutRequest:
 WIRE_KEYS = frozenset({
     "final_text", "tool_calls", "tool_calls_omitted_count", "artifacts",
     "events", "timing", "llm_call_count", "reward", "success",
-    "agent_fingerprint", "exclusion",
+    "agent_fingerprint", "exclusion", "checks", "checks_dropped",
+    "termination", "seeds",
 })
 
 
@@ -384,6 +1004,24 @@ class RolloutOutput:
     events: list[dict[str, Any]] = field(default_factory=list)
     timing: dict[str, Any] = field(default_factory=dict)
     agent_fingerprint: dict[str, Any] | None = None
+    #: What the agent's own environment checked on this episode, beyond the
+    #: one ``reward``/``success``: see :func:`checks_to_wire`. ``None`` is
+    #: "not reported"; ``[]`` is not sent either (it states nothing).
+    checks: list[dict[str, Any]] | None = None
+    #: How many checks this episode ran that the report does NOT carry: the
+    #: rows past :data:`MAX_REPORTED_CHECKS`, and every row of a ``checks``
+    #: the wire could not carry at all (``runner._wire_payload``). Sent as
+    #: ``checks_dropped`` when positive, so a reader of the stored episode can
+    #: tell "these were all its checks" from "these are the ones that fit".
+    #: Only a positive integer is stated; anything else is not sent.
+    checks_dropped: int = 0
+    #: How the episode ended, ``{"class", "detail"}``, the class one of
+    #: :data:`TERMINATION_CLASSES`. A statement, not a verdict: the platform
+    #: decides from its own records whether the ending was the policy's.
+    termination: dict[str, Any] | None = None
+    #: The seeds the episode ran under, ``{"environment", "sampling"}``, so a
+    #: replica can be told from a repeat.
+    seeds: dict[str, Any] | None = None
 
     def to_wire(self) -> dict[str, Any]:
         if self.llm_call_count is not None and (
@@ -391,6 +1029,14 @@ class RolloutOutput:
         ):
             raise ContractViolation(
                 "llm_call_count must be a nonnegative integer or None"
+            )
+        # A bool is not a reward and NaN/infinity are not JSON: the first
+        # trained as 1.0/0.0, the second was refused by the control plane as
+        # the whole report.
+        if self.reward is not None and finite_number(self.reward) is None:
+            raise ContractViolation(
+                f"reward must be a finite number or None, got "
+                f"{self.reward!r}"
             )
         d: dict[str, Any] = {
             "final_text": self.final_text,
@@ -412,6 +1058,24 @@ class RolloutOutput:
                 "reason": self.exclusion_reason,
                 "detail": self.exclusion_detail,
             }
+        dropped = self.checks_dropped
+        if type(dropped) is not int or dropped < 0:
+            dropped = 0
+        # An empty list states nothing; anything else that is not a list is
+        # refused by ``checks_to_wire``, never read as nothing -- ``{}`` and
+        # ``""`` were, while the Node SDK refused them.
+        if self.checks is not None and not (
+                isinstance(self.checks, (list, tuple)) and not self.checks):
+            d["checks"] = checks_to_wire(self.checks)
+            dropped += checks_over_limit(self.checks)
+        if dropped:
+            d["checks_dropped"] = dropped
+        if self.termination is not None:
+            d["termination"] = termination_to_wire(self.termination)
+        if self.seeds is not None:
+            seeds = seeds_to_wire(self.seeds)
+            if seeds:
+                d["seeds"] = seeds
         extra = set(d) - WIRE_KEYS
         if extra:
             raise ContractViolation(

@@ -79,6 +79,10 @@ ACCEPTED: dict[str, object] = {
     "a prompt alone": {"system_prompt": "Be exact."},
     "a key given as null declares nothing": {"system_prompt": None, "tools": None},
     "a long prompt is cut in code points": {"system_prompt": "\U0001F600" * 20_005},
+    "an api_spec alone describes nothing": {"api_spec": " https://h.example/spec "},
+    "an api_spec beside a prompt": {"system_prompt": "p", "api_spec": "http://h/s"},
+    "an api_spec stripped the way Python strips": {
+        "api_spec": US + "https://h.example/s" + NEL},
 }
 
 REFUSED: dict[str, object] = {
@@ -112,6 +116,12 @@ REFUSED: dict[str, object] = {
     "a list of parameters": {"tools": [_fn(parameters=[])]},
     "a string read_only": {"tools": [{"name": "x", "read_only": "true"}]},
     "read_only inside function": {"tools": [_fn(read_only=True)]},
+    "a path is no api_spec": {"api_spec": "./openapi.yaml"},
+    "a file URL is no api_spec": {"api_spec": "file:///spec.json"},
+    "an api_spec with no host": {"api_spec": "https://"},
+    "a numeric api_spec": {"api_spec": 5},
+    "an api_spec past the stored length": {
+        "api_spec": "https://h.example/" + "\U0001F600" * 2040},
 }
 
 
@@ -119,7 +129,8 @@ REFUSED: dict[str, object] = {
 def node() -> dict[str, dict]:
     sdk, binary = require_node_sdk()
     script = (
-        "import {applyDeclaration, resolveDeclaration} from './src/declaration.js';\n"
+        "import {applyDeclaration, declarationRegistrationFields, resolveDeclaration}"
+        " from './src/declaration.js';\n"
         "let raw='';\n"
         "for await (const chunk of process.stdin) raw += chunk;\n"
         "const {accepted, refused, observed, agent} = JSON.parse(raw);\n"
@@ -129,6 +140,7 @@ def node() -> dict[str, dict]:
         "  out.accepted[name] = {\n"
         "    alone: applyDeclaration(d, {reflected: null, agentName: agent}),\n"
         "    over: applyDeclaration(d, {reflected: observed, agentName: agent}),\n"
+        "    registration: declarationRegistrationFields(d),\n"
         "  };\n"
         "}\n"
         "for (const [name, spec] of Object.entries(refused)) {\n"
@@ -147,7 +159,9 @@ def _python(spec: object) -> dict:
     alone = declaration.apply(declared, reflected=None, agent_name=AGENT)
     over = declaration.apply(declared, reflected=OBSERVED_AGENT, agent_name=AGENT)
     return {"alone": alone.to_wire() if alone is not None else None,
-            "over": over.to_wire() if over is not None else None}
+            "over": over.to_wire() if over is not None else None,
+            "registration": (declared.registration_fields()
+                             if declared is not None else {})}
 
 
 @pytest.mark.parametrize("name", list(ACCEPTED))

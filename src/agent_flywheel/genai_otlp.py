@@ -54,6 +54,7 @@ to be discovered.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import time
@@ -102,9 +103,34 @@ _CLIENT = 3
 _STATUS_ERROR = 2
 
 
+def _finite(value: Any) -> Any:
+    """``value`` with every NaN and infinity replaced by ``None``."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, Mapping):
+        return {k: _finite(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_finite(v) for v in value]
+    return value
+
+
+def _dumps(value: Any, **kw: Any) -> str:
+    """Compact JSON that is JSON. ``json.dumps`` writes NaN and Infinity by
+    default, which no JSON parser reads -- one tool returning a NaN made the
+    whole recorded line, and the trace rendered from it, unreadable at the
+    intake. A non-finite number is written ``null``, what the Node SDK's
+    ``JSON.stringify`` writes for it."""
+    try:
+        return json.dumps(value, separators=(",", ":"), ensure_ascii=False,
+                          allow_nan=False, **kw)
+    except ValueError:
+        return json.dumps(_finite(value), separators=(",", ":"),
+                          ensure_ascii=False, allow_nan=False, **kw)
+
+
 def content_json(value: Any) -> str:
     """A content value as the JSON string carried on the span."""
-    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+    return _dumps(value)
 
 
 def requested_output_format(request: Any) -> dict[str, Any] | None:
@@ -473,8 +499,7 @@ def operation_record(op: Mapping[str, Any]) -> str:
     written as its ``str``, which is also what a provider client would have
     had to send in its place; the record is never dropped for it.
     """
-    return json.dumps({"record": "operation", **op}, separators=(",", ":"),
-                      ensure_ascii=False, default=str)
+    return _dumps({"record": "operation", **op}, default=str)
 
 
 def end_record(end: str) -> str:

@@ -489,18 +489,20 @@ def test_an_unreachable_control_plane_is_not_read_as_consent(
 
 
 def test_a_blip_does_not_revoke_consent_already_granted(monkeypatch, tmp_path):
-    """It only ever turns capture ON. Revocation is enforced at the intake,
-    where the turns stay on disk rather than being lost."""
+    """A read that could not be answered is not a no: a consenting customer's
+    uploads never stop on a network blip. An ANSWERED no does stop them --
+    ``test_production_turn_upload.test_an_answered_no_on_the_capture_read_
+    stops_the_same_flush`` -- which this test used to pin the other way."""
     tr = _LateConsent()
     tr.enabled = True
     with _attached(monkeypatch, tmp_path, tr) as px:
         _serve(px, _FLUSH_EVERY)
         assert _until(lambda: tr.sent)
         assert px.may_upload is True
-        tr.enabled = False                      # the control plane now says no
+        tr.capture_current = lambda agent_id: {}    # the read went unanswered
         px._recheck_capture()
         assert px.may_upload is True, (
-            "a later 'no' silently stopped a consenting customer's uploads"
+            "a blip silently stopped a consenting customer's uploads"
         )
 
 
@@ -667,6 +669,11 @@ class _Revoked(_Transport):
             "not enabled for this agent.")
 
     def capture_current(self, agent_id):
+        # Yes until the operator's switch reaches the intake -- the read
+        # before the first POST was served first -- and no from then on.
+        if not self.attempts:
+            return {"agent_id": agent_id,
+                    "capture": {"turns": True, "model_content": True}}
         return {"agent_id": agent_id,
                 "capture": {"turns": False, "reason": "disabled by an operator"}}
 

@@ -16,10 +16,10 @@ A `list` or `tuple` first argument means the agent is a **process**, not an obje
 | channel | when | notes |
 |:--|:--|:--|
 | **stdin** | always, unless `fw.TASK` is in the argv | written, then closed |
-| **`PERCEPTEYE_TURN_INPUT`** | always | inert unless the CLI reads it |
+| **`PERCEPTEYE_TURN_INPUT`** | unless the task is over 100 KiB (too big for one environment variable) | inert unless the CLI reads it |
 | **an argv position** | only where `fw.TASK` appears | every occurrence is substituted |
 
-The first two are sent together because CLIs differ and guessing wrongly is silent. `fw.TASK` makes the choice a declaration: with the sentinel in the argv, **stdin gets the empty string** so an agent that reads both does not act on the same instruction twice. `PERCEPTEYE_TURN_INPUT` stays set either way.
+The first two are sent together because CLIs differ and guessing wrongly is silent. `fw.TASK` makes the choice a declaration: with the sentinel in the argv, **stdin gets the empty string** so an agent that reads both does not act on the same instruction twice. `PERCEPTEYE_TURN_INPUT` stays set either way, as long as the task fits in one environment variable.
 
 `fw.TASK` is a **sentinel object, not the string `"{task}"`**. A literal argument that happens to contain the placeholder text survives verbatim, and an unsubstituted sentinel surfaces as a type error rather than as an agent receiving four characters and doing something confident with them.
 
@@ -56,7 +56,7 @@ those bytes as the answer would fabricate a response the agent never made.
 
 ## The working directory is the rollout
 
-Each rollout's child starts with its cwd set to that rollout's own directory — the same path it is handed as `PERCEPTEYE_TRAJECTORY_DIR`, namely `<artifacts_dir>/_percepteye/<rollout_id>`. For a coding or REPL agent the files it leaves there **are** the deliverable, so every one of them is collected as an artifact. Two exceptions: `tool_calls.jsonl` is the trajectory, not an artifact; and a symlink is recorded as `skipped:symlink` rather than followed, because the agent authors that directory and `ln -s ~/.aws/credentials creds.txt` would otherwise be read at its target. The directory is removed once the report is out.
+Each rollout's child starts with its cwd set to that rollout's own directory — the same path it is handed as `PERCEPTEYE_TRAJECTORY_DIR`, namely `<artifacts_dir>/_percepteye/<rollout_id>.<lease digest>` — one directory per claim, because a rollout whose lease lapsed can be claimed again by the same process while its first attempt is still finishing. For a coding or REPL agent the files it leaves there **are** the deliverable, so every one of them is collected as an artifact. Two exceptions: `tool_calls.jsonl` is the trajectory, not an artifact; and a symlink is recorded as `skipped:symlink` rather than followed, because the agent authors that directory and `ln -s ~/.aws/credentials creds.txt` would otherwise be read at its target. The directory is removed once the report is out.
 
 `artifacts_dir=` defaults to `$PWD/.percepteye-artifacts`. A CLI agent has a real shell and this SDK's isolation is a process boundary and an environment scrub — it says nothing about the filesystem. **Point `artifacts_dir=` outside any checkout.**
 
@@ -101,13 +101,13 @@ Either side missing leaves the argv untouched, which is exactly the pre-gate beh
 
 ## Timeouts kill the process group
 
-`rollout_timeout_s` (default `900.0`) is capped by the rollout's own remaining budget less a 10s margin, held back so artifacts and the report can still be delivered against a live lease. On expiry the whole **process group** is killed with `SIGKILL`.
+The agent's budget is the rollout's own remaining budget less a delivery reserve (at least 10s) and a 5s teardown, held back so artifacts and the report can still be delivered against a live lease; `rollout_timeout_s` (default `None`) can only lower it. On expiry the whole **process group** is killed with `SIGKILL`.
 
 The group, not the process, and that is load-bearing. A real CLI agent spawns freely — a shell, a compiler, a test runner — and killing only the process we launched leaves those children alive holding the stdout pipe open, so `communicate()` blocks and the timeout never returns. Measured: a 1.5s budget against `sh -c 'sleep 120'` took the full 120s. The child is spawned with `start_new_session=True` on POSIX, so a spawning agent leaves nothing behind. Windows has no process groups; only the launched process is killed.
 
 ## Tool outcomes with no instrumentation
 
-Two routes in. Neither requires a line of code inside the agent.
+Two routes in. Neither requires a line of code inside the agent. A third file, below, carries the episode's grade.
 
 ### 1. An explicit adapter for the event stream your CLI already prints
 
@@ -158,6 +158,21 @@ One JSON object per line. `name` and `outcome` are required; `outcome` is one of
 **One unreadable line costs that line and nothing else.** A truncated final write is the expected case, not an exotic one — the deadline kill lands mid-write. The lost records are counted and travel as `tool_calls_omitted_count`, because a call we know executed and cannot read is not a call that did not happen.
 
 **The trajectory wins.** If anything was recorded there — including `[]`, which is a positive claim that zero calls were made — the stream parse is not consulted. An agent that wrote to the trajectory made a deliberate assertion about its own behavior, and a parse must never overwrite it.
+
+### 3. State the episode's grade in a file
+
+An agent whose own environment grades the episode says so by writing one JSON object to `outcome.json` in the same directory. No SDK, no import.
+
+```bash
+printf '{"reward": 1.0, "success": true, "termination": {"class": "completed"}}\n' \
+  > "$PERCEPTEYE_TRAJECTORY_DIR/outcome.json"
+```
+
+Every key is optional: `reward` (a finite number), `success` (`true` or `false`), and the three evidence parts of the [contract](contract.md) — `checks`, `termination`, `seeds`. Nothing is coerced: a `reward` of `"1"` or `true` is not a reward.
+
+**A part that is malformed is ignored, alone.** A check with a status outside the vocabulary costs the file its checks and nothing else; a file that is not JSON, or not an object, states nothing, and the rollout is still reported. More than 200 checks is not malformed: the first 200 are reported and the report says how many were not (`checks_dropped`). `NaN` and `Infinity` are not JSON but many writers produce them; they are read as `null`.
+
+**The Node plugin reads the same file by the same rules** when it drives a rollout itself, once, as the agent's run ends, and removes it. One table of files is driven through both readers by [`tests/test_reported_outcome_parity.py`](https://github.com/percepteye-ai/agent-flywheel/blob/main/tests/test_reported_outcome_parity.py).
 
 ## Registration: describing a CLI agent
 

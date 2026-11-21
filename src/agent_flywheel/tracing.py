@@ -48,9 +48,44 @@ otherwise.
 """
 from __future__ import annotations
 
+import threading
+from collections import OrderedDict
 from typing import Any
 
-__all__ = ["record_tool_call_span", "record_turn_span", "tracing_available"]
+__all__ = ["record_tool_call_span", "record_turn_feedback_span",
+           "record_turn_span", "tracing_available"]
+
+#: PER-TURN FEEDBACK ON A TURN'S TRACE. What a user did with a production
+#: turn is an EVENT -- something that happened at a time -- on that turn: the
+#: event Mission Control's OTLP intake reads, with the signal (one of
+#: ``contract.TURN_FEEDBACK_SIGNALS``) and the report's own id.
+TURN_FEEDBACK_EVENT = "percepteye.turn.feedback"
+TURN_FEEDBACK_SIGNAL_ATTRIBUTE = "percepteye.turn.feedback.signal"
+TURN_FEEDBACK_ID_ATTRIBUTE = "percepteye.turn.feedback.id"
+
+#: The span contexts of the production turns this process recorded, so
+#: feedback reported after them LINKS to them (:func:`record_turn_feedback_span`).
+#: Bounded: the oldest turns are forgotten first, and feedback on one of them
+#: still names its turn by ``percepteye.turn.id``.
+_TURN_SPANS: OrderedDict[str, list[Any]] = OrderedDict()
+_TURN_SPANS_MAX = 1024
+#: Spans one turn records (its question and its answer, each its own span).
+_TURN_SPANS_PER_TURN = 8
+_TURN_SPANS_LOCK = threading.Lock()
+
+
+def _remember_turn_span(turn_id: str, span: Any) -> None:
+    """Keep ``span``'s context as one of ``turn_id``'s. Never raises."""
+    try:
+        context = span.get_span_context()
+        with _TURN_SPANS_LOCK:
+            kept = _TURN_SPANS.pop(turn_id, [])
+            kept = [*kept, context][-_TURN_SPANS_PER_TURN:]
+            _TURN_SPANS[turn_id] = kept
+            while len(_TURN_SPANS) > _TURN_SPANS_MAX:
+                _TURN_SPANS.popitem(last=False)
+    except Exception:
+        return
 
 #: Resolved once. ``None`` means the API is not installed, which is the normal
 #: case: the ``otel`` extra is opt-in and the package ships with one runtime
@@ -64,16 +99,21 @@ def _tracer() -> Any:
     global _TRACER, _RESOLVED
     if _RESOLVED:
         return _TRACER
-    _RESOLVED = True
     try:
         from opentelemetry import trace  # type: ignore
 
         # get_tracer ONLY. No SDK import, no provider construction, no
         # set_tracer_provider -- see the module docstring.
-        _TRACER = trace.get_tracer("agent-flywheel")
+        tracer = trace.get_tracer("agent-flywheel")
     except Exception:
-        _TRACER = None
-    return _TRACER
+        tracer = None
+    # PUBLISHED IN THIS ORDER: the tracer, THEN the flag. The flag used to be
+    # set first, so a second thread asking while the first was still
+    # resolving read "resolved" and the None beside it, and dropped its span.
+    # Two threads that both resolve get the same answer; that costs nothing.
+    _TRACER = tracer
+    _RESOLVED = True
+    return tracer
 
 
 def tracing_available() -> bool:
@@ -259,12 +299,33 @@ def record_turn_span(
             # rather than events because the ingest side normalises attributes
             # into `raw_attributes` verbatim, and an event body does not
             # survive that path.
+            #
+            # PLAIN TEXT, NOT THE CONVENTION'S MESSAGE ARRAYS, deliberately.
+            # Each turn is two HALF-spans -- the question when the turn opens,
+            # the answer whenever ``record_answer`` arrives -- and the control
+            # plane's trace reader reads this SDK's plain text as exactly
+            # that: the answer's prompt is the
+            # transcript before it, so a conversation is rebuilt across its
+            # turns. The same half-spans as spec arrays are read as ordinary
+            # model calls instead: the answer half is refused for recording no
+            # prompt (``content_capture_off``), and each turn becomes its own
+            # conversation segment. Verified against that reader; the arrays
+            # wait for a reader that knows they are half-spans.
+            #
+            # Every Flywheel key in the text is redacted first
+            # (``_http.redact_keys``, the rule every body this SDK sends
+            # keeps): a user who pasted one, or an answer that echoed one,
+            # must not carry it into the customer's telemetry.
+            from ._http import redact_keys
+
             if input_text:
                 span.set_attribute(
-                    "gen_ai.input.messages", str(input_text)[:_MAX_TURN_CHARS])
+                    "gen_ai.input.messages",
+                    redact_keys(str(input_text))[:_MAX_TURN_CHARS])
             if output_text:
                 span.set_attribute(
-                    "gen_ai.output.messages", str(output_text)[:_MAX_TURN_CHARS])
+                    "gen_ai.output.messages",
+                    redact_keys(str(output_text))[:_MAX_TURN_CHARS])
             if rollout_id:
                 span.set_attribute("percepteye.rollout.id", str(rollout_id))
             if turn_id:
@@ -278,5 +339,61 @@ def record_turn_span(
                 span.set_attribute(
                     "percepteye.agent.execution_sha256", str(execution_sha256)
                 )
+            if turn_id and not rollout_id:
+                # A production turn: what its user does next may be reported
+                # after this span has ended (record_turn_feedback_span).
+                _remember_turn_span(str(turn_id), span)
     except Exception:
         return
+
+
+def record_turn_feedback_span(
+    *,
+    turn_id: str,
+    signal: str,
+    occurred_at_unix_nano: int,
+    feedback_id: str | None = None,
+) -> bool:
+    """Put what a user did with a production turn on that turn's trace.
+    Returns whether a span was recorded. Never raises.
+
+    THE TURN'S SPAN HAS ENDED by the time its user acts -- :func:`record_turn_span`
+    ends it at once -- and an ended span takes no event. So the event rides a
+    span of its own, ``percepteye.turn.feedback``, LINKED to the span(s) of the
+    turn this process recorded: a link is OpenTelemetry's relation between
+    spans that are causally related but not parent and child, as a later
+    reaction is to the answer it reacts to. The span also carries the turn's
+    ``percepteye.turn.id``, so it names its turn after this process forgot the
+    turn's spans, or never recorded them. It starts a trace of its own, never
+    a child of whatever span is current where the caller reports it.
+
+    The event: ``percepteye.turn.feedback`` at ``occurred_at_unix_nano`` (when
+    the user acted), with ``percepteye.turn.feedback.signal`` and, when given,
+    ``percepteye.turn.feedback.id``. A no-op, returning False, with no OTel
+    API or a tracer that records nothing."""
+    tracer = _tracer()
+    if tracer is None:
+        return False
+    try:
+        from opentelemetry import trace  # type: ignore
+        from opentelemetry.context import Context  # type: ignore
+
+        with _TURN_SPANS_LOCK:
+            contexts = list(_TURN_SPANS.get(str(turn_id), ()))
+        span = tracer.start_span(
+            TURN_FEEDBACK_EVENT, context=Context(),
+            links=[trace.Link(context) for context in contexts])
+        try:
+            if not getattr(span, "is_recording", lambda: False)():
+                return False
+            span.set_attribute("percepteye.turn.id", str(turn_id))
+            attributes = {TURN_FEEDBACK_SIGNAL_ATTRIBUTE: str(signal)}
+            if feedback_id:
+                attributes[TURN_FEEDBACK_ID_ATTRIBUTE] = str(feedback_id)
+            span.add_event(TURN_FEEDBACK_EVENT, attributes=attributes,
+                           timestamp=int(occurred_at_unix_nano))
+            return True
+        finally:
+            span.end()
+    except Exception:
+        return False

@@ -210,6 +210,26 @@ def test_a_raising_observer_never_breaks_serving():
     assert src.current().base_url == GATEWAY
 
 
+def test_an_observer_may_read_and_close_the_handle_it_observes():
+    """The observer used to run under the handle's non-reentrant state lock:
+    one that called ``current()`` or ``close()`` deadlocked, and with it every
+    reader of the handle. Run on a thread so a regression fails, not hangs."""
+    seen: list = []
+    holder: dict = {}
+
+    def _observer(snap):
+        seen.append(holder["src"].current().base_url)
+        holder["src"].close()
+
+    src, _ = _source([_body()], on_change=_observer)
+    holder["src"] = src
+    t = threading.Thread(target=src.current, daemon=True)
+    t.start()
+    t.join(timeout=5)
+    assert not t.is_alive(), "on_change deadlocked the handle"
+    assert seen == [GATEWAY]
+
+
 # ── last-good retention: the behaviour the whole design turns on ─────
 
 
@@ -297,7 +317,8 @@ def test_the_floor_overrides_a_server_hint_too():
     assert src.ttl_s == MIN_TTL_S
 
 
-@pytest.mark.parametrize("hint", ["soon", 0, -5, True, None])
+@pytest.mark.parametrize("hint", ["soon", 0, -5, True, None,
+                                  float("inf"), float("nan")])
 def test_a_junk_server_hint_is_ignored(hint):
     clock = _Clock()
     src, _ = _source([{**_body(), "ttl_s": hint}], clock=clock)
@@ -480,7 +501,7 @@ def _prompt(text, *, gen, sha, status="approved", stale=False):
 def _prompt_source(policies, prompts, *, clock):
     """A handle whose /policy/current and /prompt/current reads are both
     scripted, counting the prompt reads."""
-    src, calls = _source(policies, clock=clock)
+    src, _calls = _source(policies, clock=clock)
     reads = {"n": 0}
 
     def _fetch_prompt():
@@ -533,7 +554,7 @@ def test_a_failed_or_empty_read_never_takes_an_applied_prompt_away():
     """``{}`` from /prompt/current also means "could not answer"; and a
     /policy/current that stops naming a prompt is absence, not withdrawal."""
     clock = _Clock()
-    src, reads = _prompt_source(
+    src, _reads = _prompt_source(
         [{"prompt_generation": "g1"}, {"prompt_generation": "g2"}, {}],
         [_prompt("FIRST", gen="g1", sha=_SHA1), {}], clock=clock,
     )
@@ -592,3 +613,95 @@ def test_a_withdrawal_takes_an_applied_prompt_away_on_the_next_refresh():
     clock.advance(301)
     src.current()
     assert reads["n"] == 2
+
+
+# ── a handle's configuration and its health ────────────────────────────
+
+
+@pytest.mark.parametrize("ttl", [float("inf"), float("nan"), 0, -1.0, "soon"])
+def test_a_ttl_that_is_not_a_finite_positive_number_is_refused(ttl):
+    """Infinity never refreshes -- no promotion or rollback reaches the agent
+    -- and NaN slid silently to the floor."""
+    from agent_flywheel.errors import ConfigurationError
+
+    with pytest.raises(ConfigurationError, match="ttl_s"):
+        PolicySource(agent_id="a", ttl_s=ttl, api_key="k",
+                     _fetch=lambda: {}, _rand=lambda lo, hi: 0.0)
+
+
+def test_a_failed_prompt_read_is_a_failed_refresh():
+    """/policy/current named a new approved prompt and /prompt/current could
+    not be read: the agent is not running what it was told to, and its health
+    used to say the refresh was fine."""
+    clock = _Clock()
+    src, _reads = _prompt_source(
+        [{"prompt_generation": "g1"}],
+        [RuntimeError("503"), _prompt("FIRST", gen="g1", sha=_SHA1)],
+        clock=clock,
+    )
+    snap = src.current()
+    assert snap.last_refresh_ok is False
+    assert snap.prompt.apply is False
+    clock.advance(301)
+    snap = src.current()
+    assert snap.last_refresh_ok is True and snap.prompt.text == "FIRST"
+
+
+def test_the_prompt_read_raises_through_the_transport():
+    """The fail-open read answers {} for an outage, which the handle cannot
+    tell from "nothing served"; it reads through the raising one."""
+    from agent_flywheel.transport import AttachTransport
+
+    class _Down:
+        def request(self, *a, **kw):
+            raise ConnectionError("refused")
+
+    with pytest.raises(ConnectionError):
+        AttachTransport(_Down(), agent_id="a").prompt_current_or_raise()
+    assert AttachTransport(_Down(), agent_id="a").prompt_current() == {}
+
+
+# ── close() against a refresh in flight ────────────────────────────────
+
+
+def test_a_close_during_the_first_refresh_does_not_leak_its_client(monkeypatch):
+    """close() landing while the refresh was building its client released
+    nothing (there was nothing yet), and the refresh then stored a client no
+    one would ever close -- on a handle that kept refreshing after close."""
+    import agent_flywheel._http as http
+
+    made: list = []
+    holder: dict = {}
+
+    class _Client:
+        def __init__(self, **kw):
+            made.append(self)
+            self.closed = False
+            holder["src"].close()     # the close lands mid-refresh
+
+        def request(self, *a, **kw):
+            return _body()
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(http, "ControlPlaneClient", _Client)
+    clock = _Clock()
+    src = PolicySource(agent_id="agent-1", api_key="k",
+                       control_plane_url="https://cp.example",
+                       _now=clock, _rand=lambda lo, hi: 0.0)
+    holder["src"] = src
+    snap = src.current()
+    assert snap.last_refresh_ok is False
+    assert [c.closed for c in made] == [True]
+    assert src._client is None
+
+
+def test_a_closed_handle_never_refreshes_again():
+    clock = _Clock()
+    src, calls = _source([_body()], clock=clock)
+    assert src.current().base_url == GATEWAY
+    src.close()
+    clock.advance(301.0)
+    assert src.current().base_url == GATEWAY   # what it held still answers
+    assert calls["n"] == 1

@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import uuid
 import warnings
 from contextvars import ContextVar
 from pathlib import Path
@@ -28,7 +29,7 @@ from typing import Any, Literal
 from .contract import (
     Outcome,
     ToolCallOutcome,
-    _production_identifier,
+    _task_identifier,
 )
 from .errors import ContractViolation
 from .evidence import extract_entity_ids
@@ -290,14 +291,17 @@ def _trajectory_path(rollout_id: str) -> Path | None:
         return Path(base) / TOOL_CALLS_FILENAME
     if not _warned_no_destination:
         _warned_no_destination = True
-        warnings.warn(
-            f"record_tool_call() was called for rollout {rollout_id!r} with no "
-            f"trajectory directory configured, so the outcome was DISCARDED. "
-            f"Tool outcomes recorded outside an agent-flywheel runner are "
-            f"not captured. This warning is emitted once.",
-            RuntimeWarning,
-            stacklevel=3,
-        )
+        try:
+            warnings.warn(
+                f"record_tool_call() was called for rollout {rollout_id!r} "
+                f"with no trajectory directory configured, so the outcome was "
+                f"DISCARDED. Tool outcomes recorded outside an agent-flywheel "
+                f"runner are not captured. This warning is emitted once.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        except Exception:  # -W error: a capture bug never fails the tool call
+            pass
     return None
 
 
@@ -453,8 +457,10 @@ def read_model_boundary(trajectory_dir: Any) -> dict[str, Any] | None:
     from .genai_otlp import OBSERVATION_FILENAME, observation_from_lines
 
     try:
+        # errors="replace": a SIGKILL can cut a multi-byte character in half,
+        # and a strict decode then failed this turn on every flush, for good.
         raw = (Path(trajectory_dir) / OBSERVATION_FILENAME).read_text(
-            encoding="utf-8")
+            encoding="utf-8", errors="replace")
     except OSError:
         return None
     return observation_from_lines(raw.splitlines())
@@ -509,14 +515,17 @@ class _Sink:
             return True
         except OSError as exc:
             self._broken = True
-            warnings.warn(
-                f"[percepteye] could not write the trajectory at "
-                f"{self._path.parent}: {type(exc).__name__}: {exc}. Outcomes "
-                f"for this trajectory are NOT being recorded. Capture is "
-                f"disabled for it; nothing else is affected.",
-                RuntimeWarning,
-                stacklevel=4,
-            )
+            try:
+                warnings.warn(
+                    f"[percepteye] could not write the trajectory at "
+                    f"{self._path.parent}: {type(exc).__name__}: {exc}. "
+                    f"Outcomes for this trajectory are NOT being recorded. "
+                    f"Capture is disabled for it; nothing else is affected.",
+                    RuntimeWarning,
+                    stacklevel=4,
+                )
+            except Exception:  # -W error turns the line above into a raise
+                pass
             return False
 
     def _write(self, line: str) -> None:
@@ -594,14 +603,61 @@ def _append(path: Path, line: str) -> None:
         _write_execution_fingerprint(path.parent, _current_execution_sha256.get())
 
 
+#: What :func:`_publish_once` returns when THIS call published the sidecar.
+_PUBLISHED = object()
+
+
+def _publish_once(target: Path, content: str) -> Any:
+    """Publish ``content`` at ``target`` unless something is already there.
+
+    Returns :data:`_PUBLISHED` when this call published it, else the text
+    already at ``target`` (``None`` when that cannot be read). Raises
+    ``OSError`` for a directory it cannot write.
+
+    THE TARGET IS NEVER SEEN EMPTY. Creating it with ``open("x")`` and then
+    writing left a window in which a concurrent writer of the SAME identity
+    -- two tool calls of one turn, in parallel -- got ``FileExistsError``,
+    read the still-empty file, compared ``""`` with what it meant to write
+    and wrote the permanent conflict marker: measured, 8 threads writing one
+    identity into a fresh directory produced a false ``.conflict`` about
+    55% of the time. The content is written whole to a file of this
+    writer's own, flushed to disk, and only then linked into place:
+    ``os.link`` fails rather than replace, so the first writer wins and
+    every later one reads a complete file to compare against.
+    """
+    tmp = target.with_name(
+        f".{target.name}.{os.getpid()}.{threading.get_ident()}."
+        f"{uuid.uuid4().hex}.tmp")
+    try:
+        with open(tmp, "x", encoding="utf-8") as output:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        try:
+            os.link(tmp, target)
+            return _PUBLISHED
+        except FileExistsError:
+            pass
+        try:
+            return target.read_text(encoding="utf-8")
+        except OSError:
+            return None
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def _write_execution_fingerprint(path: Path, execution_sha256: str | None) -> None:
     """Persist one exact SDK identity, invalidating a conflicting claim.
 
     Never raises. Capture cannot fail a customer turn. A second process may
     reuse a caller-chosen turn id; if it carries a different identity, leaving
     either digest in place would falsely bind half the turn, so a monotonic
-    conflict marker makes readers refuse the identity.  Keeping that marker in
-    a separate file also closes the create/write race between two processes.
+    conflict marker makes readers refuse the identity.  The sidecar is
+    published whole (:func:`_publish_once`), so a concurrent writer of the
+    same identity never reads it half-written and calls that a conflict.
     """
     if not is_lower_sha256(execution_sha256):
         return
@@ -612,15 +668,12 @@ def _write_execution_fingerprint(path: Path, execution_sha256: str | None) -> No
         path.mkdir(parents=True, exist_ok=True)
         if conflict.exists():
             return
-        try:
-            with sidecar.open("x", encoding="utf-8") as output:
-                output.write(json.dumps(expected, sort_keys=True))
+        existing = _publish_once(sidecar, json.dumps(expected, sort_keys=True))
+        if existing is _PUBLISHED:
             return
-        except FileExistsError:
-            pass
         try:
-            current = json.loads(sidecar.read_text(encoding="utf-8"))
-        except (OSError, TypeError, ValueError):
+            current = json.loads(existing)
+        except (TypeError, ValueError):
             current = None
         if current == expected:
             return
@@ -768,6 +821,43 @@ def record_turn_text(
     return True
 
 
+def turn_started_at(d: Path) -> float:
+    """When this turn STARTED, for ordering a conversation.
+
+    THE ``conversation_id`` FILE'S mtime, NOT THE DIRECTORY'S -- and that
+    distinction is the whole point. A directory's mtime advances every time a
+    file is CREATED inside it, which this module already knows and already
+    designed around once: see ``Attachment._UPLOADED_INDEX``, which is one file at the
+    root rather than a marker in each turn for exactly this reason. But a
+    turn's own capture creates files inside its directory long after the turn
+    began -- ``record_answer`` creates ``turns.jsonl`` whenever ``input_text``
+    was not passed to :meth:`Attachment.turn` (both are documented optional),
+    and the first ``record_tool_call`` creates the trajectory file. So the
+    directory's mtime says "last written to", and ordering a conversation by
+    it puts a turn whose answer arrived late AFTER the turn that followed it:
+    the conversation is uploaded in the wrong order and MC stores the wrong
+    ``turn_index`` verbatim.
+
+    The ``conversation_id`` file is written once, at scope entry, and never
+    touched again. It exists for exactly the turns that have an index at all,
+    so nothing new has to be written to get this -- and a turn that predates
+    this ordering, or whose file cannot be read, still falls back to the
+    directory mtime rather than losing its place entirely.
+
+    ONE ANSWER FOR BOTH READERS: the upload path's ``turn_index`` and
+    ``export.iter_records``, which ordered by the directory's mtime and so
+    put a late-answered turn after the one that followed it.
+    """
+    try:
+        return (d / CONVERSATION_ID_FILENAME).stat().st_mtime
+    except OSError:
+        pass
+    try:
+        return d.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def read_conversation_id(path: Any) -> str | None:
     """Which conversation this turn directory declared, or ``None``.
 
@@ -792,12 +882,14 @@ def _normalize_task_id(value: Any) -> str | None:
     The identifier is deliberately not parsed as a UUID or given any product
     semantics: customer agents use many task-id formats.  It is still kept
     conservative at the wire boundary.  Non-strings, leading/trailing
-    whitespace, C0/C1 control characters and values beyond the control
-    plane's 255-character field cannot be exact joins, so they remain absent
-    rather than being silently rewritten into a different id. This calls the
-    same predicate whose pattern is published in ``flywheel-1.json``.
+    whitespace, any character ``str.isprintable()`` refuses (controls,
+    separators other than the space, format, unassigned and private-use
+    code points) and values beyond the control plane's 255-character field
+    cannot be exact joins, so they remain absent rather than being silently
+    rewritten into a different id. This calls the control plane's own
+    predicate (:func:`~agent_flywheel.contract._task_identifier`).
     """
-    return _production_identifier(value)
+    return _task_identifier(value)
 
 
 def _write_task_id(path: Path, task_id: Any) -> None:
@@ -811,17 +903,8 @@ def _write_task_id(path: Path, task_id: Any) -> None:
         path.mkdir(parents=True, exist_ok=True)
         if conflict.exists():
             return
-        try:
-            with sidecar.open("x", encoding="utf-8") as output:
-                output.write(value)
-            return
-        except FileExistsError:
-            pass
-        try:
-            current = sidecar.read_text(encoding="utf-8")
-        except OSError:
-            current = None
-        if current == value:
+        existing = _publish_once(sidecar, value)
+        if existing is _PUBLISHED or existing == value:
             return
         try:
             conflict.open("x", encoding="utf-8").close()
@@ -869,7 +952,9 @@ def read_turn_text(
         return None
     out: dict[str, str] = {}
     try:
-        raw = path.read_text(encoding="utf-8")
+        # errors="replace": a write cut mid-character by a SIGKILL is a
+        # truncated record like any other, never an unreadable turn.
+        raw = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
     for line in raw.splitlines():
@@ -880,6 +965,9 @@ def read_turn_text(
         except ValueError:
             # A truncated final write costs that record and nothing else --
             # the same rule Trajectory.read keeps.
+            continue
+        if not isinstance(rec, dict):
+            # A line that parses to something else (`7`, `[]`) is no record.
             continue
         kind, text = rec.get("kind"), rec.get("text")
         if kind in TURN_KINDS and isinstance(text, str) and text:
@@ -918,7 +1006,9 @@ class Trajectory:
             return None
         self.malformed = 0
         out: list[ToolCallOutcome] = []
-        with self.path.open(encoding="utf-8") as fh:
+        # errors="replace": a SIGKILL that cuts a multi-byte character costs
+        # that line (it no longer parses), never the readable ones.
+        with self.path.open(encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:

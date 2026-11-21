@@ -6,6 +6,13 @@ import json
 import pytest
 
 from agent_flywheel import RolloutOutput, RolloutRequest, ToolCallOutcome
+from agent_flywheel.contract import (
+    MAX_REPORTED_CHECKS,
+    checks_over_limit,
+    checks_to_wire,
+    finite_number,
+    seeds_to_wire,
+)
 from agent_flywheel.errors import ContractViolation
 
 
@@ -219,3 +226,189 @@ def test_a_granted_lease_survives_the_wire():
         "lease_expires_ts": 1234.5,
     })
     assert r.lease_expires_ts == 1234.5
+
+
+# ── checks, termination, seeds: what the agent's environment saw ────────────
+
+def _schema():
+    import pathlib
+
+    return json.loads(
+        (pathlib.Path(__file__).resolve().parents[1] / "schema"
+         / "flywheel-1.json").read_text())
+
+
+def test_the_evidence_parts_reach_the_wire_in_the_schemas_words():
+    from agent_flywheel.contract import (
+        CHECK_ESTABLISHES,
+        CHECK_STATUSES,
+        MAX_REPORTED_CHECKS,
+        TERMINATION_CLASSES,
+    )
+
+    wire = RolloutOutput(
+        final_text="x",
+        checks=[
+            {"id": "db_state", "status": "measured", "value": 1,
+             "required": True, "establishes": "state_reached"},
+            {"id": "judge", "status": "unavailable"},
+        ],
+        termination={"class": "turn_limit", "detail": "40 turns"},
+        seeds={"environment": 7, "sampling": "s-3"},
+    ).to_wire()
+    assert wire["checks"] == [
+        {"id": "db_state", "status": "measured", "value": 1.0,
+         "required": True, "establishes": "state_reached"},
+        {"id": "judge", "status": "unavailable"},
+    ]
+    assert wire["termination"] == {"class": "turn_limit", "detail": "40 turns"}
+    assert wire["seeds"] == {"environment": 7, "sampling": "s-3"}
+
+    defs = _schema()["$defs"]
+    assert set(wire) <= set(defs["RolloutOutput"]["properties"])
+    assert tuple(defs["ReportedCheck"]["properties"]["status"]["enum"]) \
+        == CHECK_STATUSES
+    assert tuple(e for e in defs["ReportedCheck"]["properties"]["establishes"]
+                 ["enum"] if e is not None) == CHECK_ESTABLISHES
+    assert tuple(defs["ReportedTermination"]["properties"]["class"]["enum"]) \
+        == TERMINATION_CLASSES
+    assert defs["RolloutOutput"]["properties"]["checks"]["maxItems"] \
+        == MAX_REPORTED_CHECKS
+    for row in wire["checks"]:
+        assert set(row) <= set(defs["ReportedCheck"]["properties"])
+
+
+def test_an_agent_that_states_none_of_them_sends_none_of_them():
+    wire = RolloutOutput(final_text="x", checks=[], seeds={}).to_wire()
+    assert not {"checks", "termination", "seeds"} & set(wire)
+
+
+@pytest.mark.parametrize("kwargs, named", [
+    ({"checks": [{"id": "a", "status": "passed"}]}, r"checks\[0\]\.status"),
+    ({"checks": [{"id": "", "status": "measured"}]}, r"checks\[0\]\.id"),
+    ({"checks": [{"id": "a", "status": "error", "value": 0}]},
+     "only a measured check has a value"),
+    ({"checks": [{"id": "a", "status": "measured", "value": True}]},
+     r"checks\[0\]\.value"),
+    ({"checks": [{"id": "a", "status": "measured", "value": float("nan")}]},
+     r"checks\[0\]\.value"),
+    ({"checks": [{"id": "a", "status": "measured", "establishes": "won"}]},
+     r"checks\[0\]\.establishes"),
+    ({"checks": [{"id": "a", "status": "measured", "source": "human_label"}]},
+     "unknown key"),
+    ({"termination": {"class": "gave_up"}}, r"termination\.class"),
+    ({"termination": {"class": "time_limit",
+                      "corroborated_by": "mission_control_gateway"}},
+     "unknown key"),
+    ({"termination": {"class": "time_limit", "attributed_to": "platform"}},
+     "unknown key"),
+    ({"seeds": {"environment": 1.5}}, r"seeds\.environment"),
+    ({"seeds": {"sampling": True}}, r"seeds\.sampling"),
+    ({"seeds": {"environment": 2**53}}, r"seeds\.environment"),
+    ({"seeds": {"environment": float("nan")}}, r"seeds\.environment"),
+    ({"seeds": {"sampling": "s" * 129}}, r"seeds\.sampling"),
+    ({"seeds": {"sampling": ""}}, r"seeds\.sampling"),
+])
+def test_a_malformed_evidence_part_is_refused_by_name(kwargs, named):
+    """A check that could not run is never a zero, and an agent can neither
+    corroborate nor attribute its own ending."""
+    with pytest.raises(ContractViolation, match=named):
+        RolloutOutput(final_text="x", **kwargs).to_wire()
+
+
+def test_more_checks_than_a_report_carries_keeps_the_first_and_says_how_many():
+    """One check too many used to refuse the list whole, so the episode lost
+    every check it ran. The first ``MAX_REPORTED_CHECKS`` are sent and the
+    report states the rest as ``checks_dropped``, the field the stored
+    episode keeps. Mutation: stop counting the rows past the limit in
+    ``to_wire`` -> no ``checks_dropped`` on the wire."""
+    rows = [{"id": str(i), "status": "measured", "value": i}
+            for i in range(MAX_REPORTED_CHECKS + 3)]
+    wire = RolloutOutput(final_text="x", checks=rows).to_wire()
+    assert [r["id"] for r in wire["checks"]] == [
+        str(i) for i in range(MAX_REPORTED_CHECKS)]
+    assert wire["checks_dropped"] == 3
+    # A count the output already carries (an outcome file's own overflow, a
+    # spooled report) is added to, never replaced.
+    again = RolloutOutput(final_text="x", checks=rows, checks_dropped=4)
+    assert again.to_wire()["checks_dropped"] == 7
+    schema = _schema()["$defs"]["RolloutOutput"]["properties"]
+    assert schema["checks_dropped"] == {
+        "description": schema["checks_dropped"]["description"],
+        "type": "integer", "minimum": 1}
+
+
+@pytest.mark.parametrize("dropped", [0, -1, True, "3", None, 1.5])
+def test_a_report_with_nothing_dropped_does_not_say_so(dropped):
+    """``checks_dropped`` is on the wire only as a positive whole number."""
+    wire = RolloutOutput(
+        final_text="x", checks=[{"id": "a", "status": "measured"}],
+        checks_dropped=dropped).to_wire()
+    assert "checks_dropped" not in wire
+
+
+def test_a_row_past_the_limit_is_not_read():
+    """The rows a report does not carry cannot refuse the ones it does."""
+    rows = [{"id": str(i), "status": "measured"}
+            for i in range(MAX_REPORTED_CHECKS)] + [{"id": "", "status": "?"}]
+    assert len(checks_to_wire(rows)) == MAX_REPORTED_CHECKS
+    assert checks_over_limit(rows) == 1
+    assert checks_over_limit(None) == 0 and checks_over_limit(rows[:5]) == 0
+
+
+@pytest.mark.parametrize("value", [10**400, -(10**400)])
+def test_a_number_too_large_to_be_one_is_refused_not_raised(value):
+    """``float(10**400)`` raises OverflowError, which is not a
+    ContractViolation: it escaped ``checks_to_wire`` and the outcome-file
+    reader, whose callers catch only the contract's own refusal."""
+    assert finite_number(value) is None
+    with pytest.raises(ContractViolation, match=r"checks\[0\]\.value"):
+        checks_to_wire([{"id": "a", "status": "measured", "value": value}])
+    with pytest.raises(ContractViolation, match=r"seeds\.environment"):
+        seeds_to_wire({"environment": value})
+
+
+def test_a_whole_float_seed_is_the_integer_it_spells():
+    """``7.0`` is how JavaScript and many JSON writers spell 7. Python
+    refused it and Node took it; both take it and both send the integer."""
+    wire = seeds_to_wire({"environment": 7.0, "sampling": -3})
+    assert wire == {"environment": 7, "sampling": -3}
+    assert type(wire["environment"]) is int
+    assert seeds_to_wire({"environment": 2**53 - 1}) == {
+        "environment": 2**53 - 1}
+
+
+# ── text the control plane's parser takes ─────────────────────────────────
+
+_LONE = "case-\ud800"
+_EMOJI = "case-\U0001F600"
+_AT = "2026-11-10T09:00:00Z"
+
+
+@pytest.mark.parametrize("field", [
+    "outcome_id", "turn_id", "conversation_id", "episode_id"])
+def test_an_outcome_id_with_a_lone_surrogate_is_refused(field):
+    """A lone surrogate is escaped on the wire and refused by the control
+    plane's parser: a 422 for the batch, then a record dropped by the split."""
+    from agent_flywheel.contract import production_outcome
+
+    base = {"outcome_id": "o-1", "outcome": "resolved", "episode_id": "e-1",
+            "occurred_at": _AT}
+    with pytest.raises(ContractViolation, match=field):
+        production_outcome({**base, field: _LONE})
+    assert production_outcome({**base, field: _EMOJI})[field] == _EMOJI
+
+
+def test_feedback_and_a_note_with_a_lone_surrogate_are_refused():
+    from agent_flywheel.contract import production_outcome, turn_feedback
+
+    feedback = {"feedback_id": "f-1", "signal": "accepted",
+                "episode_id": "e-1", "turn_index": 0, "occurred_at": _AT}
+    for field in ("feedback_id", "episode_id"):
+        with pytest.raises(ContractViolation, match=field):
+            turn_feedback({**feedback, field: _LONE})
+    outcome = {"outcome_id": "o-1", "outcome": "resolved",
+               "episode_id": "e-1", "occurred_at": _AT}
+    with pytest.raises(ContractViolation, match="well-formed Unicode"):
+        production_outcome({**outcome, "note": f"x{_LONE}"})
+    assert production_outcome({**outcome, "note": _EMOJI})["note"] == _EMOJI

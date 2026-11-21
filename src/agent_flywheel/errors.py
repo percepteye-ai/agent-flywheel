@@ -17,6 +17,8 @@ __all__ = [
     "ContractViolation",
     "EntrypointError",
     "FlywheelError",
+    "InvalidFeedback",
+    "InvalidOutcome",
     "LeaseLost",
     "ModeNotAvailable",
     "RoutingNotInstallable",
@@ -75,6 +77,28 @@ class ContractViolation(FlywheelError):
     """
 
 
+class InvalidOutcome(ContractViolation):
+    """``report_outcome`` was handed something the outcome wire cannot carry:
+    a word outside the closed vocabulary, no turn or conversation to attach
+    it to, an id, number, note or time the published schema refuses.
+
+    Raised by ``Attachment.report_outcome`` BEFORE anything is stored or
+    sent, whether or not production capture is enabled, so the mistake shows
+    up where it was written instead of as a silently missing label.
+    """
+
+
+class InvalidFeedback(ContractViolation):
+    """``report_turn_feedback`` was handed something the feedback wire cannot
+    carry: a word outside the closed vocabulary (the message names the
+    allowed ones), an episode id or turn index that is none, or a time the
+    published schema refuses.
+
+    Raised by ``Attachment.report_turn_feedback`` BEFORE anything is stored
+    or sent, so the mistake shows up where it was written.
+    """
+
+
 class TransportError(FlywheelError):
     """The control plane could not be reached, or answered unusably.
 
@@ -113,7 +137,16 @@ class LeaseLost(TransportError):
     the reaper has cleared the lease, so "discard" named the one case where the
     local copy was the last one. The ROW is lost; the result is kept, named,
     and reported out loud (see ``RolloutRunner._settle``).
+
+    ``status_code`` is 410 unless said otherwise: a lease is lost by exactly
+    one status, and a caller that reads the code (the outcome flush's
+    ``_outcome_route_refused``) must see it here, not only in the class name.
+    It used to be ``None``, read as a blip. The Node SDK's ``LeaseLost``.
     """
+
+    def __init__(self, message: str, *, status_code: int | None = 410,
+                 ambiguous: bool = False) -> None:
+        super().__init__(message, status_code=status_code, ambiguous=ambiguous)
 
 
 class ModeNotAvailable(ConfigurationError):

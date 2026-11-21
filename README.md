@@ -52,7 +52,7 @@ Ship one line. Your agent keeps running in your process, behind your firewall, o
 <br/>
 [![runtime dependencies](https://img.shields.io/badge/runtime_deps-1-f59e0b?style=for-the-badge)](https://github.com/percepteye-ai/agent-flywheel/blob/main/pyproject.toml)
 [![lines changed in your agent](https://img.shields.io/badge/lines_changed_in_your_agent-0-ec4899?style=for-the-badge)](#-zero-instrumentation-concretely)
-[![tests](https://img.shields.io/badge/tests-1535_·_0_skips-22c55e?style=for-the-badge)](#-development)
+[![tests](https://img.shields.io/badge/tests-2354_·_0_skips-22c55e?style=for-the-badge)](#-development)
 [![license](https://img.shields.io/badge/license-MIT-14b8a6?style=for-the-badge)](https://github.com/percepteye-ai/agent-flywheel/blob/main/LICENSE)
 
 <br/>
@@ -246,8 +246,11 @@ that are mechanisms, not intentions:
   provider that accepts a connection and never answers costs you one timeout
   instead of the whole episode. Adapters translate that ceiling into whatever
   their harness understands; the arithmetic lives in one place.
-- **No bearer credential is written to disk.** The outbox sits inside the
-  directory your agent runs in, so the lease token is held only in memory.
+- **`serve()` writes no bearer credential to disk.** The outbox sits inside the
+  directory your agent runs in, so the lease token is held only in memory. (The
+  goose hook, which has no long-lived process to hold it, keeps the lease of the
+  one rollout it claimed in a `claim.json` only you can read — 0600, in a 0700
+  directory — until it reports.)
 
 The reason this is spelled out: a delivery path that fails silently is
 indistinguishable from an idle queue. `on_event` is how you tell them apart —
@@ -411,6 +414,28 @@ dataset services validate any later trace-to-task binding.
 
 `input_text=` and `record_answer()` are the two lines that carry the turn's text, and both are yours to pass — they are your end user's message and the answer your code returned, which no adapter can tell apart from the rest of a model call. Once capture is on, uploading is automatic: answered turns go every 32 turns on a short-lived daemon thread, and an `atexit` hook sends the rest. Uploads never raise into your process and never block a turn on the network.
 
+**Then tell it how the turn turned out.** The turn id `turn()` yields is the join key for what happens afterwards — the case was resolved, a person had to take over, the customer came back:
+
+```python
+px.report_outcome("resolved", turn_id=turn_id)                 # this turn settled it
+px.report_outcome("reopened", conversation_id=conv_id,         # ...or the whole conversation,
+                  value=129.50, note="refund re-requested")    # with a number and a short note of your own
+```
+
+The outcome is one of `resolved`, `escalated`, `reopened`, `abandoned`, `thumbs_up`, `thumbs_down`; anything else raises `agent_flywheel.InvalidOutcome` where you wrote it. Name the `turn_id`, the `conversation_id`, or both, and report as many as happen — resolved today and reopened next week are two outcomes, and neither replaces the other. `value=` is an optional number, `note=` an optional remark of at most 1,000 characters (the control plane masks personal data in it before storing it), `occurred_at=` defaults to now, and `outcome_id=` is the idempotency key if you want your own. It follows the turn in every way that matters: **it is a no-op once the control plane says capture is not enabled for the agent** (it returns `None` and keeps nothing; reported before that answer is known, it is kept — at most 1,000 of them, oldest dropped first, with a warning saying the control plane has not answered — and the upload asks again), and once enabled it is queued on disk under `trajectory_root`, sent off your thread, retried until the control plane acknowledges it (for up to a week, across restarts) — except a record the control plane refuses by name, which is dropped with a warning while the rest of its batch is sent — and never raises for anything but a value the vocabulary does not have. An outcome is your report of what happened next — a weak label the platform keeps beside the turn, not a grade, and nothing is trained on it directly.
+
+**An episode the platform ran has outcomes too.** When your agent is served a training episode, the request carries the episode's id (`agent_flywheel.current_rollout_id()`), and it joins what happened afterwards to that episode the way `turn_id` joins a production turn:
+
+```python
+px.report_outcome("resolved", episode_id=episode_id)           # how the whole episode turned out
+px.report_turn_feedback("corrected", episode_id=episode_id,    # ...and what the user did with
+                        turn_index=3)                          # one turn of it (0 is the first)
+```
+
+`episode_id=` is one more thing an outcome can name, alone or beside a `turn_id` or `conversation_id`. `report_turn_feedback` takes one word from a closed vocabulary — `accepted`, `corrected`, `repeated`, `escalated`, `abandoned` (`agent_flywheel.TURN_FEEDBACK_SIGNALS`) — and anything else raises `agent_flywheel.InvalidFeedback` naming the five. It returns the feedback's id (`feedback_id=` is the idempotency key if you want your own) and is queued, sent off your thread and retried exactly as an outcome is. Neither is your end users' production traffic, so **neither waits for production capture to be enabled**: an outcome naming only an episode, and all feedback, are sent as soon as the agent is attached. Both are weak labels — kept beside the episode's evidence as readings, never a grade. No answer of the control plane reaches your code. Per-turn feedback follows the outcomes' rules: a report the control plane refuses — in a 4xx, or by name inside a 200 (`accepted: false`) — is dropped alone, named in one warning with the control plane's own word, and the rest of its batch is sent; a 403 (a key without the scope) stops sending for that process and keeps what is waiting on disk; a 401 or 410 keeps it for a later flush. Only a control plane with no feedback route at all (a 404 or 405: it predates it) has what was waiting dropped, said once, and no more sent by that process. A control plane whose episode intake is switched off answers 503 with a Retry-After: the request is retried as the header says, and what is waiting stays for a later flush. An id or a note holding a lone surrogate is refused where you wrote it, as the control plane would refuse it.
+
+**Feedback on a production turn rides its trace.** A production turn has no episode, so `px.report_turn_feedback("corrected", turn_id=turn_id)` names it by the id `turn()` yielded instead, and its feedback goes where the turn went: your TracerProvider (with the `otel` extra). The turn's span has ended by the time its user acts, and an ended span takes no event, so the SDK records a span of its own, `percepteye.turn.feedback`, LINKED to the turn's spans (OpenTelemetry's relation between causally related spans that are not parent and child) and carrying the turn's `percepteye.turn.id`, with one event: `percepteye.turn.feedback` at `occurred_at`, attributes `percepteye.turn.feedback.signal` and `percepteye.turn.feedback.id`. It starts a trace of its own. An OTLP export of your traces to the control plane delivers it with the turn. It returns the feedback's id once that span is recorded and `None` when nothing records it (no OpenTelemetry, no provider) — nothing is queued, because `POST /turn-feedback` takes an episode's turns only. Name a turn one way: `turn_id`, or `episode_id` and `turn_index`.
+
 > [!IMPORTANT]
 > **What your model saw is a second, separate opt-in, also off by default.** With the model-content tier granted for the agent, the LangChain and Google ADK adapters also *observe* each model call inside a turn — the system prompt, the whole conversation history, the tool definitions and every tool result — and the turn uploads it as one [OpenTelemetry GenAI](https://opentelemetry.io/docs/specs/semconv/gen-ai/) trace (`genai_trace`). Observation only: no call, response or tool result is changed, nothing is truncated, and a turn whose model boundary was not observed carries no trace rather than one rebuilt from its text. Without the grant none of it is recorded, not even locally. The control plane grants the tier only while exactly one active Product declares the agent, because a trace is kept only for a turn it can attribute to a Product; if the agent becomes shared, recording stops when the control plane refuses a trace for that reason, and resumes once the grant is back. `px.may_capture_model_content` is the live answer; `px.model_content_refusal` is the sentence explaining a `False`. Prime Agent is served as a `serve()` command, and its JSON stream carries neither its system prompt nor its tool definitions, so no model content is captured for it.
 
@@ -518,7 +543,7 @@ record_tool_call("charge_card", {"amount": 4200}, outcome="ok", status_code=201)
 
 ## 📋 Runs, eligibility and evaluation sets
 
-`agent_flywheel.customer_api` reads the customer-automation API (customer contract 1.31.0) on the same origin as the control plane, under `/api/v2`. It needs a customer-automation key (`mck_`, from `pe login` or the dashboard's Settings), passed as `api_key=` or set as `PERCEPTEYE_MC_API_KEY`. An agent key (`pefw_`) is refused before anything is sent.
+`agent_flywheel.customer_api` reads the customer-automation API (customer contract 1.54.0; every read works against a server from 1.30.0 on) on the same origin as the control plane, under `/api/v2`. It needs a customer-automation key (`mck_`, from `pe login` or the dashboard's Settings), passed as `api_key=` or set as `PERCEPTEYE_MC_API_KEY`. An agent key (`pefw_`) is refused before anything is sent.
 
 ```python
 from agent_flywheel.customer_api import CustomerApiClient, CustomerRefusal
@@ -526,11 +551,12 @@ from agent_flywheel.customer_api import CustomerApiClient, CustomerRefusal
 with CustomerApiClient() as mc:
     runs = mc.list_runs(product_id="prod_123", include_prompt_evolutions=True)
     path = mc.training_eligibility(agent_id="agent_123")["prompt_optimization"]
+    on_gpus = mc.training_eligibility(training_location="platform_gpu")["training_locations"]
     sets = mc.list_eval_sets(product_id="prod_123", limit=20)
     security = mc.hillclimb_security("run_123")["measurement"]["state"]
 ```
 
-A refused request raises `CustomerRefusal` with the body's `code`, `message`, `customer_message`, `customer_words`, `remediation`, `fault_owner` and `retryable`. `plain_words` is what to show a person. The Node SDK has the same client in `@percepteye/agent-flywheel/customer-api`.
+A refused request raises `CustomerRefusal` with the body's `code`, `message`, `customer_message`, `customer_words`, `remediation`, `fault_owner`, `retryable` and `detail` (the refusal's own evidence, such as a diverged train's `learning_rate`). `plain_words` is what to show a person. The codes this SDK knows are exported in groups (`RUN_LIST_`, `PROMPT_RUN_`, `ATTACK_`, `CYBER_`, `TRAINING_` and `AGENT_REFUSAL_CODES`). `training_location=` (`platform_pool` or `platform_gpu`) needs Mission Control 1.50.0: an older server ignores it and answers for the organization's own setting, so that answer raises `CustomerContractTooOld` instead of being returned. The Node SDK has the same client in `@percepteye/agent-flywheel/customer-api`.
 
 ## ⚙️ Configuration
 
@@ -553,7 +579,7 @@ Two of them change behaviour; the rest are an address, a credential and a locati
 
 <br/>
 
-Once at startup the SDK reads the *shape* of the agent you handed `serve()`: system prompt (the registration projection is truncated at 20k, while an available full observation is hashed before projection), tool names/descriptions/JSON Schemas, provider and model name, sub-agents to depth 4, and the framework matched. **Never sent:** your tools' source or return values, your credentials, your data, or anything observed during a rollout. An agent nothing can read — a custom class, no framework the SDK knows — declares itself with `describe={"system_prompt": ..., "tools": [...]}` (the tools you already send the model); what you declare wins over reflection, and it never anchors an execution identity. Turn it off with `fw.serve(..., introspect=False)` or `PERCEPTEYE_INTROSPECT=0` — and only a deliberate value (`0`, `false`, `no`, `off`) disables it, so a typo leaves it on. Disabled, unreadable, or lossy discovery produces no affirmative `agent_fingerprint.execution_sha256`, so an OPSD consumer fails closed.
+Once at startup the SDK reads the *shape* of the agent you handed `serve()`: system prompt (the registration projection is truncated at 20k, while an available full observation is hashed before projection), tool names/descriptions/JSON Schemas, provider and model name, sub-agents to depth 4, and the framework matched. **Never sent:** your tools' source or return values, your credentials, your data, or anything observed during a rollout. An agent nothing can read — a custom class, no framework the SDK knows — declares itself with `describe={"system_prompt": ..., "tools": [...]}` (the tools you already send the model); what you declare wins over reflection, and it never anchors an execution identity. `describe={"api_spec": "https://…/openapi.json"}` (optional) tells the platform where the agent's API spec is published — a URL it fetches, never the document — so its tools are matched to the operations they call; it is not part of the description. Turn it off with `fw.serve(..., introspect=False)` or `PERCEPTEYE_INTROSPECT=0` — and only a deliberate value (`0`, `false`, `no`, `off`) disables it, so a typo leaves it on. Disabled, unreadable, or lossy discovery produces no affirmative `agent_fingerprint.execution_sha256`, so an OPSD consumer fails closed.
 </details>
 
 <details>
@@ -575,7 +601,7 @@ python -m venv .venv
 
 The last one is **not** the Node package's own suite — that lives in the [Node repository](https://github.com/percepteye-ai/agent-flywheel-node) and runs there with `npm test`. This drives records through the Node writer and asserts the Python `Trajectory` reads them back with the same meaning, which is the half only this repo can check. **It needs a Node checkout**: point `PERCEPTEYE_NODE_SDK` at one, or keep it as a sibling directory. Without one it prints `SKIPPED` and exits 0, and the cross-language tests in the suite above skip with it.
 
-1535 tests, and CI permits **zero skips** — a skipped test and a passing test look identical in a green check mark. CI names `PERCEPTEYE_NODE_SDK` and `PRIME_AGENT_PACKAGE_ROOT` and installs both, so neither the cross-language half nor the tests that execute the real `prime-agent` binary can go green by skipping there. Other jobs assert that a bare install still works on Python 3.10→3.13, that the runtime dependency list never grows past `httpx`, and that the Node plugins never drift from the Python reader.
+2354 tests, and CI permits **zero skips** — a skipped test and a passing test look identical in a green check mark. CI names `PERCEPTEYE_NODE_SDK` and `PRIME_AGENT_PACKAGE_ROOT` and installs both, so neither the cross-language half nor the tests that execute the real `prime-agent` binary can go green by skipping there. Other jobs assert that a bare install still works on Python 3.10→3.13, that the runtime dependency list never grows past `httpx`, and that the Node plugins never drift from the Python reader.
 
 [`schema/flywheel-1.json`](https://github.com/percepteye-ai/agent-flywheel/blob/main/schema/flywheel-1.json) is the wire contract and this repository owns it. Absence is never collapsed into zero: `tool_calls=None` means "I did not report tool calls"; `[]` means "I observed zero", a positive claim. The animations above are generated, not drawn — [`docs/assets/render.sh`](https://github.com/percepteye-ai/agent-flywheel/blob/main/docs/assets/render.sh) rebuilds them.
 

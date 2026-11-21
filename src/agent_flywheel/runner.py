@@ -20,7 +20,6 @@ import concurrent.futures as _cf
 import contextvars
 import hashlib
 import json
-import math
 import os
 import shutil
 import signal
@@ -30,13 +29,28 @@ import threading
 import time
 import warnings
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from .contract import RolloutOutput, RolloutRequest, ToolCallOutcome
+from .contract import (
+    MAX_REPORTED_CHECKS,
+    RolloutOutput,
+    RolloutRequest,
+    ToolCallOutcome,
+    checks_over_limit,
+    checks_to_wire,
+    finite_number,
+    seeds_to_wire,
+    termination_to_wire,
+)
 from .entrypoint import TASK, InputShape, ResolvedEntrypoint, resolve_entrypoint
-from .errors import ConfigurationError, LeaseLost, TransportError
+from .errors import (
+    ConfigurationError,
+    ContractViolation,
+    LeaseLost,
+    TransportError,
+)
 from .event_stream import CommandOutputAdapter, CommandOutputProjection
 from .execution_identity import (
     ExecutionChild,
@@ -49,9 +63,8 @@ from .execution_identity import (
     normalize_volatile_command_values,
 )
 from .introspection import _MAX_PROMPT_CHARS, DiscoveredAgent
-from .isolation import build_child_env, is_environment_overlay
-from .outcomes import hosted_base_for
-from .outcomes import TOOL_CALLS_FILENAME, Trajectory, _RolloutScope
+from .isolation import build_child_env, check_endpoint_env, is_environment_overlay
+from .outcomes import TOOL_CALLS_FILENAME, Trajectory, _RolloutScope, hosted_base_for
 from .transport import AttachTransport, sleep_ms
 
 __all__ = ["RolloutRunner", "run_rollout_in_process"]
@@ -133,93 +146,110 @@ def run_rollout_in_process(
     process the agent runs in -- a callback registered in the parent would
     never see a child's tool calls.
     """
+    import asyncio
+
     started = time.time()
     unbinds: list[Any] = []
-    if adapters is not None:
-        from .binding import bind_selected
+    # The unbinds run in a ``finally``. They used to follow the ``with`` below,
+    # after two ``return`` statements, so a timed-out or crashed rollout never
+    # unbound and its framework patches outlived it -- in-process, for the
+    # life of the serving process.
+    try:
+        if adapters is not None:
+            from .binding import bind_selected
 
-        report, unbinds = bind_selected(
-            adapters, llm_url=rollout.llm_url, api_key=rollout.api_key
-        )
-        _ = report
-    from .policy_calls import count_policy_calls
+            report, unbinds = bind_selected(
+                adapters, llm_url=rollout.llm_url, api_key=rollout.api_key
+            )
+            _ = report
+        from .policy_calls import count_policy_calls
 
-    with _RolloutScope(rollout.rollout_id, trajectory_dir,
-                       task_id=(rollout.metadata or {}).get("task_id"),
-                       hosted_url=hosted_base_for(rollout.llm_url)), \
-            count_policy_calls(rollout.llm_url) as policy_calls:
-        arg = resolved.build_arg(rollout.turn_input)
-        try:
-            if resolved.is_async:
-                import asyncio
-
-                raw = asyncio.run(_await_with_timeout(resolved.fn(arg), timeout_s))
+        with _RolloutScope(rollout.rollout_id, trajectory_dir,
+                           task_id=(rollout.metadata or {}).get("task_id"),
+                           hosted_url=hosted_base_for(rollout.llm_url)), \
+                count_policy_calls(rollout.llm_url) as policy_calls:
+            arg = resolved.build_arg(rollout.turn_input)
+            try:
+                if resolved.is_async:
+                    raw = asyncio.run(_await_with_timeout(resolved.fn(arg), timeout_s))
+                else:
+                    # A worker thread starts with an EMPTY context, so the
+                    # rollout binding set just above would be invisible inside
+                    # the agent and every recorded outcome would be silently
+                    # discarded. Copy the context in explicitly and run the
+                    # agent inside it.
+                    ctx = contextvars.copy_context()
+                    # Deliberately NOT a `with` block. Executor.__exit__ calls
+                    # shutdown(wait=True), which on the timeout path BLOCKS
+                    # during unwinding until the hung agent returns -- so the
+                    # TimeoutError could not escape and the budget was
+                    # cosmetic. Measured: a 1s budget against an 8s agent
+                    # returned after 8s, carrying the right reason, which is
+                    # why tests asserting the reason passed. The subprocess
+                    # path below carries the same warning; this was the one
+                    # place that had the bug the comment describes.
+                    pool = _cf.ThreadPoolExecutor(max_workers=1)
+                    fut = pool.submit(ctx.run, resolved.fn, arg)
+                    try:
+                        raw = fut.result(timeout=timeout_s)
+                    except BaseException:
+                        # wait=False: stop waiting on the wedged worker. Python
+                        # cannot kill a thread, which is exactly why subprocess
+                        # is the default and the only isolation with a real
+                        # timeout.
+                        pool.shutdown(wait=False, cancel_futures=True)
+                        raise
+                    pool.shutdown(wait=True)
+            # The policy calls counted so far ride EVERY exit, not only the
+            # agent's return. A timed-out or crashed rollout with no count is
+            # held out as ``llm_calls_unobserved`` by both reconcilers, which
+            # undid Mission Control scoring a policy that ran out of time as a
+            # failure (τ³ 2c3f5922: 60 such rollouts).
+            #
+            # BOTH timeout classes. On Python 3.10 ``asyncio.wait_for`` raises
+            # ``asyncio.TimeoutError``, which is neither the builtin nor the
+            # ``concurrent.futures`` one (they were unified in 3.11), so a
+            # timed-out ASYNC agent was reported as ``entrypoint_error`` --
+            # its own failure -- on the oldest Python this SDK supports.
+            except (_cf.TimeoutError, asyncio.TimeoutError):
+                out = RolloutOutput(
+                    final_text="",
+                    exclusion_reason="deadline_exceeded",
+                    exclusion_detail=f"entrypoint exceeded {timeout_s:.0f}s",
+                    llm_call_count=policy_calls.value,
+                )
+            except Exception as exc:
+                # The customer's agent raising is a rollout result, not our
+                # error.
+                out = RolloutOutput(
+                    final_text="",
+                    success=False,
+                    exclusion_reason="entrypoint_error",
+                    exclusion_detail=f"{type(exc).__name__}: {exc}",
+                    llm_call_count=policy_calls.value,
+                )
             else:
-                # A worker thread starts with an EMPTY context, so the rollout
-                # binding set just above would be invisible inside the agent and
-                # every recorded outcome would be silently discarded. Copy the
-                # context in explicitly and run the agent inside it.
-                ctx = contextvars.copy_context()
-                # Deliberately NOT a `with` block. Executor.__exit__ calls
-                # shutdown(wait=True), which on the timeout path BLOCKS during
-                # unwinding until the hung agent returns -- so the TimeoutError
-                # could not escape and the budget was cosmetic. Measured: a 1s
-                # budget against an 8s agent returned after 8s, carrying the
-                # right reason, which is why tests asserting the reason passed.
-                # The subprocess path below carries the same warning; this
-                # was the one place that had the bug the comment describes.
-                pool = _cf.ThreadPoolExecutor(max_workers=1)
-                fut = pool.submit(ctx.run, resolved.fn, arg)
-                try:
-                    raw = fut.result(timeout=timeout_s)
-                except BaseException:
-                    # wait=False: stop waiting on the wedged worker. Python
-                    # cannot kill a thread, which is exactly why subprocess is
-                    # the default and the only isolation with a real timeout.
-                    pool.shutdown(wait=False, cancel_futures=True)
-                    raise
-                pool.shutdown(wait=True)
-        # The policy calls counted so far ride EVERY exit, not only the
-        # agent's return. A timed-out or crashed rollout with no count is
-        # held out as ``llm_calls_unobserved`` by both reconcilers, which
-        # undid Mission Control scoring a policy that ran out of time as a
-        # failure (τ³ 2c3f5922: 60 such rollouts).
-        except _cf.TimeoutError:
-            return RolloutOutput(
-                final_text="",
-                exclusion_reason="deadline_exceeded",
-                exclusion_detail=f"entrypoint exceeded {timeout_s:.0f}s",
-                timing={"elapsed_s": time.time() - started},
-                llm_call_count=policy_calls.value,
-            )
-        except Exception as exc:
-            # The customer's agent raising is a rollout result, not our error.
-            return RolloutOutput(
-                final_text="",
-                success=False,
-                exclusion_reason="entrypoint_error",
-                exclusion_detail=f"{type(exc).__name__}: {exc}",
-                timing={"elapsed_s": time.time() - started},
-                llm_call_count=policy_calls.value,
-            )
+                out = _coerce_output(raw)
+                # The agent's own count wins; otherwise the SDK's, counted at
+                # the client (``policy_calls``). Without one Mission Control
+                # cannot reconcile what its gateway observed and holds every
+                # rollout out of training.
+                if out.llm_call_count is None:
+                    out.llm_call_count = policy_calls.value
+    finally:
+        for u in unbinds:
+            # Best effort: a failed unbind must not lose a rollout's result.
+            try:
+                if callable(u):
+                    u()
+            except Exception:
+                pass
 
-    for u in unbinds:
-        # Best effort: a failed unbind must not lose a completed rollout, and
-        # the process is short-lived anyway under the default isolation.
-        try:
-            if callable(u):
-                u()
-        except Exception:
-            pass
-
-    out = _coerce_output(raw)
     out.timing["elapsed_s"] = time.time() - started
+    # On EVERY exit, as the command path does. A timed-out or crashed agent
+    # still made the tool calls it recorded before it stopped, and those are
+    # the calls that explain why it stopped.
     _attach_trajectory(out, trajectory_dir)
-    # The agent's own count wins; otherwise the SDK's, counted at the client
-    # (``policy_calls``). Without one Mission Control cannot reconcile what
-    # its gateway observed and holds every rollout out of training.
-    if out.llm_call_count is None:
-        out.llm_call_count = policy_calls.value
     return out
 
 
@@ -250,7 +280,8 @@ def _coerce_output(raw: Any) -> RolloutOutput:
 
 
 #: The file a COMMAND agent writes its own grade to, in its trajectory
-#: directory: ``{"reward": <number>, "success": <bool>}``, either optional.
+#: directory: ``{"reward": <number>, "success": <bool>, "checks": [...],
+#: "termination": {...}, "seeds": {...}}``, each optional.
 OUTCOME_FILENAME = "outcome.json"
 
 
@@ -261,22 +292,51 @@ def _attach_reported_outcome(out: RolloutOutput, trajectory_dir: str) -> None:
     had no way to report a grade at all -- so an environment-backed CLI
     harness could never be scored by its own environment. Only a finite
     number is a reward and only a bool a success; anything else is ignored,
-    never coerced. A value the output already carries is not replaced."""
+    never coerced. ``checks``, ``termination`` and ``seeds`` are read the same
+    way (:func:`contract.checks_to_wire` and its siblings say what is
+    well-formed). A value the output already carries is not replaced.
+
+    MORE CHECKS THAN A REPORT CARRIES (``MAX_REPORTED_CHECKS``) are not a
+    malformed part: the first ones are kept and the rest are counted in
+    ``out.checks_dropped``, which the report states.
+
+    THE NODE SDK READS THE SAME FILE BY THE SAME RULES
+    (``wire.js reportedOutcome``); ``tests/test_reported_outcome_parity.py``
+    drives one table of files through both."""
     path = os.path.join(trajectory_dir, OUTCOME_FILENAME)
     try:
         with open(path, encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
+            # ``NaN``/``Infinity`` are not JSON, but ``json.dump`` writes them
+            # and this reader took them. Read as null -- which is how a
+            # JavaScript writer spells them, and what the Node reader does --
+            # so one file is the same statement under either runner.
+            data = json.load(fh, parse_constant=lambda _name: None)
+    except (OSError, ValueError, RecursionError):
         return
     if not isinstance(data, dict):
         return
-    reward = data.get("reward")
-    if (out.reward is None and isinstance(reward, (int, float))
-            and not isinstance(reward, bool) and math.isfinite(float(reward))):
-        out.reward = float(reward)
+    reward = finite_number(data.get("reward"))
+    if out.reward is None and reward is not None:
+        out.reward = reward
     success = data.get("success")
     if out.success is None and isinstance(success, bool):
         out.success = success
+    # The same rule for the three evidence parts: a well-formed one is kept,
+    # a malformed one is ignored whole -- it must not cost the episode its
+    # report, which is what raising here (or at ``to_wire``) would do.
+    for name, to_wire in (("checks", checks_to_wire),
+                          ("termination", termination_to_wire),
+                          ("seeds", seeds_to_wire)):
+        if getattr(out, name) is not None or data.get(name) is None:
+            continue
+        try:
+            stated = to_wire(data[name])
+        except ContractViolation:
+            continue
+        if stated:
+            setattr(out, name, stated)
+            if name == "checks":
+                out.checks_dropped += checks_over_limit(data[name])
 
 
 def _attach_trajectory(out: RolloutOutput, trajectory_dir: str) -> None:
@@ -338,6 +398,10 @@ TEARDOWN_DRAIN_S = 5.0
 #: (``prime_agent``'s 894s reference budget is below 900), so that identity
 #: is unchanged.
 DEFAULT_ROLLOUT_TIMEOUT_S: float | None = None
+
+#: Largest task handed to a command agent in ``PERCEPTEYE_TURN_INPUT``. Below
+#: Linux's per-string exec limit (MAX_ARG_STRLEN, 128 KiB) with room to spare.
+MAX_TURN_INPUT_ENV_BYTES = 100 * 1024
 
 #: The share of the child's window ONE blocking harness call may take. Half
 #: would mean a single wedged provider call can eat the episode and still look
@@ -420,6 +484,11 @@ _OUTBOX_SCHEMA = "percepteye.outbox/v1"
 #: a credential an operator has to reissue by hand.
 _OUTBOX_MAX_AGE_S = 7 * 24 * 3600.0
 
+#: Backoff between redeliveries of one held result: first retry ~10s after a
+#: failure, doubling per attempt, never more than ten minutes apart.
+_OUTBOX_RETRY_BASE_S = 10.0
+_OUTBOX_RETRY_MAX_S = 600.0
+
 #: Consecutive PERMANENT refusals before the loop stops claiming. Counts only
 #: the terminal 4xx branch -- never 408/429/5xx/network, which recover on their
 #: own -- and resets on the first success. Three, because one is a bad payload
@@ -460,21 +529,41 @@ def _is_permanent_refusal(exc: TransportError) -> bool:
 #: is in flight, it is wrong for all of them.
 _BEAT_TICK_S = 1.0
 
+#: A lease the control plane states within this of the rollout's deadline is
+#: AT the deadline, which caps it (``_next_beat_at``): the two are serialized
+#: separately, and a beat a second early buys nothing either way.
+_LEASE_AT_DEADLINE_SLACK_S = 1.0
+
 
 def _kill_tree(proc: subprocess.Popen[str]) -> None:
     """Kill the command AND everything it spawned.
 
     Whatever the agent started is in the same process group, so the group is
-    the unit that has to die. Falls back to killing the one process where
-    process groups do not exist.
+    the unit that has to die. Both spawners start the child in its OWN session
+    (``start_new_session``), so the group id IS the child's pid -- used
+    directly, because ``getpgid`` of a leader that has already exited (a
+    zombie, not yet reaped) fails on macOS, and the fallback then killed only
+    that zombie and left every grandchild alive holding the pipes. Falls back
+    to killing the one process where process groups do not exist.
     """
     if os.name != "nt":
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            os.killpg(proc.pid, signal.SIGKILL)
             return
         except (ProcessLookupError, PermissionError, OSError):
             pass
-    proc.kill()
+    try:
+        proc.kill()
+    except OSError:  # already reaped
+        pass
+
+
+def _reap(proc: subprocess.Popen[str], grace_s: float) -> None:
+    """Collect the killed child's exit status, so no zombie is left behind."""
+    try:
+        proc.wait(timeout=max(0.1, grace_s))
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def _kill_and_drain(
@@ -495,7 +584,9 @@ def _kill_and_drain(
 
     Q10, stated rather than hidden: when the grace period expires the child's
     output IS LOST, and the caller must say so in the detail it reports rather
-    than leave an empty stderr reading as "the agent said nothing".
+    than leave an empty stderr reading as "the agent said nothing". The child
+    itself is still REAPED on that path: closing the pipes used to be the last
+    step, and the killed child stayed a zombie for the life of the process.
     """
     _kill_tree(proc)
     try:
@@ -508,7 +599,70 @@ def _kill_and_drain(
                     pipe.close()
             except OSError:
                 pass
+        _reap(proc, grace_s)
         return "", "", False
+
+
+def _run_child_to_result(
+    proc: subprocess.Popen[str], payload: str, *, timeout_s: float,
+    grace_s: float,
+) -> tuple[str, str, bool, bool]:
+    """Feed the child its payload and read its result channel to EOF.
+
+    Returns ``(stdout, stderr, timed_out, drained)``. EOF on stdout is the
+    child EXITING: its result descriptor is private and not inherited across
+    ``exec`` (see ``child._private_result_channel``). So the moment it arrives,
+    the child's whole process GROUP is killed, and only then is stderr read to
+    EOF.
+
+    ``communicate()`` could not do that. It waits for EOF on BOTH pipes, and a
+    process the agent started still held stderr after the child had written
+    its result and exited: the parent sat out the rest of its timeout, then
+    reported the rollout as ``deadline_exceeded`` with the result it had
+    already received thrown away -- or, with ``returncode == 0`` and no
+    timeout, left the agent's processes running for good.
+    """
+    out_buf: list[str] = []
+    err_buf: list[str] = []
+
+    def _read(pipe: Any, buf: list[str]) -> None:
+        try:
+            buf.append(pipe.read())
+        except (OSError, ValueError):
+            pass
+
+    def _feed() -> None:
+        try:
+            proc.stdin.write(payload)  # type: ignore[union-attr]
+            proc.stdin.close()  # type: ignore[union-attr]
+        except (OSError, ValueError):
+            pass
+
+    readers = [
+        threading.Thread(target=_read, args=(proc.stdout, out_buf), daemon=True),
+        threading.Thread(target=_read, args=(proc.stderr, err_buf), daemon=True),
+    ]
+    feeder = threading.Thread(target=_feed, daemon=True)
+    for t in (*readers, feeder):
+        t.start()
+    readers[0].join(timeout_s)
+    timed_out = readers[0].is_alive()
+    # Either way the group goes now: the child has exited (EOF), or the clock
+    # ran out on it.
+    _kill_tree(proc)
+    grace_end = time.monotonic() + max(0.1, grace_s)
+    for t in readers:
+        t.join(max(0.0, grace_end - time.monotonic()))
+    drained = not any(t.is_alive() for t in readers)
+    if not drained:
+        for pipe in (proc.stdout, proc.stderr, proc.stdin):
+            try:
+                if pipe is not None:
+                    pipe.close()
+            except OSError:
+                pass
+    _reap(proc, max(0.1, grace_end - time.monotonic()))
+    return "".join(out_buf), "".join(err_buf), timed_out, drained
 
 
 def _is_command(entrypoint: Any) -> bool:
@@ -582,7 +736,8 @@ def run_rollout_as_command(
     """Run the customer's agent as a process and read what it left behind.
 
     ``turn_input`` reaches it two ways by default, because CLIs differ and
-    guessing wrongly is silent: on stdin, and as PERCEPTEYE_TURN_INPUT. A CLI
+    guessing wrongly is silent: on stdin, and as PERCEPTEYE_TURN_INPUT (unless
+    it is over ``MAX_TURN_INPUT_ENV_BYTES``, too big for the environment). A CLI
     that takes the task as a positional argument gets a third: put ``fw.TASK``
     in the argv and it is substituted there, and stdin is then left empty so
     the task is not delivered twice. For an ordinary command, final text is
@@ -746,7 +901,8 @@ def _attach_command_projection(
 class _InFlight:
     """One rollout being served right now, as the heartbeat thread sees it."""
 
-    __slots__ = ("beat_interval", "lease_lost", "next_beat_at", "plan", "proc", "rollout")
+    __slots__ = ("beat_interval", "beating", "lease_expires_ts", "lease_lost",
+                 "next_beat_at", "plan", "proc", "rollout")
 
     def __init__(self, rollout: RolloutRequest, beat_interval: float,
                  next_beat_at: float) -> None:
@@ -756,6 +912,12 @@ class _InFlight:
         #: Fixed for the life of the rollout. See RolloutRunner._beat_interval_for.
         self.beat_interval = beat_interval
         self.next_beat_at = next_beat_at
+        #: The lease's expiry as last stated by the control plane: at claim,
+        #: then by every beat that answered one. Read only by the heartbeat
+        #: thread and its workers.
+        self.lease_expires_ts = rollout.lease_expires_ts
+        #: A beat for this lease is in flight on a worker; never two at once.
+        self.beating = False
         #: Written by ``run_one`` (the producer), read by ``_serve_one_inner``
         #: (the consumer) so the time RESERVED for delivery is the same number
         #: delivery is then allowed to spend. ``None`` until the rollout starts,
@@ -930,6 +1092,7 @@ class RolloutRunner:
         #: name. Declared, never detected — see execution_identity.
         volatile_command_values: Sequence[str] | None = None,
     ) -> None:
+        check_endpoint_env(endpoint_env)
         if isolation not in ("subprocess", "inprocess"):
             raise ConfigurationError(
                 f"isolation must be 'subprocess' or 'inprocess', got {isolation!r}"
@@ -1040,6 +1203,8 @@ class RolloutRunner:
             self._permanent_refusals = 0
             self._outbox_lock = threading.Lock()
             self._lease_tokens = {}
+            self._retry_due = {}
+            self._delivering = set()
             return
         if command_output_adapter is not None:
             raise ConfigurationError(
@@ -1090,7 +1255,8 @@ class RolloutRunner:
         self._adapters = adapters
         self._on_event = on_event
         self._stop = False
-        #: Rollouts currently being served, by id. Read by the heartbeat thread.
+        #: Rollouts currently being served, by ATTEMPT (``_attempt_key``), not
+        #: by id. Read by the heartbeat thread.
         self._inflight: dict[str, _InFlight] = {}
         self._inflight_lock = threading.Lock()
         self._beat_stop = threading.Event()
@@ -1109,10 +1275,15 @@ class RolloutRunner:
         #: loop's thread while worker threads are spooling their own results.
         self._outbox_lock = threading.Lock()
         #: Lease tokens for rollouts whose result this process is still holding,
-        #: by rollout id. IN MEMORY ON PURPOSE: the token is a bearer credential
+        #: by attempt key. IN MEMORY ON PURPOSE: the token is a bearer credential
         #: and the outbox is a directory the customer's untrusted agent can read
         #: (see ``_spool_write``). Dropped the moment the outcome settles.
         self._lease_tokens: dict[str, str] = {}
+        #: When each held spool file (by name) is next worth sending. See
+        #: ``_schedule_retry``.
+        self._retry_due: dict[str, float] = {}
+        #: Spool files (by name) a delivery currently owns. See ``_drain_one``.
+        self._delivering: set[str] = set()
 
     @property
     def execution_sha256(self) -> str | None:
@@ -1208,6 +1379,15 @@ class RolloutRunner:
                 "gate_flag": self._configured_gate_flag,
                 "endpoint_env": self._configured_endpoint_env,
                 "reports_tool_calls": self._reports_tool_calls,
+                # Behaviour-bearing, and absent before: the adapter decides what
+                # of stdout is the answer and the evidence, and the ceiling
+                # bounds how long the agent may act. Present only when set, so
+                # an agent that sets neither keeps the digest it registered.
+                **({"command_output_adapter": str(
+                    self._command_output_adapter.adapter_name).strip()}
+                   if self._command_output_adapter is not None else {}),
+                **({"rollout_timeout_s": float(self.rollout_timeout_s)}
+                   if self.rollout_timeout_s is not None else {}),
             },
             "discovered_agent": projected,
             "discovery_observation_sha256": observation_sha256,
@@ -1251,7 +1431,7 @@ class RolloutRunner:
             rollout_timeout_s=self.rollout_timeout_s,
             envelope_s=self._delivery_envelope_s(),
         )
-        self._record_plan(rollout.rollout_id, plan)
+        self._record_plan(_attempt_key(rollout), plan)
         self._emit("episode_plan", {
             "rollout_id": rollout.rollout_id,
             "budget_s": round(budget, 3),
@@ -1261,8 +1441,15 @@ class RolloutRunner:
         })
         self._warn_if_call_ceiling_is_inert(plan)
         timeout_s = plan.child_s
-        trajectory_dir = self._trajectory_dir(rollout.rollout_id)
-        Path(trajectory_dir).mkdir(parents=True, exist_ok=True)
+        checked = self._contained_trajectory_dir(_attempt_key(rollout))
+        if checked is None:
+            raise ContractViolation(
+                f"rollout id {rollout.rollout_id!r} does not name a directory "
+                f"directly inside {Path(self.artifacts_dir) / '_percepteye'}; "
+                f"refusing to run it there"
+            )
+        trajectory_dir = str(checked)
+        checked.mkdir(parents=True, exist_ok=True)
 
         if self._command is not None:
             return self._run_command_with_execution_snapshot(
@@ -1289,16 +1476,16 @@ class RolloutRunner:
             return float(declared)
         return REPORT_MARGIN_S
 
-    def _record_plan(self, rollout_id: str, plan: EpisodePlan) -> None:
+    def _record_plan(self, key: str, plan: EpisodePlan) -> None:
         with self._inflight_lock:
-            entry = self._inflight.get(rollout_id)
+            entry = self._inflight.get(key)
             if entry is not None:
                 entry.plan = plan
 
-    def _delivery_budget_for(self, rollout_id: str) -> float:
-        """What ``run_one`` held back for delivering THIS rollout's result."""
+    def _delivery_budget_for(self, key: str) -> float:
+        """What ``run_one`` held back for delivering THIS attempt's result."""
         with self._inflight_lock:
-            entry = self._inflight.get(rollout_id)
+            entry = self._inflight.get(key)
             plan = entry.plan if entry is not None else None
         return plan.delivery_s if plan is not None else self._delivery_envelope_s()
 
@@ -1410,7 +1597,13 @@ class RolloutRunner:
         assert self._command is not None
         snapshot = self.execution_snapshot
         child: ExecutionChild | None = None
-        extra: dict[str, str | None] = {"PERCEPTEYE_TURN_INPUT": rollout.turn_input}
+        extra: dict[str, str | None] = {}
+        # Not when it is too big to be an environment variable: Linux refuses
+        # to exec with any single string over 128 KiB (E2BIG), so a long task
+        # failed the launch outright. The task still arrives on stdin (or in
+        # argv, where TASK says so).
+        if len(rollout.turn_input.encode("utf-8")) <= MAX_TURN_INPUT_ENV_BYTES:
+            extra["PERCEPTEYE_TURN_INPUT"] = rollout.turn_input
         if snapshot is not None:
             try:
                 child = snapshot.prepare_child(rollout.rollout_id)
@@ -1431,7 +1624,7 @@ class RolloutRunner:
                 # The command path's Popen, registered for the FIRST time. Every
                 # BYOH agent this product serves is a command, and the heartbeat
                 # thread's lease-lost kill only ever reached Python entrypoints.
-                proc_sink=lambda p: self._attach_proc(rollout.rollout_id, p),
+                proc_sink=lambda p: self._attach_proc(_attempt_key(rollout), p),
                 env=build_child_env(
                     rollout_id=rollout.rollout_id, llm_url=rollout.llm_url,
                     api_key=rollout.api_key, trajectory_dir=trajectory_dir,
@@ -1448,7 +1641,7 @@ class RolloutRunner:
                 cwd=str(trajectory_dir),
             )
         except BaseException:
-            self._detach_proc(rollout.rollout_id)
+            self._detach_proc(_attempt_key(rollout))
             # Popen and pre-result failures retain their existing exception
             # semantics, but must not strand an active private copy. There is
             # no result to train, so a failed post-attestation cannot create a
@@ -1464,7 +1657,16 @@ class RolloutRunner:
                     except Exception:
                         pass
             raise
-        self._detach_proc(rollout.rollout_id)
+        self._detach_proc(_attempt_key(rollout))
+        if self._lease_lost(_attempt_key(rollout)):
+            # Killed by the heartbeat thread, as the Python path already says:
+            # the -9 it exits with is the lease, not the agent, so this is not
+            # ``agent_exit_nonzero`` (the policy's own failure). What the
+            # command did before the kill stays attached as evidence.
+            prior = "; ".join(filter(None, (out.exclusion_reason, out.exclusion_detail)))
+            out.exclusion_reason = "credential_expired"
+            out.exclusion_detail = "lease lost while the rollout was running" + (
+                f" (the process then reported: {prior[:1500]})" if prior else "")
 
         if snapshot is None:
             _bind_execution_fingerprint(out, self.execution_sha256)
@@ -1547,8 +1749,36 @@ class RolloutRunner:
         )
         return out
 
-    def _trajectory_dir(self, rollout_id: str) -> str:
-        return str(Path(self.artifacts_dir) / "_percepteye" / rollout_id)
+    def _trajectory_dir(self, key: str) -> str:
+        """Where one claimed attempt runs: ``_percepteye/<attempt key>``."""
+        return str(Path(self.artifacts_dir) / "_percepteye" / key)
+
+    def _contained_trajectory_dir(self, key: str) -> Path | None:
+        """``_trajectory_dir(key)`` if it is a real directory slot DIRECTLY
+        inside ``_percepteye``; ``None`` if it is not.
+
+        The id comes off the wire, and this path is created, run in, read into
+        the report and rmtree'd. ``../x`` or an absolute id escaped the base,
+        so collection inlined host files into the report and the purge deleted
+        a host directory. A name starting with ``_`` is the SDK's own
+        (``_outbox``). And a symlink in the slot -- which another rollout's
+        agent, whose cwd is a sibling, can plant -- is refused rather than
+        followed. Checked on every use, not once: the agent can change the
+        directory between them.
+        """
+        base = Path(self.artifacts_dir) / "_percepteye"
+        if (not key or key in (".", "..") or key.startswith("_")
+                or "/" in key or "\\" in key or "\x00" in key):
+            return None
+        path = base / key
+        try:
+            if path.is_symlink():
+                return None
+            if path.resolve().parent != base.resolve():
+                return None
+        except (OSError, ValueError):
+            return None
+        return path
 
     def _run_in_subprocess(
         self, rollout: RolloutRequest, *, trajectory_dir: str, timeout_s: float,
@@ -1603,14 +1833,25 @@ class RolloutRunner:
             # and the lesson was never carried across.
             start_new_session=(os.name != "nt"),
         )
-        self._attach_proc(rollout.rollout_id, proc)
+        self._attach_proc(_attempt_key(rollout), proc)
         try:
-            stdout, stderr = proc.communicate(
-                input=json.dumps(payload), timeout=timeout_s + 15.0
+            stdout, stderr, timed_out, drained = _run_child_to_result(
+                proc, json.dumps(payload), timeout_s=timeout_s + 15.0,
+                grace_s=teardown_s,
             )
-        except subprocess.TimeoutExpired:
-            stdout, stderr, drained = _kill_and_drain(proc, teardown_s)
-            return RolloutOutput(
+        finally:
+            self._detach_proc(_attempt_key(rollout))
+
+        # EVERY exit attaches the trajectory: the tool calls the agent made
+        # before it timed out, crashed or lost its lease are the evidence of
+        # why. A result the child already carried keeps its own.
+        def _finalise(out: RolloutOutput) -> RolloutOutput:
+            out.timing.setdefault("elapsed_s", time.time() - started)
+            _attach_trajectory(out, trajectory_dir)
+            return out
+
+        if timed_out:
+            return _finalise(RolloutOutput(
                 final_text="",
                 exclusion_reason="deadline_exceeded",
                 exclusion_detail=(
@@ -1621,86 +1862,83 @@ class RolloutRunner:
                        f"of the kill — a descendant outside the killed process "
                        f"group still held the pipes")
                 ),
-                timing={"elapsed_s": time.time() - started},
-            )
-        finally:
-            self._detach_proc(rollout.rollout_id)
-
-        if self._lease_lost(rollout.rollout_id):
+            ))
+        if self._lease_lost(_attempt_key(rollout)):
             # Killed by the heartbeat thread. Not the agent's failure, and not
             # ours to hand back: the lease is already gone, so there is nothing
             # left to abandon.
-            return RolloutOutput(
+            return _finalise(RolloutOutput(
                 final_text="",
                 exclusion_reason="credential_expired",
                 exclusion_detail="lease lost while the rollout was running",
-                timing={"elapsed_s": time.time() - started},
-            )
-        if proc.returncode != 0:
-            return RolloutOutput(
-                final_text="",
-                exclusion_reason="flywheel_crash",
-                exclusion_detail=(stderr or "")[-2000:],
-                timing={"elapsed_s": time.time() - started},
-            )
+            ))
+        # The result channel carries nothing but the result, so a line that
+        # parses IS the child's answer -- read before the exit status, because
+        # the group kill above can land while the child is still leaving and
+        # turn its own clean exit into a SIGKILL status.
         try:
             out = _output_from_wire(json.loads(stdout.strip().splitlines()[-1]))
         except Exception as exc:
-            return RolloutOutput(
+            if proc.returncode != 0:
+                return _finalise(RolloutOutput(
+                    final_text="",
+                    exclusion_reason="flywheel_crash",
+                    exclusion_detail=(stderr or "")[-2000:],
+                ))
+            return _finalise(RolloutOutput(
                 final_text="",
                 exclusion_reason="flywheel_crash",
                 exclusion_detail=f"unparseable child result: {exc}",
-                timing={"elapsed_s": time.time() - started},
-            )
-        out.timing.setdefault("elapsed_s", time.time() - started)
-        _attach_trajectory(out, trajectory_dir)
-        return out
+            ))
+        return _finalise(out)
 
     # ── leases ─────────────────────────────────────────────────────────────
-    def _attach_proc(self, rollout_id: str, proc: subprocess.Popen[str]) -> None:
+    def _attach_proc(self, key: str, proc: subprocess.Popen[str]) -> None:
+        """Register the child the heartbeat thread may have to kill.
+
+        Under the same lock the heartbeat thread marks ``lease_lost`` under,
+        and a lease ALREADY lost kills the child here: the loop's kill only
+        reaches a ``proc`` it can see, so a child spawned just after the beat
+        that lost the lease used to run its whole budget unkilled.
+        """
         with self._inflight_lock:
-            entry = self._inflight.get(rollout_id)
+            entry = self._inflight.get(key)
+            lost = False
             if entry is not None:
                 entry.proc = proc
+                lost = entry.lease_lost
+        if lost:
+            _kill_tree(proc)
 
-    def _detach_proc(self, rollout_id: str) -> None:
+    def _detach_proc(self, key: str) -> None:
         with self._inflight_lock:
-            entry = self._inflight.get(rollout_id)
+            entry = self._inflight.get(key)
             if entry is not None:
                 entry.proc = None
 
-    def _lease_lost(self, rollout_id: str) -> bool:
+    def _lease_lost(self, key: str) -> bool:
         with self._inflight_lock:
-            entry = self._inflight.get(rollout_id)
+            entry = self._inflight.get(key)
             return bool(entry and entry.lease_lost)
 
     def _beat_interval_for(self, rollout: RolloutRequest) -> float:
-        """A third of the lease the server GRANTED AT CLAIM.
+        """A third of the SHORTER of the lease granted at claim and the
+        extension each beat asks for.
 
         Measured from the lease the server actually granted, not the one we
-        asked for. The server clamps our request, so a deployment with a lower
-        ceiling than our default would reap every long rollout underneath a
-        heartbeat pacing itself against a lease it never got. Falls back to the
-        requested value for a server that does not report what it granted.
+        asked for: the server clamps our request, so pacing against the
+        request would let a deployment with a lower ceiling reap every long
+        rollout. Falls back to the requested lease for a server that does not
+        report what it granted.
 
-        HONEST ABOUT WHAT THIS DOES NOT GIVE YOU. This used to claim "so two
-        beats may be lost first", and that is true only of the FIRST beat. Each
-        beat asks the control plane to extend by ``min(lease_ms, 600_000)``,
-        and the control plane SETS the expiry to now plus that -- so once the
-        claim-time lease has been replaced, the interval and the extension are
-        the same length and every later beat is scheduled at the expiry it
-        exists to pre-empt. The margin after beat #1 is one POST's latency, not
-        two intervals.
-
-        Left as it is deliberately, and reported rather than fixed here: the
-        arithmetic says it cannot fire inside the episode lengths this
-        deployment mints (the first beat is not due until ~600s and pushes the
-        expiry to ~1200s, against episodes of 300-894s), and bundling an
-        unrelated change into this one would make the mutation test for the
-        actual fix ambiguous. It is a real defect for any rollout past ~1200s.
-        The seam it needs is already there on the wire: the control plane
-        returns the new ``lease_expires_ts`` from every heartbeat and
-        ``AttachTransport.heartbeat`` discards it.
+        Against the EXTENSION too, because after the first beat that -- not
+        the claim-time lease -- is the lease: a control plane that sets the
+        expiry to now + extend left a 1800s grant paced at 600s against 600s
+        extensions, so every beat after the first was due at the very expiry
+        it exists to pre-empt. A third of the shorter one leaves two beats of
+        margin either way. The loop then schedules each beat from the
+        ``lease_expires_ts`` the previous one returned (``_beat_one``), so a
+        server that grants less than asked is followed, not assumed.
         """
         granted = rollout.lease_expires_ts
         if granted is not None:
@@ -1713,9 +1951,13 @@ class RolloutRunner:
             # Nothing was reaped -- the server extends on every beat -- so it
             # was pure load, invisible from here and paid for by the control
             # plane. Callers must compute this once, at claim, and reuse it.
-            return max(1.0, (granted - time.time()) / 3.0)
-        lease_ms = getattr(self.transport, "lease_ms", 1_800_000)
-        return max(1.0, (lease_ms / 1000.0) / 3.0)
+            lease_s = granted - time.time()
+        else:
+            lease_s = getattr(self.transport, "lease_ms", 1_800_000) / 1000.0
+        extend_ms = getattr(self.transport, "heartbeat_extend_ms", None)
+        if isinstance(extend_ms, (int, float)) and extend_ms > 0:
+            lease_s = min(lease_s, extend_ms / 1000.0)
+        return max(1.0, lease_s / 3.0)
 
     def _heartbeat_loop(self) -> None:
         """Keep every in-flight lease alive until its rollout finishes.
@@ -1725,59 +1967,103 @@ class RolloutRunner:
         was revoked mid-flight, the work was handed to someone else, and the
         report arrived against a lease that no longer existed. Long rollouts --
         the ones this product exists for -- hit it every time.
+
+        Each due beat runs on a small pool, one at a time per lease. On this
+        thread a slow beat for one lease -- a control plane taking its time,
+        a retry -- held up the beats for every other lease this process holds.
         """
-        while not self._beat_stop.wait(_BEAT_TICK_S):
-            now = time.time()
-            with self._inflight_lock:
-                entries = [
-                    e for e in self._inflight.values()
-                    if not e.lease_lost and now >= e.next_beat_at
-                ]
-            for entry in entries:
-                entry.next_beat_at = now + entry.beat_interval
-                try:
-                    self.transport.heartbeat(entry.rollout)
-                except LeaseLost:
-                    # The server has already taken it back. Stop the work now
-                    # rather than let it run to completion for nothing.
+        pool = _cf.ThreadPoolExecutor(
+            max_workers=max(1, min(self.concurrency, 8)),
+            thread_name_prefix="percepteye-beat",
+        )
+        try:
+            while not self._beat_stop.wait(_BEAT_TICK_S):
+                now = time.time()
+                with self._inflight_lock:
+                    entries = [
+                        e for e in self._inflight.values()
+                        if not e.lease_lost and not e.beating
+                        and now >= e.next_beat_at
+                    ]
+                    for e in entries:
+                        e.beating = True
+                for entry in entries:
+                    try:
+                        pool.submit(self._beat_one, entry)
+                    except RuntimeError:  # pool shut down under us: stopping
+                        entry.beating = False
+        finally:
+            pool.shutdown(wait=False)
+
+    def _next_beat_at(self, entry: _InFlight, now: float) -> float:
+        """The next beat: a beat interval from now, sooner if the lease the
+        control plane last stated has less than three of those left -- and
+        NEVER once that lease has reached the rollout's deadline.
+
+        The control plane caps a lease at the rollout's ``deadline_at``: no
+        beat can carry it further, and the only other answer a beat gets,
+        lease_lost, needs a lease that lapsed, which cannot happen before the
+        deadline, by which time the child has been stopped. Pacing on against
+        the shrinking remainder sent a burst of useless POSTs at the end of
+        every long rollout (a third of what is left each time, down to the
+        1 s floor: 200, 133, 89, ... 1, 1 s), in every tenant at once.
+        """
+        delay = entry.beat_interval
+        expires = entry.lease_expires_ts
+        if isinstance(expires, (int, float)):
+            deadline = entry.rollout.deadline_ts
+            if deadline > 0 and float(expires) >= deadline - _LEASE_AT_DEADLINE_SLACK_S:
+                return float("inf")
+            delay = min(delay, (float(expires) - now) / 3.0)
+        return now + max(1.0, delay)
+
+    def _beat_one(self, entry: _InFlight) -> None:
+        """One beat for one lease, on a pool worker. Never raises."""
+        try:
+            try:
+                expires = self.transport.heartbeat(entry.rollout)
+                if isinstance(expires, (int, float)) and not isinstance(expires, bool):
+                    entry.lease_expires_ts = float(expires)
+            except LeaseLost:
+                # The server has already taken it back. Stop the work now
+                # rather than let it run to completion for nothing. Marked
+                # and read under the lock ``_attach_proc`` holds, so a
+                # child is either seen here or killed there.
+                with self._inflight_lock:
                     entry.lease_lost = True
-                    self._emit("lease_lost", {"rollout_id": entry.rollout.rollout_id})
                     proc = entry.proc
-                    if proc is not None and proc.poll() is None:
-                        # The GROUP, not the one process. A command agent is a
-                        # shell that spawns freely, so killing only the process
-                        # we launched left its children alive holding the
-                        # pipes: MEASURED, the runner then sat in the child's
-                        # own `communicate()` for the full 120s timeout after
-                        # the lease was already gone. `proc.kill()` here was
-                        # written when this could only ever be a Python child.
-                        _kill_tree(proc)
-                except TransportError as exc:
-                    # Transient. The next beat may well succeed, and there are
-                    # two more before the lease lapses.
-                    self._emit("heartbeat_failed", {
-                        "rollout_id": entry.rollout.rollout_id, "error": str(exc),
-                    })
-                except Exception as exc:
-                    # ANYTHING ELSE, and this is the whole reason the loop is
-                    # worth guarding: ``FlywheelTransport`` is a Protocol, so a
-                    # customer implementation can raise whatever it likes, and
-                    # an exception raised here does not fail ONE rollout -- it
-                    # unwinds the single thread that renews EVERY lease this
-                    # process holds. Every in-flight rollout then runs to
-                    # completion against a lease nobody is renewing, the
-                    # control plane's reaper writes abandoned/deadline_exceeded
-                    # over all of them, and no report is ever accepted. That is
-                    # the incident this module was rewritten for, reproduced
-                    # from one unexpected exception type.
-                    #
-                    # Treated exactly like a transient failure: the next beat
-                    # is already scheduled, and a beat that raises is not
-                    # evidence the lease is gone (only a LeaseLost is).
-                    self._emit("heartbeat_failed", {
-                        "rollout_id": entry.rollout.rollout_id,
-                        "error": f"{type(exc).__name__}: {exc}",
-                    })
+                self._emit("lease_lost", {"rollout_id": entry.rollout.rollout_id})
+                if proc is not None and proc.poll() is None:
+                    # The GROUP, not the one process. A command agent is a
+                    # shell that spawns freely, so killing only the process
+                    # we launched left its children alive holding the
+                    # pipes: MEASURED, the runner then sat in the child's
+                    # own `communicate()` for the full 120s timeout after
+                    # the lease was already gone. `proc.kill()` here was
+                    # written when this could only ever be a Python child.
+                    _kill_tree(proc)
+            except TransportError as exc:
+                # Transient. The next beat may well succeed, and is scheduled
+                # against what is left of the lease, so it comes sooner.
+                self._emit("heartbeat_failed", {
+                    "rollout_id": entry.rollout.rollout_id, "error": str(exc),
+                })
+            except Exception as exc:
+                # ANYTHING ELSE. ``FlywheelTransport`` is a Protocol, so a
+                # customer implementation can raise whatever it likes. On the
+                # single heartbeat thread this used to unwind the thread that
+                # renews EVERY lease this process holds -- every in-flight
+                # rollout then ran on against a lease nobody renewed, and the
+                # reaper wrote abandoned/deadline_exceeded over all of them.
+                # Treated exactly like a transient failure: a beat that raises
+                # is not evidence the lease is gone (only a LeaseLost is).
+                self._emit("heartbeat_failed", {
+                    "rollout_id": entry.rollout.rollout_id,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+        finally:
+            entry.next_beat_at = self._next_beat_at(entry, time.time())
+            entry.beating = False
 
     # ── the loop ───────────────────────────────────────────────────────────
     def serve_forever(self, *, max_rollouts: int | None = None) -> int:
@@ -1881,6 +2167,21 @@ class RolloutRunner:
                         self._emit("claim_failed", {"error": str(exc)})
                         sleep_ms(5_000)
                         continue
+                    except ContractViolation as exc:
+                        # A claimed rollout this SDK cannot read. Not a reason
+                        # to stop serving: it used to escape here and end the
+                        # loop -- and the heartbeat thread with it -- for every
+                        # rollout in flight. The unreadable rollout's lease
+                        # lapses and the control plane re-queues it.
+                        self._emit("claim_failed", {
+                            "error": f"ContractViolation: {exc}",
+                        })
+                        warnings.warn(
+                            f"a claimed rollout could not be read ({exc}); it "
+                            f"was not run and its lease will lapse. Serving "
+                            f"continues.", RuntimeWarning, stacklevel=2)
+                        sleep_ms(5_000)
+                        continue
                     if not rollouts:
                         # A successful claim that returned no work. Emitted so
                         # an operator can tell "the queue is empty" from "the
@@ -1905,7 +2206,7 @@ class RolloutRunner:
                     with self._inflight_lock:
                         for r in rollouts:
                             _interval = self._beat_interval_for(r)
-                            self._inflight[r.rollout_id] = _InFlight(
+                            self._inflight[_attempt_key(r)] = _InFlight(
                                 r, _interval, now + _interval
                             )
                     # _serve_one really does not raise now — it has the
@@ -1923,7 +2224,9 @@ class RolloutRunner:
             # undelivered has had every chance this process can give it, and
             # what remains on disk is what the next start will pick up.
             try:
-                delivered += self._drain_outbox()
+                # Every held result once more, due or not: this is the last
+                # chance this process has to deliver it.
+                delivered += self._drain_outbox(force=True)
             except Exception:  # never let housekeeping mask the real exit
                 pass
             self._beat_stop.set()
@@ -1941,6 +2244,9 @@ class RolloutRunner:
         lease. A comment is not a mechanism; this is.
         """
         self._emit("rollout_start", {"rollout_id": rollout.rollout_id})
+        key = _attempt_key(rollout)
+        with self._inflight_lock:
+            mine = self._inflight.get(key)
         delivered = False
         try:
             delivered = self._serve_one_inner(rollout)
@@ -1961,7 +2267,7 @@ class RolloutRunner:
                         exclusion_reason="flywheel_crash",
                         exclusion_detail=f"{type(exc).__name__}: {exc}",
                     ),
-                    lease_lost=self._lease_lost(rollout.rollout_id),
+                    lease_lost=self._lease_lost(key),
                 )
                 return delivered
             except Exception:
@@ -1973,8 +2279,12 @@ class RolloutRunner:
                 )
                 return False
         finally:
+            # ITS OWN entry only, compared by identity: the key already
+            # separates attempts, and this also holds for a server that issues
+            # no lease token, where two attempts share the bare id.
             with self._inflight_lock:
-                self._inflight.pop(rollout.rollout_id, None)
+                if self._inflight.get(key) is mine:
+                    self._inflight.pop(key, None)
             # DELIVERED, not "no longer in the retry set". The trajectory is
             # the only local copy of this rollout's evidence -- the artifacts
             # too big or too binary to travel inside the report exist nowhere
@@ -1984,7 +2294,7 @@ class RolloutRunner:
             # permanently refused rollout kept its result and lost the evidence
             # behind it, in the one case an operator has to reconstruct by hand.
             if delivered:
-                self._purge_trajectory(rollout.rollout_id)
+                self._purge_trajectory(key)
 
     def _serve_one_inner(self, rollout: RolloutRequest) -> bool:
         try:
@@ -2014,8 +2324,8 @@ class RolloutRunner:
                     exclusion_reason="flywheel_crash",
                     exclusion_detail=detail,
                 )
-        lease_lost = self._lease_lost(rollout.rollout_id)
-        deadline = time.time() + self._delivery_budget_for(rollout.rollout_id)
+        lease_lost = self._lease_lost(_attempt_key(rollout))
+        deadline = time.time() + self._delivery_budget_for(_attempt_key(rollout))
         try:
             # Evidence FIRST, whatever the outcome. An agent that exhausted its
             # turn or time budget still wrote files, and for a coding/REPL agent
@@ -2114,8 +2424,9 @@ class RolloutRunner:
         is the safe direction. That costs an ordinary rollout nothing, because
         a result that DOES land is removed from the outbox on the spot.
         """
+        key = _attempt_key(rollout)
         if deadline is None:
-            deadline = time.time() + self._delivery_budget_for(rollout.rollout_id)
+            deadline = time.time() + self._delivery_budget_for(key)
         # IN MEMORY, NEVER ON DISK. The lease token is a bearer credential --
         # it authorises reporting and abandoning this rollout -- and the outbox
         # lives under ``artifacts_dir``, one level up from the working
@@ -2130,10 +2441,13 @@ class RolloutRunner:
         # memory loses nothing that was real and ends the disclosure.
         if rollout.lease_token:
             with self._outbox_lock:
-                self._lease_tokens[rollout.rollout_id] = rollout.lease_token
+                self._lease_tokens[key] = rollout.lease_token
         record = {
             "schema": _OUTBOX_SCHEMA,
             "rollout_id": rollout.rollout_id,
+            # Which claim this result belongs to (a digest of its lease, never
+            # the token) -- see ``_attempt_key``.
+            "attempt_key": key,
             "deadline_ts": float(rollout.deadline_ts),
             "lease_lost": bool(lease_lost),
             "first_seen_ts": time.time(),
@@ -2141,7 +2455,21 @@ class RolloutRunner:
             "last_error": None,
             "result": _wire_payload(out),
         }
-        path = self._spool_path(rollout.rollout_id)
+        path = self._spool_path(key)
+        # This worker owns the file until its delivery settles; the drain
+        # leaves an owned file alone (``_drain_one``).
+        with self._outbox_lock:
+            self._delivering.add(path.name)
+        try:
+            return self._spool_and_deliver(path, record, rollout, deadline)
+        finally:
+            with self._outbox_lock:
+                self._delivering.discard(path.name)
+
+    def _spool_and_deliver(
+        self, path: Path, record: dict[str, Any], rollout: RolloutRequest,
+        deadline: float,
+    ) -> bool:
         try:
             self._spool_write(path, record)
         except OSError as exc:
@@ -2166,6 +2494,7 @@ class RolloutRunner:
         cannot take a route the first attempt did not.
         """
         rollout_id = str(record.get("rollout_id") or "")
+        key = _record_key(record)
         try:
             # REBUILT BEFORE ANYTHING ELSE, and inside the try. ``_read_spool``
             # checks the envelope -- schema, rollout id, result-is-a-dict -- and
@@ -2178,7 +2507,7 @@ class RolloutRunner:
             # settled record, not a fatal one.
             deadline_ts = float(record.get("deadline_ts") or 0.0)
             rollout = _spooled_rollout(
-                record, lease_token=self._remembered_lease_token(rollout_id)
+                record, lease_token=self._remembered_lease_token(key)
             )
             out = _output_from_wire(dict(record.get("result") or {}))
         except Exception as exc:
@@ -2197,6 +2526,9 @@ class RolloutRunner:
             )
             return False
         if record.get("lease_lost") and time.time() < deadline_ts:
+            # Not before the deadline, so the drain need not look before then.
+            with self._outbox_lock:
+                self._retry_due[path.name] = deadline_ts
             # NEVER RACE A LIVE HOLDER. The lease is gone, so the control plane
             # may already have handed this rollout to someone else, and for an
             # ordinary rollout its report route performs no ownership check —
@@ -2261,7 +2593,7 @@ class RolloutRunner:
                 f"the control plane refused rollout {rollout_id}'s result: "
                 f"{exc}. The row is lost and will be swept, but the result "
                 f"itself is kept at {kept} and this rollout's evidence at "
-                f"{self._trajectory_dir(rollout_id)}.",
+                f"{self._trajectory_dir(key)}.",
                 RuntimeWarning, stacklevel=2,
             )
             return False
@@ -2298,7 +2630,7 @@ class RolloutRunner:
                         f"Resending the same result cannot change that, so it "
                         f"will not be retried. The result is kept at {kept} "
                         f"and this rollout's evidence at "
-                        f"{self._trajectory_dir(rollout_id)}."
+                        f"{self._trajectory_dir(key)}."
                         if retire else
                         f"The result is held in {kept} and will be resent once "
                         f"the cause is fixed."
@@ -2361,8 +2693,9 @@ class RolloutRunner:
         slug = _fs_slug(agent) if isinstance(agent, str) and agent else "agent"
         return Path(self.artifacts_dir) / "_percepteye" / "_outbox" / slug
 
-    def _spool_path(self, rollout_id: str) -> Path:
-        return self._outbox_dir() / f"{_fs_slug(rollout_id)}.json"
+    def _spool_path(self, key: str) -> Path:
+        """One file per claimed ATTEMPT (see ``_attempt_key``)."""
+        return self._outbox_dir() / f"{_fs_slug(key)}.json"
 
     def _spool_write(self, path: Path, record: Mapping[str, Any]) -> None:
         """Write atomically: a half-written result is worse than none.
@@ -2370,7 +2703,7 @@ class RolloutRunner:
         NO BEARER CREDENTIAL REACHES THIS FILE, which is the part that had to
         be a mechanism rather than a file mode. The outbox sits under
         ``artifacts_dir`` at ``_percepteye/_outbox/<agent>/``, and the child is
-        handed ``artifacts_dir/_percepteye/<rollout_id>`` as its cwd -- so this
+        handed ``artifacts_dir/_percepteye/<attempt key>`` as its cwd -- so this
         directory is ``../_outbox`` from a shell the customer's UNTRUSTED agent
         controls, running as this same uid. A lease token written here was
         readable by the agent it fences out, and travelled into any bundle that
@@ -2401,7 +2734,7 @@ class RolloutRunner:
                 pass
             os.replace(tmp, path)
 
-    def _remembered_lease_token(self, rollout_id: str) -> str | None:
+    def _remembered_lease_token(self, key: str) -> str | None:
         """This process's copy of a rollout's lease token, if it still has one.
 
         ``None`` for anything spooled by an EARLIER process, which is correct
@@ -2411,7 +2744,7 @@ class RolloutRunner:
         the refusal is recorded honestly.
         """
         with self._outbox_lock:
-            return self._lease_tokens.get(rollout_id)
+            return self._lease_tokens.get(key)
 
     def _settle(
         self, path: Path, record: Mapping[str, Any], *,
@@ -2432,10 +2765,15 @@ class RolloutRunner:
         Returns where the record lives now (the original path when a rename was
         not possible, so a warning quoting it still points at something real).
         """
-        rollout_id = str(record.get("rollout_id") or "")
+        key = _record_key(record)
+        if delivered or retire is not None:
+            with self._outbox_lock:
+                self._retry_due.pop(path.name, None)
+        else:
+            self._schedule_retry(path, record)
         if delivered:
             with self._outbox_lock:
-                self._lease_tokens.pop(rollout_id, None)
+                self._lease_tokens.pop(key, None)
                 try:
                     path.unlink()
                 except OSError:  # FileNotFoundError included: already gone
@@ -2450,16 +2788,36 @@ class RolloutRunner:
         with self._outbox_lock:
             # The rollout is over for this SDK either way, and holding its
             # capability past that is exactly the exposure this file avoids.
-            self._lease_tokens.pop(rollout_id, None)
+            self._lease_tokens.pop(key, None)
         return _move_aside(path, retire)
 
-    def _drain_outbox(self) -> int:
-        """Deliver everything the outbox still holds. Returns how many landed.
+    def _schedule_retry(self, path: Path, record: Mapping[str, Any]) -> None:
+        """Hold a result that failed to send until it is worth sending again.
+
+        Jittered exponential backoff on the record's own attempt count, from
+        10s to ten minutes. The drain runs on EVERY slot completion under
+        continuous claiming, and it used to resend every held result each time
+        -- a just-failed delivery was retried at once, each retry spending the
+        transport's full envelope, while the free slots it ran in front of
+        waited to claim. Many workers backing off in step against one control
+        plane is the other half of an outage, hence the jitter.
+        """
+        import random
+
+        attempts = max(1, int(record.get("attempts") or 1))
+        delay = min(_OUTBOX_RETRY_MAX_S, _OUTBOX_RETRY_BASE_S * 2 ** (attempts - 1))
+        with self._outbox_lock:
+            self._retry_due[path.name] = time.time() + delay * random.uniform(0.8, 1.2)
+
+    def _drain_outbox(self, *, force: bool = False) -> int:
+        """Deliver everything the outbox holds that is DUE. Returns how many landed.
 
         Called at the top of the claim loop — BEFORE claiming, because a result
         already produced is worth more than the next rollout — and once more on
-        the way out. A rollout still in flight is skipped: its own worker owns
-        that file until it is finished with it.
+        the way out (``force``: every held result, due or not). A rollout still
+        in flight is skipped: its own worker owns that file until it is
+        finished with it. A result not yet due (``_schedule_retry``) is skipped
+        without being read, so a drain with nothing due costs one listing.
         """
         root = self._outbox_dir()
         if not root.is_dir():
@@ -2469,7 +2827,12 @@ class RolloutRunner:
             paths = sorted(root.glob("*.json"))
         except OSError:
             return 0
+        now = time.time()
+        with self._outbox_lock:
+            due = dict(self._retry_due)
         for path in paths:
+            if not force and due.get(path.name, 0.0) > now:
+                continue
             try:
                 delivered += self._drain_one(path)
             except Exception as exc:
@@ -2492,14 +2855,45 @@ class RolloutRunner:
         return delivered
 
     def _drain_one(self, path: Path) -> int:
-        """Deliver ONE spooled outcome. Returns 1 if it landed, else 0."""
+        """Deliver ONE spooled outcome. Returns 1 if it landed, else 0.
+
+        The file is CLAIMED before it is read. The drain used to read it and
+        only then ask whether its rollout was still in flight, so a worker
+        that reported, removed the file and left ``_inflight`` in between
+        passed the check, and the same result was sent twice.
+        """
+        with self._outbox_lock:
+            if path.name in self._delivering:
+                return 0
+            self._delivering.add(path.name)
+        try:
+            if not path.exists():  # delivered and removed since the listing
+                return 0
+            return self._drain_claimed(path)
+        finally:
+            with self._outbox_lock:
+                self._delivering.discard(path.name)
+
+    def _drain_claimed(self, path: Path) -> int:
         record = _read_spool(path)
         if record is None:
+            if _foreign_schema(path) is not None:
+                # Written by an SDK with a DIFFERENT outbox shape -- a newer
+                # one, sharing this directory. Left exactly where it is, for
+                # that SDK to deliver; this one cannot read it and must not
+                # retire it as unreadable. Looked at again rarely.
+                with self._outbox_lock:
+                    self._retry_due[path.name] = time.time() + _OUTBOX_RETRY_MAX_S
+                return 0
             _move_aside(path, "unreadable")
             return 0
         rollout_id = str(record.get("rollout_id") or "")
         with self._inflight_lock:
-            if rollout_id in self._inflight:
+            # ANY attempt of this rollout still running, not only the one that
+            # spooled this record: a result from an earlier attempt landing
+            # while a later one runs would race the live holder.
+            if any(e.rollout.rollout_id == rollout_id
+                   for e in self._inflight.values()):
                 return 0
         age = time.time() - float(record.get("first_seen_ts") or 0.0)
         if age > _OUTBOX_MAX_AGE_S:
@@ -2523,7 +2917,7 @@ class RolloutRunner:
             # predicate for a result the control plane accepted and a result it
             # refused forever, and the refused one is precisely where the local
             # evidence is the last copy there is.
-            self._purge_trajectory(rollout_id)
+            self._purge_trajectory(_record_key(record))
         return delivered
 
     def _collect_artifacts(
@@ -2554,7 +2948,15 @@ class RolloutRunner:
         # about through PERCEPTEYE_TRAJECTORY_DIR and can therefore actually write
         # to. ``rollout.artifacts_dir`` is the SERVER's name for this rollout's
         # storage ("rollouts/rl_x") and is not a path on this machine.
-        root = Path(self._trajectory_dir(rollout.rollout_id))
+        root = self._contained_trajectory_dir(_attempt_key(rollout))
+        if root is None:
+            self._emit("artifact_failed", {
+                "rollout_id": rollout.rollout_id, "name": "*",
+                "error": "the trajectory directory is not a directory inside "
+                         "_percepteye (a symlink, or an id that escapes it); "
+                         "nothing was collected",
+            })
+            return
         if not root.is_dir():
             return
         inline_budget = MAX_INLINE_TOTAL_BYTES
@@ -2589,10 +2991,20 @@ class RolloutRunner:
                 out.artifacts[str(path.relative_to(root))] = "skipped:escapes_root"
                 continue
             name = str(path.relative_to(root))
+            # ONE read: the digest, the size and the inlined content all come
+            # from the same bytes. Separate reads let the file change between
+            # them, and ``read_text`` translated CRLF to LF, so the content a
+            # grader read did not match the digest it was sent with. Opened
+            # without following a link that replaced the file since the check
+            # above.
             try:
-                digest, size = sha256_file(path)
+                read = _read_artifact(path)
             except OSError:
                 continue
+            if read is None:
+                out.artifacts[name] = "skipped:symlink"
+                continue
+            digest, size, raw = read
             if size > MAX_ARTIFACT_BYTES:
                 # Named, not silently dropped: an artifact too large to
                 # collect is a fact about the rollout, and a scorer expecting
@@ -2603,10 +3015,10 @@ class RolloutRunner:
             # needs bytes, not proofs about bytes. Binary or over-cap files
             # keep the digest-string value — same wire shape as before.
             content: str | None = None
-            if size <= MAX_INLINE_ARTIFACT_BYTES and size <= inline_budget:
+            if raw is not None and size <= inline_budget:
                 try:
-                    content = path.read_text(encoding="utf-8", errors="strict")
-                except (OSError, UnicodeDecodeError):
+                    content = raw.decode("utf-8", errors="strict")
+                except UnicodeDecodeError:
                     content = None
             if content is not None:
                 inline_budget -= size
@@ -2616,14 +3028,17 @@ class RolloutRunner:
             else:
                 out.artifacts[name] = digest
 
-    def _purge_trajectory(self, rollout_id: str) -> None:
+    def _purge_trajectory(self, key: str) -> None:
         """Drop this rollout's trajectory directory once it is no longer needed.
 
         One directory per rollout accumulated for the life of the process, so a
         flywheel serving continuously grew its artifacts tree without bound.
         """
+        path = self._contained_trajectory_dir(key)
+        if path is None:  # never follow a planted link, never leave the base
+            return
         try:
-            shutil.rmtree(Path(self._trajectory_dir(rollout_id)), ignore_errors=True)
+            shutil.rmtree(path, ignore_errors=True)
         except OSError:  # pragma: no cover - best effort, never fails a rollout
             pass
 
@@ -2633,10 +3048,11 @@ class RolloutRunner:
     def _emit(self, kind: str, payload: dict[str, Any]) -> None:
         """Hand one event to the customer's callback, and survive it.
 
-        Guarded, because this is called from three different threads and one of
-        them cannot afford to die. ``lease_lost`` and ``heartbeat_failed`` are
-        emitted from inside the heartbeat thread's own exception handlers, so a
-        callback that raised there exited the for, the while, and the thread --
+        Guarded, because this is called from several threads and the heartbeat
+        machinery cannot afford to die. ``lease_lost`` and ``heartbeat_failed``
+        are emitted from inside a beat's own exception handlers -- once on the
+        single heartbeat thread, where a callback that raised there exited the
+        for, the while, and the thread --
         after which NO in-flight lease was renewed again, every subsequent
         rollout collected a 410 at report time, and the exception surfaced only
         through the thread excepthook. An observability hook that can silently
@@ -2663,6 +3079,81 @@ def _fs_slug(value: str) -> str:
     return (safe.strip("._") or "unnamed")[:120]
 
 
+def _attempt_key(rollout: RolloutRequest) -> str:
+    """The key for ONE claim of a rollout: its id plus a digest of its lease.
+
+    NOT the bare rollout id. A lapsed lease re-queues the SAME id with a new
+    lease token, so this process can claim an id it is still running (Mission
+    Control, 2026-11-20: 5 of 80). Keyed by id, attempt 1's ``finally`` popped
+    attempt 2's in-flight entry -- ending its heartbeats -- and rmtree'd the
+    trajectory directory attempt 2 was running in, and the two shared one
+    spool file and one remembered lease token. Every per-attempt map, file and
+    directory is keyed by this instead.
+
+    A digest, never the token: the key names a directory the agent runs in
+    and a file under the artifacts tree, and the token is a bearer credential.
+    A rollout claimed without a token (an older server) falls back to its id.
+    """
+    token = rollout.lease_token
+    if not token:
+        return rollout.rollout_id
+    digest = hashlib.sha256(str(token).encode("utf-8")).hexdigest()[:12]
+    return f"{rollout.rollout_id}.{digest}"
+
+
+def _record_key(record: Mapping[str, Any]) -> str:
+    """The attempt key a spooled record was written under (its id, for a
+    record spooled before attempts were keyed)."""
+    key = record.get("attempt_key")
+    return str(key) if isinstance(key, str) and key else str(
+        record.get("rollout_id") or "")
+
+
+_EVIDENCE_PARTS = (
+    ("checks", checks_to_wire),
+    ("termination", termination_to_wire),
+    ("seeds", seeds_to_wire),
+)
+
+
+def _checks_not_carried(out: RolloutOutput) -> int:
+    """``checks_dropped`` for a report that carries NONE of ``out``'s checks:
+    every row the episode ran, and the ones it already counted as dropped.
+    The one evidence part with a place on the wire to say it went missing.
+    Never raises."""
+    checks = getattr(out, "checks", None)
+    stated = getattr(out, "checks_dropped", 0)
+    return (len(checks) if isinstance(checks, (list, tuple)) else 0) + (
+        stated if type(stated) is int and stated > 0 else 0)
+
+
+def _without_unsendable_evidence(
+    out: RolloutOutput,
+) -> tuple[RolloutOutput, list[str]]:
+    """``out`` less each evidence part its own serialiser refuses, and the
+    names of the parts removed. Never raises. Checks removed this way are
+    counted in ``checks_dropped``, so the stored episode says its checks are
+    missing and not that it ran none."""
+    unsendable: list[str] = []
+    for name, to_wire in _EVIDENCE_PARTS:
+        value = getattr(out, name, None)
+        if value is None:
+            continue
+        try:
+            to_wire(value)
+        except Exception:
+            unsendable.append(name)
+    if not unsendable:
+        return out, []
+    changes: dict[str, Any] = {name: None for name in unsendable}
+    if "checks" in unsendable:
+        changes["checks_dropped"] = _checks_not_carried(out)
+    try:
+        return replace(out, **changes), unsendable
+    except Exception:
+        return out, []
+
+
 def _wire_payload(out: RolloutOutput) -> dict[str, Any]:
     """The contract payload for this outcome, ALWAYS.
 
@@ -2682,8 +3173,28 @@ def _wire_payload(out: RolloutOutput) -> dict[str, Any]:
     produced" is legible without this SDK's source.
     """
     try:
-        return out.to_wire()
+        wire = out.to_wire()
     except Exception as exc:
+        # The evidence parts are statements ABOUT the outcome, not the outcome.
+        # One malformed check row (a NaN value, an unknown key) must not cost
+        # the episode its reward, tool calls and artifacts: drop the part that
+        # cannot be carried, say so, and send the rest whole.
+        kept, unsendable = _without_unsendable_evidence(out)
+        if unsendable:
+            try:
+                wire = kept.to_wire()
+            except Exception:
+                pass  # something else is wrong too: the full salvage below
+            else:
+                warnings.warn(
+                    f"[agent-flywheel] this rollout's {', '.join(unsendable)} "
+                    f"could not be represented on the flywheel/1 wire "
+                    f"({type(exc).__name__}: {exc}) and was not sent; the "
+                    f"rest of the result was"
+                    + (f", and it says {wire['checks_dropped']} checks are "
+                       f"missing." if wire.get("checks_dropped") else "."),
+                    RuntimeWarning, stacklevel=2)
+                return wire
         # ``getattr``, because this function's whole contract is that it does
         # not raise: the object that just failed to serialise is the last one
         # to assume anything about.
@@ -2691,6 +3202,7 @@ def _wire_payload(out: RolloutOutput) -> dict[str, Any]:
             name for name in (
                 "tool_calls", "artifacts", "reward", "success",
                 "llm_call_count", "events", "timing", "agent_fingerprint",
+                "checks", "termination", "seeds",
             ) if getattr(out, name, None)
         ]
         detail = "; ".join(filter(None, (
@@ -2703,6 +3215,7 @@ def _wire_payload(out: RolloutOutput) -> dict[str, Any]:
             final_text=out.final_text if isinstance(out.final_text, str) else "",
             exclusion_reason=out.exclusion_reason or "flywheel_crash",
             exclusion_detail=detail[:4000],
+            checks_dropped=_checks_not_carried(out),
         )
         try:
             return salvaged.to_wire()
@@ -2714,6 +3227,15 @@ def _wire_payload(out: RolloutOutput) -> dict[str, Any]:
                 exclusion_reason="flywheel_crash",
                 exclusion_detail=f"unrepresentable result: {type(exc).__name__}",
             ).to_wire()
+    over = checks_over_limit(out.checks)
+    if over:
+        warnings.warn(
+            f"[agent-flywheel] this rollout states {len(out.checks)} checks "
+            f"and a report carries at most {MAX_REPORTED_CHECKS}; the first "
+            f"{MAX_REPORTED_CHECKS} were sent and the report says {over} "
+            f"were not.",
+            RuntimeWarning, stacklevel=2)
+    return wire
 
 
 def _spooled_rollout(
@@ -2757,6 +3279,19 @@ def _read_spool(path: Path) -> dict[str, Any] | None:
     return record
 
 
+def _foreign_schema(path: Path) -> str | None:
+    """The ``schema`` a spool file declares, when it declares one that is not
+    ours; ``None`` for our own, or for a file that declares nothing readable."""
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    schema = record.get("schema") if isinstance(record, dict) else None
+    if isinstance(schema, str) and schema and schema != _OUTBOX_SCHEMA:
+        return schema
+    return None
+
+
 def _move_aside(path: Path, why: str) -> Path:
     """Stop retrying a file, without deleting the work it holds.
 
@@ -2785,6 +3320,12 @@ def _move_aside(path: Path, why: str) -> Path:
     try:
         os.replace(path, target)
     except OSError:
+        # Release the reservation: an empty retired-looking file with no
+        # record in it is a false statement to the operator reading the dir.
+        try:
+            os.unlink(target)
+        except OSError:
+            pass
         return path
     return target
 
@@ -2830,17 +3371,47 @@ def _output_from_wire(d: dict[str, Any]) -> RolloutOutput:
         events=list(d.get("events") or []),
         timing=dict(d.get("timing") or {}),
         agent_fingerprint=d.get("agent_fingerprint"),
+        checks=d.get("checks"),
+        checks_dropped=d.get("checks_dropped") or 0,
+        termination=d.get("termination"),
+        seeds=d.get("seeds"),
     )
 
 
-def sha256_file(path: str | os.PathLike[str]) -> tuple[str, int]:
-    h = hashlib.sha256()
-    size = 0
-    with open(path, "rb") as fh:
+def _read_artifact(path: Path) -> tuple[str, int, bytes | None] | None:
+    """``(sha256, size, bytes-if-small)`` from ONE open of ``path``.
+
+    ``None`` when the path is not a regular file it can open without following
+    a link (it was swapped for one after the caller looked). The bytes are kept
+    only for a file within ``MAX_INLINE_ARTIFACT_BYTES``; past that the digest
+    is streamed and the bytes discarded.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        import errno
+
+        if exc.errno == errno.ELOOP:
+            return None
+        raise
+    with os.fdopen(fd, "rb") as fh:
+        import stat as _stat
+
+        if not _stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            return None
+        h = hashlib.sha256()
+        size = 0
+        kept: list[bytes] | None = []
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             h.update(chunk)
             size += len(chunk)
-    return h.hexdigest(), size
+            if kept is not None:
+                if size <= MAX_INLINE_ARTIFACT_BYTES:
+                    kept.append(chunk)
+                else:
+                    kept = None
+        return h.hexdigest(), size, (b"".join(kept) if kept is not None else None)
 
 
 _ = TOOL_CALLS_FILENAME  # re-exported for adapters writing their own file

@@ -102,6 +102,7 @@ does. An empty or failed read never takes an applied prompt away
 from __future__ import annotations
 
 import logging
+import math
 import random
 import threading
 import time
@@ -315,7 +316,9 @@ class PolicySnapshot:
 
     #: Whether the LAST refresh attempt succeeded. False after a failed one --
     #: including one that never reached the network because no control-plane
-    #: URL or key is configured. The snapshot still stands either way.
+    #: URL or key is configured, and one whose newly served system prompt
+    #: (``/prompt/current``) could not be read. The snapshot still stands
+    #: either way.
     last_refresh_ok: bool = True
 
     #: The control plane's own answer to "is what I booted with still
@@ -411,7 +414,20 @@ class PolicySource:
         #: has: the endpoint half is handed the same one.
         self._resolved_key: str | None = None
         self._url_arg = control_plane_url
-        self._base_ttl = max(MIN_TTL_S, float(ttl_s))
+        try:
+            ttl = float(ttl_s)
+        except (TypeError, ValueError):
+            ttl = math.nan
+        if not math.isfinite(ttl) or ttl <= 0.0:
+            # Infinity never refreshes -- no promotion or rollback could ever
+            # reach this agent -- and NaN compares false against everything,
+            # so it fell silently to the floor. Both are caller mistakes.
+            from .errors import ConfigurationError
+
+            raise ConfigurationError(
+                f"policy_source(ttl_s={ttl_s!r}): ttl_s must be a finite "
+                f"number of seconds greater than 0")
+        self._base_ttl = max(MIN_TTL_S, ttl)
         # Decided ONCE, so this handle's cadence is stable and differs from its
         # siblings'. Re-jittering per refresh would smear each handle across
         # the window instead of separating handles from each other, which is
@@ -446,6 +462,10 @@ class PolicySource:
         #: ``""`` before one was.
         self._prompt_generation = ""
         self._client: Any = None
+        #: Set by ``close()``, under ``_state_lock``. A refresh in flight when
+        #: the handle closes must not build (and leak) a fresh client, and no
+        #: refresh starts after it.
+        self._closed = False
 
     # ── public surface ────────────────────────────────────────────────────
 
@@ -463,8 +483,10 @@ class PolicySource:
             return replace(snap, stale_for_s=self._stale_for(now))
 
     def close(self) -> None:
-        """Release the pooled connection. Idempotent."""
+        """Release the pooled connection. Idempotent. The handle keeps
+        answering with the snapshot it holds, and never refreshes again."""
         with self._state_lock:
+            self._closed = True
             client, self._client = self._client, None
         if client is not None:
             try:
@@ -511,10 +533,13 @@ class PolicySource:
         # know which of the two is load-bearing.
         if not self._refresh_lock.acquire(blocking=False):
             return
+        changed: PolicySnapshot | None = None
         try:
             with self._state_lock:
                 # Re-check: another thread may have just refreshed.
                 if 0.0 <= self._next_refresh_at and now < self._next_refresh_at:
+                    return
+                if self._closed:
                     return
                 # Schedule the next attempt BEFORE fetching, so a failing
                 # control plane is retried on the TTL rather than on every
@@ -530,25 +555,41 @@ class PolicySource:
             # The PROMPT TEXT, read only when the served prompt is not the
             # one held -- still outside the state lock, still one bounded
             # attempt. Fail-open: a failed read is held as "not read", and
-            # the next refresh asks again.
+            # the next refresh asks again -- but it is a failed refresh, and
+            # ``last_refresh_ok`` says so: an approved prompt that cannot be
+            # read is a prompt this agent is not running.
             answer: dict[str, Any] | None = None
+            prompt_ok = True
             with self._state_lock:
                 held_generation = self._prompt_generation
             if prompt_needs_refresh(held_generation, body):
                 try:
                     answer = self._fetch_prompt()
                 except Exception:
-                    answer = None
+                    answer, prompt_ok = None, False
             with self._state_lock:
-                self._absorb(body, now, answer)
+                changed = self._absorb(body, now, answer, prompt_ok=prompt_ok)
         finally:
             self._refresh_lock.release()
+        # The observer runs with NO lock held. Under ``_state_lock`` (where it
+        # used to run) an observer that called ``current()`` or ``close()``
+        # deadlocked on that non-reentrant lock -- and with it every reader of
+        # this handle -- and a slow one stalled every reader for its duration.
+        if changed is not None and self._on_change is not None:
+            try:
+                self._on_change(changed)
+            except Exception:
+                pass
 
     def _absorb(self, body: dict[str, Any], now: float,
-                answer: dict[str, Any] | None = None) -> None:
+                answer: dict[str, Any] | None = None, *,
+                prompt_ok: bool = True) -> PolicySnapshot | None:
         """Fold a successful response into the cache. Called under
         ``_state_lock``. ``answer`` is the ``/prompt/current`` body when it
-        was read this refresh."""
+        was read this refresh; ``prompt_ok`` is False when reading it failed,
+        and is what ``last_refresh_ok`` reports. Returns the snapshot to hand ``on_change`` when
+        this answer is a change, else None: the caller notifies, after it has
+        released the lock."""
         from . import endpoint_kwargs
 
         self._last_ok_at = now
@@ -569,7 +610,8 @@ class PolicySource:
             )
         self._prompt_generation = prompt_generation
         hint = body.get("ttl_s") if isinstance(body, dict) else None
-        if isinstance(hint, (int, float)) and not isinstance(hint, bool) and hint > 0:
+        if isinstance(hint, (int, float)) and not isinstance(hint, bool) \
+                and math.isfinite(hint) and hint > 0:
             self._server_ttl = float(hint)
             self._next_refresh_at = now + self.ttl_s
 
@@ -596,14 +638,14 @@ class PolicySource:
             # change, even though the part this snapshot carries did not, and
             # a fleet watching it should still see that.
             self._snap = replace(
-                self._snap, last_refresh_ok=True,
+                self._snap, last_refresh_ok=prompt_ok,
                 serving_generation=(
                     str(body.get("serving_generation") or "")
                     if isinstance(body, dict) else ""
                 ) or self._snap.serving_generation,
                 prompt=prompt,
             )
-            return
+            return None
 
         generation = body.get("serving_generation") if isinstance(body, dict) else None
         generation = str(generation) if isinstance(generation, str) else ""
@@ -623,7 +665,7 @@ class PolicySource:
         self._last_identity = identity
         self._snap = PolicySnapshot(
             base_url=identity[0], api_key=identity[1], model=identity[2],
-            changed=changed, last_refresh_ok=True,
+            changed=changed, last_refresh_ok=prompt_ok,
             serving_generation=generation, withdrawn=withdrawn,
             prompt=prompt,
         )
@@ -638,29 +680,27 @@ class PolicySource:
                 (body.get("reason") if isinstance(body, dict) else None)
                 or "withdrawn=true",
             )
-        if changed and self._on_change is not None:
-            try:
-                self._on_change(self._snap)
-            except Exception:
-                pass
+        return self._snap if changed else None
 
     def _fetch_prompt(self) -> dict[str, Any]:
-        """``/prompt/current`` through the client ``_fetch`` built. Fail-open
-        (``{}``): to :func:`refreshed_prompt` a failed read and an empty one
-        are the same "keep what you have"."""
+        """``/prompt/current`` through the client ``_fetch`` built. RAISES on
+        a failed read, so the refresh can report it; the caller then holds
+        what it has, as :func:`refreshed_prompt` does for an empty answer."""
         if self._fetch_prompt_override is not None:
             return self._fetch_prompt_override()
-        if self._client is None:
+        client = self._client
+        if client is None:
             return {}
         from .transport import AttachTransport
 
         return AttachTransport(
-            self._client, agent_id=self.agent_id).prompt_current() or {}
+            client, agent_id=self.agent_id).prompt_current_or_raise()
 
     def _fetch(self) -> dict[str, Any]:
         if self._fetch_override is not None:
             return self._fetch_override()
-        if self._client is None:
+        client = self._client
+        if client is None:
             from ._http import ControlPlaneClient
             from .control_plane import resolve_control_plane_url
             from .credentials import resolve_api_key
@@ -699,10 +739,22 @@ class PolicySource:
             # max_attempts=1: see REFRESH_TIMEOUT_S. The budget has to be a
             # TOTAL, and a retry ladder inside a "bounded" refresh is how a
             # 1s promise becomes 3s plus backoff.
-            self._client = ControlPlaneClient(
+            client = ControlPlaneClient(
                 base_url=url, api_key=key,
                 timeout=REFRESH_TIMEOUT_S, max_attempts=1,
             )
+            # Published only if the handle is still open: a close() that
+            # landed while this refresh was in flight already released what it
+            # saw, and a client stored now would never be closed.
+            with self._state_lock:
+                closed = self._closed
+                if not closed:
+                    self._client = client
+            if closed:
+                client.close()
+                raise ConfigurationError(
+                    "agent-flywheel: this policy_source was closed while a "
+                    "refresh was in flight")
         from .transport import AttachTransport
 
         # THE RAISING READ. `policy_current()` fails open to `{}`, which
@@ -710,7 +762,7 @@ class PolicySource:
         # control plane then reported last_refresh_ok=True and stale_for_s=0.0
         # for as long as it was down -- the documented alert could never fire.
         return AttachTransport(
-            self._client, agent_id=self.agent_id).policy_current_or_raise()
+            client, agent_id=self.agent_id).policy_current_or_raise()
 
 
 def policy_source(

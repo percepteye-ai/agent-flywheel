@@ -27,6 +27,18 @@ at the top level of an entry, whichever shape, and a request's is never read.
 NOT EVIDENCE. A declaration is what the customer says their agent does, not an
 observation of what ran, so a declared description never anchors an execution
 identity: the callers decline one whenever this module contributed.
+
+``api_spec`` IS NOT A DESCRIPTION. It says where the agent's API spec is
+published -- an absolute http(s) URL, a REFERENCE the control plane fetches and
+parses in whatever format it is, never the document -- so Mission Control can
+annotate the agent's tools with the operations they call and ground its rewards
+in them. It is sent beside the registration as ``api_spec`` and recorded on the
+agent's Product; it changes nothing about the description, so a declaration of
+``api_spec`` alone withholds no execution identity (:attr:`Declaration.describes`).
+Optional: without it nothing is sent and nothing changes::
+
+    fw.serve("my_package.agent:build", agent_id="acme-bot",
+             describe={"api_spec": "https://api.acme.example/openapi.json"})
 """
 from __future__ import annotations
 
@@ -61,7 +73,7 @@ Describe = Mapping[str, Any] | Callable[[], Mapping[str, Any]]
 #: ``execution_sha256`` for a field that says nothing about what runs. And a
 #: description is the AGENT's, re-registered whole on every start, while the
 #: rules are its PRODUCT's, versioned and audited on their own.
-_KEYS = frozenset({"system_prompt", "tools", "model"})
+_KEYS = frozenset({"system_prompt", "tools", "model", "api_spec"})
 #: The keys ``model`` may carry as a mapping, refused otherwise for the same
 #: reason: ``{"model": "gpt-4.1"}`` inside it would register ``unknown``.
 _MODEL_KEYS = frozenset({"provider", "model_name", "temperature", "max_tokens"})
@@ -69,6 +81,9 @@ _MODEL_KEYS = frozenset({"provider", "model_name", "temperature", "max_tokens"})
 #: ``source_type`` of a description a declaration contributed to. A claim about
 #: where the description came from: the customer said it; nothing observed it.
 SOURCE_TYPE = "sdk_declared"
+
+#: The longest ``api_spec`` URL the control plane stores.
+_MAX_SPEC_URL_CHARS = 2048
 
 #: The largest integer both SDKs hold exactly. The Node plugin reads the same
 #: declaration from JSON into doubles, so a larger ``max_tokens`` would register
@@ -132,6 +147,20 @@ class Declaration:
     system_prompt: str | None = None
     tools: list[ToolDefinition] | None = None
     model: ModelConfig | None = None
+    api_spec: str | None = None
+
+    @property
+    def describes(self) -> bool:
+        """Whether any part of the agent's DESCRIPTION is declared -- what
+        replaces reflection and withholds the execution identity.
+        ``api_spec`` alone does neither."""
+        return any(p is not None
+                   for p in (self.system_prompt, self.tools, self.model))
+
+    def registration_fields(self) -> dict[str, Any]:
+        """What this declaration adds to the registration beside the
+        description: ``{"api_spec": url}``, or nothing."""
+        return {"api_spec": self.api_spec} if self.api_spec is not None else {}
 
     @property
     def complete(self) -> bool:
@@ -174,6 +203,7 @@ def resolve(describe: Describe | None) -> Declaration | None:
             f"{_key_list(_KEYS)}"
         )
     prompt, tools, model = (spec.get(k) for k in ("system_prompt", "tools", "model"))
+    api_spec = _api_spec(spec.get("api_spec"))
     if prompt is not None and not isinstance(prompt, str):
         raise ConfigurationError("describe['system_prompt'] must be a string")
     if tools is not None and not isinstance(tools, list):
@@ -183,13 +213,38 @@ def resolve(describe: Describe | None) -> Declaration | None:
         raise ConfigurationError(
             "describe['model'] must be a model name or a mapping of "
             "provider / model_name / temperature / max_tokens")
-    if prompt is None and tools is None and model is None:
+    if prompt is None and tools is None and model is None and api_spec is None:
         return None
     return Declaration(
         system_prompt=prompt[:_MAX_PROMPT_CHARS] if prompt is not None else None,
         tools=_tools(tools) if tools is not None else None,
         model=_model(model) if model is not None else None,
+        api_spec=api_spec,
     )
+
+
+def _api_spec(value: Any) -> str | None:
+    """An absolute http(s) URL with a host, trimmed, or None. A path on this
+    machine is refused by name: the control plane fetches the spec, and the
+    SDK never sends the document."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ConfigurationError(
+            f"describe['api_spec'] must be a URL string, got {_json_type(value)}")
+    text = value.strip()
+    scheme, sep, rest = text.partition("://")
+    host = rest.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    if not sep or scheme.lower() not in ("http", "https") or not host:
+        raise ConfigurationError(
+            "describe['api_spec'] must be an absolute http(s) URL where the "
+            "spec is published, got " + _render(value) + ": Mission Control "
+            "fetches the spec from it and is never sent the document")
+    if len(text) > _MAX_SPEC_URL_CHARS:
+        raise ConfigurationError(
+            f"describe['api_spec'] must be at most {_MAX_SPEC_URL_CHARS} "
+            "characters")
+    return text
 
 
 def _tools(declared: list[Any]) -> list[ToolDefinition]:
@@ -302,14 +357,14 @@ def apply(
     agent_name: str,
 ) -> DiscoveredAgent | None:
     """``reflected`` with the declared fields in place, the declaration alone
-    when nothing was reflected, or ``reflected`` unchanged when nothing was
-    declared.
+    when nothing was reflected, or ``reflected`` unchanged when no part of the
+    description was declared (``api_spec`` is not one).
 
     A part the declaration supplies stops being listed in ``incomplete``: it is
     no longer unknown. The identity digest of what was reflected is dropped --
     it covered an observation this description no longer is.
     """
-    if declared is None:
+    if declared is None or not declared.describes:
         return reflected
     base = reflected or DiscoveredAgent(agent_name=agent_name, framework="custom")
     fields: dict[str, Any] = {"source_type": SOURCE_TYPE,

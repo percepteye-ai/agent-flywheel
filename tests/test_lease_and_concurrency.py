@@ -19,7 +19,7 @@ import pytest
 from agent_flywheel import RolloutRequest
 from agent_flywheel._http import ControlPlaneClient
 from agent_flywheel.errors import LeaseLost, TransportError
-from agent_flywheel.runner import RolloutRunner
+from agent_flywheel.runner import RolloutRunner, _InFlight
 
 TESTS_DIR = str(pathlib.Path(__file__).resolve().parent)
 
@@ -314,9 +314,9 @@ def _client(handler, **kw) -> ControlPlaneClient:
 
 
 def test_an_ambiguous_failure_is_not_replayed_when_the_route_is_not_replayable():
-    """The control plane does not honour Idempotency-Key on claim, so a resend
-    after a READ timeout -- where the server may already have leased a batch --
-    leases a second one that nobody holds."""
+    """On a route with a side effect and no replay protection, a resend after
+    a READ timeout -- where the server may already have acted -- acts twice.
+    (Claim is NOT such a route: see the claim tests below.)"""
     attempts = {"n": 0}
 
     def handler(request):
@@ -325,7 +325,7 @@ def test_an_ambiguous_failure_is_not_replayed_when_the_route_is_not_replayable()
 
     with pytest.raises(TransportError):
         _client(handler).request(
-            "POST", "/rollouts/claim", json_body={}, retry_if_ambiguous=False
+            "POST", "/side-effect", json_body={}, retry_if_ambiguous=False
         )
 
     assert attempts["n"] == 1, "resent a claim that may have been processed"
@@ -342,14 +342,15 @@ def test_a_failure_that_never_reached_the_server_is_still_retried():
 
     with pytest.raises(TransportError):
         _client(handler, max_attempts=3).request(
-            "POST", "/rollouts/claim", json_body={}, retry_if_ambiguous=False
+            "POST", "/side-effect", json_body={}, retry_if_ambiguous=False
         )
 
     assert attempts["n"] == 3
 
 
 def test_a_5xx_is_not_replayed_on_a_non_replayable_route():
-    """The server may well have committed the lease before failing to answer."""
+    """The server may well have committed its side effect before failing to
+    answer."""
     attempts = {"n": 0}
 
     def handler(request):
@@ -358,28 +359,52 @@ def test_a_5xx_is_not_replayed_on_a_non_replayable_route():
 
     with pytest.raises(TransportError, match="503"):
         _client(handler).request(
-            "POST", "/rollouts/claim", json_body={}, retry_if_ambiguous=False
+            "POST", "/side-effect", json_body={}, retry_if_ambiguous=False
         )
 
     assert attempts["n"] == 1
 
 
-def test_the_claim_call_site_actually_asks_for_the_narrow_retry():
-    """Guards the CALL SITE, not just the capability. The client can support
-    narrow retries and claim can still forget to ask for them."""
+def test_a_claim_that_may_have_landed_is_resent_under_its_own_key():
+    """The control plane answers a claim resent under the same
+    Idempotency-Key with the batch it already leased. So a read timeout -- the claim may have
+    leased work -- is retried, under the SAME key, and the batch reaches
+    this worker instead of sitting unheld until its leases lapse. Guards the
+    CALL SITE: the client can retry, and claim must ask it to."""
     from agent_flywheel.transport import AttachTransport
 
-    attempts = {"n": 0}
+    keys: list[str] = []
 
     def handler(request):
-        attempts["n"] += 1
-        raise httpx.ReadTimeout("timed out reading", request=request)
+        keys.append(request.headers.get("Idempotency-Key"))
+        if len(keys) == 1:
+            raise httpx.ReadTimeout("timed out reading", request=request)
+        return httpx.Response(200, json={"rollouts": [{
+            "rollout_id": "rl_1", "turn_input": "x", "llm_url": "http://g",
+            "api_key": "k", "artifacts_dir": "rollouts/rl_1",
+            "deadline_ts": 1.0, "lease_token": "lt"}], "poll_after_ms": 1000})
 
     tr = AttachTransport(_client(handler), "agent-1")
-    with pytest.raises(TransportError):
-        tr.claim(4)
+    rollouts, _ = tr.claim(4)
 
-    assert attempts["n"] == 1, "claim replayed a request that may have leased work"
+    assert [r.rollout_id for r in rollouts] == ["rl_1"]
+    assert len(keys) == 2 and keys[0] and keys[0] == keys[1], keys
+
+
+def test_each_claim_has_a_key_of_its_own():
+    """A NEW claim must never replay the last one's batch."""
+    from agent_flywheel.transport import AttachTransport
+
+    keys: list[str] = []
+
+    def handler(request):
+        keys.append(request.headers.get("Idempotency-Key"))
+        return httpx.Response(200, json={"rollouts": [], "poll_after_ms": 1})
+
+    tr = AttachTransport(_client(handler), "agent-1")
+    tr.claim(1)
+    tr.claim(1)
+    assert len(set(keys)) == 2
 
 
 def test_a_429_is_still_retried_because_nothing_was_leased():
@@ -392,7 +417,7 @@ def test_a_429_is_still_retried_because_nothing_was_leased():
         return httpx.Response(200, json={"rollouts": [], "poll_after_ms": 1000})
 
     body = _client(handler).request(
-        "POST", "/rollouts/claim", json_body={}, retry_if_ambiguous=False
+        "POST", "/side-effect", json_body={}, retry_if_ambiguous=False
     )
 
     assert attempts["n"] == 3
@@ -667,3 +692,67 @@ def test_a_granted_lease_sets_the_interval_to_a_third_of_it(tmp_path):
     assert 28.0 <= interval <= 31.0, interval          # a third of 90s
     # and the requested lease is NOT what was used, which is the whole point
     assert interval < 600.0
+
+
+def test_no_beat_is_sent_once_the_lease_has_reached_the_deadline(tmp_path):
+    """The control plane caps a lease at the rollout's deadline, so once a
+    beat answers that cap no beat can extend it further. Paced against the
+    shrinking remainder, the beats came faster and faster up to the deadline
+    (a third of what was left, down to the 1 s floor) -- a dozen useless POSTs
+    per long rollout, in every tenant. Mutation: drop the deadline rule from
+    ``_next_beat_at`` -> the next beat is due within the remainder, red."""
+    rollout = _req(tmp_path, "rl_1", seconds=300.0)
+    answers = [rollout.deadline_ts - 200.0, rollout.deadline_ts]
+
+    class Capped(FakeTransport):
+        def heartbeat(self, r, *, progress=None):
+            super().heartbeat(r, progress=progress)
+            return answers.pop(0)
+
+    runner = _runner(tmp_path, Capped([]))
+    entry = _InFlight(rollout, 60.0, time.time())
+
+    # A lease short of the deadline: the next beat comes, sooner than the
+    # interval because a third of what is left is less.
+    runner._beat_one(entry)
+    assert entry.next_beat_at < time.time() + 60.0
+
+    # The lease reached the deadline: nothing more is due for it.
+    runner._beat_one(entry)
+    assert entry.next_beat_at == float("inf"), entry.next_beat_at - time.time()
+    assert entry.beating is False
+
+
+def test_one_malformed_rollout_costs_the_batch_nothing_and_is_given_back():
+    """One item the SDK cannot read used to raise out of the whole claim, so
+    every rollout in the batch sat leased by a worker that never saw them
+    until their leases lapsed. Now the readable ones run and the bad one is
+    abandoned at once as the SDK's own fault. Mutation: parse the batch in one
+    comprehension again -- ContractViolation, red."""
+    from agent_flywheel.transport import AttachTransport
+
+    abandoned: list[tuple[str, dict]] = []
+
+    def good(rid):
+        return {"rollout_id": rid, "turn_input": "x", "llm_url": "http://g",
+                "api_key": "k", "artifacts_dir": f"rollouts/{rid}",
+                "deadline_ts": 1.0, "lease_token": f"lt-{rid}"}
+
+    def handler(request):
+        if request.url.path.endswith("/abandon"):
+            abandoned.append((request.url.path, json.loads(request.content)))
+            return httpx.Response(200, json={"requeued": False})
+        bad = {**good("rl_bad"), "deadline_ts": "soon"}
+        return httpx.Response(200, json={
+            "rollouts": [good("rl_1"), bad, good("rl_2")], "poll_after_ms": 1000})
+
+    tr = AttachTransport(_client(handler), "agent-1")
+    rollouts, _ = tr.claim(4)
+
+    assert [r.rollout_id for r in rollouts] == ["rl_1", "rl_2"]
+    assert len(abandoned) == 1
+    path, body = abandoned[0]
+    assert path.endswith("/rollouts/rl_bad/abandon")
+    assert body["reason"] == "flywheel_crash"
+    assert body["lease_token"] == "lt-rl_bad"
+    assert "deadline_ts" in body["detail"]

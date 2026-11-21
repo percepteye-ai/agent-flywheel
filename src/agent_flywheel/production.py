@@ -45,7 +45,10 @@ disk for the next flush.
 from __future__ import annotations
 
 import atexit
+import hashlib
+import json
 import os
+import re
 import shutil
 import threading
 import time
@@ -55,8 +58,9 @@ import weakref
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 # NOT imported at module scope. `_http` pulls in httpx, which is 83-87% of
 # this package's import time and ~88% of its resident memory -- and a process
@@ -70,15 +74,28 @@ if TYPE_CHECKING:
 from . import declaration as _declaration
 from .contract import (
     _PRODUCTION_IDENTIFIER_MAX_CHARS,
+    _PRODUCTION_OUTCOME_BATCH_MAX_ITEMS,
     _PRODUCTION_TURN_BATCH_MAX_ITEMS,
+    _TURN_FEEDBACK_BATCH_MAX_ITEMS,
     _production_agent_identifier,
     _production_identifier,
     _production_turn_identifier,
+    names_only_an_episode,
+    production_outcome,
+    rfc3339_unix_nanos,
+    turn_feedback,
+    turn_feedback_on_a_span,
 )
 from .control_plane import resolve_control_plane_url
 from .declaration import Describe
 from .entrypoint import InputShape
-from .errors import ConfigurationError, TransportError
+from .errors import (
+    ConfigurationError,
+    ContractViolation,
+    InvalidFeedback,
+    InvalidOutcome,
+    TransportError,
+)
 from .execution_identity import normalize_attested_components
 from .outcomes import (
     AGENT_FINGERPRINT_FILENAME,
@@ -95,6 +112,7 @@ from .outcomes import (
     read_task_id,
     read_turn_text,
     record_turn_text,
+    turn_started_at,
 )
 from .policy import missing_credentials_cause
 from .transport import (
@@ -287,6 +305,19 @@ _FLUSH_EVERY = 32
 #: next process to attach uploads it.
 _CLOSE_FLUSH_GRACE_S = 5.0
 
+#: How long ``close()`` may spend in all, waiting for the upload lock AND
+#: flushing once it has it -- every request of that last flush included.
+#:
+#: The grace above bounded only the WAIT. Once the lock was taken the flush
+#: ran with the client's own envelope, four 30s attempts per request, for every
+#: pending batch of turns, outcomes and feedback in turn: during an outage the
+#: ``atexit`` hook held a customer's process open for minutes. Now each request
+#: is clamped to what is left of this (``ControlPlaneClient.request``'s
+#: ``deadline``), nothing new starts once it is spent, and the first failure
+#: that is not a refusal ends the flush. What it does not send is still on
+#: disk for the next process that attaches.
+_CLOSE_FLUSH_BUDGET_S = 10.0
+
 #: What :attr:`Attachment.rulebook_refusal` says while the control plane has
 #: not yet answered ``attach(rules=...)``.
 _RULEBOOK_PENDING = (
@@ -295,37 +326,68 @@ _RULEBOOK_PENDING = (
 )
 
 
-def _started_at(d: Path) -> float:
-    """When this turn STARTED, for ordering a conversation.
+#: A reported outcome waiting to be uploaded is ONE FILE in the trajectory
+#: root, ``.outcome.<digest of its id>.json``. A file and not a directory for
+#: the reason ``Attachment._UPLOADED_INDEX`` is: every directory under the
+#: root is read as a turn. One file per outcome, written whole and renamed
+#: into place, so two processes sharing a root never rewrite each other's
+#: pending outcomes; the Node SDK writes the same names.
+_OUTCOME_FILE_PREFIX = ".outcome."
+_OUTCOME_FILE_SUFFIX = ".json"
+#: Per-turn feedback waits the same way, under its own name:
+#: ``.feedback.<digest of its id>.json``. The outcomes' week and count bounds
+#: apply to it.
+_FEEDBACK_FILE_PREFIX = ".feedback."
+#: How long an outcome that could not be delivered is kept. Bounded, because
+#: an outbox nothing can drain (a control plane that has no ``/outcomes``
+#: route yet) must not grow for the life of a deployment; a week, the Node
+#: SDK's rollout outbox bound.
+_OUTCOME_MAX_AGE_S = 7 * 24 * 3600.0
+#: How many outcomes are kept while consent is still UNKNOWN (the verdict read
+#: has not been answered yet). Bounded by count as well as age, because a week
+#: of a busy agent's reports is not a small outbox; past it the oldest go, out
+#: loud. The Node SDK's ``OUTCOME_MAX_KEPT_UNANSWERED``.
+_OUTCOME_MAX_KEPT_UNANSWERED = 1000
+#: How many requests one flush may spend splitting refused ``/outcomes``
+#: batches. Isolating one bad record of 64 costs 12; the bound stops a refusal
+#: the split did not recognise as whole-batch from costing two requests per
+#: outcome, each charged against the control plane's rate limit. The Node
+#: SDK's ``OUTCOME_SPLIT_MAX_REQUESTS``.
+_OUTCOME_SPLIT_MAX_REQUESTS = 32
 
-    THE ``conversation_id`` FILE'S mtime, NOT THE DIRECTORY'S -- and that
-    distinction is the whole point. A directory's mtime advances every time a
-    file is CREATED inside it, which this module already knows and already
-    designed around once: see ``_UPLOADED_INDEX``, which is one file at the
-    root rather than a marker in each turn for exactly this reason. But a
-    turn's own capture creates files inside its directory long after the turn
-    began -- ``record_answer`` creates ``turns.jsonl`` whenever ``input_text``
-    was not passed to :meth:`Attachment.turn` (both are documented optional),
-    and the first ``record_tool_call`` creates the trajectory file. So the
-    directory's mtime says "last written to", and ordering a conversation by
-    it puts a turn whose answer arrived late AFTER the turn that followed it:
-    the conversation is uploaded in the wrong order and MC stores the wrong
-    ``turn_index`` verbatim.
 
-    The ``conversation_id`` file is written once, at scope entry, and never
-    touched again. It exists for exactly the turns that have an index at all,
-    so nothing new has to be written to get this -- and a turn that predates
-    this ordering, or whose file cannot be read, still falls back to the
-    directory mtime rather than losing its place entirely.
+def _outcome_file(root: str | os.PathLike[str], outcome_id: str) -> Path:
+    """Where the outcome with this id waits. A digest of the id, never the id:
+    a caller's id may be 255 characters, and a file name may not."""
+    digest = hashlib.sha256(outcome_id.encode("utf-8")).hexdigest()[:32]
+    return Path(root) / (
+        f"{_OUTCOME_FILE_PREFIX}{digest}{_OUTCOME_FILE_SUFFIX}")
+
+
+def _feedback_file(root: str | os.PathLike[str], feedback_id: str) -> Path:
+    """Where the feedback with this id waits (:func:`_outcome_file`)."""
+    digest = hashlib.sha256(feedback_id.encode("utf-8")).hexdigest()[:32]
+    return Path(root) / (
+        f"{_FEEDBACK_FILE_PREFIX}{digest}{_OUTCOME_FILE_SUFFIX}")
+
+
+def _rfc3339(value: Any, refusal: type[Exception] = InvalidOutcome) -> Any:
+    """``occurred_at`` as the wire spells it. ``None`` is now; an aware
+    ``datetime`` becomes UTC with milliseconds and ``Z`` (what the Node SDK's
+    ``Date.toISOString()`` writes); a string goes through untouched for the
+    validator to judge. A naive ``datetime`` is refused, as ``refusal``: it
+    names no instant.
     """
-    try:
-        return (d / CONVERSATION_ID_FILENAME).stat().st_mtime
-    except OSError:
-        pass
-    try:
-        return d.stat().st_mtime
-    except OSError:
-        return 0.0
+    if value is None:
+        value = datetime.now(timezone.utc)
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise refusal(
+                "occurred_at must carry a timezone: a naive datetime does "
+                "not say when")
+        return value.astimezone(timezone.utc).isoformat(
+            timespec="milliseconds").replace("+00:00", "Z")
+    return value
 
 
 #: How ``_http.ControlPlaneClient.request`` spells a terminal 403. It formats
@@ -335,6 +397,174 @@ def _started_at(d: Path) -> float:
 #: is a refusal read as a blip again -- which is what
 #: ``test_a_revoked_agent_stops_uploading`` is there to catch.
 _REFUSED_MARKER = "-> HTTP 403"
+
+
+#: A 4xx that is about the ROUTE or the KEY, never the records in an
+#: ``/outcomes`` batch: an absent route (404, 405 -- a control plane older
+#: than ``POST /outcomes``), a key it does not accept (401), a gone resource
+#: (410). The Node SDK's ``outcomeRouteRefused``.
+_OUTCOME_ROUTE_REFUSALS = frozenset({401, 404, 405, 410})
+#: 4xx that are neither: 403 is the consent refusal
+#: (:func:`_capture_refusal`); 408 and 429 are blips the client retried.
+_OUTCOME_NOT_A_BATCH_REFUSAL = frozenset({403, 408, 429})
+
+
+def _outcome_route_refused(status: Any) -> bool:
+    """Whether an ``/outcomes`` answer refused the route or the key, not the
+    records: sending stops for this flush and the outcomes stay."""
+    return status in _OUTCOME_ROUTE_REFUSALS
+
+
+#: The 4xx about the BODY'S SIZE (a proxy's limit, or the control plane's):
+#: never a refusal of what the batch says, so a smaller part may pass.
+_OUTCOME_TOO_LARGE = 413
+
+
+def _outcome_refused_for_size(status: Any) -> bool:
+    """Whether an ``/outcomes`` refusal was about how LARGE the body was.
+    Both halves of a batch too large for a proxy answer it in the same
+    words, so it is never read as a refusal of the batch: the split goes on,
+    and a record that draws it alone is too large on its own. The Node SDK's
+    ``outcomeRefusedForSize``."""
+    return status == _OUTCOME_TOO_LARGE
+
+
+#: A refusal's detail that NAMES A RECORD: a 422's ``loc`` carrying an item
+#: index (``["body","outcomes",3,"note"]``, as the control plane's validation
+#: answers every batch route), or a handler's ``"index"``. Read off the detail
+#: as both SDKs render it -- compact JSON, ``_http._detail`` and the Node
+#: client's ``detail`` -- so the Node SDK's ``REFUSAL_NAMES_A_RECORD`` is this
+#: pattern, byte for byte.
+_REFUSAL_NAMES_A_RECORD = re.compile(
+    r'"loc":\[(?:"(?:[^"\\]|\\.)*",)*\d+[,\]]|"index":\d')
+
+
+def _refusal_may_be_of_the_batch(status: Any, cause: str) -> bool:
+    """Whether a refusal CAN be about the batch rather than a record in it.
+
+    Never one about the body's size (:func:`_outcome_refused_for_size`), and
+    never one whose detail names a record (:data:`_REFUSAL_NAMES_A_RECORD`).
+    That location is the index WITHIN the half that was sent, so two bad
+    records at the same offset of each half answered in identical words, and
+    reading those as a refusal of the batch held every healthy record beside
+    them, flush after flush -- turns for good, since turns never expire. The
+    Node SDK's ``refusalMayBeOfTheBatch``."""
+    return (not _outcome_refused_for_size(status)
+            and not _REFUSAL_NAMES_A_RECORD.search(cause or ""))
+
+
+def _outcome_wire_bytes(wire: Mapping[str, Any]) -> int:
+    """A record's size as the wire spells it: compact JSON, UTF-8 -- the
+    Node SDK's ``Buffer.byteLength(JSON.stringify(wire))``."""
+    return len(json.dumps(wire, separators=(",", ":"),
+                          ensure_ascii=False).encode("utf-8"))
+
+
+def _outcome_batch_refused(status: Any) -> bool:
+    """Whether an ``/outcomes`` answer refused THIS BATCH: any other 4xx
+    (400, 409, 413, 422 ...). The batch is split to find the records it
+    refused, or -- both halves refused alike for what they say, never for
+    their size (:func:`_outcome_refused_for_size`) -- kept as a refusal of
+    the batch itself (``Attachment._flush_outcomes``). The Node SDK's
+    ``outcomeBatchRefused``."""
+    return (isinstance(status, int) and not isinstance(status, bool)
+            and 400 <= status < 500
+            and status not in _OUTCOME_ROUTE_REFUSALS
+            and status not in _OUTCOME_NOT_A_BATCH_REFUSAL)
+
+
+#: A 4xx that says THE ROUTE IS NOT THERE: a control plane older than it
+#: answers 404, or 405 where another method has the path. The Node SDK's
+#: ``routeAbsent``.
+_ROUTE_ABSENT = frozenset({404, 405})
+
+
+def _unanswered_outcomes_dropped(dropped: int) -> str:
+    """The one sentence for outcomes dropped by the count bound while the
+    consent question is unanswered -- its cause, which is not a refusal: the
+    control plane has not answered (it could not be reached, or did not say).
+    The Node SDK's ``unansweredOutcomesDropped``."""
+    return (
+        f"agent-flywheel: {dropped} reported outcome(s) were dropped, oldest "
+        "first: the control plane has not answered whether this agent may "
+        "upload production traffic (it could not be reached, or did not say), "
+        f"and at most {_OUTCOME_MAX_KEPT_UNANSWERED} outcomes that wait on "
+        "that answer are kept until it does.")
+
+
+def _route_absent(status: Any) -> bool:
+    """Whether an answer says the route does not exist on this control
+    plane. Every other 4xx is about the key or the records, and must never
+    be read as this: per-turn feedback deletes its queue on it
+    (``Attachment._flush_feedback``)."""
+    return status in _ROUTE_ABSENT
+
+
+class _ReportKind(NamedTuple):
+    """What ``Attachment._send_reports`` needs to know about one of the two
+    report routes: how to say it, where the reply lists its records, and how
+    to send a batch."""
+
+    #: "reported outcomes"
+    many: str
+    #: "reported outcome(s)"
+    counted: str
+    #: "an outcome"
+    one: str
+    #: The key of the reply's per-record list.
+    results: str
+    #: The key of a record's id, in the wire and in the reply.
+    id: str
+    #: The route's batch limit.
+    batch_max: int
+    #: The ``AttachTransport`` method that sends one batch.
+    send: str
+
+
+_OUTCOMES = _ReportKind(
+    "reported outcomes", "reported outcome(s)", "an outcome",
+    "outcomes", "outcome_id", _PRODUCTION_OUTCOME_BATCH_MAX_ITEMS,
+    "report_outcomes")
+_FEEDBACK = _ReportKind(
+    "per-turn feedback reports", "per-turn feedback report(s)",
+    "a feedback report", "feedback", "feedback_id",
+    _TURN_FEEDBACK_BATCH_MAX_ITEMS, "report_turn_feedback")
+_TURNS = _ReportKind(
+    "captured turns", "captured turn(s)", "a turn", "turns", "turn_id",
+    _PRODUCTION_TURN_BATCH_MAX_ITEMS, "report_turns")
+
+
+def _reply_records(reply: Any, kind: _ReportKind) -> list[Mapping[str, Any]]:
+    """The per-record answers of an acknowledged batch; ``[]`` for a reply
+    that carries none. Never raises."""
+    results = reply.get(kind.results) if isinstance(reply, Mapping) else None
+    if not isinstance(results, list):
+        return []
+    return [r for r in results if isinstance(r, Mapping)]
+
+
+def _refused_by_name(reply: Any, kind: _ReportKind) -> list[str]:
+    """Each record of an acknowledged batch the control plane did NOT record
+    (``accepted: false``), as ``<its id> (<the control plane's word>)``. The
+    Node SDK's ``refusedByName``. Never raises."""
+    return [
+        f"{r.get(kind.id) or 'unnamed'} ({r.get('error') or 'refused'})"
+        for r in _reply_records(reply, kind) if r.get("accepted") is False
+    ]
+
+
+def _notes_not_stored(reply: Any, kind: _ReportKind) -> list[str]:
+    """Each record the control plane recorded WITHOUT its note
+    (``note.stored: false``), as ``<its id> (<the control plane's word>)``.
+    The Node SDK's ``notesNotStored``. Never raises."""
+    out = []
+    for r in _reply_records(reply, kind):
+        note = r.get("note")
+        if (r.get("accepted") is True and isinstance(note, Mapping)
+                and note.get("stored") is False):
+            out.append(f"{r.get(kind.id) or 'unnamed'} "
+                       f"({note.get('error') or 'not stored'})")
+    return out
 
 
 def _capture_refusal(exc: BaseException) -> str | None:
@@ -384,6 +614,29 @@ def _recorded_anything(
     return bool(text.get("task") or text.get("answer") or calls or task_id)
 
 
+class _DeadlineBound:
+    """A ``ControlPlaneClient`` whose every request carries one deadline.
+
+    ``AttachTransport`` builds each request itself and passes no deadline, so
+    the bound is applied here, beneath it, rather than in each of its
+    methods."""
+
+    def __init__(self, client: Any, deadline: float) -> None:
+        self._client = client
+        self._deadline = deadline
+
+    def request(self, *args: Any, **kwargs: Any) -> Any:
+        kwargs.setdefault("deadline", self._deadline)
+        return self._client.request(*args, **kwargs)
+
+    @property
+    def delivery_envelope_s(self) -> float:
+        return float(self._client.delivery_envelope_s)
+
+    def close(self) -> None:
+        self._client.close()
+
+
 class Attachment:
     """A bound capture session for one process. Returned by :func:`attach`.
 
@@ -404,6 +657,7 @@ class Attachment:
         api_key: str | None = None,
         may_upload: bool = False,
         upload_refusal: str | None = None,
+        consent_refused: bool = False,
         agent_fingerprint: Mapping[str, str] | None = None,
         may_capture_model_content: bool = False,
         model_content_refusal: str | None = None,
@@ -431,6 +685,12 @@ class Attachment:
         self._retention_turns = retention_turns
         self._turns_since_prune = 0
         self._turns_since_flush = 0
+        #: Turns whose ``with px.turn()`` scope is open in this process, by
+        #: id (a count, since an id may be reused). Neither uploaded nor
+        #: pruned while open: their tool calls are still being written, so an
+        #: upload would send a truncated turn, and a prune would delete the
+        #: directory under the code running in it.
+        self._active_turns: dict[str, int] = {}
         self._lock = threading.Lock()
         #: SEPARATE FROM ``_lock`` on purpose. ``_lock`` guards the turn
         #: counters and is taken on the request path; an upload holding it
@@ -449,6 +709,26 @@ class Attachment:
         self.may_upload = may_upload
         #: Why not, in a sentence, when it is False and the control plane said.
         self.upload_refusal = upload_refusal
+        #: Whether the control plane SAID NO -- an answered verdict, or the
+        #: intake's 403 -- as opposed to not having answered yet (a
+        #: registration that failed on a blip). ``may_upload`` is False in
+        #: both, and they are different facts: an outcome reported while the
+        #: answer is UNKNOWN is kept for the flush that re-asks, and only an
+        #: explicit no makes :meth:`report_outcome` a no-op.
+        self._consent_refused = bool(consent_refused and not may_upload)
+        #: The cause of the last whole-batch refusal said out loud, per kind
+        #: of report (:meth:`_warn_whole_batch_refusal`), so it is said once.
+        self._batch_refusal_said: dict[str, str] = {}
+        #: The control plane refused an outcome that names only an episode
+        #: while production capture is not enabled -- one that predates the
+        #: episode join. Said once; no more are sent on those terms by this
+        #: process (:meth:`_refuse_episode_outcomes`).
+        self._episode_outcomes_refused = False
+        #: The control plane will not take per-turn feedback from this
+        #: process: it has no such route (404, 405 -- what was waiting was
+        #: dropped) or it refused this key (403 -- what was waiting stays on
+        #: disk). Said once; after it :meth:`report_turn_feedback` is a no-op.
+        self._turn_feedback_refused = False
         #: THE SECOND CONSENT TIER, as the control plane last said it: may a
         #: turn also carry what its model calls saw and said -- the system
         #: prompt, the whole conversation history, the tool definitions and
@@ -482,6 +762,26 @@ class Attachment:
         #: at startup OR later, and can be taken away and re-granted, so the
         #: hook is claimed once rather than once per grant.
         self._exit_flush_registered = False
+        #: The absolute ``time.time()`` past which the flush in progress may
+        #: start no request, or ``None``: set by :meth:`close` for its last
+        #: flush (:data:`_CLOSE_FLUSH_BUDGET_S`), under ``_flush_lock``.
+        self._deadline: float | None = None
+
+    def _control_plane(self) -> Any:
+        """A client for one flush's requests, bounded by :attr:`_deadline`
+        when one is set: every request it sends is clamped to the time left.
+        The one place an attachment builds its client. Raises what building
+        one raises."""
+        from ._http import ControlPlaneClient
+
+        client = ControlPlaneClient(self._cp_url, self._api_key)
+        deadline = self._deadline
+        return client if deadline is None else _DeadlineBound(client, deadline)
+
+    def _past_deadline(self) -> bool:
+        """Whether the flush in progress may start no further request."""
+        deadline = self._deadline
+        return deadline is not None and time.time() >= deadline
 
     @property
     def rulebook(self) -> RulebookReceipt | None:
@@ -546,7 +846,8 @@ class Attachment:
 
         Yields the turn id, which the caller should keep: it is the join key
         for any outcome that arrives later than the turn does -- the draft was
-        kept an hour afterwards, the pull request merged the next morning.
+        kept an hour afterwards, the pull request merged the next morning --
+        and :meth:`report_outcome` is how that outcome is reported.
 
         A turn boundary is DECLARED rather than inferred. Guessing where one
         request ends and the next begins is the same class of guess this SDK
@@ -596,6 +897,42 @@ class Attachment:
             _production_turn_identifier(turn_id)
             or f"t_{uuid.uuid4().hex[:16]}"
         )
+        # ONE counter block for both cadences, because they are the same
+        # question -- "is periodic maintenance due?" -- asked twice. They were
+        # split while only pruning existed and the flush counter was added
+        # beside it; two lock acquisitions per turn on the request path for one
+        # answer is the kind of duplication that drifts.
+        #
+        # The turn is OPEN from here, before anything of it is on disk, so no
+        # flush or prune on another thread sees a directory it is still
+        # writing.
+        with self._lock:
+            self._active_turns[tid] = self._active_turns.get(tid, 0) + 1
+            self._turns_since_prune += 1
+            self._turns_since_flush += 1
+            prune_due = (self._retention_turns is not None
+                         and self._turns_since_prune >= _PRUNE_EVERY)
+            if prune_due:
+                self._turns_since_prune = 0
+            flush_due = self._turns_since_flush >= _FLUSH_EVERY
+            if flush_due:
+                self._turns_since_flush = 0
+        try:
+            yield from self._open_turn(
+                tid, conversation_id, task_id, input_text,
+                prune_due=prune_due, flush_due=flush_due)
+        finally:
+            with self._lock:
+                left = self._active_turns.get(tid, 0) - 1
+                if left > 0:
+                    self._active_turns[tid] = left
+                else:
+                    self._active_turns.pop(tid, None)
+
+    def _open_turn(self, tid: str, conversation_id: str | None,
+                   task_id: str | None, input_text: str | None, *,
+                   prune_due: bool, flush_due: bool) -> Iterator[str]:
+        """The body of :meth:`turn`, between its open and its close."""
         effective_conversation_id = _production_identifier(conversation_id)
         path = Path(self.trajectory_root) / tid
         validated_task_id = _normalize_task_id(task_id)
@@ -622,21 +959,6 @@ class Attachment:
                              conversation_id=effective_conversation_id or "",
                              task_id=effective_task_id or "",
                              execution_sha256=self._execution_sha256 or "")
-        # ONE counter block for both cadences, because they are the same
-        # question -- "is periodic maintenance due?" -- asked twice. They were
-        # split while only pruning existed and the flush counter was added
-        # beside it; two lock acquisitions per turn on the request path for one
-        # answer is the kind of duplication that drifts.
-        with self._lock:
-            self._turns_since_prune += 1
-            self._turns_since_flush += 1
-            prune_due = (self._retention_turns is not None
-                         and self._turns_since_prune >= _PRUNE_EVERY)
-            if prune_due:
-                self._turns_since_prune = 0
-            flush_due = self._turns_since_flush >= _FLUSH_EVERY
-            if flush_due:
-                self._turns_since_flush = 0
         if prune_due:
             self.prune(keep_last=self._retention_turns)
         if flush_due:
@@ -651,6 +973,11 @@ class Attachment:
                            execution_sha256=self._execution_sha256,
                            model_content=self.may_capture_model_content):
             yield tid
+
+    def _open_turns(self) -> set[str]:
+        """The ids of the turns whose scope is open in this process."""
+        with self._lock:
+            return set(self._active_turns)
 
     def record_answer(self, turn_id: str, text: str) -> bool:
         """Record what the agent finally answered for one turn.
@@ -680,9 +1007,744 @@ class Attachment:
         )
         return record_turn_text(
             path, "answer", text, turn_id=safe_turn_id,
+            # The turn's own, as its question's record and span carry it:
+            # without it the answer's span named no conversation.
+            conversation_id=read_conversation_id(path) or "",
             task_id=read_task_id(path) or "",
             execution_sha256=execution_sha256 or "",
         )
+
+    def report_outcome(
+        self,
+        outcome: str,
+        *,
+        turn_id: str | None = None,
+        conversation_id: str | None = None,
+        value: float | None = None,
+        note: str | None = None,
+        occurred_at: datetime | str | None = None,
+        outcome_id: str | None = None,
+        episode_id: str | None = None,
+    ) -> str | None:
+        """Tell the control plane how a turn, a conversation or an episode
+        turned out.
+
+        The outcome that arrives later than the turn does: the case was
+        ``"resolved"``, ``"escalated"`` to a person, ``"reopened"`` or
+        ``"abandoned"``, or the end user gave a ``"thumbs_up"`` or
+        ``"thumbs_down"``. Name what it is the outcome of with the ``turn_id``
+        :meth:`turn` yielded, the ``conversation_id`` you passed it, or both.
+        Report as many as happen -- resolved today, reopened next week -- each
+        is recorded and none replaces another.
+
+        FOR AN EPISODE THE PLATFORM RAN (an environment or simulation
+        rollout), pass ``episode_id``: the ``rollout_id`` your entrypoint was
+        handed with it (``current_rollout_id()`` inside the rollout). The
+        report joins that episode's reward evidence as a weak reading. An
+        outcome that names ONLY an episode carries nothing about your end
+        users' traffic, so it is queued and sent whether or not production
+        capture is enabled; it needs only a control plane to send to. A
+        control plane that predates the join refuses it, which is said once,
+        and no more are sent on those terms by this process.
+
+        ``value`` is an optional number of your own (an order value, a
+        satisfaction score); ``note`` an optional short remark, at most 1,000
+        characters, masked for personal data by the control plane before it
+        is stored; ``occurred_at`` when it happened (an aware ``datetime`` or
+        an RFC 3339 string), now when omitted. ``outcome_id`` is this
+        report's idempotency key: leave it out and one is minted; pass your
+        own stable id to make your own retries of the same report collapse.
+
+        A WEAK LABEL, not a grade. It is your report of what happened next;
+        it does not score the turn and nothing is trained on it directly.
+
+        Returns the outcome's id once it is queued for upload, or ``None``
+        when nothing was queued. IT IS A NO-OP ONCE THE CONTROL PLANE HAS SAID
+        PRODUCTION CAPTURE IS NOT ENABLED for this agent, or with no control
+        plane to ask: an outcome is a fact about your end users' traffic, so
+        it is sent on exactly the terms a turn is, and nothing is kept locally
+        for an agent that may not send it. While the answer is still UNKNOWN
+        (the registration that asks failed on a blip) the outcome is kept, and
+        reporting it starts the flush that asks again; it is sent once the
+        answer is yes. At most 1,000 are kept while it is unknown; past that
+        the oldest are dropped, with a warning.
+
+        Queued, then uploaded off the calling thread with the turns' own
+        retry behaviour: the outcome waits on disk under ``trajectory_root``
+        until the control plane acknowledges it, survives a restart, and is
+        given up on (with a warning) only after a week undelivered, or at
+        once, with a warning naming the cause, when the control plane refuses
+        that record (a 4xx about the record; the rest of the batch is sent).
+        A refusal of the whole batch -- every part of it refused alike --
+        keeps the outcomes for a later flush instead.
+
+        Raises :class:`~agent_flywheel.errors.InvalidOutcome` -- before
+        anything is stored, capture enabled or not -- for a word outside the
+        vocabulary, no turn, conversation or episode, or an id, number, note
+        or time the wire cannot carry. Nothing else here raises.
+        """
+        wire: dict[str, Any] = {
+            "outcome_id": (
+                f"o_{uuid.uuid4().hex}" if outcome_id is None else outcome_id
+            ),
+            "outcome": outcome,
+            "occurred_at": _rfc3339(occurred_at),
+        }
+        for name, given in (
+            ("turn_id", turn_id), ("conversation_id", conversation_id),
+            ("episode_id", episode_id), ("value", value), ("note", note),
+        ):
+            if given is not None:
+                wire[name] = given
+        wire = production_outcome(wire)
+        if not self.may_upload:
+            if not (self._cp_url and self._api_key):
+                # Nothing to ask and nothing to send to.
+                return None
+            if names_only_an_episode(wire):
+                # Not about end users' traffic: consent is not its question.
+                if self._episode_outcomes_refused:
+                    return None
+            elif self._consent_refused:
+                # An explicit no: nothing will ever say yes to this outcome,
+                # so nothing is kept. While the answer is merely UNKNOWN it
+                # is kept, and ``_flush_soon`` below re-asks.
+                return None
+        path = _outcome_file(self.trajectory_root, wire["outcome_id"])
+        partial = path.with_name(path.name + ".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            partial.write_text(
+                json.dumps(wire, sort_keys=True), encoding="utf-8")
+            os.replace(partial, path)
+        except OSError:
+            # Capture costs the observation, never the caller.
+            return None
+        if not self.may_upload and not names_only_an_episode(wire):
+            # Only an outcome consent is the question for waits on its
+            # answer; one naming only an episode is sent regardless.
+            self._cap_unanswered_outcomes()
+        self._flush_soon()
+        return str(wire["outcome_id"])
+
+    def report_turn_feedback(
+        self,
+        signal: str,
+        *,
+        episode_id: str | None = None,
+        turn_index: int | None = None,
+        occurred_at: datetime | str | None = None,
+        feedback_id: str | None = None,
+        turn_id: str | None = None,
+    ) -> str | None:
+        """Tell the control plane what the user did with one turn of an
+        episode -- or with one production turn, named by ``turn_id``.
+
+        ``signal`` is what your application already knows: the user
+        ``"accepted"`` the answer, ``"corrected"`` it, ``"repeated"`` the
+        request, ``"escalated"`` to a person or ``"abandoned"`` the task.
+        ``episode_id`` is the ``rollout_id`` your entrypoint was handed with
+        the episode (``current_rollout_id()`` inside it) and ``turn_index``
+        the zero-based position of the turn in it. ``occurred_at`` is when it
+        happened (an aware ``datetime`` or an RFC 3339 string), now when
+        omitted. ``feedback_id`` is this report's idempotency key: leave it
+        out and one is minted. Report as many as happen -- corrected, then
+        accepted -- each is its own record.
+
+        A WEAK LABEL, and not an outcome: it does not score the turn, it is
+        stored apart from reported outcomes, and nothing is trained on it
+        directly.
+
+        Returns the feedback's id once it is queued for upload, or ``None``
+        when nothing was queued: with no control plane to send to, or once
+        the control plane has refused feedback (said once, and nothing more
+        is queued or sent by this process: one that predates the route
+        answers 404, and what was waiting is dropped; a 403 is its decision
+        about this key, and what was waiting stays on disk for its week). A
+        report it refuses by name is said by its id and not sent again.
+        It needs no production-capture consent: it carries ids, one word and
+        a time. Queued as one file under ``trajectory_root`` and uploaded off
+        the calling thread; kept across a blip for at most a week.
+
+        A PRODUCTION TURN (``turn_id=``, the id :meth:`turn` yielded, in
+        place of ``episode_id`` and ``turn_index``) has no episode for that
+        route to join. Its feedback goes where its turn went: an event on the
+        turn's trace, through your TracerProvider
+        (``tracing.record_turn_feedback_span``: a span linked to the turn's,
+        carrying ``percepteye.turn.feedback`` at ``occurred_at``), which an
+        OTLP export to the control plane delivers with the turn. It returns
+        the feedback's id once that span is recorded, and ``None`` when
+        nothing records it (no OpenTelemetry, no provider): nothing is queued
+        for it, because no route takes it.
+
+        Raises :class:`~agent_flywheel.errors.InvalidFeedback` -- before
+        anything is stored -- for a word outside the vocabulary (the message
+        names the allowed ones), an episode id, turn index, turn id or time
+        the wire cannot carry, or a turn named both ways. Nothing else here
+        raises, and no answer of the control plane ever reaches the caller.
+        """
+        if turn_id is not None:
+            return self._report_turn_feedback_on_its_span(
+                signal, turn_id=turn_id, named_an_episode=(
+                    episode_id is not None or turn_index is not None),
+                occurred_at=occurred_at, feedback_id=feedback_id)
+        wire = turn_feedback({
+            "feedback_id": (
+                f"f_{uuid.uuid4().hex}" if feedback_id is None
+                else feedback_id
+            ),
+            "episode_id": episode_id,
+            "turn_index": turn_index,
+            "signal": signal,
+            "occurred_at": _rfc3339(occurred_at, InvalidFeedback),
+        })
+        if self._turn_feedback_refused or not (
+                self._cp_url and self._api_key):
+            return None
+        path = _feedback_file(self.trajectory_root, wire["feedback_id"])
+        partial = path.with_name(path.name + ".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            partial.write_text(
+                json.dumps(wire, sort_keys=True), encoding="utf-8")
+            os.replace(partial, path)
+        except OSError:
+            # Capture costs the observation, never the caller.
+            return None
+        self._flush_soon()
+        return str(wire["feedback_id"])
+
+    def _report_turn_feedback_on_its_span(
+        self, signal: str, *, turn_id: str, named_an_episode: bool,
+        occurred_at: datetime | str | None, feedback_id: str | None,
+    ) -> str | None:
+        """:meth:`report_turn_feedback` for a production turn: validated by
+        ``contract.turn_feedback_on_a_span``, emitted by
+        ``tracing.record_turn_feedback_span``. The id once recorded, else
+        ``None``."""
+        if named_an_episode:
+            raise InvalidFeedback(
+                "feedback names one turn: a production turn's turn_id, or an "
+                "episode's episode_id and turn_index, not both")
+        wire = turn_feedback_on_a_span({
+            "feedback_id": (
+                f"f_{uuid.uuid4().hex}" if feedback_id is None
+                else feedback_id
+            ),
+            "turn_id": turn_id,
+            "signal": signal,
+            "occurred_at": _rfc3339(occurred_at, InvalidFeedback),
+        })
+        from .tracing import record_turn_feedback_span
+
+        recorded = record_turn_feedback_span(
+            turn_id=wire["turn_id"], signal=wire["signal"],
+            occurred_at_unix_nano=rfc3339_unix_nanos(wire["occurred_at"]),
+            feedback_id=wire["feedback_id"])
+        return str(wire["feedback_id"]) if recorded else None
+
+    def _flush_feedback(self) -> dict[str, int]:
+        """Upload the per-turn feedback waiting on disk. Caller holds
+        ``_flush_lock``. Never raises.
+
+        THE OUTCOMES' RULES, through the outcomes' own sender
+        (:meth:`_send_reports`): an acknowledged batch is deleted, and a
+        report the control plane refused by name inside it is said by name
+        and not sent again; a blip leaves what is waiting for the next flush,
+        bounded by the outcomes' week and count; a 403 is its decision (a key
+        without the scope, a key bound elsewhere), so sending stops for this
+        process and what is waiting stays on disk; a 401 or 410 stops this
+        flush and it stays; any other 4xx is about the records, so the batch
+        is split and only the report it refused is dropped.
+
+        ONE DIFFERENCE: AN ABSENT ROUTE (:func:`_route_absent`, 404 or 405)
+        is a control plane that predates per-turn feedback, and nothing will
+        ever take what is waiting. It is dropped, said once, and
+        :meth:`report_turn_feedback` is a no-op for the rest of the process.
+
+        Counts, only when feedback was waiting: ``feedback_sent``,
+        ``feedback_failed`` (still on disk), ``feedback_dropped``.
+        """
+        files = self._queued_files(_FEEDBACK_FILE_PREFIX)
+        now = time.time()
+
+        def _age(path: Path) -> float:
+            try:
+                return path.stat().st_mtime
+            except OSError:
+                return 0.0
+
+        files.sort(key=lambda p: (_age(p), p.name))
+        stale = [p for p in files if now - _age(p) > _OUTCOME_MAX_AGE_S]
+        excess = len(files) - len(stale) - _OUTCOME_MAX_KEPT_UNANSWERED
+        fresh = [p for p in files if p not in stale]
+        dropped = 0
+        for path in stale + fresh[:max(excess, 0)]:
+            try:
+                path.unlink()
+                dropped += 1
+            except OSError:
+                pass
+        pending: list[tuple[Path, dict[str, Any]]] = []
+        for path in fresh[max(excess, 0):]:
+            try:
+                pending.append((path, turn_feedback(
+                    json.loads(path.read_text(encoding="utf-8")))))
+            except (OSError, ValueError, InvalidFeedback):
+                # Unreadable or not ours to send; one file costs that file.
+                continue
+        if not pending or self._turn_feedback_refused:
+            return {"feedback_dropped": dropped} if dropped else {}
+        sent, failed, refused = self._send_reports(
+            pending, _FEEDBACK,
+            on_refusal=self._refuse_turn_feedback,
+            on_absent=self._turn_feedback_absent)
+        return {"feedback_sent": sent, "feedback_failed": failed,
+                "feedback_dropped": dropped + refused}
+
+    def _refuse_turn_feedback(self, reason: str) -> None:
+        """The control plane refused per-turn feedback (a 403: its decision
+        about this key). Said ONCE; what is waiting stays on disk for its
+        week, and no more is queued or sent by this process. Never raises."""
+        if self._turn_feedback_refused:
+            return
+        self._turn_feedback_refused = True
+        self._warn(
+            "agent-flywheel: the control plane refused per-turn feedback "
+            f"({reason}). What is waiting stays on disk and no more is sent "
+            "by this process.")
+
+    def _turn_feedback_absent(self, reason: str) -> None:
+        """The control plane has no per-turn feedback route (404, 405): it
+        predates it. Said ONCE; the sender has dropped what was waiting, and
+        no more is queued or sent by this process. Never raises."""
+        if self._turn_feedback_refused:
+            return
+        self._turn_feedback_refused = True
+        self._warn(
+            "agent-flywheel: the control plane did not take per-turn "
+            f"feedback ({reason}); it may predate it. What was waiting is "
+            "dropped and no more is sent by this process.")
+
+    def _queued_files(self, prefix: str) -> list[Path]:
+        """The files with this prefix waiting in the trajectory root, in name
+        order. Never raises: an unreadable root is an empty queue."""
+        try:
+            return sorted(
+                p for p in Path(self.trajectory_root).iterdir()
+                if p.name.startswith(prefix)
+                and p.name.endswith(_OUTCOME_FILE_SUFFIX) and p.is_file()
+            )
+        except OSError:
+            return []
+
+    def _outcome_files(self) -> list[Path]:
+        """The outcome files waiting in the trajectory root, in name order.
+        Never raises: an unreadable root is an empty queue."""
+        return self._queued_files(_OUTCOME_FILE_PREFIX)
+
+    def _cap_unanswered_outcomes(self) -> None:
+        """While consent is UNKNOWN, keep at most
+        :data:`_OUTCOME_MAX_KEPT_UNANSWERED` of the outcomes that wait on it:
+        the oldest (by when they were written, then by name) go, with a
+        warning naming that cause. An outcome that names only an episode
+        (``contract.names_only_an_episode``) does not wait on consent, so it
+        is neither counted nor dropped here. Never raises."""
+        files = self._outcome_files()
+        if len(files) <= _OUTCOME_MAX_KEPT_UNANSWERED:
+            return
+        waiting: list[Path] = []
+        for path in files:
+            try:
+                wire = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not (isinstance(wire, Mapping) and names_only_an_episode(wire)):
+                waiting.append(path)
+        excess = len(waiting) - _OUTCOME_MAX_KEPT_UNANSWERED
+        if excess <= 0:
+            return
+
+        def _age(path: Path) -> tuple[float, str]:
+            try:
+                return (path.stat().st_mtime, path.name)
+            except OSError:
+                return (0.0, path.name)
+
+        dropped = 0
+        for path in sorted(waiting, key=_age)[:excess]:
+            try:
+                path.unlink()
+                dropped += 1
+            except OSError:
+                continue
+        if dropped:
+            self._warn(_unanswered_outcomes_dropped(dropped))
+
+    def _expire_outcomes(self) -> list[Path]:
+        """Drop the outcomes undelivered for a week, out loud; the rest, in
+        name order. Runs on EVERY flush, whatever consent says: the bound used
+        to live inside the upload, which runs only once consent is yes, so an
+        outcome kept while the answer was unknown -- or after a refusal --
+        never expired. Never raises."""
+        kept: list[Path] = []
+        expired = 0
+        now = time.time()
+        for path in self._outcome_files():
+            try:
+                if now - path.stat().st_mtime > _OUTCOME_MAX_AGE_S:
+                    path.unlink()
+                    expired += 1
+                    continue
+            except OSError:
+                continue
+            kept.append(path)
+        if expired:
+            self._warn(
+                f"agent-flywheel: {expired} reported outcome(s) could not be "
+                f"delivered for a week and were dropped.")
+        return kept
+
+    def _refuse_episode_outcomes(self, reason: str) -> None:
+        """The control plane refused outcomes that name only an episode, for
+        want of production capture: it predates the episode join (or has it
+        switched off). Said ONCE; they stay on disk, go with the rest if
+        capture is enabled, and no more are queued or sent on those terms by
+        this process. Never raises."""
+        if self._episode_outcomes_refused:
+            return
+        self._episode_outcomes_refused = True
+        self._warn(
+            "agent-flywheel: the control plane did not take outcomes "
+            f"reported for an episode ({reason}); it may predate them. They "
+            "stay on disk and no more are sent by this process unless "
+            "production capture is enabled.")
+
+    def _flush_outcomes(
+        self, files: list[Path], *, episodes_only: bool = False,
+    ) -> dict[str, int]:
+        """Upload the outcomes waiting on disk (``files``, already past
+        :meth:`_expire_outcomes`). Caller holds ``_flush_lock`` and has
+        established :attr:`may_upload` -- or passes ``episodes_only``, which
+        sends just the outcomes that name an episode and nothing else
+        (``contract.names_only_an_episode``), the ones consent is not the
+        question for; a 403 then stops those alone
+        (:meth:`_refuse_episode_outcomes`). Never raises. The rules are
+        :meth:`_send_reports`'s.
+
+        Counts: ``outcomes_sent``, the outcomes the control plane recorded;
+        ``outcomes_failed``, the outcomes still on disk for a later flush,
+        each counted once; ``outcomes_dropped``, the records the control
+        plane refused.
+        """
+        pending: list[tuple[Path, dict[str, Any]]] = []
+        for path in files:
+            try:
+                pending.append((path, production_outcome(
+                    json.loads(path.read_text(encoding="utf-8")))))
+            except (OSError, ValueError, InvalidOutcome):
+                # Unreadable or not ours to send; one file costs that file.
+                continue
+        if episodes_only:
+            pending = [p for p in pending if names_only_an_episode(p[1])]
+        if not pending:
+            return {}
+        sent, failed, refused = self._send_reports(
+            pending, _OUTCOMES,
+            on_refusal=(self._refuse_episode_outcomes if episodes_only
+                        else self._refuse_upload))
+        return {"outcomes_sent": sent, "outcomes_failed": failed,
+                "outcomes_dropped": refused}
+
+    def _send_reports(
+        self,
+        pending: list[tuple[Path, dict[str, Any]]],
+        kind: _ReportKind,
+        *,
+        on_refusal: Any,
+        on_absent: Any = None,
+        batch_size: int | None = None,
+        forget: Any = None,
+        on_reply: Any = None,
+        stop_on_blip: bool = False,
+    ) -> tuple[int, int, int]:
+        """Send the reports waiting on disk -- outcomes, per-turn feedback or
+        captured turns, ``kind`` says which -- and return ``(sent, failed,
+        dropped)``: the ones the control plane recorded, the ones still on
+        disk for a later flush (each counted once), the ones it refused.
+        Caller holds ``_flush_lock``. Never raises.
+
+        ONE SENDER FOR EVERY ROUTE. Feedback had its own, which read every
+        final 4xx as "the route is not there" and deleted the queue for it;
+        turns had their own, which had no split at all, so one turn a proxy
+        refused for its size (413) or the intake refused as a batch held back
+        every healthy turn beside it on every flush.
+
+        What a TURN differs in is passed: ``forget`` is what is done with a
+        batch that will not be sent again (default: delete its files; a turn
+        directory is the customer's copy and is marked uploaded instead),
+        ``on_reply`` reads an acknowledged batch's reply, ``batch_size``
+        overrides ``kind.batch_max``, and ``stop_on_blip`` ends the flush at
+        the first blip, where the next batch would wait out the same outage.
+
+        THE TURNS' RULES: a batch the control plane acknowledged is deleted;
+        a 403 is its decision, so sending stops (``on_refusal`` is told its
+        words) and the reports stay on disk; a blip (no answer, a 5xx, a 408
+        or 429 that outlasted the retries) leaves the batch for the next
+        flush.
+
+        A REPORT REFUSED BY NAME inside an acknowledged batch
+        (``accepted: false`` -- a conflicting replay, an unknown episode)
+        would be refused again: it is not sent again, it counts as dropped
+        and not as sent, and it is said BY ITS ID with the control plane's
+        own word (:func:`_refused_by_name`). An outcome recorded without its
+        note is said the same way (:func:`_notes_not_stored`).
+
+        A 4xx ABOUT THE RECORDS IS FINAL FOR THEM
+        (:func:`_outcome_batch_refused`). A refused batch is split in halves,
+        and BOTH halves are tried before either is split again: the good ones
+        are sent, and each bad one, once it stands alone, is dropped with a
+        warning naming the control plane's own cause.
+
+        Unless both halves are refused with the same status and the same
+        words: then the refusal was about THE BATCH, not a record in it -- a
+        422 from a control plane on another contract minor, a proxy's 400 --
+        and splitting further would drop every report at two requests each.
+        Sending stops for this flush, they stay on disk (the week's expiry
+        still applies), and the cause is said once. Never when the words NAME
+        A RECORD (:func:`_refusal_may_be_of_the_batch`): a 422's location is
+        the index within the half, so two bad records at one offset of each
+        half say the same words, and the split goes on to isolate them.
+
+        Except a 413 (:func:`_outcome_refused_for_size`): it is about the
+        body's SIZE, so both halves of a batch too large for a proxy answer
+        it alike, and smaller parts may still pass. The split goes on; a
+        record that draws a 413 standing alone is too large on its own, and
+        is dropped with a warning naming the 413 and its size.
+
+        A BATCH OF ONE THAT WAS NEVER SPLIT has nothing beside it to compare
+        with, so a refusal of it cannot be told from a refusal of the batch:
+        it is kept for a later flush, where it travels with others, and said
+        once. (Every ``report_outcome`` flushes; reading that refusal as the
+        record's dropped each outcome a control plane on another contract
+        minor refused whole.) Unless its words name the record: that refusal
+        is the record's, and it is dropped like any record refused alone.
+
+        Splitting is bounded per flush (:data:`_OUTCOME_SPLIT_MAX_REQUESTS`);
+        what the bound leaves unsent stays for the next flush.
+
+        A 4xx about the ROUTE or the KEY (401, 404, 405, 410) is not the
+        records' fault either: sending stops for this flush and they stay on
+        disk, said out loud. Unless the caller passes ``on_absent`` and the
+        route is ABSENT (:func:`_route_absent`): then everything waiting is
+        dropped, counted as dropped, and ``on_absent`` is told the words.
+        """
+        size = batch_size or kind.batch_max
+        Batch = list[tuple[Path, dict[str, Any]]]
+        # Every GROUP still to send, in order: a batch on its own, or the two
+        # halves of one refused batch, which are tried together. A refused
+        # half's own halves go back to the front.
+        queue: list[list[Batch]] = [
+            [pending[i:i + size]] for i in range(0, len(pending), size)]
+        sent = failed = split_requests = absent = 0
+        dropped: list[str] = []
+        by_name: list[str] = []
+        noteless: list[str] = []
+        client = None
+
+        def _left() -> int:
+            return sum(len(b) for group in queue for b in group)
+
+        def _forget(batch: Batch) -> None:
+            if forget is not None:
+                forget(batch)
+                return
+            for path, _wire in batch:
+                try:
+                    path.unlink()
+                except OSError:
+                    # Resent next flush; the intake answers a duplicate.
+                    pass
+
+        try:
+            from .transport import AttachTransport
+
+            client = self._control_plane()
+            send = getattr(AttachTransport(client, self.agent_id), kind.send)
+            while queue:
+                group = queue.pop(0)
+                if self._past_deadline():
+                    # close()'s budget is spent: nothing new starts.
+                    failed += sum(len(b) for b in group) + _left()
+                    queue.clear()
+                    break
+                halves = len(group) == 2
+                if halves and (split_requests + 2
+                               > _OUTCOME_SPLIT_MAX_REQUESTS):
+                    failed += sum(len(b) for b in group) + _left()
+                    queue.clear()
+                    self._warn(
+                        f"agent-flywheel: the control plane refused "
+                        f"{kind.many}, and finding which ones reached "
+                        f"{_OUTCOME_SPLIT_MAX_REQUESTS} requests in this "
+                        "flush; the rest stay on disk for a later flush.")
+                    break
+                refused: list[tuple[Batch, tuple[int, str]]] = []
+                stop = False
+                for index, batch in enumerate(group):
+                    if halves:
+                        split_requests += 1
+                    try:
+                        reply = send(
+                            self.agent_id, [wire for _, wire in batch])
+                    except Exception as exc:
+                        # Kept by a stop: this half, the half not tried
+                        # yet, a half already refused beside it, the queue.
+                        beside = ([r for b in group[index + 1:] for r in b]
+                                  + [r for b, _ in refused for r in b])
+                        untried = len(beside)
+                        refusal = _capture_refusal(exc)
+                        if refusal is not None:
+                            on_refusal(refusal)
+                            failed += len(batch) + untried + _left()
+                            queue.clear()
+                            stop = True
+                            break
+                        status = getattr(exc, "status_code", None)
+                        if isinstance(exc, ContractViolation):
+                            # Refused before it left, by the transport's own
+                            # check of the records: about them, never a blip
+                            # that a retry of the same bytes could clear.
+                            status = 422
+                        if on_absent is not None and _route_absent(status):
+                            gone = batch + beside + [
+                                r for g in queue for b in g for r in b]
+                            _forget(gone)
+                            absent += len(gone)
+                            queue.clear()
+                            on_absent(str(exc))
+                            stop = True
+                            break
+                        if _outcome_batch_refused(status):
+                            refused.append((batch, (status, str(exc))))
+                            continue
+                        if _outcome_route_refused(status):
+                            failed += len(batch) + untried + _left()
+                            queue.clear()
+                            # A 410 is a ``LeaseLost``, whose words are the
+                            # detail alone: the status is named either way.
+                            said = str(exc)
+                            if f"HTTP {status}" not in said:
+                                said = f"HTTP {status}: {said}"
+                            self._warn(
+                                "agent-flywheel: the control plane did not "
+                                f"take {kind.many} ({said}); they stay "
+                                "on disk and are sent again on a later "
+                                "flush.")
+                            stop = True
+                            break
+                        failed += len(batch)
+                        if stop_on_blip or self._deadline is not None:
+                            # close()'s last flush: a blip ends it. The next
+                            # batch would wait out the same outage.
+                            failed += untried + _left()
+                            queue.clear()
+                            stop = True
+                            break
+                        continue
+                    _forget(batch)
+                    if on_reply is not None:
+                        on_reply(reply)
+                    named = _refused_by_name(reply, kind)[:len(batch)]
+                    by_name.extend(named)
+                    noteless.extend(_notes_not_stored(reply, kind))
+                    sent += len(batch) - len(named)
+                if stop:
+                    break
+                if (halves and len(refused) == 2
+                        and refused[0][1] == refused[1][1]
+                        and _refusal_may_be_of_the_batch(*refused[0][1])):
+                    failed += sum(len(b) for b, _ in refused) + _left()
+                    queue.clear()
+                    self._warn_whole_batch_refusal(kind, refused[0][1][1])
+                    break
+                if (not halves and refused and len(refused[0][0]) == 1
+                        and _refusal_may_be_of_the_batch(*refused[0][1])):
+                    failed += 1
+                    self._warn_whole_batch_refusal(
+                        kind, refused[0][1][1], alone=True)
+                    continue
+                split: list[list[Batch]] = []
+                for batch, (status, cause) in refused:
+                    if len(batch) == 1:
+                        _forget(batch)
+                        if _outcome_refused_for_size(status):
+                            cause = (
+                                f"{cause} ({kind.one} of "
+                                f"{_outcome_wire_bytes(batch[0][1])} bytes, "
+                                "too large to send even alone)")
+                        dropped.append(cause)
+                    else:
+                        half = len(batch) // 2
+                        split.append([batch[:half], batch[half:]])
+                queue[:0] = split
+        except Exception:
+            failed += _left()
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+        if dropped:
+            self._warn(
+                f"agent-flywheel: the control plane refused {len(dropped)} "
+                f"{kind.counted}, so they were dropped and the rest of "
+                f"their batch was sent: {'; '.join(sorted(set(dropped)))}")
+        if by_name:
+            self._warn(
+                f"agent-flywheel: the control plane did not record "
+                f"{len(by_name)} {kind.counted}; they will not be sent "
+                f"again: {', '.join(by_name)}")
+        if noteless:
+            self._warn(
+                f"agent-flywheel: the control plane recorded {len(noteless)} "
+                f"{kind.counted} without the note: {', '.join(noteless)}")
+        return sent, failed, len(dropped) + len(by_name) + absent
+
+    def _warn_whole_batch_refusal(self, kind: _ReportKind, cause: str,
+                                  *, alone: bool = False) -> None:
+        """Say ONCE per kind and cause that the control plane refuses whole
+        batches: it holds for every flush until one side is upgraded, and a
+        warning per flush would be a week of the same line. ``alone``: the
+        batch held one record, so which of the two it refused is unknown."""
+        if self._batch_refusal_said.get(kind.many) == cause:
+            return
+        self._batch_refusal_said[kind.many] = cause
+        if alone:
+            self._warn(
+                f"agent-flywheel: the control plane refused a batch of one "
+                f"of the {kind.many} ({cause}); with nothing beside it, a "
+                "refusal of the record cannot be told from one of the batch, "
+                "so it stays on disk and is sent again with the next.")
+            return
+        # Turns are the customer's copy and never expire; the queued
+        # reports do, after a week.
+        kept = ("they stay on disk and are sent again on a later flush"
+                if kind is _TURNS else
+                "they stay on disk, are sent again on a later flush, and are "
+                "dropped only after a week undelivered")
+        self._warn(
+            "agent-flywheel: the control plane refused whole batches of "
+            f"{kind.many} ({cause}), which is about the batch, not a "
+            f"record in it; {kept}.")
+
+    @staticmethod
+    def _warn(message: str) -> None:
+        try:
+            warnings.warn(message, RuntimeWarning, stacklevel=3)
+        except Exception:  # -W error turns the line above into a raise
+            pass
 
     def read_turn(self, turn_id: str) -> dict[str, str] | None:
         """The task and answer recorded for one turn, or ``None``.
@@ -754,6 +1816,14 @@ class Attachment:
             except OSError:
                 return 0.0
 
+        # A TURN STILL RUNNING IS NEVER A CANDIDATE. The automatic prune runs
+        # inside ``turn()``, before the caller's body: with
+        # ``retention_turns=0``, or more turns in flight than it keeps, the
+        # turn about to run was itself the oldest-surviving victim, and its
+        # directory was deleted under the code writing to it.
+        open_turns = self._open_turns()
+        entries = [e for e in entries if e.name not in open_turns]
+
         # Newest first, so "keep_last" is a slice rather than a sort per turn.
         entries.sort(key=mtime, reverse=True)
 
@@ -796,6 +1866,7 @@ class Attachment:
 
         removed = 0
         unsent = 0
+        gone: set[str] = set()
         pending = self._uploaded_ids() if self.may_upload else None
         for e in dict.fromkeys(doomed):
             # NOT "absent from the index" -- that is half the question. A turn
@@ -807,41 +1878,41 @@ class Attachment:
             # a tool and passes neither ``input_text`` nor an answer -- both
             # documented optional -- which is a steady drip of a warning whose
             # two remedies are both wrong.
-            if (pending is not None and e.name not in pending
-                    and self._holds_a_record(e)):
-                unsent += 1
+            held = (pending is not None and e.name not in pending
+                    and self._holds_a_record(e))
             # Release any handle we still hold on it first, or on a platform
             # that refuses to unlink an open file this would silently no-op.
             _release(str(e))
             try:
                 shutil.rmtree(e)
-                removed += 1
             except OSError:
+                # Still on disk, so not lost: counted only once it is gone.
                 continue
+            removed += 1
+            gone.add(e.name)
+            if held:
+                unsent += 1
         if unsent:
             # SAID OUT LOUD, once per prune that does it. Retention winning
             # over an unsent turn is a legitimate outcome -- the customer
             # asked for a bounded directory and we are honouring it -- but it
             # is data the control plane will never see, and an operator who
-            # is not told will look for those turns upstream.
-            warnings.warn(
+            # is not told will look for those turns upstream. Through
+            # ``_warn``: under ``-W error`` a warning is a raise, and this runs
+            # inside a customer's ``with px.turn()``.
+            self._warn(
                 f"agent-flywheel: retention deleted {unsent} captured turn(s) "
                 f"that had not been uploaded -- including any still waiting "
                 f"on an answer, which the periodic flush holds back. They are "
                 f"gone. Raise retention_turns, or check why uploads are not "
                 f"succeeding (Attachment.upload_refusal says if consent is "
-                f"the reason).",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-        if removed:
+                f"the reason).")
+        if gone:
             # The upload index describes this tree, so it is bounded by this
             # tree. Left alone it would grow for the life of the process while
             # the directory it describes stays capped -- which is the opposite
             # of what a retention setting is for.
-            self._forget_uploaded({
-                e.name for e in entries if e not in set(doomed)
-            })
+            self._forget_uploaded(gone)
         return removed
 
     #: Where upload state is kept: ONE FILE at the trajectory root, holding the
@@ -890,20 +1961,43 @@ class Attachment:
             # deduped server-side, so this costs bandwidth, never correctness.
             pass
 
-    def _forget_uploaded(self, keep: set[str]) -> None:
-        """Drop ids whose turn directory no longer exists.
+    def _forget_uploaded(self, gone: set[str]) -> None:
+        """Drop the ids of turn directories ``prune`` just removed.
 
         Called from ``prune``. Without it the index grows for the life of the
         process while the tree it describes stays bounded -- an unbounded file
         is not an acceptable price for retention that exists to bound things.
+
+        UNDER ``_flush_lock``, re-read there, and replaced whole. It used to
+        rewrite the file in place from a snapshot taken without the lock: an
+        id a flush appended meanwhile was erased (that turn was sent again),
+        a turn whose removal failed lost its marker, and a crash mid-write left
+        a truncated index. Only ids whose directory is gone are dropped, and
+        the new index is written to a file of its own and renamed over the old
+        one. NOT WAITED FOR: ``prune`` runs on the request path, and a flush
+        holding the lock may be on the network -- the ids are dropped by the
+        next prune instead.
         """
+        if not gone or not self._flush_lock.acquire(blocking=False):
+            return
         try:
-            path = Path(self.trajectory_root) / self._UPLOADED_INDEX
-            current = self._uploaded_ids() & keep
-            path.write_text("".join(t + "\n" for t in sorted(current)),
-                            encoding="utf-8")
-        except OSError:
-            pass
+            index = Path(self.trajectory_root) / self._UPLOADED_INDEX
+            kept = sorted(self._uploaded_ids() - gone)
+            tmp = index.with_name(
+                f"{index.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+            try:
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    fh.write("".join(t + "\n" for t in kept))
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp, index)
+            except OSError:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+        finally:
+            self._flush_lock.release()
 
     def _holds_a_record(self, d: Path) -> bool:
         """Whether this turn directory holds anything an upload could carry.
@@ -1027,7 +2121,7 @@ class Attachment:
                 continue
             if read_conversation_id(d) != conversation_id:
                 continue
-            siblings.append((_started_at(d), d.name))
+            siblings.append((turn_started_at(d), d.name))
         siblings.sort()
         for i, (_, name) in enumerate(siblings):
             if name == turn_dir.name:
@@ -1113,26 +2207,39 @@ class Attachment:
         """
         self.may_upload = True
         self.upload_refusal = None
+        self._consent_refused = False
         if not self._exit_flush_registered:
             self._exit_flush_registered = True
             _flush_at_exit(self)
 
     def _refuse_upload(self, reason: str) -> None:
-        """The intake terminally refused these turns. Stop sending, say why.
+        """The control plane said NO. Stop sending, say why.
 
-        THE ONE PLACE ``may_upload`` turns False after it was True, and it says
-        so out loud because nothing else would: ``upload_refusal`` would
-        otherwise still read whatever startup said, the operator would see
-        repeated 403s in the control plane's logs with nothing in the
-        customer's, and the customer would see a serving process making an
-        outbound request every cadence that can never succeed.
+        THE ONE PLACE ``may_upload`` turns False after startup, for every
+        way the no arrives: the intake's 403 on turns or outcomes, and an
+        ANSWERED refusal on a capture read (:meth:`_take_capture_verdict`). The
+        read used to record the refusal and leave ``may_upload`` True, so the
+        turn upload that follows it in the same flush sent end users' text
+        to a control plane that had just said not to.
+
+        Said out loud when it STOPS an upload, because nothing else would:
+        ``upload_refusal`` would otherwise still read whatever startup said,
+        the operator would see repeated 403s in the control plane's logs with
+        nothing in the customer's, and the customer would see a serving
+        process making an outbound request every cadence that can never
+        succeed. A no repeated to an agent that was not uploading changes
+        only the sentence, silently.
         """
+        stopped = self.may_upload
         self.may_upload = False
         self.upload_refusal = reason
+        self._consent_refused = True
         # A trace rides on a turn: a refused turn refuses its model content
         # too, for the same reason.
         self.may_capture_model_content = False
         self.model_content_refusal = reason
+        if not stopped:
+            return
         try:
             warnings.warn(
                 f"agent-flywheel: the control plane refused this agent's captured "
@@ -1154,47 +2261,26 @@ class Attachment:
         introspection as ``disabled`` -- so polling for permission would have
         repeatedly disabled the agent's own description.
 
-        ONLY EVER TURNS CAPTURE ON, never off. A control plane that cannot
-        answer returns ``{}``, and reading that as a revocation would stop a
-        consenting customer's uploads on a network blip. Revocation is enforced
-        where it belongs: the intake refuses. ``_flush_locked`` reads that
-        refusal -- a 403 is a decision, not a blip -- stops sending, and leaves
-        the turns on disk; this method is then how consent is picked back up if
-        it is re-granted.
+        AN ANSWER TURNS CAPTURE EITHER WAY; A BLIP NEVER REVOKES. The answer
+        lands at :meth:`_take_capture_verdict`, the seam the startup
+        registration's answer lands at too: a yes goes through
+        :meth:`_grant_upload`; an ANSWERED no goes through
+        :meth:`_refuse_upload`, the seam the intake's 403 goes through, so
+        ``may_upload`` and the model-content tier are False before this flush
+        sends anything, and the outcomes that waited on the answer are
+        deleted, exactly as :meth:`report_outcome` keeps none after a no. A
+        control plane that cannot answer returns ``{}`` (``answered`` False),
+        which changes nothing.
         """
-        if not self._cp_url or not self._api_key:
+        if not self._cp_url or not self._api_key or self._past_deadline():
             return
         client = None
         try:
-            from ._http import ControlPlaneClient
             from .transport import AttachTransport
 
-            client = ControlPlaneClient(self._cp_url, self._api_key)
-            verdict = capture_verdict(
-                AttachTransport(client, self.agent_id).capture_current(self.agent_id))
-            if verdict.may_upload:
-                self._grant_upload()
-            if verdict.answered:
-                # The second tier is read off the same answer, both ways: this
-                # is a verdict the control plane GAVE, not a blip, so a grant
-                # turns model-content recording on from the next turn and a
-                # refusal keeps it off with the server's current sentence.
-                self.may_capture_model_content = (
-                    verdict.may_capture_model_content and self.may_upload)
-                self.model_content_refusal = (
-                    None if self.may_capture_model_content
-                    else verdict.model_content_reason)
-            if not verdict.may_upload and verdict.answered:
-                # Keep the reason current even while the answer stays no: an
-                # operator who fixes consent but not the key's scope should see
-                # the second sentence, not the first one from startup.
-                #
-                # ONLY WHEN IT ANSWERED. A poll that came back with no capture
-                # block is a blip, and overwriting a specific refusal with the
-                # generic one would lose the sentence the operator needs --
-                # the same argument that stops an empty answer revoking
-                # consent two lines up.
-                self.upload_refusal = verdict.reason
+            client = self._control_plane()
+            self._take_capture_verdict(capture_verdict(
+                AttachTransport(client, self.agent_id).capture_current(self.agent_id)))
         except Exception:
             # A capture bug costs the observation, never the turn.
             pass
@@ -1204,6 +2290,69 @@ class Attachment:
                     client.close()
                 except Exception:
                     pass
+
+    def _take_capture_verdict(self, verdict: CaptureVerdict) -> None:
+        """THE ONE SEAM a capture verdict lands at, whichever read delivered
+        it: the registration :func:`attach` makes at startup, or the re-read
+        in :meth:`_recheck_capture`.
+
+        A yes goes through :meth:`_grant_upload`. An ANSWERED no goes through
+        :meth:`_refuse_upload` and, when the answer had been unknown until
+        now, deletes the outcomes that waited on it
+        (:meth:`_purge_unanswered_outcomes`). That second step used to run on
+        the re-read alone, so a process that learned its no AT STARTUP never
+        purged what an earlier process had queued while the control plane was
+        unreachable -- and those outcomes uploaded if consent was granted
+        later. Outcomes kept after THIS process's intake 403 are not unknown
+        ones (``_consent_refused`` is already True) and stay.
+
+        An unanswered verdict changes nothing: reading a blip as a revocation
+        would stop a consenting customer's uploads, and overwriting a specific
+        refusal with the generic sentence would lose the one the operator
+        needs.
+        """
+        if verdict.may_upload:
+            self._grant_upload()
+            # The second tier is read off the same answer, both ways: a grant
+            # turns model-content recording on from the next turn and a
+            # refusal keeps it off with the server's current sentence.
+            self.may_capture_model_content = verdict.may_capture_model_content
+            self.model_content_refusal = (
+                None if self.may_capture_model_content
+                else verdict.model_content_reason)
+        elif verdict.answered:
+            # Keep the reason current even while the answer stays no: an
+            # operator who fixes consent but not the key's scope should see
+            # the second sentence, not the first one from startup.
+            was_unknown = not self.may_upload and not self._consent_refused
+            self._refuse_upload(verdict.reason or "")
+            if was_unknown:
+                self._purge_unanswered_outcomes()
+
+    def _purge_unanswered_outcomes(self) -> None:
+        """Delete the outcomes that waited on the consent answer, now that it
+        is no. An outcome naming only an episode never waited on it
+        (``contract.names_only_an_episode``) and stays. Said once, with the
+        count and the control plane's sentence. Never raises."""
+        dropped = 0
+        for path in self._outcome_files():
+            try:
+                wire = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                wire = None
+            if isinstance(wire, Mapping) and names_only_an_episode(wire):
+                continue
+            try:
+                path.unlink()
+                dropped += 1
+            except OSError:
+                continue
+        if dropped:
+            self._warn(
+                f"agent-flywheel: {dropped} reported outcome(s) kept while the "
+                "control plane had not answered were deleted: it answered that "
+                f"this agent may not upload production traffic "
+                f"({self.upload_refusal})")
 
     def _note_model_content_refusal(self, reply: Any) -> None:
         """Stop recording model content the intake says it may not take.
@@ -1245,7 +2394,14 @@ class Attachment:
 
     def flush(self, *, include_unanswered: bool = False,
               batch_size: int = 64) -> dict[str, int]:
-        """Upload captured turns to the control plane. Returns counts.
+        """Upload captured turns, and any reported outcomes still waiting, to
+        the control plane. Returns counts: the turns' ``sent`` / ``skipped`` /
+        ``failed`` (each unsent turn counted once), ``dropped`` when the
+        control plane refused turns that will not be sent again (they stay on
+        disk, marked sent), ``not_permitted`` when consent is no, plus
+        ``outcomes_sent`` / ``outcomes_failed`` / ``outcomes_dropped`` when
+        outcomes were waiting. A turn whose ``with px.turn()`` scope is still
+        open is never sent, and is counted ``skipped``.
 
         Serialized against the automatic background flush, so a manual call
         cannot race it into sending the same turn twice.
@@ -1261,7 +2417,38 @@ class Attachment:
 
     def _flush_locked(self, *, include_unanswered: bool = False,
                       batch_size: int = 64) -> dict[str, int]:
-        """The upload itself. Caller holds ``_flush_lock``.
+        """Everything a flush sends: the captured turns, then the reported
+        outcomes. Caller holds ``_flush_lock``. Never raises.
+
+        ONE SEAM FOR BOTH, because the consent question is one question: the
+        turn half asks (and re-asks) it, and outcomes go only when its answer
+        is yes. The counts are the turns'; ``outcomes_sent`` and
+        ``outcomes_failed`` are added only when outcomes were waiting.
+
+        EXCEPT WHAT IS NOT ABOUT END USERS' TRAFFIC, which consent is not the
+        question for: an outcome that names only an episode the platform ran,
+        and per-turn feedback (:meth:`_flush_feedback`). Those go whenever
+        there is a control plane to send to.
+
+        THE WEEK'S EXPIRY RUNS ON EVERY FLUSH, consent or not
+        (:meth:`_expire_outcomes`): an outcome kept while the answer is
+        unknown, or after a refusal, is bounded like any other.
+        """
+        counts = self._flush_turns_locked(
+            include_unanswered=include_unanswered, batch_size=batch_size)
+        waiting = self._expire_outcomes()
+        if self.may_upload and waiting:
+            counts.update(self._flush_outcomes(waiting))
+        elif (waiting and not self._episode_outcomes_refused
+                and self._cp_url and self._api_key):
+            counts.update(self._flush_outcomes(waiting, episodes_only=True))
+        if self._cp_url and self._api_key:
+            counts.update(self._flush_feedback())
+        return counts
+
+    def _flush_turns_locked(self, *, include_unanswered: bool = False,
+                            batch_size: int = 64) -> dict[str, int]:
+        """The turn upload itself. Caller holds ``_flush_lock``.
 
         WHY NOT AT TURN-SCOPE EXIT, which is where an earlier design put it:
         ``record_answer`` is callable AFTER the scope closes, and the package's
@@ -1316,6 +2503,7 @@ class Attachment:
             return {"sent": 0, "skipped": 0, "failed": 0}
 
         already = self._uploaded_ids()
+        open_turns = self._open_turns()
         pending: list[tuple[Path, dict[str, Any]]] = []
         try:
             entries = sorted(root.iterdir(), key=lambda p: p.name)
@@ -1323,6 +2511,14 @@ class Attachment:
             return {"sent": 0, "skipped": 0, "failed": 0}
         for d in entries:
             if not d.is_dir() or d.name in already:
+                continue
+            if d.name in open_turns:
+                # STILL RUNNING. Its calls are still being written, so even
+                # close()'s send-everything flush would ship it truncated --
+                # and the intake keys a turn on its id, so the complete turn
+                # would then read as a conflicting replay. The next flush, or
+                # the next process, sends it whole.
+                skipped += 1
                 continue
             # PER DIRECTORY. The scan used to sit outside the try below, so a
             # truncated trajectory -- which this package documents as the
@@ -1343,60 +2539,52 @@ class Attachment:
             pending.append((d, wire))
 
         if not pending:
-            return {"sent": 0, "skipped": skipped, "failed": 0}
+            # The unreadable ones are still counted: a flush where every
+            # turn failed to render is not a flush with nothing to do.
+            return {"sent": 0, "skipped": skipped, "failed": failed}
 
-        client = None
-        try:
-            from ._http import ControlPlaneClient
-            from .transport import AttachTransport
+        requested_batch_size = (
+            batch_size
+            if isinstance(batch_size, int) and not isinstance(batch_size, bool)
+            else 1
+        )
+        wire_batch_size = min(
+            max(1, requested_batch_size), _PRODUCTION_TURN_BATCH_MAX_ITEMS)
 
-            client = ControlPlaneClient(self._cp_url, self._api_key)
-            tr = AttachTransport(client, self.agent_id)
-            requested_batch_size = (
-                batch_size
-                if isinstance(batch_size, int) and not isinstance(batch_size, bool)
-                else 1
-            )
-            wire_batch_size = min(
-                max(1, requested_batch_size),
-                _PRODUCTION_TURN_BATCH_MAX_ITEMS,
-            )
-            for i in range(0, len(pending), wire_batch_size):
-                chunk = pending[i:i + wire_batch_size]
-                try:
-                    reply = tr.report_turns(self.agent_id, [w for _, w in chunk])
-                except Exception as exc:
-                    refusal = _capture_refusal(exc)
-                    if refusal is not None:
-                        # NOT A TRANSPORT FAILURE, and treating it as one is
-                        # what made this loop re-POST the same end-user message
-                        # bodies to a control plane that had been told not to
-                        # accept them, every cadence, for the life of the
-                        # process. Stop, say why in the words the intake used,
-                        # and leave the turns on disk. `_recheck_capture` picks
-                        # consent back up if it is re-granted.
-                        self._refuse_upload(refusal)
-                        refused = True
-                        failed += len(pending) - sent
-                        break
-                    # Whole chunk unacknowledged. Leave every marker unwritten
-                    # so the next flush retries it: the intake dedupes on
-                    # turn_id, so a retry of a batch that DID land is answered
-                    # as a duplicate rather than stored twice.
-                    failed += len(chunk)
-                    continue
-                self._mark_uploaded([d.name for d, _ in chunk])
-                sent += len(chunk)
-                self._note_model_content_refusal(reply)
-        except Exception:
-            failed += len(pending) - sent
-        finally:
-            if client is not None:
-                try:
-                    client.close()
-                except Exception:
-                    pass
-        counts = {"sent": sent, "skipped": skipped, "failed": failed}
+        def _refused(reason: str) -> None:
+            # NOT A TRANSPORT FAILURE, and treating it as one is what made
+            # this loop re-POST the same end-user message bodies to a control
+            # plane that had been told not to accept them, every cadence, for
+            # the life of the process. Stop, say why in the words the intake
+            # used, and leave the turns on disk. `_recheck_capture` picks
+            # consent back up if it is re-granted.
+            nonlocal refused
+            refused = True
+            self._refuse_upload(reason)
+
+        # THE OUTCOMES' SENDER (:meth:`_send_reports`), so a turn refused by
+        # the intake as a record (a 4xx about it, a 413 from a proxy for its
+        # size) is isolated and the healthy turns beside it are sent, where
+        # one such turn used to hold back its whole batch on every flush. A
+        # turn that will not be sent again -- acknowledged, or refused
+        # standing alone -- is MARKED UPLOADED, never deleted: the directory
+        # is the customer's copy. A transport failure or a 5xx that outlasted
+        # the client's retries ends the flush: the intake dedupes on turn_id,
+        # so the next flush retries those turns, and the next batch would
+        # only wait out the same outage.
+        sent, sender_failed, dropped = self._send_reports(
+            pending, _TURNS,
+            on_refusal=_refused,
+            batch_size=wire_batch_size,
+            forget=lambda batch: self._mark_uploaded(
+                [d.name for d, _ in batch]),
+            on_reply=self._note_model_content_refusal,
+            stop_on_blip=True,
+        )
+        counts = {"sent": sent, "skipped": skipped,
+                  "failed": failed + sender_failed}
+        if dropped:
+            counts["dropped"] = dropped
         if refused:
             counts["not_permitted"] = 1
         return counts
@@ -1440,13 +2628,21 @@ class Attachment:
         # one it avoids: a turn we do not send now is still on disk, and the
         # next process that attaches uploads it. So give the running flush a
         # short grace period and then let go.
+        #
+        # And the flush itself is bounded by the same clock
+        # (:data:`_CLOSE_FLUSH_BUDGET_S`): each request is clamped to the time
+        # left, none starts once it is spent, and a failure that is not a
+        # refusal ends it.
+        deadline = time.time() + _CLOSE_FLUSH_BUDGET_S
         if self._flush_lock.acquire(timeout=_CLOSE_FLUSH_GRACE_S):
+            self._deadline = deadline
             try:
                 self._flush_locked(include_unanswered=True)
             except Exception:
                 # Shutdown must not raise. The turns remain on disk.
                 pass
             finally:
+                self._deadline = None
                 self._flush_lock.release()
         # The rules' declaration, if the control plane has not answered it
         # yet: a process closing moments after attach() would otherwise kill
@@ -1578,8 +2774,11 @@ def attach(
     your data in a directory you named, and a library that silently deleted it
     would be worse than one that grows -- but it is a decision, so make it.
 
-    ``register=False`` skips the control-plane call entirely, for a process
-    that should make no outbound connection at all.
+    ``register=False`` is for a process that should make no outbound
+    connection at all, ever: no registration, and no later consent read,
+    upload, outcome or feedback either. Turns are captured locally, and
+    :meth:`Attachment.report_outcome` and
+    :meth:`Attachment.report_turn_feedback` queue nothing.
 
     ``execution_entrypoint`` optionally names the exact Python agent this
     attachment observes. Together with ``attested_execution_components`` it
@@ -1685,7 +2884,7 @@ def attach(
     # The empty strings are load-bearing, not placeholders. bind_selected
     # forwards them to each adapter's bind(), and both built-ins treat "no
     # endpoint" as "do not touch routing": LangChainAdapter._route returns at
-    # once when self.llm is None, and the ADK adapter never reads the URL. So
+    # once when llm_url is empty, and the ADK adapter never reads the URL. So
     # this installs observation and cannot re-point a single production call.
     unbinds: list[Any] = []
     bound: tuple[str, ...] = ()
@@ -1747,10 +2946,11 @@ def attach(
             except Exception:
                 pass
         raise
-    if declared is not None:
+    if declared is not None and declared.describes:
         # What the customer declared wins where they gave it; with no
         # entrypoint it is the whole description. And it is their word, not an
         # observation of what runs, so it anchors no execution identity.
+        # (``api_spec`` alone describes nothing and changes neither.)
         described = _declaration.apply(declared, reflected=described,
                                        agent_name=agent_id)
         agent_fingerprint = None
@@ -1767,8 +2967,9 @@ def attach(
         api_key, agent_id=agent_id, control_plane_url=url,
     )
     key = _resolved_key.value if _resolved_key else None
-    may_upload = False
-    may_capture_model_content = False
+    #: What the registration said, landed on the Attachment through
+    #: ``Attachment._take_capture_verdict`` -- the seam the re-read uses.
+    startup_verdict: CaptureVerdict | None = None
     model_content_refusal: str | None = None
     # NAMED, not None. `upload_refusal` is documented as "the sentence
     # explaining a False", and the ways to get here without ever asking the
@@ -1866,6 +3067,10 @@ def attach(
                     registration["discovered_agent"] = (
                         described.to_wire() if described is not None else None
                     )
+                if declared is not None:
+                    # Where the agent's API spec is published, when describe=
+                    # says (declaration.py): a reference, never the document.
+                    registration.update(declared.registration_fields())
                 reg = tr.register(registration)
                 # WHAT THE SERVER SAID, not what we assume, and asked through
                 # the ONE predicate `_recheck_capture` asks -- see
@@ -1873,11 +3078,9 @@ def attach(
                 # `bool(cap.get("turns"))` while the late-consent path three
                 # hundred lines up asked `is True`, so the same registration
                 # payload could grant consent here and refuse it there.
-                verdict = capture_verdict(reg)
-                may_upload = verdict.may_upload
-                upload_refusal = verdict.reason
-                may_capture_model_content = verdict.may_capture_model_content
-                model_content_refusal = verdict.model_content_reason
+                startup_verdict = capture_verdict(reg)
+                upload_refusal = startup_verdict.reason
+                model_content_refusal = startup_verdict.model_content_reason
             except Exception as exc:
                 # A REFUSED registration must not cost the last mile.
                 #
@@ -1942,19 +3145,24 @@ def attach(
         unbinds=unbinds,
         adapters_bound=bound,
         retention_turns=retention_turns,
-        control_plane_url=url,
-        api_key=key,
-        may_upload=may_upload,
+        # register=False is "no outbound connection at all", for the life of
+        # the attachment and not only at startup: every network path returns
+        # early on a missing URL or key, so withholding them here is what
+        # keeps a later flush, the consent re-read, an outcome or feedback
+        # from contacting the control plane this caller opted out of.
+        control_plane_url=url if register else None,
+        api_key=key if register else None,
         upload_refusal=upload_refusal,
         agent_fingerprint=agent_fingerprint,
-        may_capture_model_content=may_capture_model_content,
         model_content_refusal=model_content_refusal,
         rulebook_refusal=rulebook_refusal,
     )
-    if may_upload:
-        # Through the same seam late consent goes through, so the hook is
-        # registered by exactly one rule: "may_upload just became True".
-        px._grant_upload()
+    if startup_verdict is not None:
+        # Through the seam the re-read goes through, so a yes registers the
+        # exit hook by exactly one rule ("may_upload just became True") and an
+        # answered no deletes the outcomes an earlier process kept waiting on
+        # it, whichever read delivered the answer.
+        px._take_capture_verdict(startup_verdict)
     if declare_through is not None:
         transport, owned = declare_through
         px._declare_rulebook(transport, rulebook_request, owned)

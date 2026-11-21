@@ -206,3 +206,60 @@ def test_unroutable_providers_are_reported_for_the_startup_warning():
     assert found == ("GEMINI_API_KEY",), (
         "an empty value is not configuration, and a Jira token is not a model"
     )
+
+
+# ── an adapter's overlay and the endpoint pair cannot undo the scrub ──────
+
+
+def test_an_adapter_overlay_cannot_put_an_unroutable_provider_back():
+    """PY-H29. The overlay was applied AFTER the provider scrub, so an
+    adapter's ``extra`` re-injected the very names the scrub removed and the
+    agent sampled from the live provider around the gateway."""
+    env = _env(extra={
+        "GEMINI_API_KEY": "live-gemini",
+        "AZURE_OPENAI_ENDPOINT": "https://acme.openai.azure.com",
+        "CLAUDE_CODE_USE_BEDROCK": "1",
+        "MY_LAYOUT": "kept",
+    })
+    for name in ("GEMINI_API_KEY", "AZURE_OPENAI_ENDPOINT",
+                 "CLAUDE_CODE_USE_BEDROCK"):
+        assert name not in env, f"the overlay re-injected {name}"
+    assert env["MY_LAYOUT"] == "kept"
+
+
+def test_claude_code_provider_switches_and_auth_token_are_scrubbed():
+    """PY-M14. Either switch sends Claude Code to Bedrock/Vertex regardless of
+    ANTHROPIC_BASE_URL; the auth token rides requests in place of the rollout
+    key."""
+    env = _env(parent_env={
+        **PARENT,
+        "CLAUDE_CODE_USE_BEDROCK": "1",
+        "CLAUDE_CODE_USE_VERTEX": "1",
+        "ANTHROPIC_AUTH_TOKEN": "live-anthropic-token",
+    })
+    for name in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+                 "ANTHROPIC_AUTH_TOKEN"):
+        assert name not in env, f"{name} would have routed past the gateway"
+
+
+def test_endpoint_env_may_not_name_our_namespace():
+    """PY-M14. The pair is written after the rollout identity, so naming
+    PERCEPTEYE_ROLLOUT_ID replaced it with the gateway URL."""
+    import pytest
+
+    from agent_flywheel.errors import ConfigurationError
+
+    with pytest.raises(ConfigurationError, match="PERCEPTEYE_ROLLOUT_ID"):
+        _env(endpoint_env=("PERCEPTEYE_ROLLOUT_ID", "MY_KEY"))
+
+
+def test_a_runner_refuses_that_endpoint_env_at_startup(tmp_path):
+    import pytest
+
+    from agent_flywheel.errors import ConfigurationError
+    from agent_flywheel.runner import RolloutRunner
+
+    with pytest.raises(ConfigurationError, match="PERCEPTEYE_TRAJECTORY_DIR"):
+        RolloutRunner(["true"], transport=object(), input_shape="text",
+                      artifacts_dir=str(tmp_path),
+                      endpoint_env=("MY_URL", "PERCEPTEYE_TRAJECTORY_DIR"))

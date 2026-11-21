@@ -29,12 +29,13 @@ def _no_binding_leaks():
     which is exactly the cross-rollout leak the design is built to prevent. If
     a test leaks here, production can too.
     """
-    from agent_flywheel.adapters.langchain import _ACTIVE
+    from agent_flywheel.adapters import langchain as lcmod
 
-    assert _ACTIVE.get() is None, "a previous test left a binding active"
+    assert lcmod._active() is None, "a previous test left a binding active"
     yield
-    leaked = _ACTIVE.get()
-    _ACTIVE.set(None)
+    leaked = lcmod._active()
+    lcmod._ACTIVE.set(None)
+    lcmod._fallback, lcmod._fallback_refs = None, 0
     assert leaked is None, f"this test left a binding active: {leaked!r}"
 
 
@@ -276,12 +277,233 @@ def test_a_raised_traceback_keeps_its_exception_line(monkeypatch, tmp_path):
 
 
 def test_events_outside_a_binding_are_ignored():
-    """The handler is registered process-wide once; only a bound context
-    records. Otherwise a sub-agent or worker thread would attribute its tools
-    to whatever rollout ran last."""
+    """The hook is registered process-wide once and outlives every bind; with
+    nothing bound -- no context binding and no process-wide one -- the
+    handler records nothing."""
     from agent_flywheel.adapters.langchain import _ACTIVE, _build_handler_cls
 
     assert _ACTIVE.get() is None
     h = _build_handler_cls()()
     h.on_tool_start({"name": "x"}, "in", run_id="r9")
     assert "r9" not in h._open
+
+
+# ── a bind is seen by threads that never saw the binding context ──────────────
+
+
+def _calc_tool():
+    from langchain_core.tools import tool
+
+    @tool
+    def calc(x: int) -> int:
+        """Double x."""
+        return 2 * x
+
+    return calc
+
+
+def test_a_thread_pool_worker_captures_under_a_startup_bind(monkeypatch, tmp_path):
+    """attach() binds once, on the thread that starts the server; Flask,
+    Django, gthread and ThreadPoolExecutor workers run with an EMPTY context.
+    They used to see no binding and capture nothing at all."""
+    import concurrent.futures as cf
+
+    monkeypatch.setenv(ROLLOUT_ID_ENV, "rl_pool")
+    monkeypatch.setenv(TRAJECTORY_DIR_ENV, str(tmp_path))
+    calc = _calc_tool()
+    unbind = LangChainAdapter().bind(llm_url="", api_key="")
+    try:
+        with cf.ThreadPoolExecutor(max_workers=2) as pool:
+            assert list(pool.map(lambda x: calc.invoke({"x": x}), [1, 2])) == [2, 4]
+    finally:
+        unbind()
+    calls = Trajectory(tmp_path).read() or []
+    assert [c.name for c in calls] == ["calc", "calc"]
+
+
+def test_a_raw_thread_captures_under_a_startup_bind(monkeypatch, tmp_path):
+    import threading
+
+    monkeypatch.setenv(ROLLOUT_ID_ENV, "rl_thread")
+    monkeypatch.setenv(TRAJECTORY_DIR_ENV, str(tmp_path))
+    calc = _calc_tool()
+    unbind = LangChainAdapter().bind(llm_url="", api_key="")
+    try:
+        t = threading.Thread(target=lambda: calc.invoke({"x": 3}))
+        t.start()
+        t.join()
+    finally:
+        unbind()
+    assert [c.name for c in Trajectory(tmp_path).read() or []] == ["calc"]
+
+
+def test_an_attachment_captures_a_turn_served_on_a_worker_thread(tmp_path):
+    """The production shape end to end: attach() on this thread, the turn and
+    its tool call on a pool worker."""
+    import concurrent.futures as cf
+
+    import agent_flywheel as fw
+
+    calc = _calc_tool()
+    px = fw.attach(agent_id="pool-agent", trajectory_root=str(tmp_path),
+                   register=False, adapters=["langchain"])
+    try:
+        def serve_one():
+            with px.turn() as tid:
+                calc.invoke({"x": 5})
+            return tid
+
+        with cf.ThreadPoolExecutor(max_workers=1) as pool:
+            tid = pool.submit(serve_one).result()
+    finally:
+        px.close()
+    assert [c.name for c in Trajectory(tmp_path / tid).read() or []] == ["calc"]
+
+
+def test_unbind_from_another_thread_does_not_raise_and_retires_the_bind():
+    """A server's shutdown hook runs on another thread. reset() refuses a
+    token from another context; the unbind used to raise ValueError there."""
+    import threading
+
+    from agent_flywheel.adapters.langchain import _active
+
+    unbind = LangChainAdapter().bind(llm_url="", api_key="")
+    errors: list[BaseException] = []
+
+    def _run():
+        try:
+            unbind()
+        except BaseException as exc:  # pragma: no cover - the failure shown
+            errors.append(exc)
+
+    t = threading.Thread(target=_run)
+    t.start()
+    t.join()
+    assert errors == []
+    # Retired in the binding context too, not only in the unbinding one.
+    assert _active() is None
+
+
+def test_the_process_binding_lasts_while_any_bind_does():
+    import threading
+
+    from agent_flywheel.adapters.langchain import _active
+
+    u1 = LangChainAdapter().bind(llm_url="", api_key="")
+    u2 = LangChainAdapter().bind(llm_url="", api_key="")
+    seen: list = []
+    u1()
+    u1()  # idempotent: a second call must not release u2's hold
+    t = threading.Thread(target=lambda: seen.append(_active()))
+    t.start()
+    t.join()
+    assert seen[0] is not None
+    u2()
+    assert _active() is None
+
+
+# ── routing a real chat model ──────────────────────────────────────────────
+
+
+def test_an_attach_bind_leaves_the_model_untouched():
+    """attach() binds with llm_url="": a model handed to the adapter must keep
+    its endpoint and key. Rewriting both to "" broke every production call."""
+    class Model:
+        base_url = "https://api.openai.com/v1"
+        api_key = "sk-theirs"
+
+    m = Model()
+    unbind = LangChainAdapter(llm=m).bind(llm_url="", api_key="")
+    try:
+        # While bound -- the whole life of a production process.
+        assert (m.base_url, m.api_key) == ("https://api.openai.com/v1", "sk-theirs")
+    finally:
+        unbind()
+
+
+def test_unbind_restores_the_rewritten_fields():
+    class Model:
+        base_url = "https://api.openai.com/v1"
+        api_key = "sk-theirs"
+
+    m = Model()
+    unbind = LangChainAdapter(llm=m).bind(llm_url="https://gw/r", api_key="perk_1")
+    assert m.base_url == "https://gw/r"
+    unbind()
+    assert (m.base_url, m.api_key) == ("https://api.openai.com/v1", "sk-theirs")
+
+
+class _Client:
+    def __init__(self, base_url):
+        self.base_url = base_url
+
+
+def test_a_client_built_at_construction_is_rebuilt_not_just_relabelled():
+    """A ChatOpenAI-shaped model: the field is what the client was built
+    from, and the client is what sends. Rewriting the field alone left every
+    request on the old URL while the check read the field back as routed."""
+    class Model:
+        def __init__(self):
+            self.openai_api_base = "https://api.openai.com/v1"
+            self.openai_api_key = "sk-theirs"
+            self.client = None
+            self.validate_environment()
+
+        def validate_environment(self):
+            if self.client is None:
+                self.client = _Client(self.openai_api_base)
+            return self
+
+    m = Model()
+    original = m.client
+    unbind = LangChainAdapter(llm=m).bind(llm_url="https://gw/r", api_key="perk_1")
+    assert m.client.base_url == "https://gw/r"
+    unbind()
+    assert m.client is original and m.openai_api_base == "https://api.openai.com/v1"
+
+
+def test_a_client_that_cannot_be_rebuilt_is_a_refusal_and_is_restored():
+    class Model:
+        openai_api_base = "https://api.openai.com/v1"
+        client = _Client("https://api.openai.com/v1")
+
+    m = Model()
+    with pytest.raises(RoutingNotInstallable) as exc:
+        LangChainAdapter(llm=m).bind(llm_url="https://gw/r", api_key="k")
+    assert "still sends to https://api.openai.com/v1" in exc.value.evidence
+    assert m.openai_api_base == "https://api.openai.com/v1"
+
+
+def test_a_real_chat_openai_sends_to_the_rollout_endpoint_and_back():
+    """Against the installed langchain_openai, read off the provider clients
+    the model actually sends through."""
+    lco = pytest.importorskip("langchain_openai")
+    m = lco.ChatOpenAI(model="gpt-4o", api_key="sk-theirs")
+    clients = (m.root_client, m.client, m.async_client, m.root_async_client)
+    unbind = LangChainAdapter(llm=m).bind(llm_url="https://gw.example/r1/v1",
+                                          api_key="perk_1")
+    try:
+        for c in (m.root_client, m.root_async_client, m.client._client,
+                  m.async_client._client):
+            assert str(c.base_url).startswith("https://gw.example/r1/v1")
+            assert c.api_key == "perk_1"
+    finally:
+        unbind()
+    assert (m.root_client, m.client, m.async_client, m.root_async_client) == clients
+    assert str(m.root_client.base_url).startswith("https://api.openai.com")
+    assert m.openai_api_key.get_secret_value() == "sk-theirs"
+
+
+def test_a_real_chat_anthropic_sends_to_the_rollout_endpoint_and_back():
+    lca = pytest.importorskip("langchain_anthropic")
+    m = lca.ChatAnthropic(model="claude-x", api_key="sk-theirs")
+    _ = m._client
+    unbind = LangChainAdapter(llm=m).bind(llm_url="https://gw.example/r1",
+                                          api_key="perk_1")
+    try:
+        assert str(m._client.base_url).startswith("https://gw.example/r1")
+        assert m._client.api_key == "perk_1"
+    finally:
+        unbind()
+    assert str(m._client.base_url).startswith("https://api.anthropic.com")
+    assert m._client.api_key == "sk-theirs"

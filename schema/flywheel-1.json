@@ -132,21 +132,21 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 255,
-          "pattern": "^(?!\\.{1,2}$)(?!\\s)(?!.*\\s$)(?!.*[\\\\/])[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+          "pattern": "^(?!\\.{1,2}$)(?![\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])(?![\\s\\S]*[\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]$)(?![\\s\\S]*[\\\\/])[^\\u0000-\\u001F\\u007F-\\u009F]+$"
         },
         "task_id": {
-          "description": "Optional opaque task/case/work-item identifier supplied by the customer. It is an exact correlation candidate for control-plane validation, never a success label, hint, policy identity, or permission to train.",
+          "description": "Optional opaque task/case/work-item identifier supplied by the customer. It is an exact correlation candidate for control-plane validation, never a success label, hint, policy identity, or permission to train. Valid iff it equals its own Python str.strip() and every character satisfies Python str.isprintable() (the control plane's is_canonical_task_id): no control, format, separator other than the ASCII space, unassigned, private-use or surrogate code point. The pattern carries the part of that rule an ECMA-262 pattern can name; an SDK omits a task_id that fails the full rule rather than sending it.",
           "type": "string",
           "minLength": 1,
           "maxLength": 255,
-          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+          "pattern": "^(?! )(?![\\s\\S]* $)[^\\u0000-\\u001F\\u007F-\\u00A0\\u00AD\\u0378\\u0379\\u0600-\\u0605\\u061C\\u06DD\\u070F\\u1680\\u180E\\u2000-\\u200F\\u2028-\\u202F\\u205F-\\u206F\\u3000\\uE000-\\uF8FF\\uFEFF\\uFFF9-\\uFFFB]+$"
         },
         "conversation_id": {
           "description": "Optional opaque correlation id using the shared production identifier grammar: no leading/trailing whitespace or C0/C1 control characters.",
           "type": "string",
           "minLength": 1,
           "maxLength": 255,
-          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+          "pattern": "^(?![\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])(?![\\s\\S]*[\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]$)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
         },
         "turn_index": {
           "type": "integer",
@@ -215,7 +215,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 255,
-          "pattern": "^(?!\\.{1,2}$)(?!\\s)(?!.*\\s$)(?!.*[\\\\/])[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+          "pattern": "^(?!\\.{1,2}$)(?![\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])(?![\\s\\S]*[\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]$)(?![\\s\\S]*[\\\\/])[^\\u0000-\\u001F\\u007F-\\u009F]+$"
         },
         "turns": {
           "type": "array",
@@ -223,6 +223,192 @@
           "maxItems": 64,
           "items": {
             "$ref": "#/$defs/ProductionTurn"
+          }
+        }
+      }
+    },
+    "ProductionOutcome": {
+      "type": "object",
+      "description": "How one production turn, conversation or platform-run episode actually turned out, as the customer reports it afterwards. A weak label: the customer's own report of what happened next, never a grade. Several outcomes for one turn, conversation or episode are ordinary (resolved, then reopened); each is its own report with its own outcome_id.",
+      "additionalProperties": false,
+      "required": [
+        "outcome_id",
+        "outcome",
+        "occurred_at"
+      ],
+      "anyOf": [
+        {
+          "required": [
+            "turn_id"
+          ]
+        },
+        {
+          "required": [
+            "conversation_id"
+          ]
+        },
+        {
+          "required": [
+            "episode_id"
+          ]
+        }
+      ],
+      "properties": {
+        "outcome_id": {
+          "description": "This report's idempotency key, minted by the reporter and resent unchanged: the control plane records one outcome per outcome_id and answers a replay as a duplicate.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^(?!\\.{1,2}$)(?![\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])(?![\\s\\S]*[\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]$)(?![\\s\\S]*[\\\\/])[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+        },
+        "outcome": {
+          "description": "The closed vocabulary.",
+          "enum": [
+            "resolved",
+            "escalated",
+            "reopened",
+            "abandoned",
+            "thumbs_up",
+            "thumbs_down"
+          ]
+        },
+        "turn_id": {
+          "description": "The turn this is the outcome of: the exact turn_id of a ProductionTurn. The turn need not have been uploaded yet.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^(?!\\.{1,2}$)(?![\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])(?![\\s\\S]*[\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]$)(?![\\s\\S]*[\\\\/])[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+        },
+        "conversation_id": {
+          "description": "The conversation this is the outcome of: the exact conversation_id its turns carry.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^(?![\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])(?![\\s\\S]*[\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]$)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+        },
+        "episode_id": {
+          "description": "The platform-run episode this is the outcome of: the exact rollout_id of the RolloutRequest the agent was handed. Optional; a control plane that predates it refuses the report and the SDK then stops sending episode-only outcomes.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^(?![\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])(?![\\s\\S]*[\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]$)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+        },
+        "value": {
+          "description": "Optional business metric attached by the customer. Opaque: no unit, never interpreted.",
+          "type": "number"
+        },
+        "note": {
+          "description": "Optional short free-text remark. Personal data in it is masked by the control plane before it is stored; a note that cannot be masked is refused by name and the outcome is kept without it.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "occurred_at": {
+          "description": "RFC 3339 time, with its offset, at which the outcome happened.",
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$"
+        }
+      }
+    },
+    "ProductionOutcomeBatch": {
+      "type": "object",
+      "description": "The body sent to POST /outcomes.",
+      "additionalProperties": false,
+      "required": [
+        "agent_id",
+        "outcomes"
+      ],
+      "properties": {
+        "agent_id": {
+          "description": "The agent whose turns these are the outcomes of, as in ProductionTurnBatch.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^(?!\\.{1,2}$)(?![\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])(?![\\s\\S]*[\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]$)(?![\\s\\S]*[\\\\/])[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+        },
+        "outcomes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/ProductionOutcome"
+          }
+        }
+      }
+    },
+    "TurnFeedback": {
+      "type": "object",
+      "description": "What the user did with one turn of one platform-run episode, as the customer reports it. A weak label, weaker than a reported outcome: it is stored beside the episode's readings and never decides whether the episode passed.",
+      "additionalProperties": false,
+      "required": [
+        "feedback_id",
+        "episode_id",
+        "turn_index",
+        "signal",
+        "occurred_at"
+      ],
+      "properties": {
+        "feedback_id": {
+          "description": "This report's idempotency key, minted by the reporter and resent unchanged: the control plane records one report per feedback_id and answers a replay as a duplicate.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^(?!\\.{1,2}$)(?![\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])(?![\\s\\S]*[\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]$)(?![\\s\\S]*[\\\\/])[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+        },
+        "episode_id": {
+          "description": "The episode the turn belongs to: the exact rollout_id of the RolloutRequest the agent was handed.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^(?![\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])(?![\\s\\S]*[\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]$)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+        },
+        "turn_index": {
+          "description": "The turn's position inside the episode, counted from 0.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000
+        },
+        "signal": {
+          "description": "The closed vocabulary.",
+          "enum": [
+            "accepted",
+            "corrected",
+            "repeated",
+            "escalated",
+            "abandoned"
+          ]
+        },
+        "occurred_at": {
+          "description": "RFC 3339 time, with its offset, at which the user did it.",
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$"
+        }
+      }
+    },
+    "TurnFeedbackBatch": {
+      "type": "object",
+      "description": "The body sent to POST /turn-feedback.",
+      "additionalProperties": false,
+      "required": [
+        "agent_id",
+        "feedback"
+      ],
+      "properties": {
+        "agent_id": {
+          "description": "The agent that ran the episodes, as in ProductionOutcomeBatch.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^(?!\\.{1,2}$)(?![\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])(?![\\s\\S]*[\\t-\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]$)(?![\\s\\S]*[\\\\/])[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+        },
+        "feedback": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/TurnFeedback"
           }
         }
       }
@@ -417,6 +603,44 @@
             "object",
             "null"
           ]
+        },
+        "checks": {
+          "description": "What the flywheel's own environment checked on this episode, beyond the one reward/success. A STATEMENT by the flywheel: recorded as the flywheel's report and never an authority on the outcome. Only a measured check carries a value -- a check that could not run is never a zero.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "maxItems": 200,
+          "items": {
+            "$ref": "#/$defs/ReportedCheck"
+          }
+        },
+        "checks_dropped": {
+          "description": "How many checks the episode ran that this report does NOT carry: the rows past the 200 a report holds, or every row when the checks could not be sent at all. Present only when positive. A STATEMENT by the flywheel, like the checks themselves.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "termination": {
+          "description": "How the episode ended, as the flywheel saw it. The class is a statement; whether the ending was the policy's doing or the platform's is decided server-side from the gateway's own records, and nothing here can assert it.",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ReportedTermination"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seeds": {
+          "description": "The seeds the episode ran under, so a replica can be told from a repeat.",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ReportedSeeds"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
@@ -513,6 +737,107 @@
         "rule_count": {
           "type": "integer",
           "minimum": 0
+        }
+      }
+    },
+    "ReportedCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "status": {
+          "enum": [
+            "measured",
+            "unavailable",
+            "error",
+            "abstained",
+            "not_applicable"
+          ]
+        },
+        "value": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "basis": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 200
+        },
+        "required": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "establishes": {
+          "enum": [
+            "action_taken",
+            "state_reached",
+            "output_matched",
+            "message_communicated",
+            "call_returned_without_error",
+            null
+          ]
+        }
+      }
+    },
+    "ReportedTermination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "class"
+      ],
+      "properties": {
+        "class": {
+          "enum": [
+            "completed",
+            "turn_limit",
+            "token_limit",
+            "time_limit",
+            "error",
+            "cancelled"
+          ]
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 500
+        }
+      }
+    },
+    "ReportedSeeds": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "environment": {
+          "type": [
+            "integer",
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "sampling": {
+          "type": [
+            "integer",
+            "string",
+            "null"
+          ],
+          "maxLength": 128
         }
       }
     }

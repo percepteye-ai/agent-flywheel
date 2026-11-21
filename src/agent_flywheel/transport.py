@@ -30,14 +30,19 @@ from urllib.parse import quote
 if TYPE_CHECKING:
     from ._http import ControlPlaneClient
 from .contract import (
+    _PRODUCTION_OUTCOME_BATCH_MAX_ITEMS,
     _PRODUCTION_TURN_BATCH_MAX_ITEMS,
+    _TURN_FEEDBACK_BATCH_MAX_ITEMS,
     RolloutOutput,
     RolloutRequest,
     RulebookReceipt,
     RulebookRequest,
+    _path_segment,
     _production_agent_identifier,
     _production_identifier,
     _production_turn_identifier,
+    production_outcome,
+    turn_feedback,
 )
 from .errors import ConfigurationError, ContractViolation, TransportError
 from .execution_identity import is_lower_sha256
@@ -197,7 +202,12 @@ class FlywheelTransport(Protocol):
         """Return (rollouts, poll_after_ms). An empty list is normal."""
         ...
 
-    def heartbeat(self, rollout: RolloutRequest, *, progress: str | None = None) -> None:
+    def heartbeat(
+        self, rollout: RolloutRequest, *, progress: str | None = None
+    ) -> float | None:
+        """Extend the lease. May return the new ``lease_expires_ts``; the
+        runner schedules the next beat from it, and paces by the grant when
+        a transport returns ``None``."""
         ...
 
     def report(self, rollout: RolloutRequest, output: RolloutOutput) -> dict[str, Any]:
@@ -205,6 +215,24 @@ class FlywheelTransport(Protocol):
 
     def abandon(self, rollout: RolloutRequest, *, reason: str, detail: str = "") -> None:
         ...
+
+
+#: Statuses on ``GET /agents/{id}/capture`` that are the control plane's
+#: answer, not a blip: a key it does not accept (401), a key or agent it will
+#: not answer for (403), no such agent or no such route (404 -- a control
+#: plane older than the read). The Node SDK's ``CAPTURE_READ_REFUSALS``.
+CAPTURE_READ_REFUSALS = frozenset({401, 403, 404})
+
+
+def capture_read_refusal(what: str) -> dict[str, Any]:
+    """The verdict-read body for an answer that grants nothing: an answered
+    refusal (``capture.turns`` false) whose reason names what the control
+    plane said, so :func:`~agent_flywheel.production.capture_verdict` reads
+    it as an answer. The Node SDK's ``captureReadRefusal``, word for word."""
+    return {"capture": {"turns": False, "reason": (
+        "the control plane did not grant this agent production capture when "
+        f"asked ({what}), so nothing is uploaded. Turns are still captured "
+        "locally.")}}
 
 
 class AttachTransport:
@@ -295,8 +323,10 @@ class AttachTransport:
         if not isinstance(request, RulebookRequest):
             request = RulebookRequest(request)
         body = request.to_wire()
-        agent = quote(self.agent_id, safe="-._~")
         try:
+            # Inside the try: an agent id that cannot be a path segment is
+            # named as why there is no receipt, like any other cause.
+            agent = _path_segment(self.agent_id, "agent_id")
             reply = self._c.request(
                 "POST",
                 f"/agents/{agent}/rulebook",
@@ -366,9 +396,15 @@ class AttachTransport:
         running agent's instructions.
         """
         try:
-            return self._c.request("GET", "/prompt/current") or {}
+            return self.prompt_current_or_raise()
         except Exception:  # see docstring
             return {}
+
+    def prompt_current_or_raise(self) -> dict[str, Any]:
+        """The same read, with a failure left to the caller -- for
+        :class:`~agent_flywheel.policy.PolicySource`, whose health must say
+        when the prompt it was told to read could not be."""
+        return self._c.request("GET", "/prompt/current") or {}
 
     def claim(self, max_rollouts: int) -> tuple[list[RolloutRequest], int]:
         claim_body: dict[str, Any] = {
@@ -383,29 +419,94 @@ class AttachTransport:
             "POST",
             "/rollouts/claim",
             json_body=claim_body,
+            # ONE key per claim, kept across the client's retries (``_http``
+            # sets the header once, before its attempt loop).
             idempotency_key=str(uuid.uuid4()),
             timeout=(self.wait_ms / 1000.0) + 10.0,
-            # Claiming is NOT replayable. The control plane does not honour
-            # Idempotency-Key on this route, so resending a claim that may
-            # already have been processed leases a SECOND batch while the first
-            # is held by nobody -- those rollouts then sit until their leases
-            # lapse. Only a failure that never reached the server is retried.
-            retry_if_ambiguous=False,
+            # Claiming IS replayable under that key. The control plane keys a
+            # claim on Idempotency-Key and answers a resend with the batch it
+            # already leased (``RolloutRepository.claim``), re-issuing the
+            # inference credential, rather than leasing a second batch. So a
+            # failure after the request may have landed -- a read timeout, a
+            # dropped connection, a 502 -- is retried like any other, and the
+            # first batch reaches this worker instead of sitting unheld until
+            # its leases lapse.
+            retry_if_ambiguous=True,
         )
         raw = body.get("rollouts") or []
         poll_after = int(body.get("poll_after_ms") or 1000)
-        return [RolloutRequest.from_wire(r) for r in raw], poll_after
+        # Each leased rollout is parsed ON ITS OWN. One malformed item used to
+        # raise out of the whole claim, so every rollout in the batch -- the
+        # well-formed ones included -- sat leased by a worker that never saw
+        # them until their leases lapsed. The bad one is handed straight back
+        # as the SDK's fault (``flywheel_crash``: not the policy's, never
+        # trained on); the rest run.
+        parsed: list[RolloutRequest] = []
+        for item in raw:
+            try:
+                parsed.append(RolloutRequest.from_wire(item))
+            except ContractViolation as exc:
+                self._give_back_unparseable(item, exc)
+        return parsed, poll_after
 
-    def heartbeat(self, rollout: RolloutRequest, *, progress: str | None = None) -> None:
+    def _give_back_unparseable(self, item: Any, exc: ContractViolation) -> None:
+        """Abandon a claimed rollout this SDK could not read, when it can at
+        least be named: its lease would otherwise be held by nobody until it
+        lapsed. Best effort -- an id that is not one path segment, or a
+        transport failure, leaves it to lapse as before."""
+        if not isinstance(item, dict):
+            return
+        try:
+            rid = _path_segment(item.get("rollout_id"), "rollout_id")
+            token = item.get("lease_token")
+            self._c.request(
+                "POST", f"/rollouts/{rid}/abandon",
+                json_body={
+                    "lease_token": token if isinstance(token, str) else None,
+                    "reason": "flywheel_crash",
+                    "detail": f"the SDK could not read the claimed rollout: {exc}"[:2000],
+                },
+                idempotency_key=f"abandon-{item.get('rollout_id')}",
+            )
+        except (ContractViolation, TransportError):
+            pass
+
+    #: Each beat's own budget, whole call: one attempt, and a second only if
+    #: the first fails fast. A beat is worth retrying on the NEXT beat, not
+    #: inside this one: the client's default report envelope (4 x 30s plus
+    #: backoff) held the heartbeat for two minutes against a lease it exists
+    #: to renew.
+    HEARTBEAT_BUDGET_S = 10.0
+    HEARTBEAT_ATTEMPT_S = 5.0
+
+    @property
+    def heartbeat_extend_ms(self) -> int:
+        """What each beat asks the lease to be extended by. Read by the runner
+        to pace beats against it; the one place the number is chosen."""
+        return min(self.lease_ms, 600_000)
+
+    def heartbeat(
+        self, rollout: RolloutRequest, *, progress: str | None = None
+    ) -> float | None:
+        """Extend this rollout's lease. Returns the new ``lease_expires_ts``
+        the control plane answered with (``None`` if it named none), which the
+        runner schedules the next beat from."""
         payload: dict[str, Any] = {
             "lease_token": rollout.lease_token,
-            "extend_ms": min(self.lease_ms, 600_000),
+            "extend_ms": self.heartbeat_extend_ms,
         }
         if progress:
             payload["progress"] = progress
-        self._c.request(
-            "POST", f"/rollouts/{rollout.rollout_id}/heartbeat", json_body=payload
+        rid = _path_segment(rollout.rollout_id, "rollout_id")
+        body = self._c.request(
+            "POST", f"/rollouts/{rid}/heartbeat", json_body=payload,
+            timeout=self.HEARTBEAT_ATTEMPT_S,
+            deadline=time.time() + self.HEARTBEAT_BUDGET_S,
         )
+        expires = (body or {}).get("lease_expires_ts")
+        if isinstance(expires, (int, float)) and not isinstance(expires, bool):
+            return float(expires)
+        return None
 
     def report(
         self,
@@ -420,7 +521,8 @@ class AttachTransport:
         )
         return self._c.request(
             "POST",
-            f"/rollouts/{rollout.rollout_id}/result",
+            f"/rollouts/{_path_segment(rollout.rollout_id, 'rollout_id')}"
+            "/result",
             json_body=output.to_wire(),
             # The server keys on (rollout_id, attempt); an identical replay is
             # acknowledged as a duplicate rather than double-counted.
@@ -453,14 +555,32 @@ class AttachTransport:
         OPEN because keeping the current policy is the safe answer there -- and
         the two must not be made to look alike, because their safe directions
         are opposite.
+
+        A DEFINITIVE ANSWER IS AN ANSWER, though. A 401, 403 or 404 on this
+        read, or a 2xx body with no ``capture`` block in it, is the control
+        plane deciding, not a blip: it will say the same thing to the next
+        read. Returned as ``{}`` it read as "consent unknown", so an outcome
+        reported meanwhile was kept on disk for good and every report re-asked.
+        Each is returned as an answered refusal naming what was said
+        (:func:`capture_read_refusal`); only an exception with no answer, or
+        a status outside :data:`CAPTURE_READ_REFUSALS`, is ``{}``.
         """
         if _production_agent_identifier(agent_id) is None:
             return {}
         try:
-            return self._c.request(
-                "GET", f"/agents/{quote(agent_id, safe='')}/capture") or {}
+            body = self._c.request(
+                "GET", f"/agents/{_path_segment(agent_id, 'agent_id')}/capture")
+        except TransportError as exc:
+            status = exc.status_code
+            if status in CAPTURE_READ_REFUSALS:
+                return capture_read_refusal(str(exc))
+            return {}
         except Exception:  # see docstring
             return {}
+        if isinstance(body, dict) and isinstance(body.get("capture"), dict):
+            return body
+        return capture_read_refusal(
+            "it answered with no capture verdict in the body")
 
     def report_turns(
         self, agent_id: str, turns: list[dict[str, Any]]
@@ -505,9 +625,11 @@ class AttachTransport:
                 raise ContractViolation(
                     f"production turn {index} has an invalid conversation_id"
                 )
+            # An explicit ``"task_id": None`` is refused too: the wire says
+            # "no task id" by omitting the key, and the intake refuses a null.
             if (
                 "task_id" in turn
-                and _normalize_task_id(turn.get("task_id")) != turn.get("task_id")
+                and _normalize_task_id(turn["task_id"]) is None
             ):
                 raise ContractViolation(
                     f"production turn {index} has an invalid task_id"
@@ -522,6 +644,82 @@ class AttachTransport:
             ),
         )
 
+    def report_outcomes(
+        self, agent_id: str, outcomes: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Upload a batch of reported outcomes: ``POST /outcomes``.
+
+        How production turns or conversations actually turned out, each in
+        the shape :func:`~agent_flywheel.contract.production_outcome`
+        validates -- which every outcome is passed through again here, so a
+        batch that leaves is one the published schema accepts.
+
+        RETRYING IS SAFE, as it is for :meth:`report_turns`: the control
+        plane keys each outcome on its ``outcome_id`` and answers a replay as
+        a duplicate. The idempotency key is the turn batch's derivation over
+        the outcomes, so both SDKs send the same key for the same batch.
+        """
+        if _production_agent_identifier(agent_id) is None:
+            raise ContractViolation(
+                "production outcome agent_id does not match the published "
+                "production agent identifier grammar"
+            )
+        if (
+            not isinstance(outcomes, list)
+            or not 1 <= len(outcomes) <= _PRODUCTION_OUTCOME_BATCH_MAX_ITEMS
+        ):
+            raise ContractViolation(
+                "production outcome batches must contain between 1 and "
+                f"{_PRODUCTION_OUTCOME_BATCH_MAX_ITEMS} outcomes"
+            )
+        body = [production_outcome(outcome) for outcome in outcomes]
+        return self._c.request(
+            "POST",
+            "/outcomes",
+            json_body={"agent_id": agent_id, "outcomes": body},
+            idempotency_key=(
+                f"outcomes-{quote(agent_id, safe='-._~')}-{_body_digest(body)}"
+            ),
+        )
+
+    def report_turn_feedback(
+        self, agent_id: str, feedback: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Upload a batch of per-turn feedback: ``POST /turn-feedback``.
+
+        What the user did with one turn of one episode, each in the shape
+        :func:`~agent_flywheel.contract.turn_feedback` validates -- which
+        every report is passed through again here.
+
+        RETRYING IS SAFE, as it is for :meth:`report_outcomes`: the control
+        plane keys each report on its ``feedback_id`` and answers a replay as
+        a duplicate. The idempotency key is the outcome batch's derivation
+        over the feedback, so both SDKs send the same key for the same batch.
+        """
+        if _production_agent_identifier(agent_id) is None:
+            raise ContractViolation(
+                "turn feedback agent_id does not match the published "
+                "production agent identifier grammar"
+            )
+        if (
+            not isinstance(feedback, list)
+            or not 1 <= len(feedback) <= _TURN_FEEDBACK_BATCH_MAX_ITEMS
+        ):
+            raise ContractViolation(
+                "turn feedback batches must contain between 1 and "
+                f"{_TURN_FEEDBACK_BATCH_MAX_ITEMS} reports"
+            )
+        body = [turn_feedback(report) for report in feedback]
+        return self._c.request(
+            "POST",
+            "/turn-feedback",
+            json_body={"agent_id": agent_id, "feedback": body},
+            idempotency_key=(
+                "turn-feedback-"
+                f"{quote(agent_id, safe='-._~')}-{_body_digest(body)}"
+            ),
+        )
+
     def abandon(self, rollout: RolloutRequest, *, reason: str, detail: str = "") -> None:
         """Give the work back, typed.
 
@@ -532,7 +730,8 @@ class AttachTransport:
         """
         self._c.request(
             "POST",
-            f"/rollouts/{rollout.rollout_id}/abandon",
+            f"/rollouts/{_path_segment(rollout.rollout_id, 'rollout_id')}"
+            "/abandon",
             json_body={
                 "lease_token": rollout.lease_token,
                 "reason": reason,
